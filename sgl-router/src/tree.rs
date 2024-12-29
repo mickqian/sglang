@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type NodeRef = Arc<Node>;
 
+const EMPTY_NODE_ID: &str = "empty";
+
 #[derive(Debug)]
 struct Node {
     children: DashMap<char, NodeRef>,
@@ -86,7 +88,7 @@ impl Tree {
     Thread-safe multi tenant radix tree
 
     1. Storing data for multiple tenants (the overlap of multiple radix tree)
-    2. Node-level lock to enable concurrent acesss on nodes
+    2. Node-level lock to enable concurrent access on nodes
     3. Leaf LRU eviction based on tenant access time
     */
 
@@ -294,7 +296,7 @@ impl Tree {
             .iter()
             .next()
             .map(|kv| kv.key().to_owned())
-            .unwrap_or("empty".to_string());
+            .unwrap_or(EMPTY_NODE_ID.to_string());
 
         // Traverse from the curr node to the root and update the timestamp
 
@@ -303,7 +305,7 @@ impl Tree {
             .unwrap()
             .as_millis();
 
-        if !tenant.eq("empty") {
+        if !tenant.eq(EMPTY_NODE_ID) {
             let mut current_node = Some(curr);
             while let Some(node) = current_node {
                 node.tenant_last_access_time
@@ -534,7 +536,7 @@ impl Tree {
     pub fn get_smallest_tenant(&self) -> String {
         // Return a placeholder if there are no tenants
         if self.tenant_char_count.is_empty() {
-            return "empty".to_string();
+            return EMPTY_NODE_ID.to_string();
         }
 
         // Find the tenant with minimum char count
@@ -551,8 +553,8 @@ impl Tree {
             }
         }
 
-        // Return the found tenant or "empty" if somehow none was found
-        min_tenant.unwrap_or_else(|| "empty".to_string())
+        // Return the found tenant or an empty node id if somehow none was found
+        min_tenant.unwrap_or_else(|| EMPTY_NODE_ID.to_string())
     }
 
     pub fn get_used_size_per_tenant(&self) -> HashMap<String, usize> {
@@ -673,7 +675,7 @@ mod tests {
         let tree = Tree::new();
 
         // Test empty tree
-        assert_eq!(tree.get_smallest_tenant(), "empty");
+        assert_eq!(tree.get_smallest_tenant(), EMPTY_NODE_ID);
 
         // Insert data for tenant1 - "ap" + "icot" = 6 chars
         tree.insert("ap", "tenant1");
@@ -823,7 +825,7 @@ mod tests {
         let (matched_text, tenant) = tree.prefix_match("hello");
 
         assert_eq!(matched_text, "");
-        assert_eq!(tenant, "empty");
+        assert_eq!(tenant, EMPTY_NODE_ID);
     }
 
     #[test]

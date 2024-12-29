@@ -239,13 +239,12 @@ impl Router {
         match self {
             Router::RoundRobin { worker_urls, .. }
             | Router::Random { worker_urls }
-            | Router::CacheAware { worker_urls, .. } => {
-                if worker_urls.read().unwrap().is_empty() {
-                    Err("No workers are available".to_string())
-                } else {
-                    Ok(worker_urls.read().unwrap()[0].clone())
-                }
-            }
+            | Router::CacheAware { worker_urls, .. } => worker_urls
+                .read()
+                .unwrap()
+                .first()
+                .cloned()
+                .ok_or("No workers are available".to_string()),
         }
     }
 
@@ -341,8 +340,8 @@ impl Router {
         return "".to_string();
     }
 
-    // TODO: return Result<String, String> instead of panicking
-    fn select_generate_worker(&self, body: &Bytes, route: &str) -> String {
+    /// Select a worker for generating
+    fn select_generate_worker(&self, body: &Bytes, route: &str) -> Result<String, String> {
         let text = self.get_text_from_request(&body, route);
 
         let worker_url = match self {
@@ -362,7 +361,7 @@ impl Router {
 
             Router::Random { worker_urls } => worker_urls.read().unwrap()
                 [rand::random::<usize>() % worker_urls.read().unwrap().len()]
-            .clone(),
+                .clone(),
 
             Router::CacheAware {
                 worker_urls,
@@ -418,20 +417,24 @@ impl Router {
                 };
 
                 // Update queues and tree
-                *running_queue.get_mut(&selected_url).unwrap() += 1;
+                if let Some(load) = running_queue.get_mut(&selected_url) {
+                    *load += 1;
+                }
 
-                *processed_queue
+                if let Some(load) = processed_queue
                     .lock()
-                    .unwrap()
-                    .get_mut(&selected_url)
-                    .unwrap() += 1;
+                    .ok()
+                    .and_then(|mut processed| processed.get_mut(&selected_url))
+                {
+                    *load += 1;
+                }
                 tree.insert(&text, &selected_url);
 
                 selected_url
             }
         };
 
-        worker_url
+        Ok(worker_url)
     }
 
     async fn send_generate_request(
@@ -532,7 +535,14 @@ impl Router {
         let mut total_retries = 0;
 
         while total_retries < MAX_TOTAL_RETRIES {
-            let worker_url = self.select_generate_worker(body, route);
+            let worker_url = match self
+                .select_generate_worker(body, route)
+            {
+                Ok(worker_url) => worker_url,
+                Err(err) => return HttpResponse::InternalServerError().body(err)
+            };
+
+
             let mut request_retries = 0;
 
             // Try the same worker multiple times
