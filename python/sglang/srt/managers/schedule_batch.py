@@ -52,7 +52,6 @@ from sglang.srt.server_args import ServerArgs
 if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInfo, SpeculativeAlgorithm
 
-
 INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 # Put some global args for easy access
@@ -66,7 +65,6 @@ global_server_args_dict = {
     "enable_dp_attention": ServerArgs.enable_dp_attention,
     "enable_ep_moe": ServerArgs.enable_ep_moe,
 }
-
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +145,10 @@ class ImageInputs:
     # QWen2-VL related
     image_grid_thws: List[Tuple[int, int, int]] = None
     mrope_position_delta: Optional[torch.Tensor] = None
+
+    # DeepseekVL2 related
+    images_spatial_crop: Optional[torch.LongTensor] = None
+    images_seq_mask: Optional[torch.LongTensor] = None
 
     @staticmethod
     def from_dict(obj: dict):

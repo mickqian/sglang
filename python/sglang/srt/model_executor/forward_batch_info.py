@@ -107,6 +107,7 @@ class ForwardMode(IntEnum):
         return self == ForwardMode.DUMMY_FIRST
 
 
+# 到这里，已经经历了 tokenize 的过程，只需要 embedding 处理
 @dataclass
 class ForwardBatch:
     """Store all inputs of a forward pass."""

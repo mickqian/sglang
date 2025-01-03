@@ -776,7 +776,6 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 class DeepseekV2Model(nn.Module):
-
     fall_back_to_pt_during_load = False
 
     def __init__(
@@ -807,11 +806,24 @@ class DeepseekV2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        inputs_embeds: Optional[torch.FloatTensor],
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
+        elif input_ids is None and inputs_embeds is not None:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        # embed positions
+        hidden_states = inputs_embeds
+
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -850,11 +862,12 @@ class DeepseekV2ForCausalLM(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        inputs_embeds: Optional[torch.FloatTensor],
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, forward_batch)
+        hidden_states = self.model(input_ids, positions, inputs_embeds, forward_batch)
         if not forward_batch.forward_mode.is_idle():
             return self.logits_processor(
                 input_ids, hidden_states, self.lm_head, forward_batch
@@ -988,6 +1001,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                     self_attn.w_scale = self_attn.kv_b_proj.weight_scale
                     if is_hip_:
                         self_attn.w_scale *= 2.0
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
 
 
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
