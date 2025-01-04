@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from deepseek_v2 import DeepseekV2ForCausalLM
+from sglang.srt.models.deepseek_v2 import DeepseekV2ForCausalLM
 from timm.layers import (
     AttentionPoolLatent,
     LayerType,
