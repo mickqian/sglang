@@ -230,6 +230,29 @@ register_chat_template(
     )
 )
 
+register_chat_template(
+    ChatTemplate(
+        name="janis",
+        default_system_prompt=None,
+        role_prefix_and_suffix={
+            "system": (
+                "",
+                "",
+            ),
+            "user": (
+                "<｜User｜>",
+                "",
+            ),
+            "assistant": (
+                "<｜Assistant｜>",
+                "<｜end▁of▁sentence｜>",
+            ),
+        },
+        stop_str=("<｜end▁of▁sentence｜>",),
+        image_token="<image_placeholder\n",
+    )
+)
+
 
 @register_chat_template_matching_function
 def match_deepseek(model_path: str):
@@ -396,6 +419,7 @@ def match_deepseek(model_path: str):
         or "deepseek-v3" in model_path.lower()
         or "deepseek-r1" in model_path.lower()
     ) and "base" not in model_path.lower():
+        print("Got chat template matching function")
         return get_chat_template("deepseek-v3")
 
 

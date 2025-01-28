@@ -528,7 +528,7 @@ class Attention(nn.Module):
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         # self.fused_attn = use_fused_attn()
         self.fused_attn = True
 
@@ -695,7 +695,7 @@ class PatchDropout(nn.Module):
         if self.num_prefix_tokens:
             prefix_tokens, x = (
                 x[:, : self.num_prefix_tokens],
-                x[:, self.num_prefix_tokens:],
+                x[:, self.num_prefix_tokens :],
             )
         else:
             prefix_tokens = None
@@ -704,8 +704,8 @@ class PatchDropout(nn.Module):
         L = x.shape[1]
         num_keep = max(1, int(L * (1.0 - self.prob)))
         keep_indices = torch.argsort(torch.randn(B, L, device=x.device), dim=-1)[
-                       :, :num_keep
-                       ]
+            :, :num_keep
+        ]
         if self.ordered:
             # NOTE does not need to maintain patch order in typical transformer use,
             # but possibly useful for debug / visualization
@@ -771,7 +771,7 @@ def resample_abs_pos_embed(
 def init_weights(self):
     if self.pos_embed is not None:
         trunc_normal_(self.pos_embed, std=self.pos_embed.shape[1] ** -0.5)
-    trunc_normal_(self.latent, std=self.latent_dim ** -0.5)
+    trunc_normal_(self.latent, std=self.latent_dim**-0.5)
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = "") -> None:
@@ -1071,8 +1071,8 @@ class VisionTransformer(nn.Module):
         outputs = self._intermediate_layers(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        prefix_tokens = [out[:, 0: self.num_prefix_tokens] for out in outputs]
-        outputs = [out[:, self.num_prefix_tokens:] for out in outputs]
+        prefix_tokens = [out[:, 0 : self.num_prefix_tokens] for out in outputs]
+        outputs = [out[:, self.num_prefix_tokens :] for out in outputs]
 
         if reshape:
             grid_size = self.patch_embed.grid_size
@@ -1103,7 +1103,7 @@ class VisionTransformer(nn.Module):
         if self.attn_pool is not None:
             x = self.attn_pool(x)
         elif self.global_pool == "avg":
-            x = x[:, self.num_prefix_tokens:].mean(dim=1)
+            x = x[:, self.num_prefix_tokens :].mean(dim=1)
         elif self.global_pool:
             x = x[:, 0]  # class token
         x = self.fc_norm(x)
@@ -1493,7 +1493,7 @@ class AttentionPoolLatent(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.feat_size = feat_size
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.pool = pool_type
         self.fused_attn = use_fused_attn()
 
@@ -1524,7 +1524,7 @@ class AttentionPoolLatent(nn.Module):
     def init_weights(self):
         if self.pos_embed is not None:
             trunc_normal_tf_(self.pos_embed, std=self.pos_embed.shape[1] ** -0.5)
-        trunc_normal_tf_(self.latent, std=self.latent_dim ** -0.5)
+        trunc_normal_tf_(self.latent, std=self.latent_dim**-0.5)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -1776,12 +1776,12 @@ class VectorQuantizer(nn.Module):
             embedding = self.embedding.weight
 
         d = (
-            torch.sum(z_flattened ** 2, dim=1, keepdim=True)
-            + torch.sum(embedding ** 2, dim=1)
+            torch.sum(z_flattened**2, dim=1, keepdim=True)
+            + torch.sum(embedding**2, dim=1)
             - 2
             * torch.einsum(
-            "bd,dn->bn", z_flattened, torch.einsum("n d -> d n", embedding)
-        )
+                "bd,dn->bn", z_flattened, torch.einsum("n d -> d n", embedding)
+            )
         )
 
         min_encoding_indices = torch.argmin(d, dim=1)
@@ -2069,7 +2069,7 @@ def all_gather(
 
     gathered_tensors = torch.concat(
         [
-            forward_batch.gathered_buffer[i * max_len: i * max_len + all_lens[i]]
+            forward_batch.gathered_buffer[i * max_len : i * max_len + all_lens[i]]
             for i in range(world_size)
         ]
     )

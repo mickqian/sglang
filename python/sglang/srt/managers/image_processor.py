@@ -1,13 +1,16 @@
 # TODO: also move pad_input_ids into this module
 import asyncio
+import base64
 import concurrent.futures
+import io
 import logging
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
+import PIL
 import transformers
 from decord import VideoReader, cpu
 from PIL import Image
@@ -448,6 +451,49 @@ class JanusProProcessor(BaseImageProcessor):
 
         return image_inputs
 
+    def load_pil_images(
+        self, conversations: List[Dict[str, str]]
+    ) -> List[PIL.Image.Image]:
+        """
+
+        Support file path or base64 images.
+
+        Args:
+            conversations (List[Dict[str, str]]): the conversations with a list of messages. An example is :
+                [
+                    {
+                        "role": "User",
+                        "content": "<image_placeholder>\nExtract all information from this image and convert them into markdown format.",
+                        "images": ["./examples/table_datasets.png"]
+                    },
+                    {"role": "Assistant", "content": ""},
+                ]
+
+        Returns:
+            pil_images (List[PIL.Image.Image]): the list of PIL images.
+
+        """
+
+        pil_images = []
+
+        for message in conversations:
+            if "images" not in message:
+                continue
+
+            for image_data in message["images"]:
+                if image_data.startswith("data:image"):
+                    # Image data is in base64 format
+                    _, image_data = image_data.split(",", 1)
+                    image_bytes = base64.b64decode(image_data)
+                    pil_img = PIL.Image.open(io.BytesIO(image_bytes))
+                else:
+                    # Image data is a file path
+                    pil_img = PIL.Image.open(image_data)
+                pil_img = pil_img.convert("RGB")
+                pil_images.append(pil_img)
+
+        return pil_images
+
     async def process_images_async(
         self,
         image_data: List[Union[str, bytes]],
@@ -463,7 +509,6 @@ class JanusProProcessor(BaseImageProcessor):
 
         image_hashes, image_sizes = [], []
         raw_images = []
-        IMAGE_TOKEN = "(<image>./</image>)"
 
         # roughly calculate the max number of frames
         # TODO: the process should be applied to all the visual inputs
