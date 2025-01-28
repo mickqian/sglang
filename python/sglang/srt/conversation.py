@@ -451,6 +451,7 @@ def generate_chat_conv(
             raise ValueError(f"Unknown role: {msg_role}")
 
     # Add a blank message for the assistant.
+    print(conv)
     conv.append_message(conv.roles[1], None)
     return conv
 

@@ -249,21 +249,21 @@ register_chat_template(
             ),
         },
         stop_str=("<｜end▁of▁sentence｜>",),
-        image_token="<image_placeholder\n",
+        image_token="<image_placeholder>\n",
     )
 )
 
 
-@register_chat_template_matching_function
-def match_deepseek(model_path: str):
-    if "minicpmv" in model_path.lower():
-        return get_chat_template("minicpmv")
-
-
-@register_chat_template_matching_function
-def match_deepseek(model_path: str):
-    if "minicpmo" in model_path.lower():
-        return get_chat_template("minicpmp")
+# @register_chat_template_matching_function
+# def match_deepseek(model_path: str):
+#     if "minicpmv" in model_path.lower():
+#         return get_chat_template("minicpmv")
+#
+#
+# @register_chat_template_matching_function
+# def match_deepseek(model_path: str):
+#     if "minicpmo" in model_path.lower():
+#         return get_chat_template("minicpmp")
 
 
 # The difference between "llama-3-instruct-llava" and "llama-3-instruct" is that llava uses a different image_token.
@@ -415,8 +415,7 @@ register_chat_template(
 @register_chat_template_matching_function
 def match_deepseek(model_path: str):
     if (
-        "deepseek-v3" in model_path.lower()
-        or "deepseek-r1" in model_path.lower()
+        "deepseek-v3" in model_path.lower() or "deepseek-r1" in model_path.lower()
     ) and "base" not in model_path.lower():
         print("Got chat template matching function")
         return get_chat_template("deepseek-v3")

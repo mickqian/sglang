@@ -1,19 +1,19 @@
 # TODO: also move pad_input_ids into this module
 import asyncio
-import base64
 import concurrent.futures
-import io
+import importlib
 import logging
 import multiprocessing as mp
 import os
+import pkgutil
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union
+from functools import lru_cache
+from typing import List, Optional, Union
 
-import PIL
 import numpy as np
-import transformers
 from PIL import Image
 from decord import VideoReader, cpu
+from transformers import IMAGE_PROCESSOR_MAPPING
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.mm_utils import expand2square, process_anyres_image
@@ -23,32 +23,43 @@ from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
 
-global global_processor
-
-
-def init_global_processor(server_args: ServerArgs):
-    """Init the global processor for multi modal models."""
-    global global_processor
-    transformers.logging.set_verbosity_error()
-    global_processor = get_processor(
-        server_args.tokenizer_path,
-        tokenizer_mode=server_args.tokenizer_mode,
-        trust_remote_code=server_args.trust_remote_code,
-    )
-
 
 class BaseImageProcessor(ABC):
+    global_processor = None
+
     def __init__(self, hf_config, server_args, _processor):
         self.hf_config = hf_config
         self._processor = _processor
         self.server_args = server_args
 
+        # self.global_processor = None
         self.executor = concurrent.futures.ProcessPoolExecutor(
-            initializer=init_global_processor,
+            initializer=lambda: setattr(BaseImageProcessor, 'global_processor', self._build_processor(server_args)),
+            # initializer=lambda: BaseImageProcessor._init_processor(server_args=server_args),
             mp_context=mp.get_context("fork"),
-            initargs=(server_args,),
+            # initargs=(server_args,),
             max_workers=int(os.environ.get("SGLANG_CPU_COUNT", os.cpu_count())),
         )
+
+    def _build_processor(self, server_args):
+        """Init the global processor for multi modal models."""
+        return get_processor(
+            server_args.tokenizer_path,
+            tokenizer_mode=server_args.tokenizer_mode,
+            trust_remote_code=server_args.trust_remote_code,
+        )
+
+    @staticmethod
+    def _init_processor(server_args):
+        """Init the global processor for multi modal models."""
+        BaseImageProcessor.global_processor = get_processor(
+            server_args.tokenizer_path,
+            tokenizer_mode=server_args.tokenizer_mode,
+            trust_remote_code=server_args.trust_remote_code,
+        )
+
+    def get_processor(self):
+        return BaseImageProcessor.global_processor
 
     @abstractmethod
     async def process_images_async(self, image_data, input_text, **kwargs):
@@ -69,12 +80,13 @@ class LlavaImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_single_image_task(
+        processor,
         image_data: Union[str, bytes],
         image_aspect_ratio: Optional[str] = None,
         image_grid_pinpoints: Optional[str] = None,
         image_processor=None,
     ):
-        image_processor = image_processor or global_processor.image_processor
+        image_processor = image_processor or processor.image_processor
 
         try:
             image, image_size = load_image(image_data)
@@ -122,6 +134,7 @@ class LlavaImageProcessor(BaseImageProcessor):
             return await loop.run_in_executor(
                 self.executor,
                 LlavaImageProcessor._process_single_image_task,
+                self.global_processor,
                 image_data,
                 aspect_ratio,
                 grid_pinpoints,
@@ -197,9 +210,9 @@ class MllamaImageProcessor(BaseImageProcessor):
         super().__init__(hf_config, server_args, _processor)
 
     @staticmethod
-    def _process_single_image_task(images, input_text):
+    def _process_single_image_task(processor, images, input_text):
         # input_ids', 'attention_mask', 'pixel_values', 'aspect_ratio_ids', 'aspect_ratio_mask', 'cross_attention_mask'
-        return global_processor(images, input_text, return_tensors="pt")
+        return processor(images, input_text, return_tensors="pt")
 
     async def _process_single_image(self, images, input_text):
         if self.executor is not None:
@@ -207,6 +220,7 @@ class MllamaImageProcessor(BaseImageProcessor):
             image_inputs = await loop.run_in_executor(
                 self.executor,
                 MllamaImageProcessor._process_single_image_task,
+                self.global_processor,
                 images,
                 input_text,
             )
@@ -246,8 +260,8 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         self.IMAGE_TOKEN = "(<image>./</image>)"
 
     @staticmethod
-    def _process_images_task(images, input_text):
-        result = global_processor.__call__(
+    def _process_images_task(processor, images, input_text):
+        result = processor.__call__(
             text=input_text, images=images, return_tensors="pt"
         )
         return {
@@ -262,6 +276,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             image_inputs = await loop.run_in_executor(
                 self.executor,
                 MiniCPMVImageProcessor._process_images_task,
+                self.global_processor,
                 images,
                 input_text,
             )
@@ -419,160 +434,18 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         }
 
 
-class JanusProProcessor(BaseImageProcessor):
-    def __init__(self, hf_config, server_args, _processor):
-        super().__init__(hf_config, server_args, _processor)
-
-    @staticmethod
-    def _process_images_task(images, input_text):
-        print(f"input_text: {input_text}")
-        result = global_processor.__call__(
-            prompt=input_text, images=images, return_tensors="pt"
-        )
-        print(f"result keys: {result.keys()}")
-        return {
-            "input_ids": result["input_ids"],
-            "pixel_values": result["pixel_values"],
-            "tgt_sizes": result["tgt_sizes"],
-        }
-
-    async def _process_images(self, images, input_text):
-        if self.executor is not None:
-            loop = asyncio.get_event_loop()
-            image_inputs = await loop.run_in_executor(
-                self.executor,
-                JanusProProcessor._process_images_task,
-                images,
-                input_text,
-            )
-        else:
-            image_inputs = self._processor(
-                images=images, text=input_text, return_tensors="pt"
-            )
-
-        return image_inputs
-
-    def load_pil_images(
-        self, conversations: List[Dict[str, str]]
-    ) -> List[PIL.Image.Image]:
-        """
-
-        Support file path or base64 images.
-
-        Args:
-            conversations (List[Dict[str, str]]): the conversations with a list of messages. An example is :
-                [
-                    {
-                        "role": "User",
-                        "content": "<image_placeholder>\nExtract all information from this image and convert them into markdown format.",
-                        "images": ["./examples/table_datasets.png"]
-                    },
-                    {"role": "Assistant", "content": ""},
-                ]
-
-        Returns:
-            pil_images (List[PIL.Image.Image]): the list of PIL images.
-
-        """
-
-        pil_images = []
-
-        for message in conversations:
-            if "images" not in message:
-                continue
-
-            for image_data in message["images"]:
-                if image_data.startswith("data:image"):
-                    # Image data is in base64 format
-                    _, image_data = image_data.split(",", 1)
-                    image_bytes = base64.b64decode(image_data)
-                    pil_img = PIL.Image.open(io.BytesIO(image_bytes))
-                else:
-                    # Image data is a file path
-                    pil_img = PIL.Image.open(image_data)
-                pil_img = pil_img.convert("RGB")
-                pil_images.append(pil_img)
-
-        return pil_images
-
-    async def process_images_async(
-        self,
-        image_data: List[Union[str, bytes]],
-        input_text,
-        request_obj,
-        max_req_input_len,
-    ):
-        if not image_data:
-            return None
-
-        if not isinstance(image_data, list):
-            image_data = [image_data]
-
-        image_hashes, image_sizes = [], []
-        raw_images = []
-
-        # roughly calculate the max number of frames
-        # TODO: the process should be applied to all the visual inputs
-        def calculate_max_num_frames() -> int:
-            # Model-specific
-            NUM_TOKEN_PER_FRAME = 330
-
-            ret = (max_req_input_len - len(input_text)) // NUM_TOKEN_PER_FRAME
-            return min(ret, 100)
-
-        if isinstance(input_text, list):
-            assert len(input_text) and isinstance(input_text[0], int)
-            input_text = self._processor.decode(input_text)
-        print(f"input_text: {input_text}")
-
-        images = []
-        for image in image_data:
-            pil_image, _size = load_image(image)
-            images += [pil_image]
-
-        res = await self._process_images(images=images, input_text=input_text)
-        pixel_values = res["pixel_values"]
-        tgt_sizes = res["tgt_sizes"]
-        input_ids = res["input_ids"]
-
-        # Collect special token ids
-        tokenizer = self._processor.tokenizer
-        im_start_id = [tokenizer.im_start_id]
-        im_end_id = [tokenizer.im_end_id]
-        if tokenizer.slice_start_id:
-            slice_start_id = [tokenizer.slice_start_id]
-            slice_end_id = [tokenizer.slice_end_id]
-
-        return {
-            "input_ids": input_ids.flatten().tolist(),
-            "pixel_values": pixel_values,
-            "tgt_sizes": tgt_sizes,
-            "image_hashes": image_hashes,
-            "modalities": request_obj.modalities or ["image"],
-            "im_start_id": im_start_id,
-            "im_end_id": im_end_id,
-            "slice_start_id": slice_start_id,
-            "slice_end_id": slice_end_id,
-        }
-
-
 class Qwen2VLImageProcessor(BaseImageProcessor):
     def __init__(self, hf_config, server_args, _image_processor):
         self.hf_config = hf_config
         self._image_processor = _image_processor
-        self.executor = concurrent.futures.ProcessPoolExecutor(
-            initializer=init_global_processor,
-            mp_context=mp.get_context("fork"),
-            initargs=(server_args,),
-            max_workers=int(os.environ.get("SGLANG_CPU_COUNT", os.cpu_count())),
-        )
 
     @staticmethod
     def _process_single_image_task(
+        processor,
         image_data: Union[str, bytes],
         image_processor=None,
     ):
-        image_processor = image_processor or global_processor.image_processor
+        image_processor = image_processor or processor.image_processor
 
         try:
             image, image_size = load_image(image_data)
@@ -610,6 +483,7 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
             return await loop.run_in_executor(
                 self.executor,
                 Qwen2VLImageProcessor._process_single_image_task,
+                self.global_processor,
                 image_data,
             )
         else:
@@ -675,20 +549,47 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
         }
 
 
+IMAGE_PROCESSOR_MAPPING = {
+    "MllamaForConditionalGeneration": MllamaImageProcessor,
+    "Qwen2VLForConditionalGeneration": Qwen2VLImageProcessor,
+    "MiniCPMV": MiniCPMVImageProcessor,
+}
+
+
 def get_image_processor(
     hf_config, server_args: ServerArgs, processor
 ) -> BaseImageProcessor:
-    if "MllamaForConditionalGeneration" in hf_config.architectures:
-        return MllamaImageProcessor(hf_config, server_args, processor)
-    elif "Qwen2VLForConditionalGeneration" in hf_config.architectures:
-        return Qwen2VLImageProcessor(hf_config, server_args, processor.image_processor)
-    elif "MiniCPMV" in hf_config.architectures:
-        return MiniCPMVImageProcessor(hf_config, server_args, processor)
-    elif "MultiModalityCausalLM" in hf_config.architectures:
-        return JanusProProcessor(hf_config, server_args, processor)
-    else:
-        return LlavaImageProcessor(hf_config, server_args, processor.image_processor)
+    print(f"IMAGE_PROCESSOR_MAPPING: {IMAGE_PROCESSOR_MAPPING}")
+    for name, cls in IMAGE_PROCESSOR_MAPPING.items():
+        if name in hf_config.architectures:
+            return cls(hf_config, server_args, processor)
+    return LlavaImageProcessor(hf_config, server_args, processor)
 
 
 def get_dummy_image_processor():
     return DummyImageProcessor()
+
+
+@lru_cache()
+def import_image_processors():
+    package_name = "sglang.srt.managers.image_processors"
+    package = importlib.import_module(package_name)
+    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        if not ispkg:
+            try:
+                print(f"name: imported {name}")
+                module = importlib.import_module(name)
+            except Exception as e:
+                logger.warning(f"Ignore import error when loading {name}. " f"{e}")
+                print(f"{e}")
+                continue
+            if hasattr(module, "EntryClass"):
+                entry = module.EntryClass
+                if isinstance(
+                    entry, dict
+                ):
+                    for processor_name, cls in entry.items():
+                        IMAGE_PROCESSOR_MAPPING[processor_name] = cls
+
+
+import_image_processors()

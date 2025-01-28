@@ -151,7 +151,8 @@ class ImageInputs:
     image_grid_thws: List[Tuple[int, int, int]] = None
     mrope_position_delta: Optional[torch.Tensor] = None
 
-    # MiniCPMV related
+    # The id of the single-image token
+    im_token_id: Optional[torch.Tensor] = None
     # All the images in the batch should share the same special image
     # bound token ids.
     im_start_id: Optional[torch.Tensor] = None
@@ -166,6 +167,7 @@ class ImageInputs:
             pixel_values=obj["pixel_values"],
             image_hashes=obj["image_hashes"],
         )
+        print(obj)
 
         # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
         # Please note that if the `input_ids` is later used in the model forward,
