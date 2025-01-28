@@ -232,7 +232,7 @@ register_chat_template(
 
 register_chat_template(
     ChatTemplate(
-        name="janis",
+        name="janus",
         default_system_prompt=None,
         role_prefix_and_suffix={
             "system": (

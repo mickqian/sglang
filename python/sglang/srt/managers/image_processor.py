@@ -429,6 +429,7 @@ class JanusProProcessor(BaseImageProcessor):
         result = global_processor.__call__(
             text=input_text, images=images, return_tensors="pt"
         )
+        print(f"result keys: {result.keys()}")
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
@@ -725,6 +726,7 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
 def get_image_processor(
     hf_config, server_args: ServerArgs, processor
 ) -> BaseImageProcessor:
+    print(f"architectures: {hf_config.architectures}")
     if "MllamaForConditionalGeneration" in hf_config.architectures:
         return MllamaImageProcessor(hf_config, server_args, processor)
     elif "Qwen2VLForConditionalGeneration" in hf_config.architectures:

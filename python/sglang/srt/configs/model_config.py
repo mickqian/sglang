@@ -65,7 +65,6 @@ class ModelConfig:
         self.is_multimodal = is_multimodal_model(self.hf_config.architectures)
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
-        print("self.dtype: ", self.dtype)
 
         # Derive context length
         derived_context_len = get_context_length(self.hf_text_config)
@@ -93,11 +92,6 @@ class ModelConfig:
             self.hf_text_config,
             "head_dim",
             self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
-        )
-        print(f"ModelConfig.head_dim: ", self.head_dim)
-        print(f"ModelConfig.hidden_size:  {self.hf_text_config.hidden_size}")
-        print(
-            f"ModelConfig.num_attention_heads:  {self.hf_text_config.num_attention_heads}"
         )
 
         # FIXME: temporary special judge for MLA architecture
@@ -391,7 +385,7 @@ def _get_and_verify_dtype(
 
 def is_generation_model(model_architectures: List[str], is_embedding: bool = False):
     # We have two ways to determine whether a model is a generative model.
-    # 1. Check the model architectue
+    # 1. Check the model architecture
     # 2. check the `is_embedding` server args
 
     if (
@@ -415,7 +409,7 @@ def is_multimodal_model(model_architectures: List[str]):
         or "MllamaForConditionalGeneration" in model_architectures
         or "Qwen2VLForConditionalGeneration" in model_architectures
         or "MiniCPMV" in model_architectures
-        or "JanusProProcessor" in model_architectures
+        or "MultiModalityCausalLM" in model_architectures
     ):
         return True
     else:

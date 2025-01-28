@@ -30,6 +30,7 @@ from transformers import (
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedTokenizer,
+    PreTrainedTokenizerBase,
     PreTrainedTokenizerFast,
 )
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
@@ -292,8 +293,22 @@ def get_processor(
         **kwargs,
     )
 
-    attach_additional_stop_token_ids(processor.tokenizer)
+    tokenizer = get_tokenizer_from_processor(processor)
+    attach_additional_stop_token_ids(tokenizer)
     return processor
+
+
+def get_tokenizer_from_processor(
+    processor,
+):
+    if isinstance(processor, PreTrainedTokenizerBase):
+        tokenizer = processor
+    elif isinstance(processor, PreTrainedTokenizer):
+        tokenizer = processor
+    else:
+        tokenizer = processor.tokenizer
+
+    return tokenizer
 
 
 def attach_additional_stop_token_ids(tokenizer):
