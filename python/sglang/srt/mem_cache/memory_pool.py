@@ -187,7 +187,6 @@ class MHATokenToKVPool(BaseTokenToKVPool):
 
         self.head_num = head_num
         self.head_dim = head_dim
-        print(f"head_num: {self.head_num}, head_dim: {self.head_dim}")
         self.layer_num = layer_num
         self._create_buffers()
 

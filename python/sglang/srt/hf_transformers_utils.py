@@ -301,12 +301,12 @@ def get_processor(
 def get_tokenizer_from_processor(
     processor,
 ):
-    if isinstance(processor, PreTrainedTokenizerBase):
-        tokenizer = processor
-    elif isinstance(processor, PreTrainedTokenizer):
-        tokenizer = processor
-    else:
-        tokenizer = processor.tokenizer
+    # if isinstance(processor, PreTrainedTokenizerBase):
+    #     tokenizer = processor
+    # elif isinstance(processor, PreTrainedTokenizer):
+    #     tokenizer = processor
+    # else:
+    tokenizer = processor.tokenizer
 
     return tokenizer
 

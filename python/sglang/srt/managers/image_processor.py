@@ -9,11 +9,11 @@ import os
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Union
 
-import numpy as np
 import PIL
+import numpy as np
 import transformers
-from decord import VideoReader, cpu
 from PIL import Image
+from decord import VideoReader, cpu
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.mm_utils import expand2square, process_anyres_image
@@ -147,7 +147,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-            and "anyres" in aspect_ratio
+               and "anyres" in aspect_ratio
             else None
         )
 
@@ -368,7 +368,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:") :]
+                        path = image[len("video:"):]
                         frames = encode_video(path, frame_count_limit=frames_to_process)
                     else:
                         raw_image, _size = load_image(image)
@@ -383,7 +383,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
                 all_frames += frames
 
             assert frames_to_process == len(frames)
-
             new_text_parts.append(text_parts[image_index])
 
             if frames_to_process != 0:
@@ -426,8 +425,9 @@ class JanusProProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_images_task(images, input_text):
+        print(f"input_text: {input_text}")
         result = global_processor.__call__(
-            text=input_text, images=images, return_tensors="pt"
+            prompt=input_text, images=images, return_tensors="pt"
         )
         print(f"result keys: {result.keys()}")
         return {
@@ -441,7 +441,7 @@ class JanusProProcessor(BaseImageProcessor):
             loop = asyncio.get_event_loop()
             image_inputs = await loop.run_in_executor(
                 self.executor,
-                MiniCPMVImageProcessor._process_images_task,
+                JanusProProcessor._process_images_task,
                 images,
                 input_text,
             )
@@ -520,65 +520,17 @@ class JanusProProcessor(BaseImageProcessor):
             ret = (max_req_input_len - len(input_text)) // NUM_TOKEN_PER_FRAME
             return min(ret, 100)
 
-        # if cuda OOM set a smaller number
-        MAX_NUM_FRAMES = calculate_max_num_frames()
-        print(f"MAX_NUM_FRAMES: {MAX_NUM_FRAMES}")
-
-        def encode_video(video_path):
-            if not os.path.exists(video_path):
-                logger.error(f"Video {video_path} does not exist")
-                return []
-
-            if MAX_NUM_FRAMES == 0:
-                return []
-
-            def uniform_sample(l, n):
-                gap = len(l) / n
-                idxs = [int(i * gap + gap / 2) for i in range(n)]
-                return [l[i] for i in idxs]
-
-            vr = VideoReader(video_path, ctx=cpu(0))
-            sample_fps = round(vr.get_avg_fps() / 1)  # FPS
-            frame_idx = [i for i in range(0, len(vr), sample_fps)]
-            if len(frame_idx) > MAX_NUM_FRAMES:
-                frame_idx = uniform_sample(frame_idx, MAX_NUM_FRAMES)
-            frames = vr.get_batch(frame_idx).asnumpy()
-            frames = [Image.fromarray(v.astype("uint8")) for v in frames]
-            return frames
-
         if isinstance(input_text, list):
             assert len(input_text) and isinstance(input_text[0], int)
-            input_text = self._processor.tokenizer.decode(input_text)
+            input_text = self._processor.decode(input_text)
+        print(f"input_text: {input_text}")
 
-        # MiniCPMV requires each frame of video as a single image token
-        text_parts = input_text.split(IMAGE_TOKEN)
-        new_text_parts = []
+        images = []
+        for image in image_data:
+            pil_image, _size = load_image(image)
+            images += [pil_image]
 
-        for image_index, image in enumerate(image_data):
-            try:
-                if isinstance(image, str) and image.startswith("video:"):
-                    path = image[len("video:") :]
-                    frames = encode_video(path)
-                else:
-                    raw_image, size = load_image(image)
-                    frames = [raw_image]
-                if len(frames) == 0:
-                    continue
-            except FileNotFoundError as e:
-                print(e)
-                return None
-
-            image_sizes += frames[0].size * len(frames)
-            image_hashes += [hash(image)] * len(frames)
-            raw_images += frames
-            new_text_parts.append(text_parts[image_index])
-            new_text_parts.append(IMAGE_TOKEN * len(frames))
-
-        new_text_parts.append(text_parts[-1])
-        input_text = "".join(new_text_parts)
-        if len(raw_images) == 0:
-            return None
-        res = await self._process_images(images=raw_images, input_text=input_text)
+        res = await self._process_images(images=images, input_text=input_text)
         pixel_values = res["pixel_values"]
         tgt_sizes = res["tgt_sizes"]
         input_ids = res["input_ids"]
@@ -726,7 +678,6 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
 def get_image_processor(
     hf_config, server_args: ServerArgs, processor
 ) -> BaseImageProcessor:
-    print(f"architectures: {hf_config.architectures}")
     if "MllamaForConditionalGeneration" in hf_config.architectures:
         return MllamaImageProcessor(hf_config, server_args, processor)
     elif "Qwen2VLForConditionalGeneration" in hf_config.architectures:

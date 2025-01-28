@@ -575,11 +575,11 @@ register_conv_template(
     Conversation(
         name="janus",
         system_message="You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.",
-        system_template="<|im_start|>system\n{system_message}.",
-        roles=("<|im_start|>user", "<|im_start|>assistant"),
-        sep="<|im_end|>\n",
+        system_template="{system_message}",
+        roles=("User:", "Assistant:"),
+        sep="\n\n",
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
-        stop_str=("<|im_end|>", "<|endoftext|>"),
+        stop_str=("", "<|endoftext|>"),
         image_token="<image_placeholder>\n",
     )
 )
