@@ -989,8 +989,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                         self_attn.w_scale *= 2.0
 
 
-class DeepseekJanusPro(DeepseekV2ForCausalLM):
+class MultiModalityCausalLM(DeepseekV2ForCausalLM):
     pass
 
 
-EntryClass = [DeepseekJanusPro]
+EntryClass = [MultiModalityCausalLM]

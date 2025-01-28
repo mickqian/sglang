@@ -65,6 +65,7 @@ class ModelConfig:
         self.is_multimodal = is_multimodal_model(self.hf_config.architectures)
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        print("self.dtype: ", self.dtype)
 
         # Derive context length
         derived_context_len = get_context_length(self.hf_text_config)
@@ -331,10 +332,13 @@ def _get_and_verify_dtype(
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
     config_dtype = getattr(config, "torch_dtype", None)
+    print("config dtype", config_dtype)
+
     if config_dtype is None:
         config_dtype = torch.float32
 
     if isinstance(dtype, str):
+        print("dtype str")
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
@@ -355,6 +359,7 @@ def _get_and_verify_dtype(
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")
             torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+            print(f"torch_dtype {torch_dtype}")
     elif isinstance(dtype, torch.dtype):
         torch_dtype = dtype
     else:
@@ -362,6 +367,8 @@ def _get_and_verify_dtype(
 
     # Verify the dtype.
     if torch_dtype != config_dtype:
+        print("torch_dtype dtype", torch_dtype)
+
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
             logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)

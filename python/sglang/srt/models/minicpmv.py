@@ -1044,6 +1044,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
+            print("996")
             # The resampler in 2.6 remains consistent with the one in 2.5.
             resampler = Resampler2_5(
                 num_queries=self.config.query_num,

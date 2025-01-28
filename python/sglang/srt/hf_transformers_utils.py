@@ -14,11 +14,15 @@
 """Utilities for Huggingface Transformers."""
 
 import contextlib
+import json
 import os
+import tempfile
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Optional, Type, Union
 
+import torch
 from huggingface_hub import snapshot_download
 from transformers import (
     AutoConfig,
@@ -38,7 +42,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     ExaoneConfig.model_type: ExaoneConfig,
     Qwen2VLConfig.model_type: Qwen2VLConfig,
 }
-
 
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
@@ -64,9 +67,97 @@ def get_config(
         kwargs["gguf_file"] = model
         model = Path(model).parent
 
-    config = AutoConfig.from_pretrained(
-        model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
-    )
+    if model == "deepseek-ai/Janus-Pro-1B":
+        config_str = """{
+  "aligner_config": {
+    "cls": "MlpProjector",
+    "model_type": "aligner",
+    "params": {
+      "depth": 2,
+      "input_dim": 1024,
+      "n_embed": 2048,
+      "projector_type": "mlp_gelu"
+    }
+  },
+  "architectures": [
+    "MultiModalityCausalLM"
+  ],
+  "gen_aligner_config": {
+    "cls": "MlpProjector",
+    "model_type": "gen_aligner",
+    "params": {
+      "depth": 2,
+      "input_dim": 8,
+      "n_embed": 2048,
+      "projector_type": "mlp_gelu"
+    }
+  },
+  "hidden_size": 3584,
+  "intermediate_size": 5632,
+  "max_position_embeddings": 16384,
+  "model_type": "llama",
+  "num_attention_heads": 16,
+  "num_hidden_layers": 24,
+  "num_key_value_heads": 16,
+  "torch_dtype": "bfloat16",
+  "vocab_size": 102400,
+  "gen_head_config": {
+    "cls": "vision_head",
+    "model_type": "gen_head",
+    "params": {
+      "image_token_embed": 2048,
+      "image_token_size": 16384,
+      "n_embed": 2048
+    }
+  },
+  "gen_vision_config": {
+    "cls": "VQ-16",
+    "model_type": "gen_vision",
+    "params": {
+      "image_token_size": 16384,
+      "n_embed": 8
+    }
+  },
+  "language_config": {
+    "hidden_size": 2048,
+    "intermediate_size": 5632,
+    "max_position_embeddings": 16384,
+    "model_type": "llama",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 24,
+    "num_key_value_heads": 16,
+    "torch_dtype": "bfloat16",
+    "vocab_size": 102400
+  },
+
+  "torch_dtype": "torch.bfloat16",
+  "transformers_version": "4.33.1",
+"model_type": "janus-pro",
+  "vision_config": {
+    "cls": "CLIPVisionTower",
+    "model_type": "vision",
+    "params": {
+      "image_size": 384,
+      "model_name": "siglip_large_patch16_384",
+      "select_feature": "same",
+      "select_layer": -1
+    }
+  }
+}"""
+        config_dict = json.loads(config_str)
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
+            temp_file.write(config_str)
+            temp_file_path = temp_file.name
+        # config = AutoConfig.from_pretrained(config_dict)
+        # config = AutoConfig.from_pretrained(temp_file_path)
+        config = json.loads(config_str, object_hook=lambda d: SimpleNamespace(**d))
+        config.torch_dtype = torch.bfloat16
+
+    else:
+        config = AutoConfig.from_pretrained(
+            model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
+        )
+
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision)

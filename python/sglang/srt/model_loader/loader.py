@@ -11,7 +11,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 
 import gguf
 import huggingface_hub
@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
-from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from sglang.srt.configs.device_config import DeviceConfig
@@ -353,6 +353,9 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
+            print(f"Loading model from {model_config.dtype}")
+            print(f"torch default dtype set to {torch.get_default_dtype()}")
+            print("356")
             with target_device:
                 model = _initialize_model(
                     model_config,
@@ -396,6 +399,7 @@ class LayeredModelLoader(DefaultModelLoader):
         target_device = torch.device(device_config.device)
 
         with set_default_torch_dtype(model_config.dtype):
+            print("400")
             # Create model on meta device
             with torch.device("meta"):
                 model = _initialize_model(
@@ -467,6 +471,8 @@ class DummyModelLoader(BaseModelLoader):
         device_config: DeviceConfig,
     ) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
+            print("473")
+
             with torch.device(device_config.device):
                 model = _initialize_model(
                     model_config,
@@ -576,6 +582,8 @@ class ShardedStateLoader(BaseModelLoader):
         )
 
         with set_default_torch_dtype(model_config.dtype):
+            print("584")
+
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config)
                 for _, module in model.named_modules():
@@ -973,6 +981,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     loaded_weight = loaded_weight.contiguous()
 
                 with set_default_torch_dtype(torch.float32):
+                    print("983")
+
                     processed_weight, quant_state = quantize_4bit(
                         loaded_weight, compress_statistics=True, quant_type="nf4"
                     )
@@ -1105,6 +1115,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         device_config: DeviceConfig,
     ) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
+            print("1113")
+
             with torch.device(device_config.device):
                 model = _initialize_model(
                     model_config,
@@ -1195,6 +1207,8 @@ class GGUFModelLoader(BaseModelLoader):
             model_config.hf_config.update({"tie_word_embeddings": True})
 
         with set_default_torch_dtype(model_config.dtype):
+            print("1203")
+
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config)
             model.load_weights(
@@ -1207,21 +1221,29 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
     if isinstance(load_config.load_format, type):
+        print("model loader load format ")
         return load_config.load_format(load_config)
 
     if load_config.load_format == LoadFormat.DUMMY:
+        print("model loader dummy ")
         return DummyModelLoader(load_config)
 
     if load_config.load_format == LoadFormat.SHARDED_STATE:
+        print("model sharded ")
         return ShardedStateLoader(load_config)
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
+        print("model bitsand ")
         return BitsAndBytesModelLoader(load_config)
 
     if load_config.load_format == LoadFormat.GGUF:
+        print("model bbuf ")
         return GGUFModelLoader(load_config)
 
     if load_config.load_format == LoadFormat.LAYERED:
+        print("model layered ")
         return LayeredModelLoader(load_config)
+
+    print("model default ")
 
     return DefaultModelLoader(load_config)

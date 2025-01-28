@@ -14,6 +14,8 @@ from sglang.srt.configs.model_config import ModelConfig
 def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
+    print("default torch dtype:", dtype)
+    print("default torch old dtype:", old_dtype)
     torch.set_default_dtype(dtype)
     yield
     torch.set_default_dtype(old_dtype)
