@@ -24,21 +24,35 @@ from enum import Enum
 from functools import partial
 from itertools import repeat
 from typing import (
-    Iterable, Union, Final, Literal, Set, Dict, Callable, Type, Sequence,
+    Callable,
+    Dict,
+    Final,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    Union,
 )
-from typing import Optional, Tuple, List
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from modelscope.models.cv.vision_efficient_tuning.timm_helpers import named_apply, checkpoint_seq
-from torch import _assert, Tensor
-from torch import nn
+from modelscope.models.cv.vision_efficient_tuning.timm_helpers import (
+    checkpoint_seq,
+    named_apply,
+)
+from torch import Tensor, _assert, nn
 from torch.nn.init import trunc_normal_
-from transformers import PretrainedConfig, LlamaConfig, PreTrainedModel
+from transformers import LlamaConfig, PretrainedConfig, PreTrainedModel
 
+from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
 
 
@@ -116,7 +130,7 @@ class GenHeadConfig(PretrainedConfig):
         if not isinstance(self.cls, str):
             self.cls = self.cls.__name__
 
-        self.params = (kwargs.get("params", {}))
+        self.params = kwargs.get("params", {})
         # self.params = types.SimpleNamespace(**kwargs.get("params", {}))
         # self.params = DictToObject(kwargs.get("params", {}))
 
@@ -137,7 +151,7 @@ class AlignerConfig(PretrainedConfig):
         # self.params = types.SimpleNamespace(**kwargs.get("params", {}))
         # self.params = DictToObject(kwargs.get("params", {}))
 
-        self.params = (kwargs.get("params", {}))
+        self.params = kwargs.get("params", {})
 
 
 class GenVisionConfig(PretrainedConfig):
@@ -155,7 +169,7 @@ class GenVisionConfig(PretrainedConfig):
         # self.params = types.SimpleNamespace(**kwargs.get("params", {}))
         # self.params = DictToObject(kwargs.get("params", {}))
 
-        self.params = (kwargs.get("params", {}))
+        self.params = kwargs.get("params", {})
 
 
 class MultiModalityConfig(PretrainedConfig):
@@ -285,7 +299,11 @@ def _trunc_normal_(tensor, mean, std, a, b):
 
 
 def trunc_normal_tf_(
-    tensor: torch.Tensor, mean: float = 0.0, std: float = 1.0, a: float = -2.0, b: float = 2.0
+    tensor: torch.Tensor,
+    mean: float = 0.0,
+    std: float = 1.0,
+    a: float = -2.0,
+    b: float = 2.0,
 ) -> torch.Tensor:
     """Fills the input Tensor with values drawn from a truncated
     normal distribution. The values are effectively drawn from the
@@ -316,15 +334,15 @@ to_ntuple = _ntuple
 
 
 class Format(str, Enum):
-    NCHW = 'NCHW'
-    NHWC = 'NHWC'
-    NCL = 'NCL'
-    NLC = 'NLC'
+    NCHW = "NCHW"
+    NHWC = "NHWC"
+    NCL = "NCL"
+    NLC = "NLC"
 
 
 class PatchEmbed(nn.Module):
-    """ 2D Image to Patch Embedding
-    """
+    """2D Image to Patch Embedding"""
+
     output_fmt: Format
     dynamic_img_pad: torch.jit.Final[bool]
 
@@ -355,7 +373,9 @@ class PatchEmbed(nn.Module):
         self.strict_img_size = strict_img_size
         self.dynamic_img_pad = dynamic_img_pad
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias)
+        self.proj = nn.Conv2d(
+            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias
+        )
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def _init_img_size(self, img_size: Union[int, Tuple[int, int]]):
@@ -384,14 +404,18 @@ class PatchEmbed(nn.Module):
                     stride=new_patch_size,
                     bias=self.proj.bias is not None,
                 )
-                new_proj.weight.copy_(resample_patch_embed(self.proj.weight, new_patch_size, verbose=True))
+                new_proj.weight.copy_(
+                    resample_patch_embed(self.proj.weight, new_patch_size, verbose=True)
+                )
                 if self.proj.bias is not None:
                     new_proj.bias.copy_(self.proj.bias)
                 self.proj = new_proj
             self.patch_size = new_patch_size
         img_size = img_size or self.img_size
         if img_size != self.img_size or new_patch_size is not None:
-            self.img_size, self.grid_size, self.num_patches = self._init_img_size(img_size)
+            self.img_size, self.grid_size, self.num_patches = self._init_img_size(
+                img_size
+            )
 
     def feat_ratio(self, as_scalar=True) -> Union[Tuple[int, int], int]:
         if as_scalar:
@@ -400,11 +424,13 @@ class PatchEmbed(nn.Module):
             return self.patch_size
 
     def dynamic_feat_size(self, img_size: Tuple[int, int]) -> Tuple[int, int]:
-        """ Get grid (feature) size for given image size taking account of dynamic padding.
+        """Get grid (feature) size for given image size taking account of dynamic padding.
         NOTE: must be torchscript compatible so using fixed tuple indexing
         """
         if self.dynamic_img_pad:
-            return math.ceil(img_size[0] / self.patch_size[0]), math.ceil(img_size[1] / self.patch_size[1])
+            return math.ceil(img_size[0] / self.patch_size[0]), math.ceil(
+                img_size[1] / self.patch_size[1]
+            )
         else:
             return img_size[0] // self.patch_size[0], img_size[1] // self.patch_size[1]
 
@@ -412,16 +438,22 @@ class PatchEmbed(nn.Module):
         B, C, H, W = x.shape
         if self.img_size is not None:
             if self.strict_img_size:
-                _assert(H == self.img_size[0], f"Input height ({H}) doesn't match model ({self.img_size[0]}).")
-                _assert(W == self.img_size[1], f"Input width ({W}) doesn't match model ({self.img_size[1]}).")
+                _assert(
+                    H == self.img_size[0],
+                    f"Input height ({H}) doesn't match model ({self.img_size[0]}).",
+                )
+                _assert(
+                    W == self.img_size[1],
+                    f"Input width ({W}) doesn't match model ({self.img_size[1]}).",
+                )
             elif not self.dynamic_img_pad:
                 _assert(
                     H % self.patch_size[0] == 0,
-                    f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]})."
+                    f"Input height ({H}) should be divisible by patch size ({self.patch_size[0]}).",
                 )
                 _assert(
                     W % self.patch_size[1] == 0,
-                    f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]})."
+                    f"Input width ({W}) should be divisible by patch size ({self.patch_size[1]}).",
                 )
         if self.dynamic_img_pad:
             pad_h = (self.patch_size[0] - H % self.patch_size[0]) % self.patch_size[0]
@@ -437,7 +469,7 @@ class PatchEmbed(nn.Module):
 
 
 class Mlp(nn.Module):
-    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
+    """MLP as used in Vision Transformer, MLP-Mixer and related networks
 
     NOTE: When use_conv=True, expects 2D NCHW tensors, otherwise N*C expected.
     """
@@ -450,7 +482,7 @@ class Mlp(nn.Module):
         act_layer=nn.GELU,
         norm_layer=None,
         bias=True,
-        drop=0.,
+        drop=0.0,
         use_conv=False,
     ):
         super().__init__()
@@ -463,7 +495,9 @@ class Mlp(nn.Module):
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer()
         self.drop1 = nn.Dropout(drop_probs[0])
-        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        self.norm = (
+            norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        )
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
         self.drop2 = nn.Dropout(drop_probs[1])
 
@@ -535,7 +569,9 @@ class Attention(nn.Module):
         return x
 
 
-def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
+def drop_path(
+    x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True
+):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
 
     This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
@@ -545,10 +581,12 @@ def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: b
     'survival rate' as the argument.
 
     """
-    if drop_prob == 0. or not training:
+    if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (
+        x.ndim - 1
+    )  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
     if keep_prob > 0.0 and scale_by_keep:
         random_tensor.div_(keep_prob)
@@ -556,10 +594,9 @@ def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: b
 
 
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
-    def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
+    def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
         self.scale_by_keep = scale_by_keep
@@ -568,7 +605,7 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training, self.scale_by_keep)
 
     def extra_repr(self):
-        return f'drop_prob={round(self.drop_prob, 3):0.3f}'
+        return f"drop_prob={round(self.drop_prob, 3):0.3f}"
 
 
 class Block(nn.Module):
@@ -628,6 +665,7 @@ class PatchDropout(nn.Module):
     """
     https://arxiv.org/abs/2212.00794 and https://arxiv.org/pdf/2208.07220
     """
+
     return_indices: torch.jit.Final[bool]
 
     def __init__(
@@ -638,27 +676,36 @@ class PatchDropout(nn.Module):
         return_indices: bool = False,
     ):
         super().__init__()
-        assert 0 <= prob < 1.
+        assert 0 <= prob < 1.0
         self.prob = prob
-        self.num_prefix_tokens = num_prefix_tokens  # exclude CLS token (or other prefix tokens)
+        self.num_prefix_tokens = (
+            num_prefix_tokens  # exclude CLS token (or other prefix tokens)
+        )
         self.ordered = ordered
         self.return_indices = return_indices
 
-    def forward(self, x) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        if not self.training or self.prob == 0.:
+    def forward(
+        self, x
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        if not self.training or self.prob == 0.0:
             if self.return_indices:
                 return x, None
             return x
 
         if self.num_prefix_tokens:
-            prefix_tokens, x = x[:, :self.num_prefix_tokens], x[:, self.num_prefix_tokens:]
+            prefix_tokens, x = (
+                x[:, : self.num_prefix_tokens],
+                x[:, self.num_prefix_tokens:],
+            )
         else:
             prefix_tokens = None
 
         B = x.shape[0]
         L = x.shape[1]
-        num_keep = max(1, int(L * (1. - self.prob)))
-        keep_indices = torch.argsort(torch.randn(B, L, device=x.device), dim=-1)[:, :num_keep]
+        num_keep = max(1, int(L * (1.0 - self.prob)))
+        keep_indices = torch.argsort(torch.randn(B, L, device=x.device), dim=-1)[
+                       :, :num_keep
+                       ]
         if self.ordered:
             # NOTE does not need to maintain patch order in typical transformer use,
             # but possibly useful for debug / visualization
@@ -678,7 +725,7 @@ def resample_abs_pos_embed(
     new_size: List[int],
     old_size: Optional[List[int]] = None,
     num_prefix_tokens: int = 1,
-    interpolation: str = 'bicubic',
+    interpolation: str = "bicubic",
     antialias: bool = True,
     verbose: bool = False,
 ):
@@ -693,7 +740,10 @@ def resample_abs_pos_embed(
         old_size = hw, hw
 
     if num_prefix_tokens:
-        posemb_prefix, posemb = posemb[:, :num_prefix_tokens], posemb[:, num_prefix_tokens:]
+        posemb_prefix, posemb = (
+            posemb[:, :num_prefix_tokens],
+            posemb[:, num_prefix_tokens:],
+        )
     else:
         posemb_prefix, posemb = None, posemb
 
@@ -702,7 +752,9 @@ def resample_abs_pos_embed(
     orig_dtype = posemb.dtype
     posemb = posemb.float()  # interpolate needs float32
     posemb = posemb.reshape(1, old_size[0], old_size[1], -1).permute(0, 3, 1, 2)
-    posemb = F.interpolate(posemb, size=new_size, mode=interpolation, antialias=antialias)
+    posemb = F.interpolate(
+        posemb, size=new_size, mode=interpolation, antialias=antialias
+    )
     posemb = posemb.permute(0, 2, 3, 1).reshape(1, -1, embed_dim)
     posemb = posemb.to(orig_dtype)
 
@@ -711,7 +763,7 @@ def resample_abs_pos_embed(
         posemb = torch.cat([posemb_prefix, posemb], dim=1)
 
     if not torch.jit.is_scripting() and verbose:
-        logger.info(f'Resized position embedding: {old_size} to {new_size}.')
+        logger.info(f"Resized position embedding: {old_size} to {new_size}.")
 
     return posemb
 
@@ -1087,11 +1139,11 @@ class vision_head(torch.nn.Module):
     def __init__(self, params):
         super().__init__()
         self.output_mlp_projector = torch.nn.Linear(
-            params['n_embed'], params['image_token_embed']
+            params["n_embed"], params["image_token_embed"]
         )
         self.vision_activation = torch.nn.GELU()
         self.vision_head = torch.nn.Linear(
-            params['image_token_embed'], params['image_token_size']
+            params["image_token_embed"], params["image_token_size"]
         )
 
     def forward(self, x):
@@ -1251,9 +1303,7 @@ class CLIPVisionTower(nn.Module):
         )
 
         if pixel_mean is not None and pixel_std is not None:
-            image_norm = Normalize(
-                mean=pixel_mean, std=pixel_std
-            )
+            image_norm = Normalize(mean=pixel_mean, std=pixel_std)
         else:
             image_norm = None
 
@@ -1321,29 +1371,29 @@ class MlpProjector(nn.Module):
         self.cfg = cfg
         print(f"Mlp Projector cfg: {self.cfg}")
 
-        if cfg['projector_type'] == "identity":
+        if cfg["projector_type"] == "identity":
             modules = nn.Identity()
 
-        elif cfg['projector_type'] == "linear":
-            modules = nn.Linear(cfg['input_dim'], cfg['n_embed'])
+        elif cfg["projector_type"] == "linear":
+            modules = nn.Linear(cfg["input_dim"], cfg["n_embed"])
 
-        elif cfg['projector_type'] == "mlp_gelu":
+        elif cfg["projector_type"] == "mlp_gelu":
             mlp_depth = cfg.get("depth", 1)
-            modules = [nn.Linear(cfg['input_dim'], cfg['n_embed'])]
+            modules = [nn.Linear(cfg["input_dim"], cfg["n_embed"])]
             for _ in range(1, mlp_depth):
                 modules.append(nn.GELU())
-                modules.append(nn.Linear(cfg['n_embed'], cfg['n_embed']))
+                modules.append(nn.Linear(cfg["n_embed"], cfg["n_embed"]))
             modules = nn.Sequential(*modules)
 
-        elif cfg['projector_type'] == "low_high_hybrid_split_mlp_gelu":
+        elif cfg["projector_type"] == "low_high_hybrid_split_mlp_gelu":
             mlp_depth = cfg.get("depth", 1)
-            self.high_up_proj = nn.Linear(cfg['input_dim'], cfg['n_embed'] // 2)
-            self.low_up_proj = nn.Linear(cfg['input_dim'], cfg['n_embed'] // 2)
+            self.high_up_proj = nn.Linear(cfg["input_dim"], cfg["n_embed"] // 2)
+            self.low_up_proj = nn.Linear(cfg["input_dim"], cfg["n_embed"] // 2)
 
             modules = []
             for _ in range(1, mlp_depth):
                 modules.append(nn.GELU())
-                modules.append(nn.Linear(cfg['n_embed'], cfg['n_embed']))
+                modules.append(nn.Linear(cfg["n_embed"], cfg["n_embed"]))
             modules = nn.Sequential(*modules)
 
         else:
@@ -1393,11 +1443,13 @@ class LayerScale(nn.Module):
 
 
 # use torch.scaled_dot_product_attention where possible
-_HAS_FUSED_ATTN = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-if 'TIMM_FUSED_ATTN' in os.environ:
-    _USE_FUSED_ATTN = int(os.environ['TIMM_FUSED_ATTN'])
+_HAS_FUSED_ATTN = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+if "TIMM_FUSED_ATTN" in os.environ:
+    _USE_FUSED_ATTN = int(os.environ["TIMM_FUSED_ATTN"])
 else:
-    _USE_FUSED_ATTN = 1  # 0 == off, 1 == on (for tested use), 2 == on (for experimental use)
+    _USE_FUSED_ATTN = (
+        1  # 0 == off, 1 == on (for tested use), 2 == on (for experimental use)
+    )
 
 # Set to True if exporting a model with Same padding via ONNX
 _EXPORTABLE = False
@@ -1413,8 +1465,8 @@ def use_fused_attn(experimental: bool = False) -> bool:
 
 
 class AttentionPoolLatent(nn.Module):
-    """ Attention pooling w/ latent query
-    """
+    """Attention pooling w/ latent query"""
+
     fused_attn: torch.jit.Final[bool]
 
     def __init__(
@@ -1429,8 +1481,8 @@ class AttentionPoolLatent(nn.Module):
         qk_norm: bool = False,
         latent_len: int = 1,
         latent_dim: int = None,
-        pos_embed: str = '',
-        pool_type: str = 'token',
+        pos_embed: str = "",
+        pool_type: str = "token",
         norm_layer: Optional[nn.Module] = None,
         drop: float = 0.0,
     ):
@@ -1445,7 +1497,7 @@ class AttentionPoolLatent(nn.Module):
         self.pool = pool_type
         self.fused_attn = use_fused_attn()
 
-        if pos_embed == 'abs':
+        if pos_embed == "abs":
             assert feat_size is not None
             self.pos_embed = nn.Parameter(torch.zeros(feat_size, in_features))
         else:
@@ -1462,7 +1514,9 @@ class AttentionPoolLatent(nn.Module):
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_drop = nn.Dropout(drop)
 
-        self.norm = norm_layer(out_features) if norm_layer is not None else nn.Identity()
+        self.norm = (
+            norm_layer(out_features) if norm_layer is not None else nn.Identity()
+        )
         self.mlp = Mlp(embed_dim, int(embed_dim * mlp_ratio))
 
         self.init_weights()
@@ -1480,9 +1534,17 @@ class AttentionPoolLatent(nn.Module):
             x = x + self.pos_embed.unsqueeze(0).to(x.dtype)
 
         q_latent = self.latent.expand(B, -1, -1)
-        q = self.q(q_latent).reshape(B, self.latent_len, self.num_heads, self.head_dim).transpose(1, 2)
+        q = (
+            self.q(q_latent)
+            .reshape(B, self.latent_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
 
-        kv = self.kv(x).reshape(B, N, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        kv = (
+            self.kv(x)
+            .reshape(B, N, 2, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
         k, v = kv.unbind(0)
 
         q, k = self.q_norm(q), self.k_norm(k)
@@ -1501,9 +1563,9 @@ class AttentionPoolLatent(nn.Module):
         x = x + self.mlp(self.norm(x))
 
         # optional pool if latent seq_len > 1 and pooled output is desired
-        if self.pool == 'token':
+        if self.pool == "token":
             x = x[:, 0]
-        elif self.pool == 'avg':
+        elif self.pool == "avg":
             x = x.mean(1)
 
 
@@ -1694,8 +1756,11 @@ class VectorQuantizer(nn.Module):
             self.embedding.weight.data = F.normalize(
                 self.embedding.weight.data, p=2, dim=-1
             )
+        print(f"show_usage: {self.show_usage}")
         if self.show_usage:
-            self.register_buffer("codebook_used", nn.Parameter(torch.zeros(65536)))
+            # self.register_buffer("codebook_used", nn.Parameter(torch.zeros(65536)))
+            self.codebook_used = nn.Parameter(torch.zeros(65536))
+        print(f"named paremeters: {self.named_parameters}")
 
     def forward(self, z):
         # reshape z -> (batch, height, width, channel) and flatten
@@ -2105,9 +2170,7 @@ global_config = MultiModalityConfig(**config_dict)
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
-    def __init__(self,
-                 config: dict,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, config: dict, quant_config: Optional[QuantizationConfig] = None):
         config = global_config
         super().__init__(config)
 
@@ -2132,11 +2195,36 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         self.gen_head = gen_head_cls(gen_head_config.params)
 
         self.gen_embed = torch.nn.Embedding(
-            gen_vision_config.params['image_token_size'], gen_vision_config.params['n_embed']
+            gen_vision_config.params["image_token_size"],
+            gen_vision_config.params["n_embed"],
         )
 
         language_config = config.language_config
-        self.language_model = LlamaForCausalLM(language_config, quant_config=quant_config)
+        self.language_model = LlamaForCausalLM(
+            language_config, quant_config=quant_config
+        )
+        self.logits_processor = LogitsProcessor(config)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        # # run image encoder to get the image embeddings
+        # inputs_embeds = self.prepare_inputs_embeds(
+        #     input_ids=input_ids,
+        #     pixel_values=
+        #
+        # )
+
+        return self.language_model(
+            input_ids, positions, forward_batch, get_embedding=False
+        )
+        # return self.logits_processor(
+        #     input_ids, hidden_states, self.lm_head, forward_batch
+        # )
 
     def prepare_inputs_embeds(
         self,
@@ -2193,9 +2281,9 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         ]
 
         params_dict = dict(self.named_parameters())
-        print(f"params_dict: {params_dict}")
+        # print(f"params_dict: {params_dict.keys()}")
         for name, loaded_weight in weights:
-            print(f"name: {name}")
+            # print(f"name: {name}")
             if "rotary_emb.inv_freq~" in name or "projector" in name:
                 continue
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
@@ -2206,7 +2294,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 continue
 
             # adapt to VisionAttention
-            name = name.replace(r"self_attn.out_proj", r"self_attn.proj")
+            # name = name.replace(r"self_attn.out_proj", r"self_attn.proj")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # replace the name and load with customized loader

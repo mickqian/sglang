@@ -648,6 +648,7 @@ class ModelRunner:
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
         else:
+            print(f"model config: {self.model_config}")
             self.token_to_kv_pool = MHATokenToKVPool(
                 self.max_total_num_tokens,
                 dtype=self.kv_cache_dtype,

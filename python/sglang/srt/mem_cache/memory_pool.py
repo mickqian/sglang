@@ -187,6 +187,7 @@ class MHATokenToKVPool(BaseTokenToKVPool):
 
         self.head_num = head_num
         self.head_dim = head_dim
+        print(f"head_num: {self.head_num}, head_dim: {self.head_dim}")
         self.layer_num = layer_num
         self._create_buffers()
 
@@ -285,6 +286,7 @@ class MHATokenToKVPool(BaseTokenToKVPool):
             self.k_buffer[layer_id][loc] = cache_k.view(self.store_dtype)
             self.v_buffer[layer_id][loc] = cache_v.view(self.store_dtype)
         else:
+            # print(f"cache_k shape: {cache_k.shape}, cache_v.shape: {cache_v.shape}")
             self.k_buffer[layer_id][loc] = cache_k
             self.v_buffer[layer_id][loc] = cache_v
 

@@ -94,6 +94,11 @@ class ModelConfig:
             "head_dim",
             self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
         )
+        print(f"ModelConfig.head_dim: ", self.head_dim)
+        print(f"ModelConfig.hidden_size:  {self.hf_text_config.hidden_size}")
+        print(
+            f"ModelConfig.num_attention_heads:  {self.hf_text_config.num_attention_heads}"
+        )
 
         # FIXME: temporary special judge for MLA architecture
         if (

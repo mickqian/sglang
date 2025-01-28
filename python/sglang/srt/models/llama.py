@@ -166,6 +166,7 @@ class LlamaAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
         )
+        print(f"Llama attention head dim: {self.head_dim}")
 
     def forward(
         self,

@@ -92,7 +92,7 @@ def get_config(
       "projector_type": "mlp_gelu"
     }
   },
-  "hidden_size": 3584,
+  "hidden_size": 2048,
   "intermediate_size": 5632,
   "max_position_embeddings": 16384,
   "model_type": "llama",
