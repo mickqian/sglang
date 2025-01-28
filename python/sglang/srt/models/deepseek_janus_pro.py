@@ -51,6 +51,7 @@ from transformers import LlamaConfig, PretrainedConfig, PreTrainedModel
 
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
+from sglang.srt.managers.schedule_batch import ImageInputs, ImageTokenPattern
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
@@ -340,6 +341,82 @@ class Format(str, Enum):
     NLC = "NLC"
 
 
+def resample_patch_embed(
+    patch_embed,
+    new_size: List[int],
+    interpolation: str = "bicubic",
+    antialias: bool = True,
+    verbose: bool = False,
+):
+    """Resample the weights of the patch embedding kernel to target resolution.
+    We resample the patch embedding kernel by approximately inverting the effect
+    of patch resizing.
+
+    Code based on:
+      https://github.com/google-research/big_vision/blob/b00544b81f8694488d5f36295aeb7972f3755ffe/big_vision/models/proj/flexi/vit.py
+
+    With this resizing, we can for example load a B/8 filter into a B/16 model
+    and, on 2x larger input image, the result will match.
+
+    Args:
+        patch_embed: original parameter to be resized.
+        new_size (tuple(int, int): target shape (height, width)-only.
+        interpolation (str): interpolation for resize
+        antialias (bool): use anti-aliasing filter in resize
+        verbose (bool): log operation
+    Returns:
+        Resized patch embedding kernel.
+    """
+    import numpy as np
+
+    try:
+        from torch import vmap
+    except ImportError:
+        from functorch import vmap
+
+    assert len(patch_embed.shape) == 4, "Four dimensions expected"
+    assert len(new_size) == 2, "New shape should only be hw"
+    old_size = patch_embed.shape[-2:]
+    if tuple(old_size) == tuple(new_size):
+        return patch_embed
+
+    if verbose:
+        _logger.info(
+            f"Resize patch embedding {patch_embed.shape} to {new_size}, w/ {interpolation} interpolation."
+        )
+
+    def resize(x_np, _new_size):
+        x_tf = torch.Tensor(x_np)[None, None, ...]
+        x_upsampled = F.interpolate(
+            x_tf, size=_new_size, mode=interpolation, antialias=antialias
+        )[0, 0, ...].numpy()
+        return x_upsampled
+
+    def get_resize_mat(_old_size, _new_size):
+        mat = []
+        for i in range(np.prod(_old_size)):
+            basis_vec = np.zeros(_old_size)
+            basis_vec[np.unravel_index(i, _old_size)] = 1.0
+            mat.append(resize(basis_vec, _new_size).reshape(-1))
+        return np.stack(mat).T
+
+    resize_mat = get_resize_mat(old_size, new_size)
+    resize_mat_pinv = torch.tensor(
+        np.linalg.pinv(resize_mat.T), device=patch_embed.device
+    )
+
+    def resample_kernel(kernel):
+        resampled_kernel = resize_mat_pinv @ kernel.reshape(-1)
+        return resampled_kernel.reshape(new_size)
+
+    v_resample_kernel = vmap(vmap(resample_kernel, 0, 0), 1, 1)
+    orig_dtype = patch_embed.dtype
+    patch_embed = patch_embed.float()
+    patch_embed = v_resample_kernel(patch_embed)
+    patch_embed = patch_embed.to(orig_dtype)
+    return patch_embed
+
+
 class PatchEmbed(nn.Module):
     """2D Image to Patch Embedding"""
 
@@ -459,6 +536,7 @@ class PatchEmbed(nn.Module):
             pad_h = (self.patch_size[0] - H % self.patch_size[0]) % self.patch_size[0]
             pad_w = (self.patch_size[1] - W % self.patch_size[1]) % self.patch_size[1]
             x = F.pad(x, (0, pad_w, 0, pad_h))
+        print(f"x dtype: {x.dtype}")
         x = self.proj(x)
         if self.flatten:
             x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
@@ -528,7 +606,7 @@ class Attention(nn.Module):
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         # self.fused_attn = use_fused_attn()
         self.fused_attn = True
 
@@ -695,7 +773,7 @@ class PatchDropout(nn.Module):
         if self.num_prefix_tokens:
             prefix_tokens, x = (
                 x[:, : self.num_prefix_tokens],
-                x[:, self.num_prefix_tokens:],
+                x[:, self.num_prefix_tokens :],
             )
         else:
             prefix_tokens = None
@@ -704,8 +782,8 @@ class PatchDropout(nn.Module):
         L = x.shape[1]
         num_keep = max(1, int(L * (1.0 - self.prob)))
         keep_indices = torch.argsort(torch.randn(B, L, device=x.device), dim=-1)[
-                       :, :num_keep
-                       ]
+            :, :num_keep
+        ]
         if self.ordered:
             # NOTE does not need to maintain patch order in typical transformer use,
             # but possibly useful for debug / visualization
@@ -771,7 +849,7 @@ def resample_abs_pos_embed(
 def init_weights(self):
     if self.pos_embed is not None:
         trunc_normal_(self.pos_embed, std=self.pos_embed.shape[1] ** -0.5)
-    trunc_normal_(self.latent, std=self.latent_dim ** -0.5)
+    trunc_normal_(self.latent, std=self.latent_dim**-0.5)
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = "") -> None:
@@ -1056,37 +1134,6 @@ class VisionTransformer(nn.Module):
 
         return outputs
 
-    def get_intermediate_layers(
-        self,
-        x: torch.Tensor,
-        n: Union[int, Sequence] = 1,
-        reshape: bool = False,
-        return_prefix_tokens: bool = False,
-        norm: bool = False,
-    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
-        """Intermediate layer accessor (NOTE: This is a WIP experiment).
-        Inspired by DINO / DINOv2 interface
-        """
-        # take last n blocks if n is an int, if in is a sequence, select by matching indices
-        outputs = self._intermediate_layers(x, n)
-        if norm:
-            outputs = [self.norm(out) for out in outputs]
-        prefix_tokens = [out[:, 0: self.num_prefix_tokens] for out in outputs]
-        outputs = [out[:, self.num_prefix_tokens:] for out in outputs]
-
-        if reshape:
-            grid_size = self.patch_embed.grid_size
-            outputs = [
-                out.reshape(x.shape[0], grid_size[0], grid_size[1], -1)
-                .permute(0, 3, 1, 2)
-                .contiguous()
-                for out in outputs
-            ]
-
-        if return_prefix_tokens:
-            return tuple(zip(outputs, prefix_tokens))
-        return tuple(outputs)
-
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
         x = self._pos_embed(x)
@@ -1103,7 +1150,7 @@ class VisionTransformer(nn.Module):
         if self.attn_pool is not None:
             x = self.attn_pool(x)
         elif self.global_pool == "avg":
-            x = x[:, self.num_prefix_tokens:].mean(dim=1)
+            x = x[:, self.num_prefix_tokens :].mean(dim=1)
         elif self.global_pool:
             x = x[:, 0]  # class token
         x = self.fc_norm(x)
@@ -1309,6 +1356,14 @@ class CLIPVisionTower(nn.Module):
 
         self.image_norm = image_norm
 
+    @property
+    def device(self) -> torch.device:
+        return next(self.vision_tower.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.vision_tower.parameters()).dtype
+
     def build_vision_tower(self, vision_tower_params):
         if self.model_name.startswith("siglip"):
             self.select_feature = "same"
@@ -1493,7 +1548,7 @@ class AttentionPoolLatent(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.feat_size = feat_size
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.pool = pool_type
         self.fused_attn = use_fused_attn()
 
@@ -1524,7 +1579,7 @@ class AttentionPoolLatent(nn.Module):
     def init_weights(self):
         if self.pos_embed is not None:
             trunc_normal_tf_(self.pos_embed, std=self.pos_embed.shape[1] ** -0.5)
-        trunc_normal_tf_(self.latent, std=self.latent_dim ** -0.5)
+        trunc_normal_tf_(self.latent, std=self.latent_dim**-0.5)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -1776,12 +1831,12 @@ class VectorQuantizer(nn.Module):
             embedding = self.embedding.weight
 
         d = (
-            torch.sum(z_flattened ** 2, dim=1, keepdim=True)
-            + torch.sum(embedding ** 2, dim=1)
+            torch.sum(z_flattened**2, dim=1, keepdim=True)
+            + torch.sum(embedding**2, dim=1)
             - 2
             * torch.einsum(
-            "bd,dn->bn", z_flattened, torch.einsum("n d -> d n", embedding)
-        )
+                "bd,dn->bn", z_flattened, torch.einsum("n d -> d n", embedding)
+            )
         )
 
         min_encoding_indices = torch.argmin(d, dim=1)
@@ -2069,7 +2124,7 @@ def all_gather(
 
     gathered_tensors = torch.concat(
         [
-            forward_batch.gathered_buffer[i * max_len: i * max_len + all_lens[i]]
+            forward_batch.gathered_buffer[i * max_len : i * max_len + all_lens[i]]
             for i in range(world_size)
         ]
     )
@@ -2212,19 +2267,49 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        # # run image encoder to get the image embeddings
-        # inputs_embeds = self.prepare_inputs_embeds(
-        #     input_ids=input_ids,
-        #     pixel_values=
-        #
-        # )
+        input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
 
+        inputs_embeds = None
+        if (
+            len(forward_batch.image_inputs) != 0
+            and forward_batch.image_inputs[0] != None
+        ):
+            start_id = forward_batch.image_inputs[0].im_start_id[0]
+            end_id = forward_batch.image_inputs[0].im_end_id[0]
+
+            # recalculate the mask, for the prefix may be truncated
+            images_seq_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
+            # Find positions of start_id and end_id
+            start_positions = (input_ids == start_id).nonzero()
+            end_positions = (input_ids == end_id).nonzero()
+            print(f"start_positions: {start_positions}")
+            print(f"end_positions: {end_positions}")
+            if start_positions.numel() == 0 or end_positions.numel() == 0:
+                # sometimes image_inptus is not empty, but input_ids contain no image token because of prefix-cache
+                pass
+            else:
+                # For each start-end pair, mark the tokens in between as True
+                for start_pos, end_pos in zip(start_positions, end_positions):
+                    # Mark tokens between start_id and end_id (exclusive) as True
+                    images_seq_mask[start_pos + 1 : end_pos] = True
+                print(f"images_seq_mask: {images_seq_mask}")
+                inputs_embeds = self.prepare_inputs_embeds(
+                    input_ids=input_ids,
+                    pixel_values=forward_batch.image_inputs[0].pixel_values,
+                    images_seq_mask=images_seq_mask,
+                    images_emb_mask=forward_batch.image_inputs[0].images_emb_mask,
+                )
+
+                input_ids = None
+        print(f"positions: {positions}")
         return self.language_model(
-            input_ids, positions, forward_batch, get_embedding=False
+            input_ids=input_ids,
+            positions=positions,
+            forward_batch=forward_batch,
+            input_embeds=inputs_embeds,
+            get_embedding=False,
         )
-        # return self.logits_processor(
-        #     input_ids, hidden_states, self.lm_head, forward_batch
-        # )
 
     def prepare_inputs_embeds(
         self,
@@ -2250,6 +2335,10 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         bs, n = pixel_values.shape[0:2]
         images = rearrange(pixel_values, "b n c h w -> (b n) c h w")
+        # images = images.to(dtype=torch.bfloat16)
+        images = images.to(
+            device=self.vision_model.device, dtype=self.vision_model.dtype
+        )
         # [b x n, T2, D]
         images_embeds = self.aligner(self.vision_model(images))
 
@@ -2260,7 +2349,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         # [b, T, D]
         input_ids[input_ids < 0] = 0  # ignore the image embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
         # replace with the image embeddings
         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
@@ -2276,76 +2365,13 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         ):
             return input_ids
 
-        new_input_ids = []
-        last_idx = 0
-        image_idx = -1
-        image_inputs.image_offsets = []
+        print(f"pad_values: {image_inputs.pad_values}")
+        image_inputs.image_token_pattern = ImageTokenPattern.ENCLOSED_TOKEN_PAIRS
 
-        # Get all special token IDs
-        im_start_id = (
-            image_inputs.im_start_id
-            if isinstance(image_inputs.im_start_id[0], torch.Tensor)
-            else image_inputs.im_start_id
-        )
-        im_end_id = (
-            image_inputs.im_end_id[0].item()
-            if isinstance(image_inputs.im_end_id[0], torch.Tensor)
-            else image_inputs.im_end_id[0]
-        )
-        slice_start_id = (
-            image_inputs.slice_start_id[0].item()
-            if isinstance(image_inputs.slice_start_id[0], torch.Tensor)
-            else image_inputs.slice_start_id[0]
-        )
-        slice_end_id = (
-            image_inputs.slice_end_id[0].item()
-            if isinstance(image_inputs.slice_end_id[0], torch.Tensor)
-            else image_inputs.slice_end_id[0]
-        )
+        im_start_id = image_inputs.im_start_id[0]
+        im_end_id = image_inputs.im_end_id[0]
 
-        # Find all start and end positions for both types
-        start_indices = [
-            i
-            for i, x in enumerate(input_ids)
-            if x == im_start_id or x == slice_start_id
-        ]
-        end_indices = [
-            i for i, x in enumerate(input_ids) if x == im_end_id or x == slice_end_id
-        ]
-
-        if len(start_indices) != len(end_indices):
-            return input_ids
-        # Process each region (both image and slice)
-        for start_idx, end_idx in zip(start_indices, end_indices):
-            # Add non-image tokens before this region
-            new_input_ids.extend(
-                input_ids[last_idx: start_idx + 1]
-            )  # include start token
-
-            is_image_start = input_ids[start_idx] == im_start_id
-
-            if is_image_start:
-                image_inputs.image_offsets += [start_idx]
-                image_idx += 1
-
-            num_tokens = end_idx - start_idx - 1  # exclude start and end tokens
-
-            # Generate pad_ids
-            pad_values = [image_inputs.pad_values[image_idx]]
-
-            pad_ids = pad_values * ((num_tokens + len(pad_values)) // len(pad_values))
-            pad_ids = pad_ids[:num_tokens]
-
-            # Add pad_ids
-            new_input_ids.extend(pad_ids)
-
-            # Update last_idx to after end token
-            last_idx = end_idx
-
-        # Add remaining tokens after last region
-        new_input_ids.extend(input_ids[last_idx:])
-        assert len(input_ids) == len(new_input_ids)
-        return new_input_ids
+        return image_inputs.pad_input_ids(input_ids, [im_start_id, im_end_id])
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

@@ -130,6 +130,16 @@ class FINISH_ABORT(BaseFinishReason):
         }
 
 
+class ImageTokenPattern:
+    """
+    Describes how, tokens of an image, is represented in the input_ids sequence
+    """
+
+    # The tokens of the image is within an enclosed token pair
+    ENCLOSED_TOKEN_PAIRS = (0,)
+    OTHERS = 1
+
+
 @dataclasses.dataclass
 class ImageInputs:
     """The image related inputs."""
@@ -159,7 +169,14 @@ class ImageInputs:
     im_end_id: Optional[torch.Tensor] = None
     slice_start_id: Optional[torch.Tensor] = None
     slice_end_id: Optional[torch.Tensor] = None
+
+    # [b, width, height]
     tgt_sizes: Optional[list] = None
+
+    # denotes the number of valid image tokens in each image
+    images_emb_mask: Optional[torch.BoolTensor] = None
+
+    image_token_pattern: ImageTokenPattern = ImageTokenPattern.OTHERS
 
     @staticmethod
     def from_dict(obj: dict):
@@ -186,6 +203,7 @@ class ImageInputs:
             "slice_start_id",
             "slice_end_id",
             "tgt_sizes",
+            "images_emb_mask",
         ]
         for arg in optional_args:
             if arg in obj:
@@ -208,7 +226,6 @@ class ImageInputs:
             "image_sizes",
             "image_offsets",
             "image_pad_len",
-            # "modalities", # modalities should be ["multi-images"] (one entry) even for multiple images
             "aspect_ratio_ids",
             "aspect_ratio_mask",
             "image_grid_thws",
@@ -216,6 +233,62 @@ class ImageInputs:
         for arg in optional_args:
             if getattr(self, arg, None) is not None:
                 setattr(self, arg, getattr(self, arg) + getattr(other, arg))
+
+    def pad_input_ids(self, input_ids: List[int], tokens: list[int]):
+        if self.image_offsets is None:
+            self.image_offsets = []
+        if self.image_token_pattern == ImageTokenPattern.ENCLOSED_TOKEN_PAIRS:
+            start_token_id = tokens[0]
+            end_token_id = tokens[1]
+
+            new_input_ids = []
+            last_idx = 0
+            image_idx = -1
+
+            # Find all start and end positions for both types
+            start_indices = [i for i, x in enumerate(input_ids) if x == start_token_id]
+            end_indices = [i for i, x in enumerate(input_ids) if x == end_token_id]
+            print(f"start_indices: {start_indices}")
+            print(f"end_indices: {end_indices}")
+            print(f"input_ids: {input_ids}")
+
+            if len(start_indices) != len(end_indices):
+                return input_ids
+            # Process each region (both image and slice)
+            for start_idx, end_idx in zip(start_indices, end_indices):
+                # Add non-image tokens before this region
+                new_input_ids.extend(
+                    input_ids[last_idx : start_idx + 1]
+                )  # include start token
+
+                is_image_start = input_ids[start_idx] == start_token_id
+
+                if is_image_start:
+                    self.image_offsets += [start_idx]
+                    image_idx += 1
+
+                num_tokens = end_idx - start_idx - 1  # exclude start and end tokens
+
+                # Generate pad_ids
+                pad_values = [self.pad_values[image_idx]]
+
+                pad_ids = pad_values * (
+                    (num_tokens + len(pad_values)) // len(pad_values)
+                )
+                pad_ids = pad_ids[:num_tokens]
+
+                # Add pad_ids
+                new_input_ids.extend(pad_ids)
+
+                # Update last_idx to after end token
+                last_idx = end_idx
+
+            # Add remaining tokens after last region
+            new_input_ids.extend(input_ids[last_idx:])
+            print(f"new_input_ids: {input_ids}")
+
+            assert len(input_ids) == len(new_input_ids)
+            return new_input_ids
 
 
 class Req:
@@ -352,6 +425,7 @@ class Req:
 
     def init_next_round_input(self, tree_cache: Optional[BasePrefixCache] = None):
         self.fill_ids = self.origin_input_ids + self.output_ids
+        print(f"self.fill_ids 44: {self.fill_ids}")
         if tree_cache is not None:
             # tree cache is None if the prefix is not computed with tree cache.
             self.prefix_indices, self.last_node = tree_cache.match_prefix(
@@ -361,6 +435,8 @@ class Req:
 
     def adjust_max_prefix_ids(self):
         self.fill_ids = self.origin_input_ids + self.output_ids
+        print(f"self.fill_ids: {self.fill_ids}")
+
         input_len = len(self.fill_ids)
 
         # FIXME: To work around some bugs in logprob computation, we need to ensure each
@@ -465,7 +541,11 @@ class Req:
             )
 
         all_text = self.origin_input_text + self.decoded_text + jump_forward_str
+        print(f"input_text 539: {all_text}")
+
         all_ids = self.tokenizer.encode(all_text)
+        print(f"all_ids 539: {all_ids}")
+
         if not all_ids:
             logger.warning("Encoded all_text resulted in empty all_ids")
             return False
@@ -720,6 +800,7 @@ class ScheduleBatch:
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
         )
+        print(f"input_ids801: {self.input_ids}")
         self.seq_lens = torch.tensor(seq_lens, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -745,6 +826,7 @@ class ScheduleBatch:
 
         bs = len(self.reqs)
         reqs = self.reqs
+        print(f"prefix_indices: {self.prefix_lens}")
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = []
@@ -794,6 +876,8 @@ class ScheduleBatch:
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
         )
+        print(f"input_ids877: {self.input_ids}")
+
         self.req_pool_indices = torch.tensor(req_pool_indices, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -866,6 +950,8 @@ class ScheduleBatch:
 
         self.merge_batch(running_batch)
         self.input_ids = input_ids
+        print(f"input_ids950: {self.input_ids}")
+
         self.out_cache_loc = out_cache_loc
 
         # For overlap scheduler, the output_ids has one step delay
@@ -1015,6 +1101,7 @@ class ScheduleBatch:
                         req.origin_input_ids = pad_input_ids_func(
                             req.origin_input_ids_unpadded, req.image_inputs
                         )
+                        print("padded!!!!!!!!!!")
 
                     jump_forward_reqs.append(req)
                     keep_indices.remove(i)
@@ -1047,6 +1134,8 @@ class ScheduleBatch:
             return
 
         self.input_ids = self.output_ids
+        print(f"input_ids1134: {self.input_ids}")
+
         self.output_ids = None
         self.sampling_info.penalizer_orchestrator.cumulate_output_tokens(self.input_ids)
 

@@ -934,6 +934,7 @@ def v1_chat_generate_request(
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
+                print(f"prompt:'{prompt}'")
                 image_data = conv.image_data
                 modalities = conv.modalities
                 stop = conv.stop_str or []
@@ -942,7 +943,10 @@ def v1_chat_generate_request(
                         stop.append(request.stop)
                     else:
                         stop.extend(request.stop)
+                print(f"prompt: {prompt}")
+
                 prompt_ids = tokenizer_manager.tokenizer.encode(prompt)
+                print(f"prompt_ids: {prompt_ids}")
         else:
             # Use the raw prompt and stop strings if the messages is already a string.
             prompt_ids = request.messages

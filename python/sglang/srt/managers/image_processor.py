@@ -11,8 +11,8 @@ from functools import lru_cache
 from typing import List, Optional, Union
 
 import numpy as np
-from PIL import Image
 from decord import VideoReader, cpu
+from PIL import Image
 from transformers import IMAGE_PROCESSOR_MAPPING
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -34,7 +34,11 @@ class BaseImageProcessor(ABC):
 
         # self.global_processor = None
         self.executor = concurrent.futures.ProcessPoolExecutor(
-            initializer=lambda: setattr(BaseImageProcessor, 'global_processor', self._build_processor(server_args)),
+            initializer=lambda: setattr(
+                BaseImageProcessor,
+                "global_processor",
+                self._build_processor(server_args),
+            ),
             # initializer=lambda: BaseImageProcessor._init_processor(server_args=server_args),
             mp_context=mp.get_context("fork"),
             # initargs=(server_args,),
@@ -160,7 +164,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-               and "anyres" in aspect_ratio
+            and "anyres" in aspect_ratio
             else None
         )
 
@@ -261,9 +265,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_images_task(processor, images, input_text):
-        result = processor.__call__(
-            text=input_text, images=images, return_tensors="pt"
-        )
+        result = processor.__call__(text=input_text, images=images, return_tensors="pt")
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
@@ -383,7 +385,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:"):]
+                        path = image[len("video:") :]
                         frames = encode_video(path, frame_count_limit=frames_to_process)
                     else:
                         raw_image, _size = load_image(image)
@@ -577,17 +579,13 @@ def import_image_processors():
     for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
         if not ispkg:
             try:
-                print(f"name: imported {name}")
                 module = importlib.import_module(name)
             except Exception as e:
                 logger.warning(f"Ignore import error when loading {name}. " f"{e}")
-                print(f"{e}")
                 continue
             if hasattr(module, "EntryClass"):
                 entry = module.EntryClass
-                if isinstance(
-                    entry, dict
-                ):
+                if isinstance(entry, dict):
                     for processor_name, cls in entry.items():
                         IMAGE_PROCESSOR_MAPPING[processor_name] = cls
 

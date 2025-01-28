@@ -2,23 +2,27 @@ import asyncio
 import base64
 import io
 from dataclasses import dataclass
-from typing import Tuple, Union, List, Dict
+from typing import Dict, List, Tuple, Union
 
-import PIL
 import numpy as np
+import PIL
 import torch
 from PIL.Image import Image
-from transformers import BaseImageProcessor, BatchFeature, AutoImageProcessor, PretrainedConfig, ProcessorMixin, \
-    LlamaTokenizerFast
+from transformers import (
+    AutoImageProcessor,
+    BaseImageProcessor,
+    BatchFeature,
+    LlamaTokenizerFast,
+    PretrainedConfig,
+    ProcessorMixin,
+)
 from transformers.image_utils import to_numpy_array
 
 from sglang.srt.mm_utils import expand2square
 from sglang.srt.utils import load_image
 
 
-def load_pil_images(
-    conversations: List[Dict[str, str]]
-) -> List[Image]:
+def load_pil_images(conversations: List[Dict[str, str]]) -> List[Image]:
     """
 
     Support file path or base64 images.
@@ -117,6 +121,8 @@ class VLMImageProcessor(BaseImageProcessor):
             print(f"orig size = {pil_img.size}, new size = {size}")
             raise ValueError("Invalid size!")
 
+        import torchvision
+
         # pil_img = torchvision.transforms.functional.resize(
         #     pil_img,
         #     size,
@@ -125,7 +131,7 @@ class VLMImageProcessor(BaseImageProcessor):
         # )
         pil_img = pil_img.resize(
             size=(size[0], size[1]),  # size 是 (width, height) 元组
-            resample=PIL.Image.Resampling.BICUBIC  # 使用双三次插值
+            resample=PIL.Image.Resampling.BICUBIC,  # 使用双三次插值
         )
 
         pil_img = expand2square(pil_img, self.background_color)
@@ -411,7 +417,6 @@ class VLChatProcessor(ProcessorMixin):
         """
 
         sft_format = prompt
-        print(f"sft_format: {sft_format}")
         # tokenize
         input_ids = self.tokenizer.encode(sft_format)
         input_ids = torch.LongTensor(input_ids)
@@ -419,13 +424,10 @@ class VLChatProcessor(ProcessorMixin):
         # add image tokens to the input_ids
         image_token_mask: torch.BoolTensor = input_ids == self.image_id
         image_indices = image_token_mask.nonzero()
-        print(f"image_indices: {image_indices}")
         input_ids, num_image_tokens = self.add_image_token(
             image_indices=image_indices,
             input_ids=input_ids,
         )
-
-        print(f"input_ids: {input_ids}")
 
         # load images
         images_outputs = self.image_processor(images, return_tensors="pt")
@@ -546,17 +548,17 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
         super().__init__(hf_config, server_args, _processor)
 
     @staticmethod
-    def _process_images_task(processor, images, input_text):
+    def _process_images_task(images, input_text):
         processor = image_processor.BaseImageProcessor.global_processor
-        print(f"input_text: {input_text}")
-        print(f"global processor type: {type(processor)}")
         result = processor.__call__(
             prompt=input_text, images=images, return_tensors="pt"
         )
-        print(f"result keys: {result.keys()}")
         return {
             "input_ids": result["input_ids"],
-            "pixel_values": result["pixel_values"],
+            "pixel_values": result["pixel_values"].to(
+                dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16
+            ),
+            "images_emb_mask": result["images_emb_mask"],
             "im_start_id": [processor.image_start_id],
             "im_end_id": [processor.image_end_id],
             "image_token_id": [processor.image_id],
@@ -564,8 +566,9 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
 
     def _build_processor(self, server_args):
         """Init the global processor for multi modal models."""
-        return VLChatProcessor.from_pretrained(server_args.tokenizer_path,
-                                               trust_remote_code=server_args.trust_remote_code)
+        return VLChatProcessor.from_pretrained(
+            server_args.tokenizer_path, trust_remote_code=server_args.trust_remote_code
+        )
 
     async def _process_images(self, images, input_text):
         if self.executor is not None:
@@ -573,7 +576,6 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
             image_inputs = await loop.run_in_executor(
                 self.executor,
                 JanusProProcessor._process_images_task,
-                self.get_processor(),
                 images,
                 input_text,
             )
@@ -601,8 +603,6 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
             assert len(input_text) and isinstance(input_text[0], int)
             input_text = self._processor.decode(input_text)
 
-        print(f"input_text: {input_text}")
-
         images, image_hashes = [], []
         for image in image_data:
             pil_image, _size = load_image(image)
@@ -610,16 +610,11 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
             image_hashes += [hash(image)]
 
         res = await self._process_images(images=images, input_text=input_text)
-        processor = self.get_processor()
-        # print(f"tokenizer type: {type(tokenizer)}")
-        print(f"Janus Pro : {type(processor)}")
-        # image_token_id = [tokenizer.image_id]
-        # im_start_id = [tokenizer.image_start_id]
-        # im_end_id = [tokenizer.image_end_id]
 
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": res["pixel_values"],
+            "images_emb_mask": res["images_emb_mask"],
             "image_hashes": image_hashes,
             "im_start_id": res["im_start_id"],
             "im_end_id": res["im_end_id"],

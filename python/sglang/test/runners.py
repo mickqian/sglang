@@ -162,9 +162,12 @@ class HFRunner:
                     top_output_logprobs = []
                     for i, p in enumerate(prompts):
                         if isinstance(p, str):
+                            print(f"input_text 165: {p}")
                             input_ids = self.tokenizer.encode(
                                 p, return_tensors="pt"
                             ).cuda()
+                            print(f"input_ids 165: {input_ids}")
+
                         else:
                             input_ids = torch.tensor([p], device="cuda")
 
