@@ -1134,7 +1134,6 @@ class ScheduleBatch:
             return
 
         self.input_ids = self.output_ids
-        print(f"input_ids1134: {self.input_ids}")
 
         self.output_ids = None
         self.sampling_info.penalizer_orchestrator.cumulate_output_tokens(self.input_ids)

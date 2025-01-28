@@ -142,7 +142,6 @@ class AlignerConfig(PretrainedConfig):
     params = {}
 
     def __init__(self, **kwargs):
-        print(f"AlignerConfig: {kwargs}")
         super().__init__(**kwargs)
 
         self.cls = kwargs.get("cls", "")
@@ -536,7 +535,6 @@ class PatchEmbed(nn.Module):
             pad_h = (self.patch_size[0] - H % self.patch_size[0]) % self.patch_size[0]
             pad_w = (self.patch_size[1] - W % self.patch_size[1]) % self.patch_size[1]
             x = F.pad(x, (0, pad_w, 0, pad_h))
-        print(f"x dtype: {x.dtype}")
         x = self.proj(x)
         if self.flatten:
             x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
@@ -1331,7 +1329,6 @@ class CLIPVisionTower(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        print(f"CLIPVisionTower({model_name}, {image_size}, {select_feature})")
 
         self.model_name = model_name
         self.select_feature = select_feature
@@ -1424,7 +1421,6 @@ class MlpProjector(nn.Module):
         super().__init__()
 
         self.cfg = cfg
-        print(f"Mlp Projector cfg: {self.cfg}")
 
         if cfg["projector_type"] == "identity":
             modules = nn.Identity()
@@ -1811,11 +1807,9 @@ class VectorQuantizer(nn.Module):
             self.embedding.weight.data = F.normalize(
                 self.embedding.weight.data, p=2, dim=-1
             )
-        print(f"show_usage: {self.show_usage}")
         if self.show_usage:
             # self.register_buffer("codebook_used", nn.Parameter(torch.zeros(65536)))
             self.codebook_used = nn.Parameter(torch.zeros(65536))
-        print(f"named paremeters: {self.named_parameters}")
 
     def forward(self, z):
         # reshape z -> (batch, height, width, channel) and flatten
@@ -2350,7 +2344,9 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         # [b, T, D]
         input_ids[input_ids < 0] = 0  # ignore the image embeddings
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-
+        print(f"images_embeds shape: {images_embeds.shape}")
+        print(f"images_emb_mask shape: {images_emb_mask.shape}")
+        print(f"images_seq_mask shape: {images_seq_mask.shape}")
         # replace with the image embeddings
         inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
 
@@ -2365,7 +2361,6 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         ):
             return input_ids
 
-        print(f"pad_values: {image_inputs.pad_values}")
         image_inputs.image_token_pattern = ImageTokenPattern.ENCLOSED_TOKEN_PAIRS
 
         im_start_id = image_inputs.im_start_id[0]
@@ -2384,9 +2379,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         ]
 
         params_dict = dict(self.named_parameters())
-        # print(f"params_dict: {params_dict.keys()}")
         for name, loaded_weight in weights:
-            # print(f"name: {name}")
             if "rotary_emb.inv_freq~" in name or "projector" in name:
                 continue
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:

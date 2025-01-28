@@ -121,8 +121,6 @@ class VLMImageProcessor(BaseImageProcessor):
             print(f"orig size = {pil_img.size}, new size = {size}")
             raise ValueError("Invalid size!")
 
-        import torchvision
-
         # pil_img = torchvision.transforms.functional.resize(
         #     pil_img,
         #     size,
@@ -146,7 +144,8 @@ class VLMImageProcessor(BaseImageProcessor):
         # resize and pad to [self.image_size, self.image_size]
         # then convert from [H, W, 3] to [3, H, W]
         images: List[np.ndarray] = [self.resize(image) for image in images]
-
+        print(f"images len = {len(images)}")
+        print(f"images shape = {images[0].shape}")
         # rescale from [0, 255] -> [0, 1]
         images = [
             self.rescale(
@@ -158,6 +157,8 @@ class VLMImageProcessor(BaseImageProcessor):
         ]
 
         # normalize
+        print("Stopped before here 1111")
+        print(f"mean = {self.image_mean}")
         if self.do_normalize:
             images = [
                 self.normalize(
@@ -168,7 +169,7 @@ class VLMImageProcessor(BaseImageProcessor):
                 )
                 for image in images
             ]
-
+        print("Stopped before here")
         data = {"pixel_values": images}
         return BatchFeature(data=data, tensor_type=return_tensors)
 
@@ -606,6 +607,7 @@ class JanusProProcessor(image_processor.BaseImageProcessor):
         images, image_hashes = [], []
         for image in image_data:
             pil_image, _size = load_image(image)
+            pil_image = pil_image.convert("RGB")
             images += [pil_image]
             image_hashes += [hash(image)]
 
