@@ -328,9 +328,7 @@ class TokenizerManager:
                     "accept text prompts. Please provide input_ids or re-initialize "
                     "the engine with skip_tokenizer_init=False."
                 )
-            print(f"input_text 331: {input_text}")
             input_ids = self.tokenizer.encode(input_text)
-            print(f"input_ids: {input_ids}")
 
         if self.is_generation:
             # TODO: also support getting embeddings for multimodal models

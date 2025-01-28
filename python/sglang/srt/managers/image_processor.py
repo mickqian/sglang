@@ -11,8 +11,8 @@ from functools import lru_cache
 from typing import List, Optional, Union
 
 import numpy as np
-from decord import VideoReader, cpu
 from PIL import Image
+from decord import VideoReader, cpu
 from transformers import IMAGE_PROCESSOR_MAPPING
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -84,12 +84,13 @@ class LlavaImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_single_image_task(
-        processor,
         image_data: Union[str, bytes],
         image_aspect_ratio: Optional[str] = None,
         image_grid_pinpoints: Optional[str] = None,
         image_processor=None,
     ):
+        processor = BaseImageProcessor.global_processor
+
         image_processor = image_processor or processor.image_processor
 
         try:
@@ -138,7 +139,6 @@ class LlavaImageProcessor(BaseImageProcessor):
             return await loop.run_in_executor(
                 self.executor,
                 LlavaImageProcessor._process_single_image_task,
-                self.global_processor,
                 image_data,
                 aspect_ratio,
                 grid_pinpoints,
@@ -164,7 +164,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-            and "anyres" in aspect_ratio
+               and "anyres" in aspect_ratio
             else None
         )
 
@@ -214,7 +214,8 @@ class MllamaImageProcessor(BaseImageProcessor):
         super().__init__(hf_config, server_args, _processor)
 
     @staticmethod
-    def _process_single_image_task(processor, images, input_text):
+    def _process_single_image_task(images, input_text):
+        processor = BaseImageProcessor.global_processor
         # input_ids', 'attention_mask', 'pixel_values', 'aspect_ratio_ids', 'aspect_ratio_mask', 'cross_attention_mask'
         return processor(images, input_text, return_tensors="pt")
 
@@ -224,7 +225,6 @@ class MllamaImageProcessor(BaseImageProcessor):
             image_inputs = await loop.run_in_executor(
                 self.executor,
                 MllamaImageProcessor._process_single_image_task,
-                self.global_processor,
                 images,
                 input_text,
             )
@@ -264,7 +264,8 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         self.IMAGE_TOKEN = "(<image>./</image>)"
 
     @staticmethod
-    def _process_images_task(processor, images, input_text):
+    def _process_images_task(images, input_text):
+        processor = BaseImageProcessor.global_processor
         result = processor.__call__(text=input_text, images=images, return_tensors="pt")
         return {
             "input_ids": result["input_ids"],
@@ -278,7 +279,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             image_inputs = await loop.run_in_executor(
                 self.executor,
                 MiniCPMVImageProcessor._process_images_task,
-                self.global_processor,
                 images,
                 input_text,
             )
@@ -385,7 +385,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:") :]
+                        path = image[len("video:"):]
                         frames = encode_video(path, frame_count_limit=frames_to_process)
                     else:
                         raw_image, _size = load_image(image)
@@ -443,10 +443,10 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_single_image_task(
-        processor,
         image_data: Union[str, bytes],
         image_processor=None,
     ):
+        processor = BaseImageProcessor.global_processor
         image_processor = image_processor or processor.image_processor
 
         try:
@@ -485,7 +485,6 @@ class Qwen2VLImageProcessor(BaseImageProcessor):
             return await loop.run_in_executor(
                 self.executor,
                 Qwen2VLImageProcessor._process_single_image_task,
-                self.global_processor,
                 image_data,
             )
         else:

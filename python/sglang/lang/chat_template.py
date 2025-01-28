@@ -417,7 +417,6 @@ def match_deepseek(model_path: str):
     if (
         "deepseek-v3" in model_path.lower() or "deepseek-r1" in model_path.lower()
     ) and "base" not in model_path.lower():
-        print("Got chat template matching function")
         return get_chat_template("deepseek-v3")
 
 

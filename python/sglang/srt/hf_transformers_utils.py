@@ -44,6 +44,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     Qwen2VLConfig.model_type: Qwen2VLConfig,
 }
 
+
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
         AutoConfig.register(name, cls)

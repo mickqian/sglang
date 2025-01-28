@@ -64,7 +64,6 @@ class Conversation:
     offset: int = 0
     # The separator style and configurations
     sep_style: SeparatorStyle = SeparatorStyle.ADD_COLON_SINGLE
-    # sep after messages
     sep: str = "\n"
     sep2: str = None
     # Stop criteria (the default one is EOS token)
@@ -182,7 +181,7 @@ class Conversation:
 
             for i, (role, message) in enumerate(self.messages):
                 if i % 2 == 0:
-                    ret += f"[Round {i // 2 + round_add_n}]{self.sep}"
+                    ret += f"[Round {i//2 + round_add_n}]{self.sep}"
 
                 if message:
                     ret += f"{role}：{message}{self.sep}"
@@ -452,7 +451,6 @@ def generate_chat_conv(
             raise ValueError(f"Unknown role: {msg_role}")
 
     # Add a blank message for the assistant.
-    print(conv)
     conv.append_message(conv.roles[1], None)
     return conv
 

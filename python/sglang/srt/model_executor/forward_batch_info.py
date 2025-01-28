@@ -262,8 +262,6 @@ class ForwardBatch:
         model_runner: ModelRunner,
     ):
 
-        print(f"input_ids 265: {batch.input_ids}")
-
         device = model_runner.device
         ret = cls(
             forward_mode=batch.forward_mode,

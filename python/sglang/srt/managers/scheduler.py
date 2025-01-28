@@ -1493,7 +1493,7 @@ class Scheduler:
                         input_top_logprobs_val,
                         input_top_logprobs_idx,
                         output_top_logprobs_val,
-                        output_top_logprobs_idx=output_top_logprobs_idx,
+                        output_top_logprobs_idx,
                     )
                 )
         else:  # embedding or reward model

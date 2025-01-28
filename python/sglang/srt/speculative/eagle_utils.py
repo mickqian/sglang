@@ -229,7 +229,6 @@ class EAGLEDraftInput(SpecInfo):
 
         # TODO: support batching inputs
         assert len(batch.extend_lens) == 1
-        print("truncated!2222!!!!!!!")
         batch.input_ids = torch.concat((batch.input_ids[1:], self.verified_id))
 
     def filter_batch(

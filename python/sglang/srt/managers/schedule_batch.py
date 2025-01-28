@@ -169,8 +169,6 @@ class ImageInputs:
     im_end_id: Optional[torch.Tensor] = None
     slice_start_id: Optional[torch.Tensor] = None
     slice_end_id: Optional[torch.Tensor] = None
-
-    # [b, width, height]
     tgt_sizes: Optional[list] = None
 
     # denotes the number of valid image tokens in each image
@@ -184,7 +182,6 @@ class ImageInputs:
             pixel_values=obj["pixel_values"],
             image_hashes=obj["image_hashes"],
         )
-        print(obj)
 
         # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
         # Please note that if the `input_ids` is later used in the model forward,
@@ -226,6 +223,7 @@ class ImageInputs:
             "image_sizes",
             "image_offsets",
             "image_pad_len",
+            # "modalities", # modalities should be ["multi-images"] (one entry) even for multiple images
             "aspect_ratio_ids",
             "aspect_ratio_mask",
             "image_grid_thws",
@@ -425,7 +423,6 @@ class Req:
 
     def init_next_round_input(self, tree_cache: Optional[BasePrefixCache] = None):
         self.fill_ids = self.origin_input_ids + self.output_ids
-        print(f"self.fill_ids 44: {self.fill_ids}")
         if tree_cache is not None:
             # tree cache is None if the prefix is not computed with tree cache.
             self.prefix_indices, self.last_node = tree_cache.match_prefix(
@@ -435,8 +432,6 @@ class Req:
 
     def adjust_max_prefix_ids(self):
         self.fill_ids = self.origin_input_ids + self.output_ids
-        print(f"self.fill_ids: {self.fill_ids}")
-
         input_len = len(self.fill_ids)
 
         # FIXME: To work around some bugs in logprob computation, we need to ensure each
@@ -541,11 +536,7 @@ class Req:
             )
 
         all_text = self.origin_input_text + self.decoded_text + jump_forward_str
-        print(f"input_text 539: {all_text}")
-
         all_ids = self.tokenizer.encode(all_text)
-        print(f"all_ids 539: {all_ids}")
-
         if not all_ids:
             logger.warning("Encoded all_text resulted in empty all_ids")
             return False
@@ -800,7 +791,6 @@ class ScheduleBatch:
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
         )
-        print(f"input_ids801: {self.input_ids}")
         self.seq_lens = torch.tensor(seq_lens, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -826,7 +816,6 @@ class ScheduleBatch:
 
         bs = len(self.reqs)
         reqs = self.reqs
-        print(f"prefix_indices: {self.prefix_lens}")
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = []
@@ -876,8 +865,6 @@ class ScheduleBatch:
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
         )
-        print(f"input_ids877: {self.input_ids}")
-
         self.req_pool_indices = torch.tensor(req_pool_indices, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
@@ -950,8 +937,6 @@ class ScheduleBatch:
 
         self.merge_batch(running_batch)
         self.input_ids = input_ids
-        print(f"input_ids950: {self.input_ids}")
-
         self.out_cache_loc = out_cache_loc
 
         # For overlap scheduler, the output_ids has one step delay
@@ -1101,7 +1086,6 @@ class ScheduleBatch:
                         req.origin_input_ids = pad_input_ids_func(
                             req.origin_input_ids_unpadded, req.image_inputs
                         )
-                        print("padded!!!!!!!!!!")
 
                     jump_forward_reqs.append(req)
                     keep_indices.remove(i)
@@ -1134,7 +1118,6 @@ class ScheduleBatch:
             return
 
         self.input_ids = self.output_ids
-
         self.output_ids = None
         self.sampling_info.penalizer_orchestrator.cumulate_output_tokens(self.input_ids)
 

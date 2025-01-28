@@ -321,7 +321,7 @@ class CudaGraphRunner:
             gathered_buffer = None
 
         spec_info = self.get_spec_info(num_tokens, positions)
-        print(f"input_ids 324: {input_ids}")
+
         forward_batch = ForwardBatch(
             forward_mode=self.capture_forward_mode,
             batch_size=bs,
