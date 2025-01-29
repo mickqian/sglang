@@ -11,8 +11,8 @@ from functools import lru_cache
 from typing import List, Optional, Union
 
 import numpy as np
-from PIL import Image
 from decord import VideoReader, cpu
+from PIL import Image
 from transformers import IMAGE_PROCESSOR_MAPPING
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -164,7 +164,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-               and "anyres" in aspect_ratio
+            and "anyres" in aspect_ratio
             else None
         )
 
@@ -385,7 +385,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:"):]
+                        path = image[len("video:") :]
                         frames = encode_video(path, frame_count_limit=frames_to_process)
                     else:
                         raw_image, _size = load_image(image)

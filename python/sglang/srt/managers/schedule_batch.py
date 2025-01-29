@@ -283,7 +283,9 @@ class ImageInputs:
 
             # Add remaining tokens after last region
             new_input_ids.extend(input_ids[last_idx:])
-            print(f"new_input_ids: {input_ids}")
+            print(f"start: {start_token_id}")
+            print(f"end: {end_token_id}")
+            # print(f"new_input_ids: {new_input_ids}")
 
             assert len(input_ids) == len(new_input_ids)
             return new_input_ids

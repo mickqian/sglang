@@ -2261,33 +2261,58 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
 
         inputs_embeds = None
         if (
             len(forward_batch.image_inputs) != 0
-            and forward_batch.image_inputs[0] != None
+            and forward_batch.image_inputs[0] is not None
         ):
-            start_id = forward_batch.image_inputs[0].im_start_id[0]
-            end_id = forward_batch.image_inputs[0].im_end_id[0]
+            image_inputs = forward_batch.image_inputs[0]
+            start_id = image_inputs.im_start_id[0]
+            end_id = image_inputs.im_end_id[0]
 
             # recalculate the mask, for the prefix may be truncated
             images_seq_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-
+            print(f"input_ids: {input_ids}")
             # Find positions of start_id and end_id
-            start_positions = (input_ids == start_id).nonzero()
-            end_positions = (input_ids == end_id).nonzero()
+            (start_positions,) = torch.where((input_ids == start_id))
+            start_positions += 1
+            (end_positions,) = torch.where((input_ids == end_id))
+
             print(f"start_positions: {start_positions}")
             print(f"end_positions: {end_positions}")
             if start_positions.numel() == 0 or end_positions.numel() == 0:
                 # sometimes image_inptus is not empty, but input_ids contain no image token because of prefix-cache
                 pass
             else:
+                # FIXME: not correct in some cases
+                print(f"pad_values: {image_inputs.pad_values}")
+                # the im_start_id sometimes can be cached as prefix, but it is needed for the embedding of the images
+                if len(start_positions) != len(end_positions):
+                    print(f"clamped_pad_values: {image_inputs.pad_values}")
+                    if (
+                        len(start_positions) + 1 == len(end_positions)
+                        # and input_ids[0] in image_inputs.pad_values
+                        and end_positions[0] < start_positions[0]
+                    ):
+                        print("updated")
+                        start_positions = torch.cat(
+                            [
+                                torch.tensor([0], device=start_positions.device),
+                                start_positions,
+                            ]
+                        )
                 # For each start-end pair, mark the tokens in between as True
-                for start_pos, end_pos in zip(start_positions, end_positions):
+                for b, (start_pos, end_pos) in enumerate(
+                    zip(start_positions, end_positions)
+                ):
                     # Mark tokens between start_id and end_id (exclusive) as True
-                    images_seq_mask[start_pos + 1 : end_pos] = True
-                print(f"images_seq_mask: {images_seq_mask}")
+                    images_seq_mask[start_pos:end_pos] = True
+
+                    # for start, end in zip(start_pos, end_pos):
+                    #     images_seq_mask[start + 1: end] = True
+                input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
+
                 inputs_embeds = self.prepare_inputs_embeds(
                     input_ids=input_ids,
                     pixel_values=forward_batch.image_inputs[0].pixel_values,
@@ -2296,7 +2321,10 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 )
 
                 input_ids = None
-        print(f"positions: {positions}")
+
+        if input_ids is not None:
+            input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
+
         return self.language_model(
             input_ids=input_ids,
             positions=positions,
