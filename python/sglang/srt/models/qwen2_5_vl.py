@@ -392,7 +392,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
-
+        print(f"grid_thw {grid_thw}")
+        print(f"grid_thw {grid_thw.shape}")
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
@@ -590,6 +591,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             inputs_embeds = self.model.embed_tokens(input_ids)
             extend_start_loc_cpu = forward_batch.extend_start_loc.cpu().numpy()
             prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu
+            print(f"image_inputs {forward_batch.image_inputs.__len__()}")
             for i, image in enumerate(forward_batch.image_inputs):
                 if image is None:
                     continue
@@ -597,6 +599,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 prefix_len = prefix_lens_cpu[i]
 
                 pixel_values = image.pixel_values.clone().detach().requires_grad_(False)
+
+                print(f"pixel_values {pixel_values.shape}")
+                print(f"image_grid_thws ", image.image_grid_thws)
+                print(f"image_grid_thws ", type(image.image_grid_thws))
+
                 image_grid_thws = torch.tensor(
                     np.array(image.image_grid_thws), device="cuda"
                 )
@@ -630,6 +637,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                     rank = get_tensor_model_parallel_rank()
                     start_dim = rank * hidden_chunk_size
                     end_dim = (rank + 1) * hidden_chunk_size
+
+                    print(f"left_idx {left_idx}")
+                    print(f"right_idx {right_idx}")
                     inputs_embeds[left_idx:right_idx, ..., start_dim:end_dim] = (
                         image_embeds[
                             image_embeds_offset : image_embeds_offset

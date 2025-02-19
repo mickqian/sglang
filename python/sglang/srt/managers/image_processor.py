@@ -10,6 +10,7 @@ from typing import List, Optional, Union
 
 import numpy as np
 import PIL
+import torch
 import transformers
 from decord import VideoReader, cpu
 from PIL import Image
@@ -85,7 +86,8 @@ class BaseImageProcessor(ABC):
 
         return estimated_frames_list
 
-    def encode_video(self, video_path, frame_count_limit=None):
+    @staticmethod
+    def encode_video(video_path, frame_count_limit=None):
         if not os.path.exists(video_path):
             logger.error(f"Video {video_path} does not exist")
             return []
@@ -100,10 +102,11 @@ class BaseImageProcessor(ABC):
 
         vr = VideoReader(video_path, ctx=cpu(0))
         sample_fps = round(vr.get_avg_fps() / 1)  # FPS
-        frame_idx = [i for i in range(0, len(vr), sample_fps)]
-        if frame_count_limit is not None and len(frame_idx) > frame_count_limit:
-            frame_idx = uniform_sample(frame_idx, frame_count_limit)
-        frames = vr.get_batch(frame_idx).asnumpy()
+        frame_indices = [i for i in range(0, len(vr), sample_fps)]
+        if frame_count_limit is not None and len(frame_indices) > frame_count_limit:
+            frame_indices = uniform_sample(frame_indices, frame_count_limit)
+
+        frames = vr.get_batch(frame_indices).asnumpy()
         frames = [Image.fromarray(v.astype("uint8")) for v in frames]
         return frames
 
@@ -146,18 +149,18 @@ class BaseImageProcessor(ABC):
             zip(image_data, estimated_frames_list)
         ):
             if len(all_frames) >= MAX_NUM_FRAMES:
-                frames_to_process = 0
+                max_frames_to_process = 0
             else:
-                frames_to_process = max(1, int(estimated_frames * scaling_factor))
+                max_frames_to_process = max(1, int(estimated_frames * scaling_factor))
 
-            if frames_to_process == 0:
+            if max_frames_to_process == 0:
                 frames = []
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
                         path = image[len("video:") :]
-                        frames = self.encode_video(
-                            path, frame_count_limit=frames_to_process
+                        frames = BaseImageProcessor.encode_video(
+                            path, frame_count_limit=max_frames_to_process
                         )
                     else:
                         raw_image, _size = load_image(image)
@@ -172,9 +175,9 @@ class BaseImageProcessor(ABC):
                 all_frames += frames
 
             new_text_parts.append(text_parts[image_index])
-            if frames_to_process != 0:
+            if max_frames_to_process != 0:
                 new_text_parts.append(image_token * len(frames))
-            assert frames_to_process == len(frames)
+            assert max_frames_to_process >= len(frames)
 
         new_text_parts.append(text_parts[-1])
 
@@ -445,142 +448,47 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         }
 
 
-class Qwen2VLImageProcessor(BaseImageProcessor):
-    def __init__(self, hf_config, server_args, _image_processor):
-        self.hf_config = hf_config
-        self._image_processor = _image_processor
-        self.executor = concurrent.futures.ProcessPoolExecutor(
-            initializer=init_global_processor,
-            mp_context=mp.get_context("fork"),
-            initargs=(server_args,),
-            max_workers=int(os.environ.get("SGLANG_CPU_COUNT", os.cpu_count())),
-        )
-
-    @staticmethod
-    def _process_single_image_task(
-        image_data: Union[str, bytes],
-        image_processor=None,
-    ):
-        image_processor = image_processor or global_processor.image_processor
-
-        try:
-            image, image_size = load_image(image_data)
-            if image_size is not None:
-                # It is a video with multiple images
-                image_hash = hash(image_data)
-                process_result = image_processor(image)
-                pixel_values, image_grid_thws = (
-                    process_result["pixel_values"],
-                    process_result["image_grid_thw"][0],
-                )
-                for _ in range(len(pixel_values)):
-                    pixel_values[_] = pixel_values[_].astype(np.float16)
-                pixel_values = np.stack(pixel_values, axis=0)
-                image_grid_thws = np.stack(image_grid_thws, axis=0)
-                return pixel_values, image_hash, image_size, image_grid_thws
-            else:
-                # It is an image
-                image_hash = hash(image_data)
-                process_result = image_processor(image)
-                pixel_values, image_grid_thws = (
-                    process_result["pixel_values"],
-                    process_result["image_grid_thw"][0],
-                )
-                if isinstance(pixel_values, np.ndarray):
-                    pixel_values = pixel_values.astype(np.float16)
-
-                return pixel_values, image_hash, image.size, image_grid_thws
-        except Exception:
-            logger.error("Exception in TokenizerManager:\n" + get_exception_traceback())
-
-    async def _process_single_image(self, image_data: Union[bytes, str]):
-        if self.executor is not None:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                self.executor,
-                Qwen2VLImageProcessor._process_single_image_task,
-                image_data,
-            )
-        else:
-            return self._process_single_image_task(image_data)
-
-    async def process_images_async(
-        self,
-        image_data: List[Union[str, bytes]],
-        input_text,
-        request_obj,
-        *args,
-        **kwargs,
-    ):
-        if not image_data:
-            return None
-
-        if isinstance(image_data, list) and len(image_data) > 0:
-            # Multiple images
-            if len(image_data) > 1:
-                pixel_values, image_hashes, image_sizes, image_grid_thws = (
-                    [],
-                    [],
-                    [],
-                    [],
-                )
-                res = []
-                for img_data in image_data:
-                    res.append(self._process_single_image(img_data))
-                res = await asyncio.gather(*res)
-                for pixel_v, image_h, image_s, image_thw in res:
-                    pixel_values.append(pixel_v)
-                    image_hashes.append(image_h)
-                    image_sizes.append(image_s)
-                    image_grid_thws.append(image_thw)
-
-                if isinstance(pixel_values[0], np.ndarray):
-                    pixel_values = np.concatenate(pixel_values, axis=0)
-            else:
-                # A single image
-                pixel_values, image_hash, image_size, image_grid_thw = (
-                    await self._process_single_image(image_data[0])
-                )
-                image_hashes = [image_hash]
-                image_sizes = [image_size]
-                image_grid_thws = [image_grid_thw]
-        elif isinstance(image_data, str):
-            # A single image
-            pixel_values, image_hash, image_size, image_grid_thw = (
-                await self._process_single_image(image_data)
-            )
-            image_hashes = [image_hash]
-            image_sizes = [image_size]
-            image_grid_thws = [image_grid_thw]
-        else:
-            raise ValueError(f"Invalid image data: {image_data}")
-
-        return {
-            "pixel_values": pixel_values,
-            "image_hashes": image_hashes,
-            "image_sizes": image_sizes,
-            "modalities": request_obj.modalities or ["image"],
-            "image_grid_thws": image_grid_thws,
-        }
-
-
 class Qwen2_5VLImageProcessor(BaseImageProcessor):
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
         self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
         self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
+        self.image_token_id = hf_config.image_token_id
+        self.video_token_id = hf_config.video_token_id
         self.NUM_TOKEN_PER_FRAME = 770
 
     @staticmethod
-    def _process_images_task(images, input_text):
+    def _process_images_task(images, input_text, hf_config):
+        def is_qwen_2_vl() -> bool:
+            return any("2VL" in arch for arch in hf_config.architectures)
+
         result = global_processor.__call__(
             text=input_text, images=images, return_tensors="pt"
         )
+
+        image_grid_thw = result.image_grid_thw if "image_grid_thw" in result else None
+        pixel_values = result.pixel_values
+
+        # if is_qwen_2_vl():
+        #     if image_grid_thw is not None:
+        #         print(f"shape thw {image_grid_thw.shape}")
+        #         image_grid_thw = [t.tolist() for t in image_grid_thw]
+                # image_grid_thw = image_grid_thw[0]
+                # print(f"shape thw {image_grid_thw.shape}")
+
+            # pixel_values =
+
         return {
             "input_ids": result.input_ids,
-            "pixel_values": result.pixel_values,
-            "image_grid_thws": result.image_grid_thw,
+            "pixel_values": pixel_values,
+            "image_grid_thws": image_grid_thw,
+            "second_per_grid_ts": (
+                result.second_per_grid_ts if "second_per_grid_ts" in result else None
+            ),
+            "video_grid_thws": (
+                result.video_grid_thws if "video_grid_thws" in result else None
+            ),
         }
 
     async def _process_images(self, images, input_text) -> dict:
@@ -591,9 +499,10 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
                 Qwen2_5VLImageProcessor._process_images_task,
                 images,
                 input_text,
+                self.hf_config,
             )
         else:
-            return self._process_images_task(images, input_text)
+            return self._process_images_task(images, input_text, self.hf_config)
 
     async def process_images_async(
         self,
@@ -622,8 +531,12 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
             "image_hashes": base_output.image_hashes,
             "modalities": request_obj.modalities or ["image"],
             "image_grid_thws": ret["image_grid_thws"],
+            "video_grid_thws": ret["video_grid_thws"],
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
+            "im_token_id": self.image_token_id,
+            "video_token_id": self.video_token_id,
+            "second_per_grid_ts": ret["second_per_grid_ts"],
         }
 
 
@@ -633,11 +546,9 @@ def get_image_processor(
     if "MllamaForConditionalGeneration" in hf_config.architectures:
         return MllamaImageProcessor(hf_config, server_args, processor)
     elif "Qwen2VLForConditionalGeneration" in hf_config.architectures:
-
-        return Qwen2VLImageProcessor(hf_config, server_args, processor)
+        return Qwen2_5VLImageProcessor(hf_config, server_args, processor)
     elif "Qwen2_5_VLForConditionalGeneration" in hf_config.architectures:
         return Qwen2_5VLImageProcessor(hf_config, server_args, processor)
-
     elif "MiniCPMV" in hf_config.architectures:
         return MiniCPMVImageProcessor(hf_config, server_args, processor)
     else:
