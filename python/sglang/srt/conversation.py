@@ -439,8 +439,11 @@ def generate_chat_conv(
                             real_content += "\n"  # for video
                         real_content += content.text
                     elif content.type == "image_url":
-                        # NOTE: Only works for llava
-                        real_content += image_token
+                        if conv.name == "internvl2_5":
+                            real_content = image_token + real_content
+                        else:
+                            # NOTE: Only works for llava
+                            real_content += image_token
                         conv.append_image(content.image_url.url)
                 conv.append_message(conv.roles[0], real_content)
         elif msg_role == "assistant":
