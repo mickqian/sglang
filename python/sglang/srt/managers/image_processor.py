@@ -10,7 +10,6 @@ from typing import List, Optional, Union
 
 import numpy as np
 import PIL
-import torch
 import transformers
 from decord import VideoReader, cpu
 from PIL import Image
@@ -112,10 +111,11 @@ class BaseImageProcessor(ABC):
 
     def load_images(
         self,
-        max_req_input_len: int,
         input_ids: list,
         image_data,
         image_token: str,
+        max_req_input_len: int,
+        return_text: Optional[bool] = True,
     ) -> BaseImageProcessorOutput:
         """
         Each frame of video/image will be replaced by a single image token
@@ -124,13 +124,14 @@ class BaseImageProcessor(ABC):
         all_frames = []
         new_text_parts = []
 
-        if isinstance(input_ids, list):
+        if isinstance(input_ids, list) and return_text:
             assert len(input_ids) and isinstance(input_ids[0], int)
             input_text = self._processor.tokenizer.decode(input_ids)
         else:
             input_text = input_ids
 
-        text_parts = input_text.split(image_token)
+        if return_text:
+            text_parts = input_text.split(image_token)
 
         # roughly calculate the max number of frames under the max_req_input_len limit
         def calculate_max_num_frames() -> int:
@@ -174,12 +175,13 @@ class BaseImageProcessor(ABC):
                 image_hashes += [hash(image)] * len(frames)
                 all_frames += frames
 
-            new_text_parts.append(text_parts[image_index])
+            if return_text:
+                new_text_parts.append(text_parts[image_index])
             if max_frames_to_process != 0:
                 new_text_parts.append(image_token * len(frames))
             assert max_frames_to_process >= len(frames)
-
-        new_text_parts.append(text_parts[-1])
+        if return_text:
+            new_text_parts.append(text_parts[-1])
 
         input_text = "".join(new_text_parts)
         return BaseImageProcessorOutput(
@@ -198,6 +200,7 @@ class DummyImageProcessor(BaseImageProcessor):
 class LlavaImageProcessor(BaseImageProcessor):
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
+        self.IMAGE_TOKEN = "<image>"
 
     @staticmethod
     def _process_single_image_task(
@@ -212,15 +215,13 @@ class LlavaImageProcessor(BaseImageProcessor):
             image, image_size = load_image(image_data)
             if image_size is not None:
                 # It is a video with multiple images
-                image_hash = hash(image_data)
                 pixel_values = image_processor(image)["pixel_values"]
                 for _ in range(len(pixel_values)):
                     pixel_values[_] = pixel_values[_].astype(np.float16)
                 pixel_values = np.stack(pixel_values, axis=0)
-                return pixel_values, image_hash, image_size
+                return {"pixel_values": pixel_values}
             else:
                 # It is an image
-                image_hash = hash(image_data)
                 if image_aspect_ratio == "pad":
                     image = expand2square(
                         image,
@@ -242,13 +243,13 @@ class LlavaImageProcessor(BaseImageProcessor):
                 if isinstance(pixel_values, np.ndarray):
                     pixel_values = pixel_values.astype(np.float16)
 
-                return pixel_values, image_hash, image.size
+                return {"pixel_values": pixel_values}
         except Exception:
             logger.error("Exception in TokenizerManager:\n" + get_exception_traceback())
 
     async def _process_single_image(
         self, image_data: Union[bytes, str], aspect_ratio: str, grid_pinpoints: str
-    ):
+    ) -> dict:
         if self.executor is not None:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -266,15 +267,25 @@ class LlavaImageProcessor(BaseImageProcessor):
     async def process_images_async(
         self,
         image_data: List[Union[str, bytes]],
-        input_text,
+        input_ids,
         request_obj,
+        max_req_input_len,
         *args,
         **kwargs,
     ):
         if not image_data:
             return None
+        if isinstance(image_data, str):
+            image_data = [image_data]
 
-        modalities = request_obj.modalities or ["image"]
+        base_output = self.load_images(
+            input_ids,
+            image_data,
+            self.IMAGE_TOKEN,
+            max_req_input_len,
+            return_text=False,
+        )
+
         aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
@@ -283,43 +294,19 @@ class LlavaImageProcessor(BaseImageProcessor):
             else None
         )
 
-        if isinstance(image_data, str):
-            image_data = [image_data]
+        res = []
+        for img_data in image_data:
+            res.append(
+                self._process_single_image(img_data, aspect_ratio, grid_pinpoints)
+            )
 
-        if isinstance(image_data, list) and len(image_data) > 0:
-            if "multi-images" in modalities or "video" in modalities:
-                # Multiple images
-                aspect_ratio = "pad"  # LLaVA OneVision Handling: more than one image --> interleaved image mode or video mode. We do not use anyres
-                pixel_values, image_hashes, image_sizes = [], [], []
-                res = []
-                for img_data in image_data:
-                    res.append(
-                        self._process_single_image(
-                            img_data, aspect_ratio, grid_pinpoints
-                        )
-                    )
-                res = await asyncio.gather(*res)
-                for pixel_v, image_h, image_s in res:
-                    pixel_values.append(pixel_v)
-                    image_hashes.append(image_h)
-                    image_sizes.append(image_s)
-
-                if isinstance(pixel_values[0], np.ndarray):
-                    pixel_values = np.stack(pixel_values, axis=0)
-            else:
-                # A single image
-                pixel_values, image_hash, image_size = await self._process_single_image(
-                    image_data[0], aspect_ratio, grid_pinpoints
-                )
-                image_hashes = [image_hash]
-                image_sizes = [image_size]
-        else:
-            raise ValueError(f"Invalid image data: {image_data}")
-
+        res = await asyncio.gather(*res)
+        pixel_values = [r["pixel_values"] for r in res]
+        pixel_values = np.stack(pixel_values, axis=0)
         return {
             "pixel_values": pixel_values,
-            "image_hashes": image_hashes,
-            "image_sizes": image_sizes,
+            "image_hashes": base_output.image_hashes,
+            "image_sizes": base_output.image_sizes,
             "modalities": request_obj.modalities or ["image"],
         }
 
@@ -417,7 +404,10 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             image_data = [image_data]
 
         base_output = self.load_images(
-            max_req_input_len, input_ids, image_data, self.IMAGE_TOKEN
+            input_ids,
+            image_data,
+            self.IMAGE_TOKEN,
+            max_req_input_len,
         )
         if base_output is None:
             return None
@@ -448,6 +438,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         }
 
 
+# Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(BaseImageProcessor):
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
@@ -460,8 +451,6 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_images_task(images, input_text, hf_config):
-        def is_qwen_2_vl() -> bool:
-            return any("2VL" in arch for arch in hf_config.architectures)
 
         result = global_processor.__call__(
             text=input_text, images=images, return_tensors="pt"
@@ -469,15 +458,6 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
 
         image_grid_thw = result.image_grid_thw if "image_grid_thw" in result else None
         pixel_values = result.pixel_values
-
-        # if is_qwen_2_vl():
-        #     if image_grid_thw is not None:
-        #         print(f"shape thw {image_grid_thw.shape}")
-        #         image_grid_thw = [t.tolist() for t in image_grid_thw]
-                # image_grid_thw = image_grid_thw[0]
-                # print(f"shape thw {image_grid_thw.shape}")
-
-            # pixel_values =
 
         return {
             "input_ids": result.input_ids,
@@ -520,7 +500,10 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
 
         image_token = self.IMAGE_TOKEN
         base_output = self.load_images(
-            max_req_input_len, input_ids, image_data, image_token
+            input_ids,
+            image_data,
+            image_token,
+            max_req_input_len,
         )
 
         ret = await self._process_images(base_output.all_frames, base_output.input_text)

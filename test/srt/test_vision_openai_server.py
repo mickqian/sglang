@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import openai
 import requests
-from PIL import Image
 from decord import VideoReader, cpu
+from PIL import Image
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
@@ -159,7 +159,7 @@ class TestOpenAIVisionServer(unittest.TestCase):
                         {
                             "type": "text",
                             "text": "I have two very different images. They are not related at all. "
-                                    "Please describe the first image in one sentence, and then describe the second image in another sentence.",
+                            "Please describe the first image in one sentence, and then describe the second image in another sentence.",
                         },
                     ],
                 },
@@ -273,7 +273,9 @@ class TestOpenAIVisionServer(unittest.TestCase):
             "man" in video_response
             or "person" in video_response
             or "individual" in video_response
+            or "speaker" in video_response
         ), video_response
+        assert "jeans" in video_response or "black" in video_response, video_response
         assert (
             "present" in video_response
             or "examine" in video_response
@@ -375,7 +377,7 @@ class TestOpenAIVisionServer(unittest.TestCase):
             list(executor.map(self.run_decode_with_image, image_ids))
 
 
-class TestQWen2VLServer(TestOpenAIVisionServer):
+class TestQwen2VLServer(TestOpenAIVisionServer):
     @classmethod
     def setUpClass(cls):
         cls.model = "Qwen/Qwen2-VL-7B-Instruct"
@@ -398,7 +400,7 @@ class TestQWen2VLServer(TestOpenAIVisionServer):
         cls.base_url += "/v1"
 
 
-class TestQWen2_5_VLServer(TestOpenAIVisionServer):
+class TestQwen2_5_VLServer(TestOpenAIVisionServer):
     @classmethod
     def setUpClass(cls):
         cls.model = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -414,7 +416,7 @@ class TestQWen2_5_VLServer(TestOpenAIVisionServer):
                 "qwen2-vl",
                 # FIXME: workaround to chunked prefill within image embeds
                 "--chunked-prefill-size",
-                "10000",
+                "15000",
                 "--mem-fraction-static",
                 "0.4",
             ],
@@ -422,7 +424,7 @@ class TestQWen2_5_VLServer(TestOpenAIVisionServer):
         cls.base_url += "/v1"
 
 
-class TestQWen2VLServerContextLengthIssue(unittest.TestCase):
+class TestQwen2VLServerContextLengthIssue(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = "Qwen/Qwen2-VL-7B-Instruct"

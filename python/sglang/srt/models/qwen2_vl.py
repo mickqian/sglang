@@ -305,7 +305,7 @@ class Qwen2VisionTransformer(nn.Module):
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     norm_layer=norm_layer,
-                    attn_implementation="sdpa",
+                    attn_implementation=vision_config._attn_implementation,
                     quant_config=quant_config,
                 )
                 for _ in range(depth)
@@ -536,8 +536,6 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             # There values are useless because their embeddings will be replaced by vision embeddings anyway.
             input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
 
-            # print(f"543 (input_ids) {input_ids.cpu().tolist()}")
-
             inputs_embeds = self.model.embed_tokens(input_ids)
             extend_start_loc_cpu = forward_batch.extend_start_loc.cpu().numpy()
             prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu
@@ -546,8 +544,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                     continue
                 start_idx = extend_start_loc_cpu[i]
                 prefix_len = prefix_lens_cpu[i]
-                pixel_values = torch.tensor(image.pixel_values, device="cuda")
-                # pixel_values = image.pixel_values.clone().detach().requires_grad_(False)
+                pixel_values = image.pixel_values.clone()
 
                 image_grid_thws = torch.tensor(
                     np.array(image.image_grid_thws), device="cuda"
