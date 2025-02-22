@@ -3,16 +3,18 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import logging
+import math
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
-import numpy as np
 import PIL
+import numpy as np
+import torch
 import transformers
-from decord import VideoReader, cpu
 from PIL import Image
+from decord import VideoReader, cpu
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.mm_utils import expand2square, process_anyres_image
@@ -74,7 +76,7 @@ class BaseImageProcessor(ABC):
         estimated_frames_list = []
         for image in image_data:
             if isinstance(image, str) and image.startswith("video:"):
-                path = image[len("video:") :]
+                path = image[len("video:"):]
                 # Estimate frames for the video
                 vr = VideoReader(path, ctx=cpu(0))
                 num_frames = len(vr)
@@ -159,12 +161,13 @@ class BaseImageProcessor(ABC):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:") :]
+                        path = image[len("video:"):]
                         frames = BaseImageProcessor.encode_video(
                             path, frame_count_limit=max_frames_to_process
                         )
                     else:
                         raw_image, _size = load_image(image)
+                        raw_image = raw_image.convert("RGB")
                         frames = [raw_image]
                     if len(frames) == 0:
                         continue
@@ -290,7 +293,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-            and "anyres" in aspect_ratio
+               and "anyres" in aspect_ratio
             else None
         )
 
@@ -448,12 +451,17 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
         self.image_token_id = hf_config.image_token_id
         self.video_token_id = hf_config.video_token_id
         self.NUM_TOKEN_PER_FRAME = 770
+        self.IMAGE_FACTOR = 28
+        self.MIN_PIXELS = 4 * 28 * 28
+        self.MAX_PIXELS = 16384 * 28 * 28
+        self.MAX_PIXELS = 16384 * 28 * 28
+        self.MAX_RATIO = 200
 
     @staticmethod
     def _process_images_task(images, input_text, hf_config):
 
         result = global_processor.__call__(
-            text=input_text, images=images, return_tensors="pt"
+            text=[input_text], images=images, padding=True, return_tensors="pt"
         )
 
         image_grid_thw = result.image_grid_thw if "image_grid_thw" in result else None
@@ -506,7 +514,66 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
             max_req_input_len,
         )
 
-        ret = await self._process_images(base_output.all_frames, base_output.input_text)
+        def resize_image(image, size_factor: int = self.IMAGE_FACTOR) -> Image.Image:
+            width, height = image.size
+            min_pixels = self.MIN_PIXELS
+            max_pixels = self.MAX_PIXELS
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=size_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+            image = image.resize((resized_width, resized_height))
+            return image
+
+        def round_by_factor(number: int, factor: int) -> int:
+            """Returns the closest integer to 'number' that is divisible by 'factor'."""
+            return round(number / factor) * factor
+
+        def ceil_by_factor(number: int, factor: int) -> int:
+            """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+            return math.ceil(number / factor) * factor
+
+        def floor_by_factor(number: int, factor: int) -> int:
+            """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+            return math.floor(number / factor) * factor
+
+        def smart_resize(
+            height: int, width: int, factor: int = self.IMAGE_FACTOR, min_pixels: int = self.MIN_PIXELS,
+            max_pixels: int = self.MAX_PIXELS
+        ) -> tuple[int, int]:
+            """
+            Rescales the image so that the following conditions are met:
+
+            1. Both dimensions (height and width) are divisible by 'factor'.
+
+            2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+            3. The aspect ratio of the image is maintained as closely as possible.
+            """
+            if max(height, width) / min(height, width) > self.MAX_RATIO:
+                raise ValueError(
+                    f"absolute aspect ratio must be smaller than {self.MAX_RATIO}, got {max(height, width) / min(height, width)}"
+                )
+            h_bar = max(factor, round_by_factor(height, factor))
+            w_bar = max(factor, round_by_factor(width, factor))
+            if h_bar * w_bar > max_pixels:
+                beta = math.sqrt((height * width) / max_pixels)
+                h_bar = floor_by_factor(height / beta, factor)
+                w_bar = floor_by_factor(width / beta, factor)
+            elif h_bar * w_bar < min_pixels:
+                beta = math.sqrt(min_pixels / (height * width))
+                h_bar = ceil_by_factor(height * beta, factor)
+                w_bar = ceil_by_factor(width * beta, factor)
+            return h_bar, w_bar
+
+        images = [resize_image(image) for image in base_output.all_frames]
+
+        print(f"text:{base_output.input_text}")
+
+        ret = await self._process_images(images, base_output.input_text)
 
         return {
             "input_ids": ret["input_ids"].flatten().tolist(),
