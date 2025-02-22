@@ -9,16 +9,15 @@ import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoModel, AutoTokenizer
 from transformers import (
+    AutoModel,
     AutoModelForImageTextToText,
     AutoProcessor,
+    AutoTokenizer,
 )
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.conversation import generate_chat_conv
-from sglang.srt.managers.schedule_batch import ModelWorkerBatch
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, compute_position_triton
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
@@ -308,26 +307,24 @@ class TestQwen2_5VLLogits(VisionLLMLogitsBase):
                 "pixel_values": inputs.pixel_values,
                 "tgt_sizes": inputs.tgt_sizes,
             }
-            hf_outputs = self.model.forward(
-                **inputs
-            )
+            hf_outputs = self.model.forward(**inputs)
             hf_logits = hf_outputs.logits[0, -1, :]
 
-        with torch.no_grad():
-            model = self.get_sglang_model()
-            input_ids = inputs["input_ids"].to(self.device).flatten()
-            positions = compute_position_triton()
-            forward_batch =
-            image_inputs = model.forward(
-                input_ids,
-                positions,
-                for
-            )
-            (sglang_output, _) = model.get_embedding(
-                input_ids=input_ids, image_inputs=image_inputs
-            )
-
-        self.compare_outputs(sglang_output, hf_output)
+        # with torch.no_grad():
+        #     model = self.get_sglang_model()
+        #     input_ids = inputs["input_ids"].to(self.device).flatten()
+        #     positions = compute_position_triton()
+        #     forward_batch =
+        #     image_inputs = model.forward(
+        #         input_ids,
+        #         positions,
+        #         for
+        #     )
+        #     (sglang_output, _) = model.get_embedding(
+        #         input_ids=input_ids, image_inputs=image_inputs
+        #     )
+        #
+        # self.compare_outputs(sglang_output, hf_output)
 
 
 if __name__ == "__main__":

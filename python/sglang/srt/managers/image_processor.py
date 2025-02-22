@@ -9,12 +9,12 @@ import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
-import PIL
 import numpy as np
+import PIL
 import torch
 import transformers
-from PIL import Image
 from decord import VideoReader, cpu
+from PIL import Image
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.mm_utils import expand2square, process_anyres_image
@@ -76,7 +76,7 @@ class BaseImageProcessor(ABC):
         estimated_frames_list = []
         for image in image_data:
             if isinstance(image, str) and image.startswith("video:"):
-                path = image[len("video:"):]
+                path = image[len("video:") :]
                 # Estimate frames for the video
                 vr = VideoReader(path, ctx=cpu(0))
                 num_frames = len(vr)
@@ -161,7 +161,7 @@ class BaseImageProcessor(ABC):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:"):]
+                        path = image[len("video:") :]
                         frames = BaseImageProcessor.encode_video(
                             path, frame_count_limit=max_frames_to_process
                         )
@@ -293,7 +293,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-               and "anyres" in aspect_ratio
+            and "anyres" in aspect_ratio
             else None
         )
 
@@ -541,8 +541,11 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
             return math.floor(number / factor) * factor
 
         def smart_resize(
-            height: int, width: int, factor: int = self.IMAGE_FACTOR, min_pixels: int = self.MIN_PIXELS,
-            max_pixels: int = self.MAX_PIXELS
+            height: int,
+            width: int,
+            factor: int = self.IMAGE_FACTOR,
+            min_pixels: int = self.MIN_PIXELS,
+            max_pixels: int = self.MAX_PIXELS,
         ) -> tuple[int, int]:
             """
             Rescales the image so that the following conditions are met:

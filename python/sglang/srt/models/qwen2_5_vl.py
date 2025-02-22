@@ -132,12 +132,17 @@ class Qwen2_5_VisionBlock(nn.Module):
         )
 
     def forward(
-        self, x: torch.Tensor, cu_seqlens: torch.Tensor, position_embeddings: torch.Tensor
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.norm1(x)
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
         attn = self.attn(
-            hidden_states, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings
+            hidden_states,
+            cu_seqlens=cu_seqlens,
+            position_embeddings=position_embeddings,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
         x = x + attn
@@ -184,7 +189,7 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.ModuleList(
             [
@@ -223,7 +228,9 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         print(f"seqlen: {seqlen}")
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        seq = torch.arange(
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
 
@@ -260,7 +267,7 @@ def tensor_hash_short(tensor, bits=32):
     final_hash = int((hash_value + std_value * 1e6 + mean_value * 1e4) * 1e6)
 
     # 取模以限制位数
-    return final_hash % (2 ** bits)
+    return final_hash % (2**bits)
 
 
 class Qwen2_5_VisionTransformer(nn.Module):
@@ -381,7 +388,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 self.spatial_merge_size,
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
-                )
+            )
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
@@ -391,7 +398,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 self.spatial_merge_size,
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
-                )
+            )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
@@ -460,7 +467,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            x = blk(x, cu_seqlens=cu_seqlens_now, position_embeddings=position_embeddings)
+            x = blk(
+                x, cu_seqlens=cu_seqlens_now, position_embeddings=position_embeddings
+            )
 
         # adapter
         x = self.merger(x)
@@ -472,13 +481,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
 
 cached_get_processor = lru_cache(get_processor)
+
+
 def save_tensor(tensor, filename):
     import os
+
     # 将 tensor 转换为 ndarray
     if os.path.exists(filename):
         return
     torch.save(tensor, filename)
-
 
 
 class Qwen2_5_VLForConditionalGeneration(nn.Module):
@@ -541,7 +552,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         # Process each region (both image and slice)
         for start_idx, end_idx in zip(start_indices, end_indices):
             # Add non-image tokens before this region
-            new_input_ids.extend(input_ids[last_idx: start_idx + 1])
+            new_input_ids.extend(input_ids[last_idx : start_idx + 1])
 
             is_image_start = input_ids[start_idx] == im_start_id
 
@@ -676,10 +687,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                     end_dim = (rank + 1) * hidden_chunk_size
                     inputs_embeds[left_idx:right_idx, ..., start_dim:end_dim] = (
                         image_embeds[
-                        image_embeds_offset: image_embeds_offset
-                                             + num_image_tokens,
-                        ...,
-                        start_dim:end_dim,
+                            image_embeds_offset : image_embeds_offset
+                            + num_image_tokens,
+                            ...,
+                            start_dim:end_dim,
                         ]
                     )
                     image_embeds_offset += num_image_tokens

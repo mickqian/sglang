@@ -20,7 +20,6 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.quantization import QuantizationConfig
 
-
 # def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
 #     if not interleaved:
 #         x1, x2 = x.chunk(2, dim=-1)
@@ -35,7 +34,7 @@ from sglang.srt.layers.quantization import QuantizationConfig
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -92,7 +91,7 @@ def tensor_hash_short(tensor, bits=32):
     final_hash = int((hash_value + std_value * 1e6 + mean_value * 1e4) * 1e6)
 
     # 取模以限制位数
-    return final_hash % (2 ** bits)
+    return final_hash % (2**bits)
 
 
 # def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
@@ -102,8 +101,10 @@ def tensor_hash_short(tensor, bits=32):
 #     output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
 #     return output
 
-def apply_rotary_pos_emb_vision(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> Tuple[
-    torch.Tensor, torch.Tensor]:
+
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     if firstVA:
         print(f"q shape {q.shape}")
         print(f"k shape {k.shape}")
@@ -235,12 +236,7 @@ class VisionAttention(nn.Module):
             q, k, v = qkv.chunk(3, dim=-1)
 
             # [b, s, embed_dim] --> [b * s, head, head_size]
-            q, k, v = [
-                x.reshape(
-                    bsz * s, head, -1
-                ).contiguous()
-                for x in (q, k, v)
-            ]
+            q, k, v = [x.reshape(bsz * s, head, -1).contiguous() for x in (q, k, v)]
         else:
             # [b, s, embed_dim] --> [s, b, embed_dim]
             x = rearrange(x, "b s ... -> s b ...")
@@ -315,8 +311,10 @@ class VisionAttention(nn.Module):
 
         return output
 
+
 def save_tensor(tensor, filename):
     import os
+
     # 将 tensor 转换为 ndarray
     if os.path.exists(filename):
         return
@@ -438,7 +436,7 @@ class VisionSdpaAttention(nn.Module):
 
         # [b, 1, s]
         if self.use_full_precision_softmax:
-            scale = self.head_size ** -0.5
+            scale = self.head_size**-0.5
             k_transposed = rearrange(k, "b h s d -> b h d s")
             attn_weights = torch.matmul(q, k_transposed) * scale
             del k, k_transposed
