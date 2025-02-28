@@ -13,6 +13,7 @@ from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.conversation import generate_chat_conv
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
@@ -190,6 +191,7 @@ class TestMiniCPMVLogits(VisionLLMLogitsBase):
             input_ids = inputs["input_ids"].to(self.device).flatten()
             image_inputs = model._parse_and_validate_inputs(
                 input_ids=input_ids,
+                forward_mode=ForwardMode.PREFILL,
                 **{
                     "pixel_values": [inputs["pixel_values"]],
                     "tgt_sizes": [inputs["tgt_sizes"]],

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import bisect
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable
@@ -22,17 +23,27 @@ from typing import TYPE_CHECKING, Callable
 import torch
 import tqdm
 
+from sglang.lang.chat_template import get_chat_template
+from sglang.srt.conversation import generate_chat_conv
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.distributed.parallel_state import GroupCoordinator, graph_capture
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe.fused_moe_native import fused_moe_forward_native
 from sglang.srt.layers.torchao_utils import save_gemlite_cache
+from sglang.srt.managers.image_processor import (
+    get_image_processor,
+    init_global_processor,
+)
+from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
     ForwardBatch,
     ForwardMode,
 )
+from sglang.srt.openai_api.protocol import ChatCompletionRequest
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_hip
 
 is_hip_ = is_hip()
@@ -157,6 +168,74 @@ def set_global_graph_memory_pool(val):
     global_graph_memory_pool = val
 
 
+def construct_minimum_input_with_image(
+    hf_config,
+    server_args: ServerArgs,
+) -> (list[int], ImageInputs):
+    global_processor = init_global_processor(server_args)
+    json_str = f"""
+        {{
+  "model": "",
+  "messages": [
+    {{
+      "role": "user",
+      "content": [
+        {{
+          "type": "image_url",
+          "image_url": {{
+            "url": "/home/misc/mick/repos/sglang/assets/minimal_pixel.png"
+          }}
+        }}
+      ]
+    }}
+  ]
+}}
+        """
+
+    req = ChatCompletionRequest.model_validate_json(json_str)
+
+    conv = generate_chat_conv(req, template_name=server_args.chat_template)
+
+    text = conv.get_prompt()
+    text = get_chat_template(server_args.chat_template).image_token
+    print(f"prompt: {text}")
+    input_ids = (
+        global_processor.tokenizer(text=text, return_tensors="pt")
+        .input_ids.flatten()
+        .tolist()
+    )
+    img_processor = get_image_processor(
+        hf_config, server_args=server_args, processor=global_processor
+    )
+    image_inputs = asyncio.run(
+        img_processor.process_images_async(
+            conv.image_data,
+            input_ids,
+            GenerateReqInput(modalities=["image"]),
+            1000,
+        )
+    )
+    if image_inputs and "input_ids" in image_inputs:
+        input_ids = image_inputs["input_ids"]
+    print(f"image_inputs {image_inputs}")
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor(input_ids, device="cuda")
+    input_ids = input_ids.to("cuda")
+    image_inputs: ImageInputs = ImageInputs.from_dict(image_inputs)
+
+    start_cond = input_ids == image_inputs.im_start_id
+    end_cond = input_ids == image_inputs.im_end_id
+
+    (image_start_tokens,) = torch.where(start_cond)
+    (image_end_tokens,) = torch.where(end_cond)
+    valid_pairs = []
+    for s, e in zip(image_start_tokens, image_end_tokens):
+        valid_pairs += [[s + 1, e]]
+    image_inputs.image_bounds = torch.tensor(valid_pairs, device="cuda")
+    print(image_inputs.image_bounds)
+    return image_inputs, input_ids
+
+
 class CudaGraphRunner:
     """A CudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
 
@@ -196,9 +275,13 @@ class CudaGraphRunner:
         # FIXME(lsyin): leave it here for now, I don't know whether it is necessary
         self.encoder_len_fill_value = 0
 
+        # if self.model_runner.is_multimodal:
+        #     logger.info("This can take up to several minutes.")
+
         if self.enable_torch_compile:
             set_torch_compile_config()
 
+        print(f"max_num_token: {self.max_num_token}")
         # Graph inputs
         with torch.device("cuda"):
             self.input_ids = torch.zeros((self.max_num_token,), dtype=torch.int64)
@@ -314,10 +397,31 @@ class CudaGraphRunner:
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = torch.cuda.CUDAGraph()
         stream = self.stream
-        num_tokens = bs * self.num_tokens_per_bs
 
         # Graph inputs
-        input_ids = self.input_ids[:num_tokens]
+        image_inputs = None
+        if self.model_runner.model_config.is_multimodal:
+            image_inputs, input_ids = construct_minimum_input_with_image(
+                hf_config=self.model_runner.model_config.hf_config,
+                server_args=self.model_runner.server_args,
+            )
+            print("before", input_ids)
+            self.num_tokens_per_bs = input_ids.numel()
+            # input_ids = torch.stack([input_ids] * bs, dim=0)
+            input_ids = input_ids.repeat(bs)
+            print("after", input_ids)
+            print(f"new input_ids len: {self.num_tokens_per_bs}")
+
+        num_tokens = bs * self.num_tokens_per_bs
+
+        if not self.model_runner.model_config.is_multimodal:
+            input_ids = self.input_ids[:num_tokens]
+
+        print(f"input_ids: {input_ids}")
+        print(f"num_tokens: {num_tokens}")
+        print(f"bs: {bs}")
+        print(f"num_tokens_per_bs: {self.num_tokens_per_bs}")
+
         req_pool_indices = self.req_pool_indices[:bs]
         seq_lens = self.seq_lens[:bs]
         out_cache_loc = self.out_cache_loc[:num_tokens]
@@ -361,6 +465,7 @@ class CudaGraphRunner:
             spec_algorithm=self.model_runner.spec_algorithm,
             spec_info=spec_info,
             capture_hidden_mode=self.capture_hidden_mode,
+            image_inputs=[image_inputs] * bs,
         )
 
         # Attention backend
@@ -450,6 +555,7 @@ class CudaGraphRunner:
         if hasattr(forward_batch.spec_info, "hidden_states"):
             self.hidden_states[:raw_num_token] = forward_batch.spec_info.hidden_states
 
+        print(f"ddddd bs {bs}")
         # Attention backend
         self.model_runner.attn_backend.init_forward_metadata_replay_cuda_graph(
             bs,

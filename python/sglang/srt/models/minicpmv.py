@@ -52,7 +52,7 @@ from sglang.srt.layers.linear import (
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.schedule_batch import ImageInputs
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Config, Qwen2ForCausalLM
@@ -73,7 +73,7 @@ def get_1d_sincos_pos_embed_from_grid(
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.0
-    omega = 1.0 / 10000**omega  # (D/2,)
+    omega = 1.0 / 10000 ** omega  # (D/2,)
 
     if version == (2, 0):
         pos = pos.reshape(-1)  # (M,)
@@ -307,7 +307,7 @@ class Idefics2VisionEmbeddings(nn.Module):
             padding="valid",
         )
         self.num_patches_per_side = self.image_size // self.patch_size
-        self.num_patches = self.num_patches_per_side**2
+        self.num_patches = self.num_patches_per_side ** 2
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
@@ -517,7 +517,7 @@ class BaseResampler(nn.Module):
         self.do_post_projection = do_post_projection
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
         self.proj = (
-            nn.Parameter((embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
+            nn.Parameter((embed_dim ** -0.5) * torch.randn(embed_dim, embed_dim))
             if do_post_projection
             else None
         )
@@ -610,7 +610,7 @@ class Resampler2_5(BaseResampler):
             pos_embed.append(
                 self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
             )  # patches * D
-            key_padding_mask[i, patch_len[i] :] = True
+            key_padding_mask[i, patch_len[i]:] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
             pos_embed, batch_first=True, padding_value=0.0
         ).permute(
@@ -690,6 +690,7 @@ class MiniCPMVBaseModel(nn.Module):
         pad_values: List[int],
         im_start_id: torch.Tensor,
         im_end_id: torch.Tensor,
+        forward_mode: ForwardMode,
         slice_start_id: Optional[torch.Tensor] = None,
         slice_end_id: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -698,15 +699,44 @@ class MiniCPMVBaseModel(nn.Module):
         """
         # All the images in the batch should share the same special image
         # bound token ids.
-        start_cond = input_ids == im_start_id[0]
-        end_cond = input_ids == im_end_id[0]
+        start_cond = input_ids == im_start_id
+        end_cond = input_ids == im_end_id
         if slice_start_id is not None:
-            start_cond |= input_ids == slice_start_id[0]
-            end_cond |= input_ids == slice_end_id[0]
+            start_cond |= input_ids == slice_start_id
+            end_cond |= input_ids == slice_end_id
 
-        (image_start_tokens,) = torch.where(start_cond)
+        # Move conditions to CPU for index search
+        if forward_mode.is_cuda_graph():
+            a = [index for index in input_ids]
+            a = [index for index, input_id in enumerate(input_ids)]
+            a = [
+                index
+                for index, input_id in enumerate(input_ids)
+                if torch.equal(
+                    torch.tensor(input_id, device="cuda"),
+                    torch.tensor(im_start_id, device="cuda"),
+                )
+            ]
+            image_start_tokens = torch.tensor(
+                [
+                    index
+                    for index, input_id in enumerate(input_ids)
+                    if input_id == im_start_id
+                ],
+                device="cuda",
+            )
+            image_end_tokens = torch.tensor(
+                [
+                    index
+                    for index, input_id in enumerate(input_ids)
+                    if input_id == im_end_id
+                ],
+                device="cuda",
+            )
+        else:
+            (image_start_tokens,) = torch.where(start_cond)
+            (image_end_tokens,) = torch.where(end_cond)
         image_start_tokens += 1
-        (image_end_tokens,) = torch.where(end_cond)
 
         # the im_start_id sometimes can be cached as prefix, but it is needed for the embedding of the images
         if len(image_start_tokens) != len(image_end_tokens):
@@ -745,6 +775,7 @@ class MiniCPMVBaseModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
+        forward_mode: ForwardMode
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         vlm_embedding: torch.Tensor = self.llm.get_input_embeddings(input_ids)
 
@@ -761,7 +792,7 @@ class MiniCPMVBaseModel(nn.Module):
                 vision_hidden_states = self.get_vision_hidden_states(image_inputs)
             # See NOTE in _parse_and_validate_inputs
             image_bounds = image_inputs["image_bounds"]
-            if len(image_bounds) > 0:
+            if not forward_mode.is_cuda_graph() and len(image_bounds) > 0:
                 image_indices = torch.stack(
                     [
                         torch.arange(start, end, dtype=torch.long)
@@ -780,6 +811,8 @@ class MiniCPMVBaseModel(nn.Module):
     def _parse_and_validate_inputs(
         self,
         input_ids: torch.Tensor,
+        forward_mode: ForwardMode,
+        image_input: ImageInputs,
         **kwargs: object,
     ) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
@@ -797,6 +830,7 @@ class MiniCPMVBaseModel(nn.Module):
                 pad_values=pad_values,
                 im_start_id=im_start_id,
                 im_end_id=im_end_id,
+                forward_mode=forward_mode,
                 slice_start_id=slice_start_id,
                 slice_end_id=slice_end_id,
             )
@@ -855,18 +889,22 @@ class MiniCPMVBaseModel(nn.Module):
         if len(pixel_values_flat) == 0:
             return None
 
-        image_bounds = self._get_image_bounds(
-            input_ids=input_ids,
-            pad_values=pad_values,
-            im_start_id=im_start_id,
-            im_end_id=im_end_id,
-            slice_start_id=slice_start_id,
-            slice_end_id=slice_end_id,
-        )
+        if forward_mode.is_cuda_graph() and image_input.image_bounds is not None:
+            image_bounds = image_input.image_bounds
+        else:
+            image_bounds = self._get_image_bounds(
+                input_ids=input_ids,
+                pad_values=pad_values,
+                im_start_id=im_start_id,
+                im_end_id=im_end_id,
+                forward_mode=forward_mode,
+                slice_start_id=slice_start_id,
+                slice_end_id=slice_end_id,
+            )
         return MiniCPMVImagePixelInputs(
             image_bounds=image_bounds.to(device=input_ids.device),
-            data=pixel_values_flat,
-            tgt_sizes=torch.stack(tgt_sizes_flat),
+            data=pixel_values,
+            tgt_sizes=tgt_sizes,
             type="pixel_values",
         )
 
@@ -908,14 +946,19 @@ class MiniCPMVBaseModel(nn.Module):
                 }
             )
 
-        image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
+        image_inputs = self._parse_and_validate_inputs(
+            input_ids,
+            forward_batch.forward_mode,
+            forward_batch.image_inputs[0],
+            **kwargs,
+        )
 
         # Clamp input ids. This is because the input_ids for the image tokens are
         # filled with the hash values of the image for the prefix matching in the radix attention.
         # There values are useless because their embeddings will be replaced by vision embeddings anyway.
         input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
 
-        vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
+        vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs, forward_mode=forward_batch.forward_mode)
 
         # always pass the input via `inputs_embeds`
         # to make sure the computation graph is consistent
@@ -1093,7 +1136,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
             (B, 1, max_patches), dtype=torch.bool, device=device
         )
 
-        tgt_sizes_tensor = tgt_sizes.clone().to(device=patch_attn_mask.device)
+        # tgt_sizes_tensor = tgt_sizes.to(device=patch_attn_mask.device)
+        tgt_sizes_tensor = tgt_sizes.clone()
+        # tgt_sizes_tensor = tgt_sizes.clone().to(device=patch_attn_mask.device)
         mask_shapes = tgt_sizes_tensor[:, 0] * tgt_sizes_tensor[:, 1]
         patch_attn_mask[:, 0, :] = torch.arange(
             patch_attn_mask.size(2), device=patch_attn_mask.device
@@ -1119,24 +1164,24 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
 
         # Get all special token IDs
         im_start_id = (
-            image_inputs.im_start_id[0].item()
-            if isinstance(image_inputs.im_start_id[0], torch.Tensor)
-            else image_inputs.im_start_id[0]
+            image_inputs.im_start_id.item()
+            if isinstance(image_inputs.im_start_id, torch.Tensor)
+            else image_inputs.im_start_id
         )
         im_end_id = (
-            image_inputs.im_end_id[0].item()
-            if isinstance(image_inputs.im_end_id[0], torch.Tensor)
-            else image_inputs.im_end_id[0]
+            image_inputs.im_end_id.item()
+            if isinstance(image_inputs.im_end_id, torch.Tensor)
+            else image_inputs.im_end_id
         )
         slice_start_id = (
-            image_inputs.slice_start_id[0].item()
-            if isinstance(image_inputs.slice_start_id[0], torch.Tensor)
-            else image_inputs.slice_start_id[0]
+            image_inputs.slice_start_id.item()
+            if isinstance(image_inputs.slice_start_id, torch.Tensor)
+            else image_inputs.slice_start_id
         )
         slice_end_id = (
-            image_inputs.slice_end_id[0].item()
-            if isinstance(image_inputs.slice_end_id[0], torch.Tensor)
-            else image_inputs.slice_end_id[0]
+            image_inputs.slice_end_id.item()
+            if isinstance(image_inputs.slice_end_id, torch.Tensor)
+            else image_inputs.slice_end_id
         )
 
         # Find all start and end positions for both types
@@ -1155,7 +1200,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         for start_idx, end_idx in zip(start_indices, end_indices):
             # Add non-image tokens before this region
             new_input_ids.extend(
-                input_ids[last_idx : start_idx + 1]
+                input_ids[last_idx: start_idx + 1]
             )  # include start token
 
             is_image_start = input_ids[start_idx] == im_start_id

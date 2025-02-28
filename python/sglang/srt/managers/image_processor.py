@@ -8,11 +8,11 @@ import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
-import numpy as np
 import PIL
+import numpy as np
 import transformers
-from decord import VideoReader, cpu
 from PIL import Image
+from decord import VideoReader, cpu
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.mm_utils import expand2square, process_anyres_image
@@ -34,6 +34,7 @@ def init_global_processor(server_args: ServerArgs):
         tokenizer_mode=server_args.tokenizer_mode,
         trust_remote_code=server_args.trust_remote_code,
     )
+    return global_processor
 
 
 @dataclasses.dataclass
@@ -74,7 +75,7 @@ class BaseImageProcessor(ABC):
         estimated_frames_list = []
         for image in image_data:
             if isinstance(image, str) and image.startswith("video:"):
-                path = image[len("video:") :]
+                path = image[len("video:"):]
                 # Estimate frames for the video
                 vr = VideoReader(path, ctx=cpu(0))
                 num_frames = len(vr)
@@ -122,10 +123,14 @@ class BaseImageProcessor(ABC):
         new_text_parts = []
 
         if isinstance(input_ids, list):
-            assert len(input_ids) and isinstance(input_ids[0], int)
+            assert (
+                len(input_ids) and len(input_ids) > 0 and isinstance(input_ids[0], int)
+            ), input_ids
             input_text = self._processor.tokenizer.decode(input_ids)
         else:
             input_text = input_ids
+
+        assert isinstance(input_text, str), type(input_text)
 
         text_parts = input_text.split(image_token)
 
@@ -155,7 +160,7 @@ class BaseImageProcessor(ABC):
             else:
                 try:
                     if isinstance(image, str) and image.startswith("video:"):
-                        path = image[len("video:") :]
+                        path = image[len("video:"):]
                         frames = self.encode_video(
                             path, frame_count_limit=frames_to_process
                         )
@@ -276,7 +281,7 @@ class LlavaImageProcessor(BaseImageProcessor):
         grid_pinpoints = (
             self.hf_config.image_grid_pinpoints
             if hasattr(self.hf_config, "image_grid_pinpoints")
-            and "anyres" in aspect_ratio
+               and "anyres" in aspect_ratio
             else None
         )
 
@@ -376,13 +381,17 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
 
     @staticmethod
     def _process_images_task(images, input_text):
+
         result = global_processor.__call__(
             text=input_text, images=images, return_tensors="pt"
         )
+
         return {
             "input_ids": result.input_ids,
             "pixel_values": result.pixel_values,
             "tgt_sizes": result.tgt_sizes,
+            # "tgt_sizes": torch.stack(tgt_sizes_flat).to(device="cuda"),
+            # "tgt_sizes": torch.tensor(result.tgt_sizes, device="cuda"),
         }
 
     async def _process_images(self, images, input_text):
@@ -427,11 +436,11 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
 
         # Collect special token ids
         tokenizer = self._processor.tokenizer
-        im_start_id = [tokenizer.im_start_id]
-        im_end_id = [tokenizer.im_end_id]
+        im_start_id = tokenizer.im_start_id
+        im_end_id = tokenizer.im_end_id
         if tokenizer.slice_start_id:
-            slice_start_id = [tokenizer.slice_start_id]
-            slice_end_id = [tokenizer.slice_end_id]
+            slice_start_id = tokenizer.slice_start_id
+            slice_end_id = tokenizer.slice_end_id
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": res["pixel_values"],
