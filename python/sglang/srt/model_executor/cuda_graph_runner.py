@@ -271,6 +271,9 @@ def construct_minimum_input_with_image(
     return image_inputs, input_ids
 
 
+torch.autograd.profiler.emit_nvtx(record_shapes=True)
+
+
 class CudaGraphRunner:
     """A CudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
 

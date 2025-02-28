@@ -73,7 +73,7 @@ def get_1d_sincos_pos_embed_from_grid(
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.0
-    omega = 1.0 / 10000 ** omega  # (D/2,)
+    omega = 1.0 / 10000**omega  # (D/2,)
 
     if version == (2, 0):
         pos = pos.reshape(-1)  # (M,)
@@ -237,7 +237,7 @@ class BaseResampler(nn.Module):
         self.do_post_projection = do_post_projection
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
         self.proj = (
-            nn.Parameter((embed_dim ** -0.5) * torch.randn(embed_dim, embed_dim))
+            nn.Parameter((embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
             if do_post_projection
             else None
         )
@@ -330,7 +330,7 @@ class Resampler2_5(BaseResampler):
             pos_embed.append(
                 self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
             )  # patches * D
-            key_padding_mask[i, patch_len[i]:] = True
+            key_padding_mask[i, patch_len[i] :] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
             pos_embed, batch_first=True, padding_value=0.0
         ).permute(
@@ -552,8 +552,9 @@ class MiniCPMBaseModel(nn.Module):
         )
         return MiniCPMVImagePixelInputs(
             image_bounds=image_bounds.to(device=input_ids.device),
-            data=pixel_values,
-            tgt_sizes=tgt_sizes,
+            data=pixel_values_flat,
+            # tgt_sizes=tgt_sizes_tensor,
+            tgt_sizes=tgt_sizes_flat,
             type="pixel_values",
         )
 
