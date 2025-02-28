@@ -305,6 +305,8 @@ class FlashInferAttnBackend(AttentionBackend):
         forward_mode: ForwardMode,
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
     ):
+        print(f"eeeee bs {bs}")
+
         if forward_mode.is_decode_or_idle():
             decode_wrappers = []
             for i in range(self.num_wrappers):
@@ -314,13 +316,11 @@ class FlashInferAttnBackend(AttentionBackend):
                         "NHD",
                         use_cuda_graph=True,
                         use_tensor_cores=self.decode_use_tensor_cores,
-                        paged_kv_indptr_buffer=self.kv_indptr[i][: num_tokens + 1],
-                        paged_kv_indices_buffer=self.cuda_graph_kv_indices[i],
-                        paged_kv_last_page_len_buffer=self.kv_last_page_len[
-                            :num_tokens
-                        ],
+                        paged_kv_indptr_buffer=self.kv_indptr[i][: bs + 1],
+                            paged_kv_indices_buffer=self.cuda_graph_kv_indices[i],
+                            paged_kv_last_page_len_buffer=self.kv_last_page_len[:bs],
+                        )
                     )
-                )
             seq_lens_sum = seq_lens.sum().item()
             self.indices_updater_decode.update(
                 req_pool_indices,
@@ -730,6 +730,7 @@ class FlashInferIndicesUpdaterDecode:
         else:
             kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
             bs = kv_indptr.shape[0] - 1
+        print(f"aaa bs: {bs}")
 
         wrapper.begin_forward(
             kv_indptr,
@@ -918,6 +919,7 @@ class FlashInferIndicesUpdaterPrefill:
         spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
     ):
         bs = len(seq_lens)
+        print(f"bbbb bs {bs}")
         if spec_info is None:
             assert len(seq_lens) == len(req_pool_indices)
             # Normal extend
@@ -1041,6 +1043,7 @@ class FlashInferMultiStepDraftBackend:
     ):
         num_seqs = forward_batch.batch_size
         bs = self.topk * num_seqs
+        print(f"ccc bs {bs}")
         seq_lens_sum = forward_batch.seq_lens_sum
 
         self.generate_draft_decode_kv_indices[

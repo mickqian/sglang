@@ -50,7 +50,7 @@ from sglang.srt.managers.mm_utils import (
     general_mm_embed_routine,
 )
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.idefics2 import Idefics2VisionTransformer
@@ -73,7 +73,7 @@ def get_1d_sincos_pos_embed_from_grid(
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.0
-    omega = 1.0 / 10000**omega  # (D/2,)
+    omega = 1.0 / 10000 ** omega  # (D/2,)
 
     if version == (2, 0):
         pos = pos.reshape(-1)  # (M,)
@@ -237,7 +237,7 @@ class BaseResampler(nn.Module):
         self.do_post_projection = do_post_projection
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
         self.proj = (
-            nn.Parameter((embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
+            nn.Parameter((embed_dim ** -0.5) * torch.randn(embed_dim, embed_dim))
             if do_post_projection
             else None
         )
@@ -330,7 +330,7 @@ class Resampler2_5(BaseResampler):
             pos_embed.append(
                 self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
             )  # patches * D
-            key_padding_mask[i, patch_len[i] :] = True
+            key_padding_mask[i, patch_len[i]:] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
             pos_embed, batch_first=True, padding_value=0.0
         ).permute(
@@ -418,6 +418,7 @@ class MiniCPMBaseModel(nn.Module):
         pad_values: List[int],
         im_start_id: int,
         im_end_id: int,
+        forward_mode: ForwardMode,
         slice_start_id: Optional[int] = None,
         slice_end_id: Optional[int] = None,
     ) -> torch.Tensor:
@@ -432,9 +433,38 @@ class MiniCPMBaseModel(nn.Module):
             start_cond |= input_ids == slice_start_id
             end_cond |= input_ids == slice_end_id
 
-        (image_start_tokens,) = torch.where(start_cond)
+        # Move conditions to CPU for index search
+        if forward_mode.is_cuda_graph():
+            a = [index for index in input_ids]
+            a = [index for index, input_id in enumerate(input_ids)]
+            a = [
+                index
+                for index, input_id in enumerate(input_ids)
+                if torch.equal(
+                    torch.tensor(input_id, device="cuda"),
+                    torch.tensor(im_start_id, device="cuda"),
+                )
+            ]
+            image_start_tokens = torch.tensor(
+                [
+                    index
+                    for index, input_id in enumerate(input_ids)
+                    if input_id == im_start_id
+                ],
+                device="cuda",
+            )
+            image_end_tokens = torch.tensor(
+                [
+                    index
+                    for index, input_id in enumerate(input_ids)
+                    if input_id == im_end_id
+                ],
+                device="cuda",
+            )
+        else:
+            (image_start_tokens,) = torch.where(start_cond)
+            (image_end_tokens,) = torch.where(end_cond)
         image_start_tokens += 1
-        (image_end_tokens,) = torch.where(end_cond)
 
         # the im_start_id sometimes can be cached as prefix, but it is needed for the embedding of the images
         if len(image_start_tokens) != len(image_end_tokens):
@@ -474,6 +504,8 @@ class MiniCPMBaseModel(nn.Module):
     def _parse_and_validate_inputs(
         self,
         input_ids: torch.Tensor,
+        forward_mode: ForwardMode,
+        image_input: ImageInputs,
         **kwargs: object,
     ) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
@@ -491,6 +523,7 @@ class MiniCPMBaseModel(nn.Module):
                 pad_values=pad_values,
                 im_start_id=im_start_id,
                 im_end_id=im_end_id,
+                forward_mode=forward_mode,
                 slice_start_id=slice_start_id,
                 slice_end_id=slice_end_id,
             )
@@ -748,7 +781,9 @@ class MiniCPMV2_6(MiniCPMBaseModel):
             (B, 1, max_patches), dtype=torch.bool, device=device
         )
 
-        tgt_sizes_tensor = tgt_sizes.clone().to(device=patch_attn_mask.device)
+        # tgt_sizes_tensor = tgt_sizes.to(device=patch_attn_mask.device)
+        tgt_sizes_tensor = tgt_sizes.clone()
+        # tgt_sizes_tensor = tgt_sizes.clone().to(device=patch_attn_mask.device)
         mask_shapes = tgt_sizes_tensor[:, 0] * tgt_sizes_tensor[:, 1]
         patch_attn_mask[:, 0, :] = torch.arange(
             patch_attn_mask.size(2), device=patch_attn_mask.device
