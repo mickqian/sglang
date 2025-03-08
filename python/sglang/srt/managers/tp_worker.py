@@ -124,6 +124,9 @@ class TpModelWorker:
             self.max_req_len > 0 and self.max_req_input_len > 0
         ), "Memory pool size is too small"
 
+        print("TPModelWorker initializing")
+
+        # self._sync_random_seed(server_args.random_seed)
         # Sync random seed across TP workers
         self.random_seed = broadcast_pyobj(
             [server_args.random_seed],
@@ -131,6 +134,34 @@ class TpModelWorker:
             self.model_runner.tp_group.cpu_group,
         )[0]
         set_random_seed(self.random_seed)
+
+    def _sync_random_seed(self, initial_seed: int):
+        """同步所有TP worker的随机种子"""
+        # 确保所有进程都到达这个点
+        torch.distributed.barrier(group=self.model_runner.tp_group.cpu_group)
+
+        # 在GPU上创建种子张量
+        device = self.device
+
+        if self.tp_rank == 0:
+            # rank 0 设置种子值
+            seed_tensor = torch.tensor([initial_seed], dtype=torch.long, device=device)
+        else:
+            # 其他rank创建空张量接收种子
+            seed_tensor = torch.tensor([0], dtype=torch.long, device=device)
+
+        # 广播种子值
+        torch.distributed.broadcast(
+            seed_tensor, src=0, group=self.model_runner.tp_group.cpu_group
+        )
+
+        # 获取种子并设置
+        self.random_seed = seed_tensor.item()
+        logger.info(f"Rank {self.tp_rank} setting random seed to {self.random_seed}")
+        set_random_seed(self.random_seed)
+
+        # 确保所有进程都完成了种子设置
+        torch.distributed.barrier(group=self.model_runner.tp_group.cpu_group)
 
     def get_worker_info(self):
         return (

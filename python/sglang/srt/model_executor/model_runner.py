@@ -77,10 +77,8 @@ from sglang.srt.utils import (
     set_cpu_offload_max_bytes,
     set_cuda_arch,
 )
-from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
-
 
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
 UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
@@ -318,7 +316,7 @@ class ModelRunner:
     def load_model(self):
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
-            f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            f"[TP{self.tp_rank}] Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
         # This can reduce thread conflicts and speed up weight loading.
@@ -388,7 +386,7 @@ class ModelRunner:
 
         after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
-            f"Load weight end. "
+            f"[TP{self.tp_rank}] Load weight end. "
             f"type={type(self.model).__name__}, "
             f"dtype={self.dtype}, "
             f"avail mem={after_avail_memory:.2f} GB, "

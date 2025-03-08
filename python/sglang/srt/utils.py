@@ -38,7 +38,6 @@ import warnings
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
-from multiprocessing import Pool
 from multiprocessing.reduction import ForkingPickler
 from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple, Union
 
@@ -678,10 +677,18 @@ def broadcast_pyobj(
     src: int = 0,
 ):
     """Broadcast inputs from rank=0 to all other ranks with torch.dist backend."""
+    print(f"broadcast_pyobj, rank: {rank}")
+    print(f"broadcast_pyobj, src: {src}")
+    print(f"broadcast_pyobj, data: ", len(data))
+    print(f"broadcast_pyobj, dist_group: ", dist_group.name())
+
+    torch.distributed.barrier(group=dist_group)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if rank == 0:
         if len(data) == 0:
-            tensor_size = torch.tensor([0], dtype=torch.long)
+            tensor_size = torch.tensor([0], dtype=torch.long, device=device)
             dist.broadcast(tensor_size, src=src, group=dist_group)
         else:
             serialized_data = pickle.dumps(data)
@@ -689,13 +696,12 @@ def broadcast_pyobj(
             tensor_data = torch.ByteTensor(
                 np.frombuffer(serialized_data, dtype=np.uint8)
             )
-            tensor_size = torch.tensor([size], dtype=torch.long)
+            tensor_size = torch.tensor([size], dtype=torch.long, device=device)
 
             dist.broadcast(tensor_size, src=src, group=dist_group)
             dist.broadcast(tensor_data, src=src, group=dist_group)
-        return data
     else:
-        tensor_size = torch.tensor([0], dtype=torch.long)
+        tensor_size = torch.tensor([0], dtype=torch.long, device=device)
         dist.broadcast(tensor_size, src=src, group=dist_group)
         size = tensor_size.item()
 
@@ -707,7 +713,10 @@ def broadcast_pyobj(
 
         serialized_data = bytes(tensor_data.cpu().numpy())
         data = pickle.loads(serialized_data)
-        return data
+
+    torch.distributed.barrier(group=dist_group)
+
+    return data
 
 
 step_counter = 0

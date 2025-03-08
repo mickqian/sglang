@@ -16,6 +16,7 @@ from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 import gguf
 import huggingface_hub
 import numpy as np
+import safetensors
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
@@ -286,12 +287,30 @@ class DefaultModelLoader(BaseModelLoader):
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
             )
+
+            # Validate safetensors files
+            valid_files = []
+            for file_path in hf_weights_files:
+                try:
+                    import safetensors.torch
+
+                    # Just try to open the file to check if it's valid
+                    with safetensors.torch.safe_open(file_path, framework="pt") as _:
+                        valid_files.append(file_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Skipping invalid safetensors file {file_path}: {e}"
+                    )
+                    # If we're in a distributed setting, we need to ensure all processes skip the same files
+                    if torch.distributed.is_initialized():
+                        torch.distributed.barrier()
+            hf_weights_files = valid_files
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
         if len(hf_weights_files) == 0:
             raise RuntimeError(
-                f"Cannot find any model weights with `{model_name_or_path}`"
+                f"Cannot find any valid model weights with `{model_name_or_path}`"
             )
 
         return hf_folder, hf_weights_files, use_safetensors

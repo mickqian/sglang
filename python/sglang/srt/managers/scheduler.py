@@ -566,6 +566,8 @@ class Scheduler:
                 work_reqs = None
                 control_reqs = None
 
+            print("request received")
+
             if self.attn_tp_size != 1:
                 attn_tp_rank_0 = self.dp_rank * self.attn_tp_size
                 work_reqs = broadcast_pyobj(

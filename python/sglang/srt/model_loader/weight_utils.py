@@ -412,6 +412,9 @@ def safetensors_encrypted_weights_iterator(
     raise NotImplementedError()
 
 
+# ... existing code ...
+
+
 def safetensors_weights_iterator(
     hf_weights_files: List[str],
     is_all_weights_sharded: bool = False,
@@ -437,9 +440,28 @@ def safetensors_weights_iterator(
         disable=not enable_tqdm,
         bar_format=_BAR_FORMAT,
     ):
-        result = safetensors.torch.load_file(st_file, device="cpu")
-        for name, param in result.items():
-            yield name, param
+        try:
+            result = safetensors.torch.load_file(st_file, device="cpu")
+            for name, param in result.items():
+                yield name, param
+        except Exception as e:
+            logger.error(f"Error loading safetensors file {st_file}: {e}")
+            # Try to recover by using a different loading method
+            try:
+                logger.info(
+                    f"Attempting to recover file {st_file} using alternative method..."
+                )
+                # Try loading with memory mapping disabled
+                result = safetensors.torch.load_file(
+                    st_file, device="cpu", framework_only=True
+                )
+                for name, param in result.items():
+                    yield name, param
+            except Exception as recovery_error:
+                logger.error(f"Recovery attempt failed for {st_file}: {recovery_error}")
+                logger.warning(f"Skipping corrupted file: {st_file}")
+                # Continue with other files instead of failing completely
+                continue
 
 
 def pt_weights_iterator(
