@@ -83,6 +83,9 @@ class TpModelWorker:
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
+
+        self._reset_communication_state(tp_rank=tp_rank, tp_size=server_args.tp_size)
+
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None
         else:
@@ -133,7 +136,24 @@ class TpModelWorker:
             self.tp_rank,
             self.model_runner.tp_group.cpu_group,
         )[0]
+        # self.random_seed = server_args.random_seed
         set_random_seed(self.random_seed)
+
+    def _reset_communication_state(self, tp_rank, tp_size):
+        """重置所有进程的通信状态，确保它们从相同的起点开始"""
+        # 这里我们需要创建一个新的进程组，专门用于同步
+        import torch.distributed as dist
+
+        # 创建一个新的进程组，用于同步
+        self.sync_group = dist.new_group(
+            ranks=list(range(tp_size)),
+            backend="nccl" if torch.cuda.is_available() else "gloo",
+        )
+
+        # 确保所有进程都创建了这个组
+        dist.barrier(group=self.sync_group)
+
+        logger.info(f"Rank {tp_rank}: Communication state reset complete")
 
     def _sync_random_seed(self, initial_seed: int):
         """同步所有TP worker的随机种子"""

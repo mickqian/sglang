@@ -1029,6 +1029,10 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        import remote_pdb
+
+        print("initializing remote pdb")
+        remote_pdb.set_trace()
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,

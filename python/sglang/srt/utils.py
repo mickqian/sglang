@@ -16,6 +16,8 @@
 import base64
 import ctypes
 import dataclasses
+import functools
+import inspect
 import io
 import ipaddress
 import itertools
@@ -35,6 +37,7 @@ import tempfile
 import threading
 import time
 import warnings
+from enum import Enum
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
@@ -679,7 +682,7 @@ def broadcast_pyobj(
     """Broadcast inputs from rank=0 to all other ranks with torch.dist backend."""
     print(f"broadcast_pyobj, rank: {rank}")
     print(f"broadcast_pyobj, src: {src}")
-    print(f"broadcast_pyobj, data: ", len(data))
+    print(f"broadcast_pyobj, data:", data)
     print(f"broadcast_pyobj, dist_group: ", dist_group.name())
 
     torch.distributed.barrier(group=dist_group)
@@ -1351,7 +1354,7 @@ def kill_itself_when_parent_died():
         libc = ctypes.CDLL("libc.so.6")
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
     else:
-        logger.warninig("kill_itself_when_parent_died is only supported in linux.")
+        logger.warning("kill_itself_when_parent_died is only supported in linux.")
 
 
 def set_uvicorn_logging_configs():
@@ -1487,3 +1490,423 @@ def add_prefix(name: str, prefix: str) -> str:
         The string `prefix.name` if prefix is non-empty, otherwise just `name`.
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+class SyncMode(Enum):
+    """集体通信同步模式"""
+
+    NONE = 0  # 不进行额外同步
+    BARRIER = 1  # 使用 barrier 进行同步
+    COUNTER = 2  # 使用计数器检查进行同步
+    BOTH = 3  # 同时使用 barrier 和计数器
+
+
+class CollectiveSyncTracker:
+    """
+    分布式集体通信操作的跟踪和同步工具
+
+    功能:
+    1. 跟踪所有集体通信操作
+    2. 记录详细的操作日志
+    3. 强制同步机制
+    4. 超时检测
+    5. 计数器检查
+    """
+
+    def __init__(
+        self,
+        log_dir: str = "./collective_logs",
+        sync_mode: SyncMode = SyncMode.COUNTER,
+        timeout_seconds: int = 60,
+        log_tensor_shapes: bool = True,
+        log_stack_info: bool = True,
+        check_interval: int = 10,
+        verbose: bool = True,
+        save_json: bool = True,
+    ):
+        """
+        初始化跟踪器
+
+        Args:
+            log_dir: 日志保存目录
+            sync_mode: 同步模式
+            timeout_seconds: 操作超时时间（秒）
+            log_tensor_shapes: 是否记录张量形状
+            log_stack_info: 是否记录调用栈信息
+            check_interval: 计数器检查间隔（操作数）
+            verbose: 是否打印详细日志
+            save_json: 是否保存JSON格式日志
+        """
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.count = 0
+        self.sync_mode = sync_mode
+        self.timeout_seconds = timeout_seconds
+        self.log_tensor_shapes = log_tensor_shapes
+        self.log_stack_info = log_stack_info
+        self.check_interval = check_interval
+        self.verbose = verbose
+        self.save_json = save_json
+
+        # 创建日志目录
+        self.log_dir = log_dir
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        # 初始化日志文件
+        self.log_file = open(f"{self.log_dir}/rank_{self.rank}_collective_log.txt", "w")
+
+        # JSON日志记录
+        if self.save_json:
+            self.json_logs = []
+
+        # 记录每种操作的计数
+        self.op_counts = {}
+
+        # 超时检测线程
+        self.current_op = None
+        self.op_start_time = None
+        self.op_lock = threading.Lock()
+
+        # 启动超时检测线程
+        if self.timeout_seconds > 0:
+            self._start_timeout_monitor()
+
+        self._log_init_info()
+
+    def _log_init_info(self):
+        """记录初始化信息"""
+        init_info = (
+            f"=== CollectiveSyncTracker Initialized ===\n"
+            f"Rank: {self.rank} / {self.world_size}\n"
+            f"Sync Mode: {self.sync_mode.name}\n"
+            f"Timeout: {self.timeout_seconds}s\n"
+            f"Check Interval: {self.check_interval}\n"
+            f"Log Dir: {self.log_dir}\n"
+            f"========================================"
+        )
+        self._write_log(init_info)
+
+    def _start_timeout_monitor(self):
+        """启动超时监控线程"""
+
+        def monitor_timeouts():
+            while True:
+                time.sleep(1)  # 每秒检查一次
+                with self.op_lock:
+                    if (
+                        self.current_op is not None
+                        and self.op_start_time is not None
+                        and time.time() - self.op_start_time > self.timeout_seconds
+                    ):
+
+                        stack_trace = "".join(inspect.stack().__str__())
+                        timeout_msg = (
+                            f"TIMEOUT DETECTED after {self.timeout_seconds}s!\n"
+                            f"Rank {self.rank} stuck in operation: {self.current_op}\n"
+                            f"Stack trace: {stack_trace}"
+                        )
+                        self._write_log(timeout_msg)
+
+                        # 在实际应用中，您可能想在这里终止进程
+                        # import os
+                        # os._exit(1)
+
+        thread = threading.Thread(target=monitor_timeouts, daemon=True)
+        thread.start()
+
+    def _write_log(self, message: str):
+        """写入日志"""
+        if self.verbose:
+            print(message)
+
+        if hasattr(self, "log_file") and self.log_file:
+            self.log_file.write(message + "\n")
+            self.log_file.flush()
+
+    def _get_caller_info(self, depth: int = 2) -> Dict[str, Any]:
+        """获取调用者信息"""
+        frame = inspect.currentframe()
+        for _ in range(depth):
+            if frame.f_back is not None:
+                frame = frame.f_back
+
+        info = {
+            "file": frame.f_code.co_filename,
+            "line": frame.f_lineno,
+            "function": frame.f_code.co_name,
+        }
+
+        if self.log_stack_info:
+            stack = inspect.stack()
+            if len(stack) > depth:
+                caller_frame = stack[depth]
+                info["module"] = caller_frame.frame.f_globals.get("__name__", "unknown")
+
+                # 获取更多上下文
+                if depth + 1 < len(stack):
+                    parent_frame = stack[depth + 1]
+                    info["parent_function"] = parent_frame.function
+
+        return info
+
+    def track(
+        self,
+        op_name: str,
+        tensor_shapes: Optional[Union[torch.Size, List[torch.Size]]] = None,
+        location: Optional[str] = None,
+    ) -> int:
+        """
+        跟踪一个集体通信操作
+
+        Args:
+            op_name: 操作名称
+            tensor_shapes: 张量形状或形状列表
+            location: 调用位置（如果为None则自动检测）
+
+        Returns:
+            当前操作计数
+        """
+        with self.op_lock:
+            self.count += 1
+            self.op_counts[op_name] = self.op_counts.get(op_name, 0) + 1
+
+            # 设置当前操作和开始时间（用于超时检测）
+            self.current_op = op_name
+            self.op_start_time = time.time()
+
+        # 获取调用位置信息
+        caller_info = self._get_caller_info(3)  # 更深的调用栈以跳过包装函数
+        if location is None:
+            location = f"{caller_info['file']}:{caller_info['line']}"
+
+        # 构建日志消息
+        timestamp = time.time()
+        log_msg = f"[{timestamp:.6f}] Rank {self.rank} | Op #{self.count} ({op_name} #{self.op_counts[op_name]}) | Loc: {location}"
+
+        # 添加张量形状信息
+        if self.log_tensor_shapes and tensor_shapes is not None:
+            if isinstance(tensor_shapes, (list, tuple)):
+                shapes_str = ", ".join(str(s) for s in tensor_shapes)
+                log_msg += f" | Shapes: [{shapes_str}]"
+            else:
+                log_msg += f" | Shape: {tensor_shapes}"
+
+        # 写入日志
+        self._write_log(log_msg)
+
+        # 保存JSON格式日志
+        if self.save_json:
+            log_entry = {
+                "timestamp": timestamp,
+                "rank": self.rank,
+                "count": self.count,
+                "op": op_name,
+                "op_count": self.op_counts[op_name],
+                "location": location,
+                "file": caller_info["file"],
+                "line": caller_info["line"],
+                "function": caller_info["function"],
+            }
+
+            if self.log_tensor_shapes and tensor_shapes is not None:
+                if isinstance(tensor_shapes, (list, tuple)):
+                    log_entry["tensor_shapes"] = [str(s) for s in tensor_shapes]
+                else:
+                    log_entry["tensor_shape"] = str(tensor_shapes)
+
+            self.json_logs.append(log_entry)
+
+            # 定期保存JSON日志
+            if self.count % 100 == 0:
+                self._save_json_logs()
+
+        # 定期检查同步状态
+        if self.count % self.check_interval == 0 and self.sync_mode in [
+            SyncMode.COUNTER,
+            SyncMode.BOTH,
+        ]:
+            self.check_sync(f"periodic_check_after_{op_name}")
+
+        return self.count
+
+    def check_sync(self, location: Optional[str] = None) -> bool:
+        """
+        检查所有进程的集体操作计数是否同步
+
+        Args:
+            location: 检查位置（如果为None则自动检测）
+
+        Returns:
+            是否同步
+        """
+        if not dist.is_initialized() or self.world_size <= 1:
+            return True
+
+        if location is None:
+            caller_info = self._get_caller_info()
+            location = f"{caller_info['file']}:{caller_info['line']}"
+
+        # 准备计数器张量
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        local_count = torch.tensor([self.count], device=device)
+        counts = [torch.zeros_like(local_count) for _ in range(self.world_size)]
+
+        # 收集所有进程的计数
+        try:
+            dist.all_gather(counts, local_count)
+            # 注意：这个all_gather本身不应该被跟踪，因为它是内部操作
+        except Exception as e:
+            self._write_log(f"ERROR during sync check: {str(e)}")
+            return False
+
+        # 检查是否同步
+        counts = [c.item() for c in counts]
+        is_synced = len(set(counts)) == 1
+
+        # 构建日志消息
+        log_msg = (
+            f"[{time.time():.6f}] SYNC CHECK at {location} | "
+            f"Rank {self.rank} count: {self.count} | "
+            f"All counts: {counts} | "
+            f"{'✓ SYNCED' if is_synced else '✗ MISMATCH'}"
+        )
+
+        # 如果不同步，添加更多诊断信息
+        if not is_synced:
+            min_count = min(counts)
+            max_count = max(counts)
+            diff = max_count - min_count
+            log_msg += f" | Diff: {diff} ops | Min: {min_count} | Max: {max_count}"
+
+        self._write_log(log_msg)
+
+        return is_synced
+
+    def _save_json_logs(self):
+        """保存JSON格式日志"""
+        if self.save_json and hasattr(self, "json_logs"):
+            json_path = f"{self.log_dir}/rank_{self.rank}_collective_log.json"
+            with open(json_path, "w") as f:
+                json.dump(self.json_logs, f, indent=2)
+
+    def __del__(self):
+        """析构函数，确保资源正确释放"""
+        # 保存最终的JSON日志
+        if hasattr(self, "save_json") and self.save_json:
+            self._save_json_logs()
+
+        # 关闭日志文件
+        if hasattr(self, "log_file") and self.log_file:
+            self.log_file.close()
+
+
+def create_collective_wrapper(
+    tracker: CollectiveSyncTracker,
+    func: Callable,
+    op_name: Optional[str] = None,
+    pre_barrier: bool = False,
+    post_barrier: bool = False,
+) -> Callable:
+    """
+    创建集体通信操作的包装函数
+
+    Args:
+        tracker: 跟踪器实例
+        func: 要包装的原始函数
+        op_name: 操作名称（如果为None则使用函数名）
+        pre_barrier: 是否在操作前添加barrier
+        post_barrier: 是否在操作后添加barrier
+
+    Returns:
+        包装后的函数
+    """
+    if op_name is None:
+        op_name = func.__name__
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # 提取张量形状（如果可能）
+        tensor_shapes = None
+        if tracker.log_tensor_shapes:
+            tensor_args = [arg for arg in args if isinstance(arg, torch.Tensor)]
+            if tensor_args:
+                tensor_shapes = [t.shape for t in tensor_args]
+                if len(tensor_shapes) == 1:
+                    tensor_shapes = tensor_shapes[0]
+
+        # 前置同步屏障
+        if pre_barrier and tracker.sync_mode in [SyncMode.BARRIER, SyncMode.BOTH]:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                dist.barrier()
+
+        # 跟踪操作
+        tracker.track(op_name, tensor_shapes)
+
+        # 执行实际操作
+        with tracker.op_lock:
+            tracker.current_op = op_name
+            tracker.op_start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                tracker.current_op = None
+            tracker.op_start_time = None
+
+        # 后置同步屏障
+        if post_barrier and tracker.sync_mode in [SyncMode.BARRIER, SyncMode.BOTH]:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                dist.barrier()
+
+        return result
+
+    return wrapper
+
+
+def wrap_torch_distributed(
+    tracker: CollectiveSyncTracker, pre_barrier: bool = True, post_barrier: bool = True
+) -> None:
+    """
+    包装torch.distributed模块中的所有集体通信函数
+
+    Args:
+        tracker: 跟踪器实例
+        pre_barrier: 是否在操作前添加barrier
+        post_barrier: 是否在操作后添加barrier
+    """
+    # 需要包装的函数列表
+    collective_funcs = [
+        "all_reduce",
+        "all_gather",
+        "all_gather_into_tensor",
+        "all_to_all",
+        "all_to_all_single",
+        "broadcast",
+        "gather",
+        "reduce",
+        "reduce_scatter",
+        "reduce_scatter_tensor",
+        "scatter",
+        "barrier",
+    ]
+
+    # 包装每个函数
+    for func_name in collective_funcs:
+        if hasattr(dist, func_name):
+            original_func = getattr(dist, func_name)
+            wrapped_func = create_collective_wrapper(
+                tracker, original_func, f"dist.{func_name}", pre_barrier, post_barrier
+            )
+            setattr(dist, func_name, wrapped_func)
+
+    # 记录包装完成信息
+    tracker._write_log(
+        f"Wrapped torch.distributed collective functions with pre_barrier={pre_barrier}, post_barrier={post_barrier}"
+    )
+
+
+# 高级用法：包装特定模块中的分布式操作
+def wrap_module_distributed_ops(module, tracker):
+    """包装模块中的所有使用分布式操作的方法"""
+    for name, method in inspect.getmembers(module, inspect.ismethod):
+        if "dist." in inspect.getsource(method):
+            setattr(module, name, create_collective_wrapper(tracker, method))

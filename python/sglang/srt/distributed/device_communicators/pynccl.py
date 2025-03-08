@@ -19,6 +19,7 @@ from sglang.srt.distributed.device_communicators.pynccl_wrapper import (
     ncclUniqueId,
 )
 from sglang.srt.distributed.utils import StatelessProcessGroup
+from sglang.srt.utils import CollectiveSyncTracker, SyncMode, wrap_torch_distributed
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,15 @@ class PyNcclCommunicator:
         # to use it, use under `with obj.change_state(enable=True)`, usually
         # when we are using CUDA graph.
         self.disabled = True
+
+        tracker = CollectiveSyncTracker(
+            log_dir="./dist_logs",
+            sync_mode=SyncMode.COUNTER,  # 使用计数器检查进行同步
+            timeout_seconds=60,  # 60秒超时检测
+            verbose=True,  # 打印详细日志
+        )
+
+        wrap_torch_distributed(tracker)
 
     def all_reduce(
         self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None

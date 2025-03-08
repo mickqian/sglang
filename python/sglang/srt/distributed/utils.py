@@ -209,6 +209,11 @@ class StatelessProcessGroup:
         can call `StatelessProcessGroup.create` to form a group, and then process A, B,
         C, and D can call `StatelessProcessGroup.create` to form another group.
         """  # noqa
+
+        import remote_pdb
+
+        print("initializing remote pdb")
+        remote_pdb.set_trace()
         store = TCPStore(
             host_name=host,
             port=port,
