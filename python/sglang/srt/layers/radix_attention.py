@@ -62,6 +62,11 @@ class RadixAttention(nn.Module):
         if k is not None:
             # For cross-layer sharing, kv can be None
             assert v is not None
+            # print(f"k shape: {k.shape}")
+            # print(f"tp_k_head_num: {self.tp_k_head_num}")
+            # print(f"qk_head_dim: {self.qk_head_dim}")
+            # print(f"tp_v_head_num: {self.tp_v_head_num}")
+            # print(f"v_head_dim: {self.v_head_dim}")
             k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
             v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
 

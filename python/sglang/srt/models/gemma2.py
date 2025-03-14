@@ -23,7 +23,7 @@ from transformers import PretrainedConfig
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.activation import GeluAndMul
-from sglang.srt.layers.layernorm import GemmaRMSNorm
+from sglang.srt.layers.layernorm import Gemma3RMSNorm
 from sglang.srt.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -86,6 +86,9 @@ class Gemma2MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+count = True
 
 
 class Gemma2Attention(nn.Module):
@@ -175,6 +178,14 @@ class Gemma2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        global count
+        if first:
+            print(f"before first attnaa")
+            print(f"q shape: {q.shape}")
+            print(f"k shape: {k.shape}")
+            print(f"q: {q}")
+            print(f"k: {k}")
+            first = False
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
@@ -211,14 +222,16 @@ class Gemma2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
+        self.input_layernorm = Gemma3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.pre_feedforward_layernorm = GemmaRMSNorm(
+        self.post_attention_layernorm = Gemma3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_feedforward_layernorm = GemmaRMSNorm(
+        self.pre_feedforward_layernorm = Gemma3RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = Gemma3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -272,7 +285,7 @@ class Gemma2Model(nn.Module):
             ),
             prefix=add_prefix("layers", prefix),
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Gemma3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's

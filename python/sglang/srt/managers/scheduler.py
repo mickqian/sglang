@@ -659,7 +659,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
             if isinstance(req.finished_reason, FINISH_ABORT):
                 self._add_request_to_queue(req)
                 return
-
+        print(f"recv_req.image_inputs: {recv_req.image_inputs}")
         # Handle multimodal inputs
         if recv_req.image_inputs is not None:
             image_inputs = ImageInputs.from_dict(recv_req.image_inputs)
@@ -1677,9 +1677,16 @@ def run_scheduler_process(
     dp_rank: Optional[int],
     pipe_writer,
 ):
+
+    # Generate the prefix
+    if dp_rank is None:
+        prefix = f" TP{tp_rank}"
+    else:
+        prefix = f" DP{dp_rank} TP{tp_rank}"
+
     # Config the process
     # kill_itself_when_parent_died()  # This is disabled because it does not work for `--dp 2`
-    setproctitle.setproctitle(f"sglang::scheduler_{dp_rank}")
+    setproctitle.setproctitle(f"sglang::scheduler{prefix.replace(' ', '_')}")
     faulthandler.enable()
     parent_process = psutil.Process().parent()
 
@@ -1688,10 +1695,6 @@ def run_scheduler_process(
         dp_rank = int(os.environ["SGLANG_DP_RANK"])
 
     # Configure the logger
-    if dp_rank is None:
-        prefix = f" TP{tp_rank}"
-    else:
-        prefix = f" DP{dp_rank} TP{tp_rank}"
     configure_logger(server_args, prefix=prefix)
     suppress_other_loggers()
 

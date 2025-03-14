@@ -718,22 +718,22 @@ def _wait_and_warmup(
         ).tolist()
         json_data["sampling_params"]["max_new_tokens"] = 0
 
-    try:
-        for i in range(server_args.dp_size):
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=600,
-            )
-            assert res.status_code == 200, f"{res}"
-    except Exception:
-        last_traceback = get_exception_traceback()
-        if pipe_finish_writer is not None:
-            pipe_finish_writer.send(last_traceback)
-        logger.error(f"Initialization failed. warmup error: {last_traceback}")
-        kill_process_tree(os.getpid())
-        return
+    # try:
+    #     for i in range(server_args.dp_size):
+    #         res = requests.post(
+    #             url + request_name,
+    #             json=json_data,
+    #             headers=headers,
+    #             timeout=600,
+    #         )
+    #         assert res.status_code == 200, f"{res}"
+    # except Exception:
+    #     last_traceback = get_exception_traceback()
+    #     if pipe_finish_writer is not None:
+    #         pipe_finish_writer.send(last_traceback)
+    #     logger.error(f"Initialization failed. warmup error: {last_traceback}")
+    #     kill_process_tree(os.getpid())
+    #     return
 
     # Debug print
     # logger.info(f"{res.json()=}")

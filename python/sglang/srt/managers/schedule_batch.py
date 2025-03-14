@@ -458,7 +458,6 @@ class Req:
             return
 
         last_token_id = self.output_ids[-1]
-
         if not self.sampling_params.ignore_eos:
             matched_eos = False
 
