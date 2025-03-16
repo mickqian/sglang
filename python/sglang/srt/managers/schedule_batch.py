@@ -158,7 +158,8 @@ class ImageInputs:
     aspect_ratio_mask: Optional[List[torch.Tensor]] = None
 
     # QWen2-VL related
-    image_grid_thws: List[Tuple[int, int, int]] = None
+    # [num_of_images, t, h, w]
+    image_grid_thws: torch.Tensor = None
     mrope_position_delta: Optional[torch.Tensor] = None
     # Qwen2-VL video related
     video_token_id: Optional[int] = None
@@ -218,12 +219,17 @@ class ImageInputs:
 
         return ret
 
-    def merge(self, other):
+    def merge(self, other: ImageInputs):
         """
         merge image inputs when requests are being merged
         """
-        assert self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
-        self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
+        if isinstance(self.pixel_values, list):
+            # in some rare cases, pixel values are list of patches with different shapes
+            # e.g. minicpm
+            self.pixel_values += other.pixel_values
+        else:
+            assert self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
+            self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
 
         # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
         # Please note that if the `input_ids` is later used in the model forward,
@@ -231,7 +237,9 @@ class ImageInputs:
         # errors in cuda kernels. See also llava.py for example.
         self.image_hashes += other.image_hashes
         self.pad_values = [x % (1 << 30) for x in self.image_hashes]
-
+        print(f"self. image_grid_thws: {self.image_grid_thws}")
+        print(f"other. image_grid_thws: {other.image_grid_thws}")
+        # args needed to be merged
         optional_args = [
             "image_sizes",
             "image_offsets",
@@ -242,10 +250,13 @@ class ImageInputs:
             "image_grid_thws",
             "image_seq_mask",
             "image_spatial_crop",
+            "tgt_sizes",
         ]
         for arg in optional_args:
             if getattr(self, arg, None) is not None:
                 setattr(self, arg, getattr(self, arg) + getattr(other, arg))
+        print(f"self.image_grid_thws: {other.image_grid_thws}")
+        # other args would be kept intact
 
 
 class Req:

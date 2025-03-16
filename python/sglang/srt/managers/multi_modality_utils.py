@@ -1,7 +1,10 @@
 from abc import abstractmethod
 from typing import Callable, List, Optional, Tuple
 
-from sglang.srt.managers.schedule_batch import ImageInputs
+import torch
+from torch import nn
+
+from sglang.srt.managers.schedule_batch import ImageInputs, logger
 from sglang.utils import logger
 
 
@@ -132,3 +135,89 @@ class MultModalityDataPaddingPatternSingleToken(MultiModalityDataPaddingPattern)
         input_ids_with_image.extend(input_ids[image_indices[-1] + 1 :])
 
         return input_ids_with_image
+
+
+def embed_image_inputs(
+    image_input: ImageInputs,
+    input_ids: torch.Tensor,
+    input_embedding: nn.Embedding,
+    image_embedding_func,
+) -> Optional[torch.Tensor]:
+    if image_input is None:
+        return None
+
+    special_image_mask = torch.isin(
+        input_ids,
+        torch.tensor(image_input.pad_values, device=input_ids.device),
+    ).unsqueeze(-1)
+
+    num_image_tokens_in_input_ids = special_image_mask.sum()
+
+    if num_image_tokens_in_input_ids == 0:
+        inputs_embeds = input_embedding(input_ids)
+    else:
+        image_embedding = image_embedding_func(image_input)
+
+        # assert image_embedding.shape[0] == input_ids.shape[0], f"{image_embedding.shape[0]} vs input_ids.shape[0]"
+
+        print(f"image_embedding: {image_embedding.shape}")
+
+        if image_embedding.dim() == 2:
+            num_image_tokens_in_embedding = image_embedding.shape[0]
+        else:
+            num_image_tokens_in_embedding = (
+                image_embedding.shape[0] * image_embedding.shape[1]
+            )
+        if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
+            num_image = num_image_tokens_in_input_ids // image_embedding.shape[1]
+            image_embedding = image_embedding[:num_image, :]
+            logger.warning(
+                f"Number of images does not match number of special image tokens in the input text. "
+                f"Got {num_image_tokens_in_input_ids} image tokens in the text but {num_image_tokens_in_embedding} "
+                "tokens from image embeddings."
+            )
+
+        vocab_size = input_embedding.num_embeddings
+        # Important: clamp after getting original image regions
+        # Clamp input ids. This is because the input_ids for the image tokens are
+        # filled with the hash values of the image for the prefix matching in the radix attention.
+        # There values are useless because their embeddings will be replaced by vision embeddings anyway.
+        input_ids.clamp_(min=0, max=vocab_size - 1)
+
+        inputs_embeds = input_embedding(input_ids)
+
+        special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
+            inputs_embeds.device
+        )
+
+        print(f"special_image_mask: {special_image_mask.shape}")
+        print(f"inputs_embeds: {inputs_embeds.shape}")
+        print(f"image_embedding: {image_embedding}")
+        print(f"image_embedding: {image_embedding.shape}")
+        print(f"input_ids: {input_ids.shape}")
+        image_embedding = image_embedding.to(inputs_embeds.device, inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            special_image_mask, image_embedding
+        )
+    return inputs_embeds
+
+
+def embed_image_embedding(
+    inputs_embeds: torch.Tensor,
+    image_embedding: torch.Tensor,
+    image_bounds: torch.Tensor,
+) -> torch.Tensor:
+    if len(image_bounds) > 0:
+        image_indices = torch.stack(
+            [
+                torch.arange(start, end, dtype=torch.long)
+                for start, end in image_bounds.tolist()
+            ]
+        ).to(inputs_embeds.device)
+
+        inputs_embeds.scatter_(
+            0,
+            image_indices.view(-1, 1).repeat(1, inputs_embeds.shape[-1]),
+            image_embedding.view(-1, image_embedding.shape[-1]),
+        )
+    return inputs_embeds

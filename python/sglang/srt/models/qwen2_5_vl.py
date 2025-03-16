@@ -26,7 +26,6 @@ import logging
 from functools import lru_cache, partial
 from typing import Iterable, List, Optional, Tuple, Type
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,10 +35,7 @@ from transformers.activations import ACT2FN
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 
 from sglang.srt.configs import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -47,14 +43,15 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.managers.multi_modality_padding import (
+from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
+    embed_image_inputs,
 )
 from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
-from sglang.srt.models.qwen2_vl import Qwen2VLImageInputs, Qwen2VLVideoInputs
+from sglang.srt.models.qwen2_vl import Qwen2VLVideoInputs
 from sglang.srt.utils import add_prefix
 
 logger = logging.getLogger(__name__)
@@ -319,12 +316,13 @@ class Qwen2_5_VisionTransformer(nn.Module):
         )
 
     def get_window_index(self, grid_thw):
-        window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
         vit_merger_window_size = (
             self.window_size // self.spatial_merge_size // self.patch_size
         )
+
+        window_indices: list = []
 
         for grid_t, grid_h, grid_w in grid_thw:
             llm_grid_h, llm_grid_w = (
@@ -362,7 +360,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
             window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
         window_index = torch.cat(window_index, dim=0)
-
         return window_index, cu_window_seqlens
 
     @property
@@ -375,6 +372,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
+        print(f"{grid_thw}")
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
@@ -425,6 +423,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         seq_len, _ = x.size()
 
         x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        print(f"x shape: {x.shape}")
+        print(f"window_index: {window_index}")
+        print(f"window_index: {window_index.shape}")
         x = x[window_index, :, :]
         x = x.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
@@ -524,9 +525,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def _process_image_input(self, image_input: Qwen2VLImageInputs) -> torch.Tensor:
-        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values, grid_thw=image_input["image_grid_thw"])
+    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
+        pixel_values = image_input.pixel_values.type(self.visual.dtype)
+        print(f"pixel_values shape: {pixel_values.shape}")
+        print(f"image_grid_thws: {image_input.image_grid_thws}")
+        image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
+        print(f"image_embeds: {image_embeds.shape}")
+
         return image_embeds
 
     def _process_video_input(self, video_input: Qwen2VLVideoInputs) -> torch.Tensor:
@@ -558,17 +563,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
             positions = forward_batch.mrope_positions
 
-        image_inputs = None
-        if forward_batch.image_inputs is not None:
-            image_inputs = [
-                img for img in forward_batch.image_inputs if img is not None
-            ]
+        image = forward_batch.get_merged_image_inputs()
 
-        if (
-            forward_batch.forward_mode.is_decode()
-            or image_inputs is None
-            or len(image_inputs) == 0
-        ):
+        if forward_batch.forward_mode.is_decode() or image is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
         else:
             if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
@@ -577,67 +574,23 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-            # Clamp input ids. This is because the input_ids for the image tokens are
-            # filled with the hash values of the image for the prefix matching in the radix attention.
-            # There values are useless because their embeddings will be replaced by vision embeddings anyway.
-            input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
-            # [B, s, hidden_size]
-            inputs_embeds = self.model.embed_tokens(input_ids)
-            extend_start_loc_cpu = forward_batch.extend_start_loc.cpu().numpy()
-            prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu
-            for i, image in enumerate(forward_batch.image_inputs):
-                if image is None or image.pixel_values is None:
-                    continue
-                start_idx = extend_start_loc_cpu[i]
-                prefix_len = prefix_lens_cpu[i]
+            tp_size = get_tensor_model_parallel_world_size()
 
-                pixel_values = image.pixel_values.to(device="cuda")
-
-                image_grid_thws = torch.tensor(
-                    np.array(image.image_grid_thws), device="cuda"
-                )
-                image_offsets = image.image_offsets
-                image_input = Qwen2VLImageInputs(
-                    pixel_values=pixel_values, image_grid_thw=image_grid_thws
-                )
-                image_embeds = self._process_image_input(image_input)
-
-                image_embeds_offset = 0
-                for idx, image_offset in enumerate(image_offsets):
-                    if image_offset < prefix_len:
-                        continue
-                    num_image_tokens = self.calculate_num_image_tokens(
-                        image_grid_thws[idx]
-                    )
-
-                    left_idx = start_idx + (image_offset - prefix_len)
-                    right_idx = left_idx + num_image_tokens
-
-                    tp_size = get_tensor_model_parallel_world_size()
-
-                    hidden_size = image_embeds.shape[-1]
-
-                    if hidden_size % tp_size != 0:
-                        padding_size = tp_size - (hidden_size % tp_size)
-                        image_embeds = F.pad(image_embeds, (0, padding_size))
-                        inputs_embeds = F.pad(inputs_embeds, (0, padding_size))
-
-                    hidden_chunk_size = image_embeds.shape[-1] // tp_size
-                    rank = get_tensor_model_parallel_rank()
-                    start_dim = rank * hidden_chunk_size
-                    end_dim = (rank + 1) * hidden_chunk_size
-                    inputs_embeds[left_idx:right_idx, ..., start_dim:end_dim] = (
-                        image_embeds[
-                            image_embeds_offset : image_embeds_offset
-                            + num_image_tokens,
-                            ...,
-                            start_dim:end_dim,
-                        ]
-                    )
-                    image_embeds_offset += num_image_tokens
+            # hidden_chunk_size = image_embeds.shape[-1] // tp_size
+            # rank = get_tensor_model_parallel_rank()
+            # if hidden_size % tp_size != 0:
+            #     padding_size = tp_size - (hidden_size % tp_size)
+            #     image_embeds = F.pad(image_embeds, (0, padding_size))
+            #     inputs_embeds = F.pad(inputs_embeds, (0, padding_size))
+            inputs_embeds = embed_image_inputs(
+                image_input=image,
+                input_ids=input_ids,
+                input_embedding=self.model.embed_tokens,
+                image_embedding_func=self._process_image_input,
+            )
 
         hidden_states = self.model(
-            input_ids=input_ids,
+            input_ids=None,
             positions=positions,
             forward_batch=forward_batch,
             input_embeds=inputs_embeds,

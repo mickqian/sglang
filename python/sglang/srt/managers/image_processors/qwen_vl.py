@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 from typing import List, Union
 
 from PIL import Image
@@ -43,7 +44,7 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
             "video_grid_thws": getattr(result, "video_grid_thws", None),
         }
 
-    async def _process_images(self, images, input_text) -> dict:
+    async def _process_single_image(self, images, input_text) -> dict:
         if self.executor is not None:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -65,6 +66,7 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
         *args,
         **kwargs,
     ):
+        start = time.time()
         if not image_data:
             return None
         if isinstance(image_data, str):
@@ -138,14 +140,42 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
 
         images = [resize_image(image) for image in base_output.all_frames]
 
-        ret = await self._process_images(images, base_output.input_text)
+        # res = []
+        # for image in images:
+        #     res.append(self._process_single_image([image], base_output.input_text))
+        # ret = await asyncio.gather(*res)
+
+        # image_grid_thw = []
+        # video_grid_thws = []
+        # pixel_values = []
+        # input_ids = (ret[0]["input_ids"].flatten().tolist(),)
+        # for single_image_res in ret:
+        #     image_grid_thw = torch.concat(
+        #         [image_grid_thw, single_image_res["image_grid_thw"]], dim=0
+        #     )
+        #     video_grid_thws = torch.concat(
+        #         [video_grid_thws, single_image_res["video_grid_thws"]], dim=0
+        #     )
+        #     pixel_values = torch.concat(
+        #         [pixel_values, single_image_res["pixel_values"]], dim=0
+        #     )
+
+        ret = await self._process_single_image(
+            images=images, input_text=base_output.input_text
+        )
+
+        print(
+            f"image processor for {base_output.image_hashes.__len__()} images took: {time.time() - start}"
+        )
+        image_grid_thws = [ret["image_grid_thw"]]
+        video_grid_thws = [ret["video_grid_thws"]]
         return {
             "input_ids": ret["input_ids"].flatten().tolist(),
             "pixel_values": ret["pixel_values"],
             "image_hashes": base_output.image_hashes,
             "modalities": request_obj.modalities or ["image"],
-            "image_grid_thws": ret["image_grid_thw"],
-            "video_grid_thws": ret["video_grid_thws"],
+            "image_grid_thws": image_grid_thws,
+            "video_grid_thws": video_grid_thws,
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
             "im_token_id": self.image_token_id,

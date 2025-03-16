@@ -358,6 +358,14 @@ class ForwardBatch:
 
         return merged
 
+    def contains_image_inputs(self) -> bool:
+        """ """
+        return any(
+            image_input.pixel_values is not None and image_input.pixel_values is not []
+            for image_input in self.image_inputs
+            if image_input is not None
+        )
+
     def _compute_mrope_positions(
         self, model_runner: ModelRunner, batch: ModelWorkerBatch
     ):

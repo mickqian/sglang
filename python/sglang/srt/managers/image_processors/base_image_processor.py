@@ -190,13 +190,8 @@ class BaseImageProcessor(ABC):
                     new_text += text_part
 
             except Exception as e:
-                import openai
-
                 logger.error(f"An exception occurred while loading images: {e}")
-                raise BadRequestError(
-                    f"An exception occurred while loading images: {e}"
-                )
-                continue
+                raise IOError(f"An exception occurred while loading images: {e}")
 
         return BaseImageProcessorOutput(
             image_hashes=hashes,

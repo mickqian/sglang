@@ -47,11 +47,12 @@ from sglang.srt.configs.janus_pro import *
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.managers.multi_modality_padding import (
+from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
+    embed_image_inputs,
 )
 from sglang.srt.managers.schedule_batch import ImageInputs
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
 from sglang.utils import logger
@@ -1958,82 +1959,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         )
         self.logits_processor = LogitsProcessor(config)
 
-    def prepare_images_seq_mask(
-        self, input_ids: torch.Tensor, image_inputs: ImageInputs
-    ) -> Optional[torch.LongTensor]:
-        images_seq_mask = torch.isin(
-            input_ids, torch.tensor(image_inputs.pad_values, device=input_ids.device)
-        )
-        if images_seq_mask.sum() == 0:
-            # sometimes image_inputs is not empty, but input_ids contain no image token because of prefix-cache
-            return None
-        else:
-            return images_seq_mask
-
-    @torch.no_grad()
-    def forward(
-        self,
-        input_ids: torch.LongTensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-    ) -> torch.Tensor:
-
-        inputs_embeds = None
-        if (
-            forward_batch.image_inputs is not None
-            and len(forward_batch.image_inputs) != 0
-            and forward_batch.image_inputs[0] is not None
-        ):
-
-            image_inputs = forward_batch.image_inputs[0]
-
-            images_seq_mask = self.prepare_images_seq_mask(
-                input_ids=input_ids, image_inputs=image_inputs
-            )
-
-            if images_seq_mask is not None:
-                input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
-                inputs_embeds = self.prepare_inputs_embeds(
-                    input_ids=input_ids,
-                    pixel_values=image_inputs.pixel_values,
-                    images_seq_mask=images_seq_mask,
-                    images_emb_mask=image_inputs.images_emb_mask,
-                )
-                input_ids = None
-
-        if input_ids is not None:
-            input_ids.clamp_(min=0, max=self.config.vocab_size - 1)
-
-        return self.language_model(
-            input_ids=input_ids,
-            positions=positions,
-            forward_batch=forward_batch,
-            input_embeds=inputs_embeds,
-            get_embedding=False,
-        )
-
-    def prepare_inputs_embeds(
-        self,
-        input_ids: torch.LongTensor,
-        pixel_values: torch.FloatTensor,
-        images_seq_mask: torch.LongTensor,
-        images_emb_mask: torch.BoolTensor,
-        **_kwargs,
-    ):
-        """
-
-        Args:
-            input_ids (torch.LongTensor): [b, T]
-            pixel_values (torch.FloatTensor):   [b, n_images, 3, h, w]
-            images_seq_mask (torch.BoolTensor): [b, T]
-            images_emb_mask (torch.BoolTensor): [b, n_images, n_image_tokens]
-
-            assert torch.sum(images_seq_mask) == torch.sum(images_emb_mask)
-
-        Returns:
-            input_embeds (torch.Tensor): [b, T, D]
-        """
-
+    def get_image_embedding(self, image_input: ImageInputs) -> torch.Tensor:
+        pixel_values = image_input.pixel_values
         bs, n = pixel_values.shape[0:2]
         pixel_values = pixel_values.to(
             device=self.vision_model.device, dtype=self.vision_model.dtype
@@ -2045,18 +1972,38 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         # [b x n, T2, D] -> [b, n x T2, D]
         images_embeds = rearrange(images_embeds, "(b n) t d -> b (n t) d", b=bs, n=n)
-        # [b, n, T2] -> [b, n x T2]
-        images_emb_mask = rearrange(images_emb_mask, "b n t -> b (n t)")
 
-        # [b, T, D]
-        # ignore the image embeddings
-        input_ids[input_ids < 0] = 0
-        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+        return images_embeds
 
-        # replace with the image embeddings
-        inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]
+    @torch.no_grad()
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
 
-        return inputs_embeds
+        merged_image_inputs = forward_batch.get_merged_image_inputs()
+        if (
+            forward_batch.forward_mode == ForwardMode.DECODE
+            or merged_image_inputs is None
+        ):
+            inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+        else:
+            inputs_embeds = embed_image_inputs(
+                image_input=merged_image_inputs,
+                input_ids=input_ids,
+                input_embedding=self.language_model.model.embed_tokens,
+                image_embedding_func=self.get_image_embedding,
+            )
+
+        return self.language_model(
+            input_ids=None,
+            positions=positions,
+            forward_batch=forward_batch,
+            input_embeds=inputs_embeds,
+            get_embedding=False,
+        )
 
     def prepare_gen_img_embeds(self, image_ids: torch.LongTensor):
         return self.gen_aligner(self.gen_embed(image_ids))
