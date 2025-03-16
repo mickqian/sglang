@@ -368,7 +368,6 @@ class CLIPVisionTransformer(nn.Module):
         self,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         hidden_states = self.embeddings(pixel_values.to(self.device))
         hidden_states = self.pre_layrnorm(hidden_states)
 
@@ -456,12 +455,18 @@ class CLIPModel(nn.Module):
         get_embedding: bool = True,
     ):
         assert get_embedding, "CLIPEmbeddingModel is only used for embedding"
-        image_inputs = None
+        mm_inputs = []
         if forward_batch.mm_inputs is not None:
-            image_inputs = forward_batch.mm_inputs
-
-        if image_inputs is not None and image_inputs[0] is not None:
-            vision_outputs = self.vision_model(image_inputs[0].pixel_values)
+            mm_inputs = forward_batch.mm_inputs
+        pixel_values_list = [
+            item.pixel_values
+            for item in flatten_nested_list(
+                [mm_input.items for mm_input in mm_inputs if mm_input is not None]
+            )
+        ]
+        if len(pixel_values_list) != 0:
+            pixel_values = torch.concat(pixel_values_list)
+            vision_outputs = self.vision_model(pixel_values)
             pooled_output = vision_outputs[:, 0, :]
             image_embeds = self.visual_projection(pooled_output)
             image_embeds = nn.functional.normalize(image_embeds, p=2, dim=1)
