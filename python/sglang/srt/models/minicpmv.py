@@ -54,7 +54,7 @@ from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     embed_image_inputs,
 )
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -1075,7 +1075,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         )
         return self.resampler(vision_embedding, tgt_sizes)
 
-    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
         im_start_id: int = image_inputs.im_start_id
         im_end_id: int = image_inputs.im_end_id
