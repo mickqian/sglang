@@ -231,6 +231,13 @@ class ImageInputs:
             assert self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
             self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
 
+        if self.image_grid_thws is None:
+            self.image_grid_thws = other.image_grid_thws
+        elif other.image_grid_thws is not None:
+            self.image_grid_thws = torch.concat(
+                [self.image_grid_thws, other.image_grid_thws]
+            )
+
         # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
         # Please note that if the `input_ids` is later used in the model forward,
         # you also need to clamp the values within the range of [0, vocab_size) to avoid out-of-bound
@@ -247,7 +254,7 @@ class ImageInputs:
             # "modalities", # modalities should be ["multi-images"] (one entry) even for multiple images
             "aspect_ratio_ids",
             "aspect_ratio_mask",
-            "image_grid_thws",
+            # "image_grid_thws",
             "image_seq_mask",
             "image_spatial_crop",
             "tgt_sizes",
