@@ -370,33 +370,30 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
-        print(f"{grid_thw}")
         for i in range(grid_thw.size(0)):
             t, h, w = grid_thw[i].tolist()
-            for t, h, w in grid_thw:
-                hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
 
-                hpos_ids =
-                    hpos_ids.reshape(
-                        h // self.spatial_merge_size,
-                        self.spatial_merge_size,
-                        w // self.spatial_merge_size,
-                        self.spatial_merge_size,
-                    )
-                    hpos_ids = hpos_ids.permute(0, 2, 1, 3)
-                    hpos_ids = hpos_ids.flatten()
+            hpos_ids = hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            hpos_ids = hpos_ids.permute(0, 2, 1, 3)
+            hpos_ids = hpos_ids.flatten()
 
-                wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-                   wpos_ids = wpos_ids.reshape(
-                        h // self.spatial_merge_size,
-                        self.spatial_merge_size,
-                        w // self.spatial_merge_size,
-                        self.spatial_merge_size,
-                    )
-                    wpos_ids = wpos_ids.permute(0, 2, 1, 3)
-                    wpos_ids = wpos_ids.flatten()
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            wpos_ids = wpos_ids.permute(0, 2, 1, 3)
+            wpos_ids = wpos_ids.flatten()
 
-                pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
@@ -426,9 +423,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         seq_len, _ = x.size()
 
         x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        print(f"x shape: {x.shape}")
-        print(f"window_index: {window_index}")
-        print(f"window_index: {window_index.shape}")
         x = x[window_index, :, :]
         x = x.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
