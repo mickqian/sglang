@@ -321,9 +321,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vit_merger_window_size = (
             self.window_size // self.spatial_merge_size // self.patch_size
         )
-
-        window_indices: list = []
-
+        window_index: list = []
         for grid_t, grid_h, grid_w in grid_thw:
             llm_grid_h, llm_grid_w = (
                 grid_h // self.spatial_merge_size,
@@ -372,27 +370,30 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
-        print(f"{grid_thw}")
-        for t, h, w in grid_thw:
+        for i in range(grid_thw.size(0)):
+            t, h, w = grid_thw[i].tolist()
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            hpos_ids = hpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            hpos_ids = hpos_ids.permute(0, 2, 1, 3)
-            hpos_ids = hpos_ids.flatten()
+
+            hpos_ids =
+                hpos_ids.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                hpos_ids = hpos_ids.permute(0, 2, 1, 3)
+                hpos_ids = hpos_ids.flatten()
 
             wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
-            wpos_ids = wpos_ids.reshape(
-                h // self.spatial_merge_size,
-                self.spatial_merge_size,
-                w // self.spatial_merge_size,
-                self.spatial_merge_size,
-            )
-            wpos_ids = wpos_ids.permute(0, 2, 1, 3)
-            wpos_ids = wpos_ids.flatten()
+                wpos_ids =wpos_ids.reshape(
+                    h // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                    w // self.spatial_merge_size,
+                    self.spatial_merge_size,
+                )
+                wpos_ids = wpos_ids.permute(0, 2, 1, 3)
+                wpos_ids = wpos_ids.flatten()
+
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
@@ -423,9 +424,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         seq_len, _ = x.size()
 
         x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        print(f"x shape: {x.shape}")
-        print(f"window_index: {window_index}")
-        print(f"window_index: {window_index.shape}")
         x = x[window_index, :, :]
         x = x.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
@@ -437,9 +435,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
         position_embeddings = (emb.cos(), emb.sin())
 
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(dim=0, dtype=torch.int32)
+        cu_seqlens = torch.cat(
+            [
+                torch.tensor([0], device=grid_thw.device),
+                (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).cumsum(dim=0),
+            ]
+        )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
@@ -503,18 +504,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
-    def calculate_num_image_tokens(self, image_grid_thw: Tuple[int, int, int]):
-        processor = cached_get_processor(self.config._name_or_path)
-        grid_t, grid_h, grid_w = image_grid_thw
-        num_image_tokens = (
-            grid_t
-            * grid_h
-            * grid_w
-            // processor.image_processor.merge_size
-            // processor.image_processor.merge_size
-        )
-        return num_image_tokens
-
     def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
         # Get all special token IDs
         im_start_id: int = image_inputs.im_start_id
@@ -527,11 +516,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
     def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values.type(self.visual.dtype)
-        print(f"pixel_values shape: {pixel_values.shape}")
-        print(f"image_grid_thws: {image_input.image_grid_thws}")
         image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
-        print(f"image_embeds: {image_embeds.shape}")
-
         return image_embeds
 
     def _process_video_input(self, video_input: Qwen2VLVideoInputs) -> torch.Tensor:

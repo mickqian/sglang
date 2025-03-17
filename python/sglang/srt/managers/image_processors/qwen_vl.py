@@ -3,6 +3,7 @@ import math
 import time
 from typing import List, Union
 
+import torch
 from PIL import Image
 
 from sglang.srt.managers.image_processor import BaseImageProcessor
@@ -167,8 +168,9 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
         print(
             f"image processor for {base_output.image_hashes.__len__()} images took: {time.time() - start}"
         )
-        image_grid_thws = [ret["image_grid_thw"]]
-        video_grid_thws = [ret["video_grid_thws"]]
+        image_grid_thws = torch.concat([ret["image_grid_thw"]])
+        video_grid_thws = None
+
         return {
             "input_ids": ret["input_ids"].flatten().tolist(),
             "pixel_values": ret["pixel_values"],

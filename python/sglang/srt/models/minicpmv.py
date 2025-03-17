@@ -859,8 +859,8 @@ class MiniCPMVBaseModel(nn.Module):
                     continue
                 kwargs.update(
                     {
-                        "pixel_values": (image_input.pixel_values),
-                        "tgt_sizes": (image_input.tgt_sizes),
+                        "pixel_values": image_input.pixel_values,
+                        "tgt_sizes": image_input.tgt_sizes,
                         "im_start_id": image_input.im_start_id,
                         "im_end_id": image_input.im_end_id,
                         "slice_start_id": image_input.slice_start_id,
