@@ -3,24 +3,24 @@ import importlib
 import logging
 import pkgutil
 from functools import lru_cache
+from typing import Union
 
+from torch import Tensor
 from transformers import IMAGE_PROCESSOR_MAPPING
 
 from sglang.srt.managers.image_processors.base_image_processor import (
     BaseImageProcessor,
     DummyImageProcessor,
 )
-from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
+MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
 
 IMAGE_PROCESSOR_MAPPING = {}
 
 
-def get_image_processor(
-    hf_config, server_args: ServerArgs, processor
-) -> BaseImageProcessor:
+def get_image_processor(hf_config, server_args, processor) -> BaseImageProcessor:
     for model_cls, processor_cls in IMAGE_PROCESSOR_MAPPING.items():
         if model_cls.__name__ in hf_config.architectures:
             return processor_cls(hf_config, server_args, processor)

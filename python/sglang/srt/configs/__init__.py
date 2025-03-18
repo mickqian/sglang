@@ -4,6 +4,7 @@ from sglang.srt.configs.deepseekvl2 import DeepseekVL2Config
 from sglang.srt.configs.exaone import ExaoneConfig
 from sglang.srt.configs.gemma3 import Gemma3Config, Gemma3TextConfig
 from sglang.srt.configs.janus_pro import MultiModalityConfig
+from sglang.srt.configs.pixtral import Mistral3Config, PixtralProcessorAdapter
 from sglang.srt.configs.qwen2_5_vl_config import (
     Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
@@ -19,4 +20,6 @@ __all__ = [
     "MultiModalityConfig",
     "Gemma3Config",
     "Gemma3TextConfig",
+    "PixtralProcessorAdapter",
+    "Mistral3Config",
 ]

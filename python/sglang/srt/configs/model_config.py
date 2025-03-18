@@ -21,7 +21,11 @@ from typing import List, Optional, Set, Union
 import torch
 from transformers import PretrainedConfig
 
-from sglang.srt.hf_transformers_utils import get_config, get_context_length
+from sglang.srt.hf_transformers_utils import (
+    get_config,
+    get_context_length,
+    get_hf_text_config,
+)
 from sglang.srt.layers.quantization import QUANTIZATION_METHODS
 from sglang.srt.utils import get_bool_env_var, is_hip
 
@@ -57,7 +61,7 @@ class ModelConfig:
         if override_config_file and override_config_file.strip():
             kwargs["_configuration_file"] = override_config_file.strip()
 
-        self.hf_config = get_config(
+        self.hf_config, config_format = get_config(
             self.model_path,
             trust_remote_code=trust_remote_code,
             revision=revision,
@@ -75,7 +79,7 @@ class ModelConfig:
         self.is_image_gen = is_image_gen_model(self.hf_config.architectures)
         self.is_audio_model = is_audio_model(self.hf_config.architectures)
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
-        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.dtype = _get_and_verify_dtype(self.hf_config, self.hf_text_config, dtype)
 
         # Derive context length
         derived_context_len = get_context_length(self.hf_text_config)
@@ -164,7 +168,10 @@ class ModelConfig:
         self._verify_quantization()
 
         # Cache attributes
-        self.hf_eos_token_id = self.get_hf_eos_token_id()
+
+        self.hf_eos_token_id = self.get_hf_eos_token_id(config=self.hf_config)
+        if not self.hf_eos_token_id:
+            self.hf_eos_token_id = self.get_hf_eos_token_id(config=self.hf_text_config)
         self.image_token_id = getattr(self.hf_config, "image_token_id", None)
 
     # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/config.py#L289
@@ -317,8 +324,8 @@ class ModelConfig:
                     self.quantization,
                 )
 
-    def get_hf_eos_token_id(self) -> Optional[Set[int]]:
-        eos_ids = getattr(self.hf_config, "eos_token_id", None)
+    def get_hf_eos_token_id(self, config) -> Optional[Set[int]]:
+        eos_ids = getattr(config, "eos_token_id", None)
         if eos_ids:
             # it can be either int or list of int
             eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
@@ -348,31 +355,6 @@ class ModelConfig:
                 self.model_path = client.get_local_dir()
 
 
-def get_hf_text_config(config: PretrainedConfig):
-    """Get the "sub" config relevant to llm for multi modal models.
-    No op for pure text models.
-    """
-    class_name = config.architectures[0]
-    if class_name.startswith("Llava") and class_name.endswith("ForCausalLM"):
-        # We support non-hf version of llava models, so we do not want to
-        # read the wrong values from the unused default text_config.
-        # NOTE(HandH1998): We set `torch_dtype` of config to `torch.float16` for the weights, as
-        # `torch.float16` is default used for image features in `python/sglang/srt/models/llava.py`.
-        setattr(config, "torch_dtype", torch.float16)
-        return config
-
-    if hasattr(config, "text_config"):
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
-    if hasattr(config, "language_config"):
-        return config.language_config
-    else:
-        return config
-
-
 # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -386,25 +368,34 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
 def _get_and_verify_dtype(
     config: PretrainedConfig,
+    text_config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
+    config_dtype = getattr(text_config, "torch_dtype", None)
     if config_dtype is None:
         config_dtype = torch.float32
-
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                if config.model_type.startswith("gemma"):
-                    if config.model_type == "gemma":
+                if text_config.model_type.startswith("gemma"):
+                    if text_config.model_type == "gemma":
                         gemma_version = ""
                     else:
-                        gemma_version = config.model_type[5]
+                        gemma_version = text_config.model_type[5]
                     logger.info(
                         f"For Gemma {gemma_version}, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16."
+                    )
+                    torch_dtype = torch.bfloat16
+                elif text_config.model_type.startswith(
+                    "mistral"
+                ) and config.model_type.startswith("mistral3"):
+                    logger.info(
+                        f"For {text_config.model_type}, we downcast float32 to bfloat16 instead "
                         "of float16 by default. Please specify `dtype` if you "
                         "want to use float16."
                     )
@@ -460,6 +451,7 @@ def is_generation_model(model_architectures: List[str], is_embedding: bool = Fal
 
 
 multimodal_model_archs = [
+    "DeepseekVL2ForCausalLM",
     "LlavaLlamaForCausalLM",
     "LlavaQwenForCausalLM",
     "LlavaMistralForCausalLM",
@@ -472,7 +464,7 @@ multimodal_model_archs = [
     "Qwen2_5_VLForConditionalGeneration",
     "MiniCPMV",
     "MultiModalityCausalLM",
-    "DeepseekVL2ForCausalLM",
+    "Mistral3ForConditionalGeneration",
 ]
 
 

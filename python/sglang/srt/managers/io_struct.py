@@ -341,7 +341,6 @@ class EmbeddingReqInput:
 
         if self.batch_size > 1:
             self.is_single = False
-
         # Fill in default arguments
         if self.is_single:
             if self.rid is None:

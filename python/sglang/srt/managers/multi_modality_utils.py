@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -84,57 +84,31 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
         return padded_ids
 
 
-class MultModalityDataPaddingPatternSingleToken(MultiModalityDataPaddingPattern):
-    """In this pattern, data is represented with a special token_id ( image_inputs.im_token_id ),
-         which needs first to be expanded to multiple tokens, then replaced with their padding values
+class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern):
+    """In this pattern, data tokens should be represented as image tokens (e.g. <image><image>....<image>)"""
 
-    This strategy should be used when a single data token represents content that should
-    be expanded to multiple tokens during processing.
-    """
+    def __init__(self, image_token_id: torch.Tensor) -> None:
+        self.image_token_id = image_token_id
 
-    def __init__(
-        self, num_data_token_calc_func: Callable[[Tuple[int, int, int]], int]
-    ) -> None:
-        self.num_data_token_calc_func = num_data_token_calc_func
-
-    def pad_input_tokens(
-        self, input_ids: List[int], image_inputs: ImageInputs
-    ) -> List[int]:
+    def pad_input_tokens(self, input_ids: List[int], image_inputs) -> List[int]:
         """
-        This function will follow the procedure of:
-            1. the data token will be expanded, of which the final number will be calculated by `num_data_token_calc_func`
-            2. the padded data tokens will be replaced with their pad_values
+        This function will replace the data-tokens in between with pad_values accordingly
         """
-        image_grid_thws = image_inputs.image_grid_thws
         pad_values = image_inputs.pad_values
 
-        image_indices = [
-            idx
-            for idx, token in enumerate(input_ids)
-            if token == image_inputs.im_token_id
-        ]
+        input_ids_tensor = torch.tensor(input_ids)
 
-        image_inputs.image_offsets = []
+        mask = torch.isin(input_ids_tensor, self.image_token_id)
 
-        input_ids_with_image = []
-        for image_cnt, _ in enumerate(image_grid_thws):
-            print(f"image_cnt {image_cnt}")
-            num_image_tokens = self.num_data_token_calc_func(image_grid_thws[image_cnt])
-            if image_cnt == 0:
-                non_image_tokens = input_ids[: image_indices[image_cnt]]
-            else:
-                non_image_tokens = input_ids[
-                    image_indices[image_cnt - 1] + 1 : image_indices[image_cnt]
-                ]
-            input_ids_with_image.extend(non_image_tokens)
-            image_inputs.image_offsets.append(len(input_ids_with_image))
-            pad_ids = pad_values * (
-                (num_image_tokens + len(pad_values)) // len(pad_values)
-            )
-            input_ids_with_image.extend(pad_ids[:num_image_tokens])
-        input_ids_with_image.extend(input_ids[image_indices[-1] + 1 :])
+        num_image_tokens = mask.sum().item()
 
-        return input_ids_with_image
+        repeated_pad_values = torch.tensor(pad_values).repeat(
+            num_image_tokens // len(pad_values) + 1
+        )[:num_image_tokens]
+
+        input_ids_tensor[mask] = repeated_pad_values
+
+        return input_ids_tensor.tolist()
 
 
 def embed_image_inputs(

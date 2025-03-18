@@ -17,7 +17,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -183,6 +183,26 @@ class LlamaAttention(nn.Module):
         return output
 
 
+class MistralRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        MistralRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
 class LlamaDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -229,8 +249,11 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
+        # self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = MistralRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_attention_layernorm = MistralRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -241,22 +264,56 @@ class LlamaDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        global first
         # Self Attention
+        if first:
+            print(f"first residual: {residual}")
+
+        residual = hidden_states
+
         if residual is None:
-            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.input_layernorm(hidden_states)
+
+        if first:
+            print(f"residual after attn1: {residual}")
+
+        if first:
+            print(f"hs after norm: {hidden_states}")
+            print(f"hs after norm: {hidden_states.shape}")
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
+        if first:
+            print(f"hs after attn: {hidden_states}")
+
+        hidden_states = residual + hidden_states
+        if first:
+            print(f"hs after residual: {hidden_states}")
+            print(f"residual after residual: {residual}")
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        if first:
+            print(f"hs after norm 2: {hidden_states}")
+
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        if first:
+            print(f"hs after mlp: {hidden_states}")
+            print(f"hs after mlp: {hidden_states.shape}")
+
+        hidden_states = residual + hidden_states
+
+        if first:
+            print(f"hs after res: {hidden_states}")
+            print(f"hs after res: {hidden_states.shape}")
+        outputs = (hidden_states,)
+        return outputs
 
 
 class LlamaModel(nn.Module):
@@ -276,6 +333,7 @@ class LlamaModel(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("embed_tokens", prefix),
         )
+
         self.layers = make_layers(
             config.num_hidden_layers,
             lambda idx, prefix: LlamaDecoderLayer(
@@ -294,23 +352,40 @@ class LlamaModel(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
+        global first
+
+        if first:
+            print(f"input_ids: {input_ids}")
+            print(f"positions: {positions}")
         if input_embeds is None:
             hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
+        if first:
+            print(f"hidden_states: {hidden_states}")
         residual = None
         aux_hidden_states = []
         for i in range(len(self.layers)):
             if i in self.layers_to_capture:
                 aux_hidden_states.append(hidden_states + residual)
             layer = self.layers[i]
-            hidden_states, residual = layer(
+            layer_outputs = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states = layer_outputs[0]
+            if first:
+                print(f"layer {i} hidden_states: {hidden_states}")
+                print(f"layer {i} hidden_states: {hidden_states.shape}")
+        hidden_states = self.norm(hidden_states, residual)
+
+        # if first:
+        #     print(f"320 hidden_states: {hidden_states}")
+        #     print(f"320 hidden_states: {hidden_states.shape}")
+
+        first = False
 
         if len(aux_hidden_states) == 0:
             return hidden_states
@@ -340,6 +415,9 @@ class LlamaModel(nn.Module):
                 raise RuntimeError(
                     "Self attention has no KV cache scaling " "factor attribute!"
                 )
+
+
+first = True
 
 
 class LlamaForCausalLM(nn.Module):
@@ -376,9 +454,11 @@ class LlamaForCausalLM(nn.Module):
         self.model = LlamaModel(
             config, quant_config=quant_config, prefix=add_prefix("model", prefix)
         )
+
         # Llama 3.2 1B Instruct set tie_word_embeddings to True
         # Llama 3.1 8B Instruct set tie_word_embeddings to False
         if self.config.tie_word_embeddings:
+            print(f"unexpected!!!!!!!!!!")
             self.lm_head = self.model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(
@@ -400,6 +480,13 @@ class LlamaForCausalLM(nn.Module):
 
         self.capture_aux_hidden_states = False
 
+        # self.make_empty_intermediate_tensors = (
+        #     make_empty_intermediate_tensors_factory(
+        #         ["hidden_states", "residual"], config.hidden_size))
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
     @torch.no_grad()
     def forward(
         self,
@@ -418,10 +505,18 @@ class LlamaForCausalLM(nn.Module):
             hidden_states = self.model(
                 input_ids, positions, forward_batch, input_embeds
             )
+        print(f"hidden_states: {hidden_states}")
 
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        # hidden_states = outputs[0]
+        # print(f"hidden states shape: {hidden_states.shape}")
         if not get_embedding:
             return self.logits_processor(
-                input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
+                input_ids,
+                hidden_states,
+                self.lm_head,
+                forward_batch,
             )
         else:
             return self.pooler(hidden_states, forward_batch)
@@ -476,6 +571,9 @@ class LlamaForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
 
+        loaded_params: Set[str] = set()
+        # print(f"params_dict: {params_dict.keys()}")
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or "projector" in name:
                 continue
@@ -517,8 +615,10 @@ class LlamaForCausalLM(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                else:
-                    logger.warning(f"Parameter {name} not found in params_dict")
+                # else:
+                #     logger.warning(f"Parameter {name} not found in params_dict")
+            loaded_params.add(name)
+        return loaded_params
 
     def get_weights_by_name(
         self, name: str, truncate_size: int = 100, tp_size: int = 1

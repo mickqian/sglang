@@ -47,6 +47,7 @@ class SeparatorStyle(IntEnum):
     DeepSeekVL2 = auto()
     QWEN2_VL_EMBED = auto()
     GEMMA3 = auto()
+    Mistral3 = auto()
 
 
 @dataclasses.dataclass
@@ -310,6 +311,18 @@ class Conversation:
                         ret += role + message + self.sep
                 else:
                     ret += role
+            return ret
+        elif self.sep_style == SeparatorStyle.Mistral3:
+            ret = "<s>"
+            print(self.messages)
+            for i, (role, message) in enumerate(self.messages):
+                if message:
+                    if role == "assistant":
+                        ret += message + "</s>"
+                    elif role == "system":
+                        ret += "[SYSTEM_PROMPT]" + message + "[/SYSTEM_PROMPT]"
+                    elif role == "user":
+                        ret += "[INST]" + message + "[/INST]"
             return ret
 
         else:
@@ -628,6 +641,21 @@ register_conv_template(
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
         stop_str=["<|im_end|>"],
         image_token="<|vision_start|><|image_pad|><|vision_end|>",
+    )
+)
+
+# placeholder chat_template: no specifying
+register_conv_template(
+    Conversation(
+        name="mistral3",
+        system_message="""""",
+        system_template="<s>[SYSTEM_PROMPT]{system_message}[/SYSTEM_PROMPT]",
+        roles=("user", "assistant"),
+        sep="",
+        sep2="",
+        sep_style=SeparatorStyle.Mistral3,
+        stop_str=["</s>"],
+        image_token="[IMG]",
     )
 )
 

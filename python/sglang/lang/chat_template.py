@@ -434,12 +434,18 @@ def match_llama2_chat(model_path: str):
     model_path = model_path.lower()
     if "llama-2" in model_path and "chat" in model_path:
         return get_chat_template("llama-2-chat")
-    if (
-        "mistral" in model_path or "mixtral" in model_path
-    ) and "instruct" in model_path:
+    if ("mixtral" in model_path) and "instruct" in model_path:
         return get_chat_template("llama-2-chat")
     if "codellama" in model_path and "instruct" in model_path:
         return get_chat_template("llama-2-chat")
+
+
+@register_chat_template_matching_function
+def match_mistral_chat(model_path: str):
+    if "mistral" in model_path and "instruct" in model_path:
+        return get_chat_template("llama-2-chat")
+    if "Mistral3ForConditionalGeneration" in model_path:
+        return get_chat_template("mistral3")
 
 
 @register_chat_template_matching_function

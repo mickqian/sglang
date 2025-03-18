@@ -238,6 +238,7 @@ class DefaultModelLoader(BaseModelLoader):
 
         is_local = os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
+        disallowed_patterns = []
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
@@ -246,6 +247,7 @@ class DefaultModelLoader(BaseModelLoader):
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+            disallowed_patterns = ["consolidated*.safetensors"]
         elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
             allow_patterns = ["consolidated*.safetensors"]
@@ -278,6 +280,7 @@ class DefaultModelLoader(BaseModelLoader):
                 if pattern == "*.safetensors":
                     use_safetensors = True
                 break
+
 
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3

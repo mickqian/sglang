@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,7 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb, rotate_half
+from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
 from sglang.srt.utils import add_prefix
 
 
@@ -50,6 +50,7 @@ class VisionAttention(nn.Module):
         use_context_forward: bool = True,
         softmax_in_single_precision: bool = False,
         flatten_batch: bool = False,
+        bias: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -80,6 +81,7 @@ class VisionAttention(nn.Module):
                 hidden_size=embed_dim,
                 head_size=self.head_size,
                 total_num_heads=num_heads,
+                bias=bias,
                 quant_config=quant_config,
                 prefix=add_prefix("qkv_proj", prefix),
             )
@@ -87,12 +89,14 @@ class VisionAttention(nn.Module):
             self.qkv_proj = ColumnParallelLinear(
                 input_size=embed_dim,
                 output_size=3 * projection_size,
+                bias=bias,
                 quant_config=quant_config,
                 prefix=add_prefix("qkv_proj", prefix),
             )
         self.proj = RowParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
+            bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("out_proj", prefix),
         )
@@ -106,7 +110,7 @@ class VisionAttention(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            x: [b, s, embed_dim]
+            x: [b, s (time), embed_dim]
             cu_seqlens: [b]
         Returns:
              [s, b, head * head_size]
@@ -179,6 +183,58 @@ class VisionAttention(nn.Module):
             output = output.view(bsz, s, -1)
 
         return output
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> bool:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+
+        for name, loaded_weight in weights:
+            # Handle QKV projection differently based on use_qkv_parallel
+            if self.use_qkv_parallel:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip loading extra bias for GPTQ models
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    # Handle non-QKV weights
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name in params_dict.keys():
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        return True
+                    return False
+            else:
+                # For non-parallel QKV, load weights directly
+                if name.endswith(".bias") and name not in params_dict:
+                    return False
+                if name in params_dict.keys():
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    return True
+                return False
+
+        return False
 
 
 class VisionSdpaAttention(nn.Module):
@@ -289,11 +345,14 @@ class VisionSdpaAttention(nn.Module):
         q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
 
         if self.softmax_in_single_precision:
-            scale = self.head_size**-0.5
+            scale = self.head_size ** -0.5
             k_transposed = rearrange(k, "b h s d -> b h d s")
             attn_weights = torch.matmul(q, k_transposed) * scale
             del k, k_transposed
-            attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
+            if attention_mask.dtype == torch.bool:
+                attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
+            else:
+                attention_mask = attention_mask.type(q.dtype)
             attn_weights = attn_weights + attention_mask
             del attention_mask
             # full-precision
