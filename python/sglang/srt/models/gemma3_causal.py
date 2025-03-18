@@ -37,11 +37,8 @@ from sglang.srt.layers.linear import (
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb, get_rope
-from sglang.srt.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
+from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
@@ -352,7 +349,7 @@ class Gemma3DecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
-
+        print(f"layer out shape: {outputs.shape}")
         return outputs
 
 
@@ -511,7 +508,7 @@ class Gemma3TextModel(PreTrainedModel):
         else:
             hidden_states = input_embeds
 
-        if len(positions.shape) == 1:
+        if positions.dim() == 1:
             positions = einops.rearrange(positions, "s -> 1 s")
 
         position_embeddings_global = self.rotary_emb(hidden_states, positions)
@@ -528,6 +525,7 @@ class Gemma3TextModel(PreTrainedModel):
             hidden_states = layer_outputs[0]
 
         hidden_states = self.norm(hidden_states)
+        print(f"320 hidden_states: {hidden_states}")
 
         return hidden_states
 
@@ -609,11 +607,11 @@ class Gemma3ForCausalLM(PreTrainedModel):
             )
         self.post_init()
 
-    def get_input_embeddings(self):
+    def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
 
     def dtype(self) -> torch.dtype:
-        return self.model.layers[0].mlp.gate_up_proj.weight.dtype
+        return next(self.parameters()).dtype
 
     @torch.no_grad()
     def forward(
@@ -629,6 +627,11 @@ class Gemma3ForCausalLM(PreTrainedModel):
             input_ids, positions, forward_batch, input_embeds, **kwargs
         )
 
+        print(f"hidden states shape: {hidden_states.shape}")
+        print(
+            f"self.model.embed_tokens.weights shape: {self.model.embed_tokens.weight.shape}"
+        )
+        print(f"self.lm_head.weight shape: {self.lm_head.weight.shape}")
         return self.logits_processor(
             input_ids, hidden_states, self.model.embed_tokens, forward_batch
         )

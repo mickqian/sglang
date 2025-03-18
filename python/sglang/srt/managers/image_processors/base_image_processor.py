@@ -4,14 +4,15 @@ import dataclasses
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import PIL
+import torch
 import transformers
-from decord import VideoReader, cpu
+from decord import VideoReader
+from numpy.distutils.cpuinfo import cpu
 from PIL import Image
 
-from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import load_image
 from sglang.utils import logger
 
@@ -23,6 +24,22 @@ def get_global_processor():
     return global_processor
 
 
+def flatten_nested_list(nested_list):
+    if isinstance(nested_list, list):
+        return [
+            item for sublist in nested_list for item in flatten_nested_list(sublist)
+        ]
+    else:
+        return [nested_list]
+
+
+def stack_nested_list(nested_list):
+    if isinstance(nested_list, list):
+        return torch.stack([stack_nested_list(sublist) for sublist in nested_list])
+    else:
+        return nested_list
+
+
 @dataclasses.dataclass
 class BaseImageProcessorOutput:
     image_hashes: list[int]
@@ -31,8 +48,16 @@ class BaseImageProcessorOutput:
     # input_text, with each frame of video/image represented as an image_token
     input_text: str
 
+    def normalize(self):
+        for field_name in ["data_hashes", "image_sizes", "all_frames"]:
+            field = getattr(self, field_name, None)
+            if field is not None and isinstance(field, list) and len(field) == 0:
+                setattr(self, field_name, None)
+
 
 class BaseImageProcessor(ABC):
+    models = []
+
     def __init__(self, hf_config, server_args, _processor):
         self.hf_config = hf_config
         self._processor = _processor
@@ -49,6 +74,43 @@ class BaseImageProcessor(ABC):
             ),
             max_workers=int(os.environ.get("SGLANG_CPU_COUNT", os.cpu_count())),
         )
+
+    # @staticmethod
+    # async def _process_single_image(input_text, images) -> dict:
+    #     pass
+
+    # TODO(mick): processing images async-ly can speedup, but if input_ids is expected from output,
+    # the images should be passed at once
+    # async def process_images_hf(self, input_text, images: List, **kwargs):
+    #     res = []
+    #     for img_data in images:
+    #         res.append(
+    #             self._process_single_image(
+    #                 input_text=input_text, images=img_data, **kwargs
+    #             )
+    #         )
+    #     res = await asyncio.gather(*res)
+    #     return res
+
+    # async def _process_images(self, images, input_text):
+    #     if self.executor is not None:
+    #         loop = asyncio.get_event_loop()
+    #         image_inputs = await loop.run_in_executor(
+    #             self.executor,
+    #             self._process_single_image,
+    #             input_text,
+    #             images,
+    #         )
+    #     else:
+    #         image_inputs = self._processor(
+    #             images=images, text=input_text, return_tensors="pt"
+    #         )
+    #
+    #     return image_inputs
+
+    # @abstractmethod
+    # def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    #     ...
 
     def _build_processor(self, server_args):
         """Init the global processor for multi modal models."""
@@ -113,7 +175,7 @@ class BaseImageProcessor(ABC):
         self,
         input_ids: list[int],
         image_data,
-        image_token: str,
+        image_token: Union[int, str],
         max_req_input_len: int,
         return_text: Optional[bool] = True,
         discard_alpha_channel: bool = True,
@@ -122,9 +184,16 @@ class BaseImageProcessor(ABC):
         Each frame of video/image will be replaced by a single image token
 
         Args:
+            image_token: The token ID representing the image placeholder.
             discard_alpha_channel: if True, discards the alpha channel in the returned images
 
         """
+        if isinstance(image_token, int):
+            image_token_str = self._processor.tokenizer.convert_ids_to_tokens(
+                image_token
+            )
+        else:
+            image_token_str = image_token
 
         if isinstance(input_ids, list) and return_text:
             assert len(input_ids) and isinstance(input_ids[0], int)
@@ -134,18 +203,13 @@ class BaseImageProcessor(ABC):
         if return_text:
             import re
 
-            pattern = "(" + "|".join(re.escape(sep) for sep in [image_token]) + ")"
-            # split text into list of normal text and special tokens
+            pattern = "(" + "|".join(re.escape(sep) for sep in [image_token_str]) + ")"
             text_parts = re.split(pattern, input_text)
 
-        # TODO(mick): load from server_args, env, or sampling_params
         MAX_NUM_FRAMES = 30
         estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
         total_frame_count = sum(estimated_frames_list)
-        # a heuristic value, suggesting the maximum fraction of frames to embed from all visual inputs.
-        # e.g., 0.1 suggests that 1 frame out of 10 input frames should be used
         _scaling_factor = min(1.0, MAX_NUM_FRAMES / max(1, total_frame_count))
-
         assert len(image_data) == len(estimated_frames_list)
 
         image_index, audio_index = 0, 0
@@ -153,8 +217,7 @@ class BaseImageProcessor(ABC):
         new_text = ""
         for index, text_part in enumerate(text_parts):
             try:
-                if text_part == image_token:
-                    # load as image
+                if text_part == image_token_str:  # 比较字符串
                     frames_to_process = estimated_frames_list[image_index]
                     if frames_to_process == 0:
                         frames = []
@@ -163,13 +226,11 @@ class BaseImageProcessor(ABC):
                         if isinstance(image_file, str) and image_file.startswith(
                             "video:"
                         ):
-                            # video
                             path = image_file[len("video:") :]
                             frames = self.encode_video(
                                 path, frame_count_limit=frames_to_process
                             )
                         else:
-                            # image
                             raw_image, _size = load_image(image_file)
                             if discard_alpha_channel:
                                 raw_image = raw_image.convert("RGB")
@@ -182,23 +243,23 @@ class BaseImageProcessor(ABC):
                     images += frames
                     image_index += 1
                     if frames_to_process != 0:
-                        new_text += image_token * len(frames)
+                        new_text += image_token_str * len(frames)  # 使用字符串拼接
                     assert frames_to_process == len(frames)
                 else:
-                    # TODO(mick): handle video
-                    # normal text
                     new_text += text_part
 
             except Exception as e:
                 logger.error(f"An exception occurred while loading images: {e}")
                 raise IOError(f"An exception occurred while loading images: {e}")
 
-        return BaseImageProcessorOutput(
+        out = BaseImageProcessorOutput(
             image_hashes=hashes,
             image_sizes=image_sizes,
             all_frames=images,
             input_text=new_text,
         )
+        out.normalize()
+        return out
 
 
 class DummyImageProcessor(BaseImageProcessor):
@@ -209,9 +270,7 @@ class DummyImageProcessor(BaseImageProcessor):
         return None
 
 
-def init_global_processor(
-    sglang_image_processor: BaseImageProcessor, server_args: ServerArgs
-):
+def init_global_processor(sglang_image_processor: BaseImageProcessor, server_args):
     """Init the global processor for multi-modal models."""
     global global_processor
     transformers.logging.set_verbosity_error()

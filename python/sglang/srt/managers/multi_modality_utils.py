@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from sglang.srt.managers.schedule_batch import ImageInputs, logger
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.utils import logger
 
 
@@ -84,57 +85,65 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
         return padded_ids
 
 
-class MultModalityDataPaddingPatternSingleToken(MultiModalityDataPaddingPattern):
-    """In this pattern, data is represented with a special token_id ( image_inputs.im_token_id ),
-         which needs first to be expanded to multiple tokens, then replaced with their padding values
+def print_info(t, name):
+    return
 
-    This strategy should be used when a single data token represents content that should
-    be expanded to multiple tokens during processing.
-    """
+    def hash_tensor(tensor):
+        # Flatten the tensor to a 1D array
+        flattened_tensor = tensor.flatten().cpu()
+        if flattened_tensor.dtype == torch.bfloat16:
+            flattened_tensor = flattened_tensor.to(torch.float32)
 
-    def __init__(
-        self, num_data_token_calc_func: Callable[[Tuple[int, int, int]], int]
-    ) -> None:
-        self.num_data_token_calc_func = num_data_token_calc_func
+        # Convert tensor elements to a byte string (assuming float32)
+        tensor_bytes = flattened_tensor.numpy().tobytes()
 
-    def pad_input_tokens(
-        self, input_ids: List[int], image_inputs: ImageInputs
-    ) -> List[int]:
+        # Hash the byte string
+        tensor_hash = hash(tensor_bytes)
+
+        return tensor_hash
+        # print(tensor_hash)
+
+    print(f"name: {name}, shape: {t.shape}, dtype: {t.dtype}, stride: {t.stride()}")
+
+    max_diff = torch.max(t)
+
+    print(f"max: {max_diff}")
+    print(f"hash: {hash_tensor(t)}")
+    # 8. 平均误差
+    mean_diff = torch.mean(t)
+    print(f"mean: {mean_diff}")
+    print(f"l1: {torch.norm(t, p=1)}")
+    print(f"l2: {torch.norm(t, p=2)}")
+    print(f"")
+    print(f"")
+    print(f"")
+
+
+class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern):
+    """In this pattern, data tokens should be represented as image tokens (e.g. <image><image>....<image>)"""
+
+    def __init__(self, image_token_id: torch.Tensor) -> None:
+        self.image_token_id = image_token_id
+
+    def pad_input_tokens(self, input_ids: List[int], image_inputs) -> List[int]:
         """
-        This function will follow the procedure of:
-            1. the data token will be expanded, of which the final number will be calculated by `num_data_token_calc_func`
-            2. the padded data tokens will be replaced with their pad_values
+        This function will replace the data-tokens in between with pad_values accordingly
         """
-        image_grid_thws = image_inputs.image_grid_thws
         pad_values = image_inputs.pad_values
 
-        image_indices = [
-            idx
-            for idx, token in enumerate(input_ids)
-            if token == image_inputs.im_token_id
-        ]
+        input_ids_tensor = torch.tensor(input_ids)
+        print(f"input_ids: {input_ids}")
+        mask = torch.isin(input_ids_tensor, self.image_token_id)
 
-        image_inputs.image_offsets = []
+        num_image_tokens = mask.sum().item()
 
-        input_ids_with_image = []
-        for image_cnt, _ in enumerate(image_grid_thws):
-            print(f"image_cnt {image_cnt}")
-            num_image_tokens = self.num_data_token_calc_func(image_grid_thws[image_cnt])
-            if image_cnt == 0:
-                non_image_tokens = input_ids[: image_indices[image_cnt]]
-            else:
-                non_image_tokens = input_ids[
-                    image_indices[image_cnt - 1] + 1 : image_indices[image_cnt]
-                ]
-            input_ids_with_image.extend(non_image_tokens)
-            image_inputs.image_offsets.append(len(input_ids_with_image))
-            pad_ids = pad_values * (
-                (num_image_tokens + len(pad_values)) // len(pad_values)
-            )
-            input_ids_with_image.extend(pad_ids[:num_image_tokens])
-        input_ids_with_image.extend(input_ids[image_indices[-1] + 1 :])
+        repeated_pad_values = torch.tensor(pad_values).repeat(
+            num_image_tokens // len(pad_values) + 1
+        )[:num_image_tokens]
 
-        return input_ids_with_image
+        input_ids_tensor[mask] = repeated_pad_values
+        print(f"input_ids: {input_ids_tensor.tolist()}")
+        return input_ids_tensor.tolist()
 
 
 def embed_image_inputs(
@@ -143,19 +152,26 @@ def embed_image_inputs(
     input_embedding: nn.Embedding,
     image_embedding_func,
 ) -> Optional[torch.Tensor]:
+    print(f"Embedding image input")
     if image_input is None:
         return None
 
+    placeholder_token_ids = image_input.pad_values
+
+    # boolean masking the special tokens
     special_image_mask = torch.isin(
         input_ids,
-        torch.tensor(image_input.pad_values, device=input_ids.device),
+        torch.tensor(placeholder_token_ids, device=input_ids.device),
     ).unsqueeze(-1)
 
     num_image_tokens_in_input_ids = special_image_mask.sum()
 
     if num_image_tokens_in_input_ids == 0:
+        # unexpected
         inputs_embeds = input_embedding(input_ids)
     else:
+        print(f"Getting image feature")
+
         image_embedding = image_embedding_func(image_input)
 
         # assert image_embedding.shape[0] == input_ids.shape[0], f"{image_embedding.shape[0]} vs input_ids.shape[0]"
@@ -186,16 +202,20 @@ def embed_image_inputs(
 
         inputs_embeds = input_embedding(input_ids)
 
+        print(f"special_image_mask: {special_image_mask}")
+
         special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
             inputs_embeds.device
         )
 
-        print(f"special_image_mask: {special_image_mask.shape}")
         print(f"inputs_embeds: {inputs_embeds.shape}")
         print(f"image_embedding: {image_embedding}")
-        print(f"image_embedding: {image_embedding.shape}")
-        print(f"input_ids: {input_ids.shape}")
+        print(f"image_embedding shape: {image_embedding.shape}")
         image_embedding = image_embedding.to(inputs_embeds.device, inputs_embeds.dtype)
+
+        print_info(image_embedding, "final image embeds")
+
+        # scatter the image embedding into inputs_embeds with mask
         inputs_embeds = inputs_embeds.masked_scatter(
             special_image_mask, image_embedding
         )
@@ -220,4 +240,30 @@ def embed_image_embedding(
             image_indices.view(-1, 1).repeat(1, inputs_embeds.shape[-1]),
             image_embedding.view(-1, image_embedding.shape[-1]),
         )
+    return inputs_embeds
+
+
+def general_causal_wrapper_for_mm(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    forward_batch: ForwardBatch,
+    embed_tokens: nn.Embedding,
+    image_embedding_func: Callable[[ImageInputs], torch.Tensor],
+):
+    if (
+        forward_batch.forward_mode.is_decode()
+        or not forward_batch.contains_image_inputs()
+    ):
+        inputs_embeds = embed_tokens(input_ids)
+    else:
+        image = forward_batch.reduce_image_inputs()
+        inputs_embeds = embed_image_inputs(
+            image_input=image,
+            input_ids=input_ids,
+            input_embedding=embed_tokens,
+            image_embedding_func=image_embedding_func,
+        )
+        # once used, image_inputs is useless
+        # just being defensive
+        forward_batch.image_inputs = None
     return inputs_embeds

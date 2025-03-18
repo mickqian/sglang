@@ -217,6 +217,13 @@ class ImageInputs:
             if arg in obj:
                 setattr(ret, arg, obj[arg])
 
+        # validate
+        assert (
+            isinstance(ret.pixel_values, torch.Tensor)
+            or isinstance(ret.pixel_values, np.ndarray)
+            or isinstance(ret.pixel_values, list)
+        )
+
         return ret
 
     def merge(self, other: ImageInputs):
@@ -228,7 +235,9 @@ class ImageInputs:
             # e.g. minicpm
             self.pixel_values += other.pixel_values
         else:
-            assert self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
+            assert (
+                self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
+            ), f"{self.pixel_values.shape[1:]} vs {other.pixel_values.shape[1:]}"
             self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
 
         if self.image_grid_thws is None:

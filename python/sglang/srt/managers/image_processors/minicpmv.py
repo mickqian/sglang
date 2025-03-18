@@ -1,4 +1,3 @@
-import asyncio
 from typing import List, Union
 
 import torch
@@ -11,12 +10,13 @@ from sglang.srt.models.minicpmv import MiniCPMV
 
 
 class MiniCPMVImageProcessor(BaseImageProcessor):
+    models = [MiniCPMV]
+
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "(<image>./</image>)"
 
-    @staticmethod
-    def _process_images_task(images, input_text):
+    async def _process_single_image(self, images, input_text) -> dict:
         processor = get_global_processor()
         result = processor.__call__(text=input_text, images=images, return_tensors="pt")
         return {
@@ -24,22 +24,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             "pixel_values": result.pixel_values,
             "tgt_sizes": result.tgt_sizes,
         }
-
-    async def _process_images(self, images, input_text):
-        if self.executor is not None:
-            loop = asyncio.get_event_loop()
-            image_inputs = await loop.run_in_executor(
-                self.executor,
-                MiniCPMVImageProcessor._process_images_task,
-                images,
-                input_text,
-            )
-        else:
-            image_inputs = self._processor(
-                images=images, text=input_text, return_tensors="pt"
-            )
-
-        return image_inputs
 
     async def process_images_async(
         self,
@@ -64,7 +48,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
 
         if len(base_output.all_frames) == 0:
             return None
-        res = await self._process_images(
+        res = await self._process_single_image(
             images=base_output.all_frames, input_text=base_output.input_text
         )
 
@@ -127,7 +111,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         print("2222")
         tgt_sizes = torch.stack(tgt_sizes_flat)
         print(f"{tgt_sizes.shape}")
-        # print(f"pixel values type: ", type(res["pixel_values"]))
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": pixel_values,
@@ -139,6 +122,3 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             "slice_start_id": slice_start_id,
             "slice_end_id": slice_end_id,
         }
-
-
-ImageProcessorMapping = {MiniCPMV: MiniCPMVImageProcessor}

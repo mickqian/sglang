@@ -29,13 +29,7 @@ import numpy as np
 import PIL
 import transformers
 from torch import TensorType
-from transformers import (
-    AutoImageProcessor,
-    AutoProcessor,
-    BatchFeature,
-    PretrainedConfig,
-    SiglipVisionConfig,
-)
+from transformers import BatchFeature, PretrainedConfig, SiglipVisionConfig
 from transformers.image_processing_utils import BaseImageProcessor, get_size_dict
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -69,6 +63,8 @@ from transformers.utils import (
     filter_out_non_signature_kwargs,
     to_py_obj,
 )
+
+from sglang.srt.configs.utils import register_image_processor, register_processor
 
 logger = logging.getLogger(__name__)
 
@@ -1073,14 +1069,5 @@ class Gemma3Config(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-AutoProcessor.register(
-    config_class=Gemma3Config, processor_class=Gemma3Processor, exist_ok=True
-)
-
-AutoImageProcessor.register(
-    config_class=Gemma3Config,
-    image_processor_class=None,
-    slow_image_processor_class=Gemma3ImageProcessor,
-    fast_image_processor_class=None,
-    exist_ok=True,
-)
+register_processor(Gemma3Config, Gemma3Processor)
+register_image_processor(Gemma3Config, Gemma3ImageProcessor)

@@ -332,7 +332,7 @@ class ForwardBatch:
 
         return ret
 
-    def get_merged_image_inputs(self) -> Optional[ImageInputs]:
+    def reduce_image_inputs(self) -> Optional[ImageInputs]:
         """
         Merge all image inputs in the batch into a single ImageInputs object.
 

@@ -47,6 +47,7 @@ class SeparatorStyle(IntEnum):
     DeepSeekVL2 = auto()
     QWEN2_VL_EMBED = auto()
     GEMMA3 = auto()
+    Mistral3 = auto()
 
 
 @dataclasses.dataclass
@@ -311,6 +312,16 @@ class Conversation:
                 else:
                     ret += role
             return ret
+        elif self.sep_style == SeparatorStyle.Mistral3:
+            ret = system_prompt
+            print(self.messages)
+            for i, (role, message) in enumerate(self.messages):
+                if message:
+                    if role == "assistant":
+                        ret += message + "</s>"
+                    elif role == "user":
+                        ret += "[INST]" + message + "[/INST]"
+            return ret
 
         else:
             raise ValueError(f"Invalid style: {self.sep_style}")
@@ -443,6 +454,9 @@ def generate_embedding_convs(
     return convs
 
 
+LINE_SEPARATOR = "\n"
+
+
 def generate_chat_conv(
     request: ChatCompletionRequest, template_name: str
 ) -> Conversation:
@@ -493,15 +507,14 @@ def generate_chat_conv(
                 if num_image_url > 1:
                     image_token = conv.image_token
                 else:
-                    image_token = (
-                        conv.image_token + "\n"
-                        if conv.name != "qwen2-vl"
-                        else conv.image_token
+                    image_token_suffix = (
+                        "" if conv.name in ["qwen2-vl", "mistral3"] else LINE_SEPARATOR
                     )
+                    image_token = conv.image_token + image_token_suffix
                 for content in message.content:
                     if content.type == "text":
                         if num_image_url > 16:
-                            real_content += "\n"  # for video
+                            real_content += LINE_SEPARATOR  # for video
                         real_content += content.text
                     elif content.type == "image_url":
                         # NOTE: Only works for llava
@@ -628,6 +641,22 @@ register_conv_template(
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
         stop_str=["<|im_end|>"],
         image_token="<|vision_start|><|image_pad|><|vision_end|>",
+    )
+)
+
+# placeholder chat_template: no specifying
+register_conv_template(
+    Conversation(
+        name="mistral3",
+        system_message="You are a helpful assistant.",
+        # <s> is already included in tokenizers
+        system_template="[SYSTEM_PROMPT]{system_message}[/SYSTEM_PROMPT]",
+        roles=("user", "assistant"),
+        sep="",
+        sep2="",
+        sep_style=SeparatorStyle.Mistral3,
+        stop_str=["</s>"],
+        image_token="[IMG]",
     )
 )
 

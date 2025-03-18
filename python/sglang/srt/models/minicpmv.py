@@ -399,7 +399,7 @@ class Idefics2VisionTransformer(nn.Module):
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
-    def get_input_embeddings(self):
+    def get_input_embeddings(self) -> nn.Embedding:
         return self.embeddings
 
     def compute_cu_seqlens(self, tgt_sizes: torch.Tensor) -> torch.Tensor:

@@ -7,28 +7,27 @@ from sglang.srt.managers.image_processors.base_image_processor import (
 from sglang.srt.managers.image_processors.base_image_processor import (
     get_global_processor,
 )
-from sglang.srt.models.deepseek_janus_pro import MultiModalityCausalLM
+from sglang.srt.models.mistral3 import Mistral3ForConditionalGeneration
 
 
-class JanusProProcessor(SGLangBaseImageProcessor):
-    models = [MultiModalityCausalLM]
+class PixtralProcessor(SGLangBaseImageProcessor):
+    models = [Mistral3ForConditionalGeneration]
 
-    def __init__(self, hf_config, server_args, _processor):
-        super().__init__(hf_config, server_args, _processor)
+    def __init__(self, hf_config, server_args, processor):
+        super().__init__(hf_config, server_args, processor)
+        self.image_token = processor.image_token
+        self.image_token_id = hf_config.image_token_index
 
     @staticmethod
-    def _process_images_task(images, input_text):
+    def _process_single_image(input_text, images) -> dict:
         processor = get_global_processor()
-        result = processor.__call__(
-            prompt=input_text, images=images, return_tensors="pt"
-        )
+        result = processor(text=input_text, prompt=input_text, images=images)
+
+        for p in result["pixel_values"]:
+            print(f"pixel values shape: {p.shape}")
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
-            "images_emb_mask": result["images_emb_mask"],
-            "im_start_id": processor.image_start_id,
-            "im_end_id": processor.image_end_id,
-            "im_token_id": processor.image_id,
         }
 
     async def _process_images(self, images, input_text):
@@ -36,9 +35,9 @@ class JanusProProcessor(SGLangBaseImageProcessor):
             loop = asyncio.get_event_loop()
             image_inputs = await loop.run_in_executor(
                 self.executor,
-                JanusProProcessor._process_images_task,
-                images,
+                PixtralProcessor._process_single_image,
                 input_text,
+                images,
             )
         else:
             image_inputs = self._processor(
@@ -55,27 +54,33 @@ class JanusProProcessor(SGLangBaseImageProcessor):
         max_req_input_len,
         **kwargs,
     ):
+        print(f"image data: {image_data}")
+
         if not image_data:
             return None
-
+        if input_ids is None:
+            input_ids = []
+        if not isinstance(input_ids, list):
+            input_ids = [input_ids]
+        if image_data is None:
+            image_data = []
         if not isinstance(image_data, list):
             image_data = [image_data]
-
         base_out = self.load_images(
             input_ids=input_ids,
             image_data=image_data,
-            image_token="<image_placeholder>",
+            image_token=self.image_token,
             max_req_input_len=max_req_input_len,
         )
         images = base_out.all_frames
         res = await self._process_images(images=images, input_text=base_out.input_text)
+        print(f"image res: {res}")
+        print(f"image res: {base_out=}")
+        print(f"input ids shape: ", res["input_ids"].numel())
 
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": res["pixel_values"],
-            "images_emb_mask": res["images_emb_mask"],
             "image_hashes": base_out.image_hashes,
-            "im_start_id": res["im_start_id"],
-            "im_end_id": res["im_end_id"],
-            "im_token_id": res["im_token_id"],
+            "im_token_id": self.image_token_id,
         }

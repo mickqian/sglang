@@ -50,6 +50,7 @@ class VisionAttention(nn.Module):
         use_context_forward: bool = True,
         softmax_in_single_precision: bool = False,
         flatten_batch: bool = False,
+        bias: bool = False,
         prefix: str = "",
     ):
         super().__init__()

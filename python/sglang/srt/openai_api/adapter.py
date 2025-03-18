@@ -26,6 +26,8 @@ from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
+
 try:
     from outlines.fsm.json_schema import convert_json_schema_to_str
 except ImportError:
@@ -45,7 +47,7 @@ from sglang.srt.conversation import (
     generate_embedding_convs,
     register_conv_template,
 )
-from sglang.srt.function_call_parser import TOOLS_TAG_LIST, FunctionCallParser
+from sglang.srt.function_call_parser import FunctionCallParser
 from sglang.srt.managers.io_struct import EmbeddingReqInput, GenerateReqInput
 from sglang.srt.openai_api.protocol import (
     BatchRequest,
@@ -900,7 +902,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
 
 def v1_chat_generate_request(
     all_requests: List[ChatCompletionRequest],
-    tokenizer_manager,
+    tokenizer_manager: TokenizerManager,
     request_ids: List[str] = None,
 ):
     input_ids = []
@@ -942,7 +944,7 @@ def v1_chat_generate_request(
                             {"role": message.role, "content": message.content}
                         )
                     else:
-                        content_list = message.dict()["content"]
+                        content_list = message.model_dump()["content"]
                         for content in content_list:
                             if content["type"] == "text":
                                 openai_compatible_messages.append(
@@ -987,6 +989,7 @@ def v1_chat_generate_request(
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
+                print(f"prompt: {prompt}")
                 image_data = conv.image_data
                 modalities = conv.modalities
                 stop = conv.stop_str or []

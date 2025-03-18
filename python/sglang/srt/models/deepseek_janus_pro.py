@@ -49,10 +49,10 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
-    embed_image_inputs,
+    general_causal_wrapper_for_mm,
 )
 from sglang.srt.managers.schedule_batch import ImageInputs
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
 from sglang.utils import logger
@@ -1959,7 +1959,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         )
         self.logits_processor = LogitsProcessor(config)
 
-    def get_image_embedding(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values
         bs, n = pixel_values.shape[0:2]
         pixel_values = pixel_values.to(
@@ -1975,6 +1975,9 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         return images_embeds
 
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.language_model.model.embed_tokens
+
     @torch.no_grad()
     def forward(
         self,
@@ -1983,19 +1986,13 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
 
-        merged_image_inputs = forward_batch.get_merged_image_inputs()
-        if (
-            forward_batch.forward_mode == ForwardMode.DECODE
-            or merged_image_inputs is None
-        ):
-            inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-        else:
-            inputs_embeds = embed_image_inputs(
-                image_input=merged_image_inputs,
-                input_ids=input_ids,
-                input_embedding=self.language_model.model.embed_tokens,
-                image_embedding_func=self.get_image_embedding,
-            )
+        inputs_embeds = general_causal_wrapper_for_mm(
+            input_ids=input_ids,
+            positions=positions,
+            forward_batch=forward_batch,
+            embed_tokens=self.get_input_embeddings(),
+            image_embedding_func=self.get_image_feature,
+        )
 
         return self.language_model(
             input_ids=None,

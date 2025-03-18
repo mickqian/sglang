@@ -43,7 +43,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
-    embed_image_inputs,
+    general_causal_wrapper_for_mm,
 )
 from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -351,7 +351,7 @@ class Qwen2VisionTransformer(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.blocks[0].mlp.fc2.weight.dtype
+        return next(self.parameters()).dtype
 
     @property
     def device(self) -> torch.device:
@@ -481,7 +481,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values.type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
         return image_embeds
@@ -492,6 +492,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             pixel_values_videos, grid_thw=video_input["video_grid_thw"]
         )
         return video_embeds
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
 
     def forward(
         self,
@@ -515,22 +518,23 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
             positions = forward_batch.mrope_positions
 
-        image = forward_batch.get_merged_image_inputs()
-
-        if forward_batch.forward_mode.is_decode() or image is None:
-            inputs_embeds = self.model.embed_tokens(input_ids)
-        else:
+        if not (
+            forward_batch.forward_mode.is_decode()
+            or not forward_batch.contains_image_inputs()
+        ):
             if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
                 assert positions.ndim == 2 and positions.size(0) == 3, (
                     "multimodal section rotary embedding requires "
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
-            inputs_embeds = embed_image_inputs(
-                image_input=image,
-                input_ids=input_ids,
-                input_embedding=self.model.embed_tokens,
-                image_embedding_func=self._process_image_input,
-            )
+
+        inputs_embeds = general_causal_wrapper_for_mm(
+            input_ids=input_ids,
+            positions=positions,
+            forward_batch=forward_batch,
+            embed_tokens=self.get_input_embeddings(),
+            image_embedding_func=self.get_image_feature,
+        )
 
         hidden_states = self.model(
             input_ids=None,
