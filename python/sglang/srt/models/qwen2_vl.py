@@ -351,7 +351,7 @@ class Qwen2VisionTransformer(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.blocks[0].mlp.fc2.weight.dtype
+        return next(self.parameters()).dtype
 
     @property
     def device(self) -> torch.device:
@@ -515,7 +515,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
             positions = forward_batch.mrope_positions
 
-        image = forward_batch.get_merged_image_inputs()
+        image = forward_batch.reduce_image_inputs()
 
         if forward_batch.forward_mode.is_decode() or image is None:
             inputs_embeds = self.model.embed_tokens(input_ids)

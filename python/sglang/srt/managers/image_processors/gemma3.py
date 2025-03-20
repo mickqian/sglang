@@ -23,8 +23,7 @@ class Gemma3SGLangImageProcessor(SGLangBaseImageProcessor):
         self.IM_START_TOKEN_ID = hf_config.boi_token_index
         self.IM_END_TOKEN_ID = hf_config.eoi_token_index
 
-    @staticmethod
-    def _process_images_task(images, input_text, _hf_config):
+    async def _process_single_image(self, images, input_text) -> dict:
         if isinstance(images, list) and len(images) == 0:
             images = None
         processor = get_global_processor()
@@ -45,19 +44,6 @@ class Gemma3SGLangImageProcessor(SGLangBaseImageProcessor):
             "input_ids": result.input_ids,
             "pixel_values": pixel_values,
         }
-
-    async def _process_images(self, images, input_text) -> dict:
-        if self.executor is not None:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                self.executor,
-                Gemma3SGLangImageProcessor._process_images_task,
-                images,
-                input_text,
-                self.hf_config,
-            )
-        else:
-            return self._process_images_task(images, input_text, self.hf_config)
 
     async def process_images_async(
         self,

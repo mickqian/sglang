@@ -1983,7 +1983,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
 
-        merged_image_inputs = forward_batch.get_merged_image_inputs()
+        merged_image_inputs = forward_batch.reduce_image_inputs()
         if (
             forward_batch.forward_mode == ForwardMode.DECODE
             or merged_image_inputs is None

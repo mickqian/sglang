@@ -611,7 +611,7 @@ class Gemma3ForCausalLM(PreTrainedModel):
         return self.model.embed_tokens
 
     def dtype(self) -> torch.dtype:
-        return self.model.layers[0].mlp.gate_up_proj.weight.dtype
+        return next(self.parameters()).dtype
 
     @torch.no_grad()
     def forward(

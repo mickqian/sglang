@@ -15,8 +15,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "(<image>./</image>)"
 
-    @staticmethod
-    def _process_images_task(images, input_text):
+    async def _process_single_image(self, images, input_text) -> dict:
         processor = get_global_processor()
         result = processor.__call__(text=input_text, images=images, return_tensors="pt")
         return {
@@ -24,22 +23,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             "pixel_values": result.pixel_values,
             "tgt_sizes": result.tgt_sizes,
         }
-
-    async def _process_images(self, images, input_text):
-        if self.executor is not None:
-            loop = asyncio.get_event_loop()
-            image_inputs = await loop.run_in_executor(
-                self.executor,
-                MiniCPMVImageProcessor._process_images_task,
-                images,
-                input_text,
-            )
-        else:
-            image_inputs = self._processor(
-                images=images, text=input_text, return_tensors="pt"
-            )
-
-        return image_inputs
 
     async def process_images_async(
         self,

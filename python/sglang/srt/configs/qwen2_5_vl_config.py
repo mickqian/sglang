@@ -18,8 +18,6 @@ from typing import Dict, Iterable, List, Optional, Union
 
 import numpy as np
 from transformers import (
-    AutoImageProcessor,
-    AutoProcessor,
     BaseImageProcessor,
     BatchFeature,
     PretrainedConfig,
@@ -52,6 +50,8 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.processing_utils import ProcessingKwargs, Unpack, VideosKwargs
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
+
+from sglang.srt.configs.utils import register_image_processor, register_processor
 
 
 def is_valid_list_of_images(images: List):
@@ -1002,5 +1002,5 @@ class Qwen2_5_VLImageProcessor(BaseImageProcessor):
         return BatchFeature(data=data, tensor_type=return_tensors)
 
 
-# AutoImageProcessor.register(Qwen2_5_VLConfig, None, Qwen2_5_VLImageProcessor, None)
-# AutoProcessor.register(Qwen2_5_VLConfig, Qwen2_5_VLProcessor, exist_ok=True)
+register_image_processor(Qwen2_5_VLConfig, Qwen2_5_VLImageProcessor)
+register_processor(Qwen2_5_VLConfig, Qwen2_5_VLProcessor)

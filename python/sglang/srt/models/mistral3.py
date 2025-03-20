@@ -5,9 +5,8 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Optional, Set, TypedDict, TypeVar, Union
 
 import torch
-from transformers import PretrainedConfig, PreTrainedModel, AutoModel
+from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 
-from .mistral import MistralForCausalLM
 from ..configs.pixtral import Mistral3Config, NestedTensors
 from ..layers.attention.vision import VisionAttention
 from ..layers.logits_processor import LogitsProcessorOutput
@@ -22,6 +21,7 @@ from ..managers.schedule_batch import ImageInputs
 from ..model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from ..model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from ..utils import add_prefix
+from .mistral import MistralForCausalLM
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")
@@ -385,7 +385,7 @@ class PixtralAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
 
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -499,7 +499,7 @@ class PixtralAttentionLayer(nn.Module):
             quant_config=quant_config,
             use_context_forward=False,
             softmax_in_single_precision=True,
-            bias=False
+            bias=False,
         )
         self.ffn_norm = PixtralRMSNorm(config.hidden_size, eps=1e-5)
 
@@ -830,7 +830,7 @@ class Mistral3PatchMerger(nn.Module):
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = self.config.vision_config.patch_size
         self.merging_layer = nn.Linear(
-            hidden_size * self.spatial_merge_size ** 2, hidden_size, bias=False
+            hidden_size * self.spatial_merge_size**2, hidden_size, bias=False
         )
 
     def forward(
@@ -856,7 +856,7 @@ class Mistral3PatchMerger(nn.Module):
                 kernel_size=self.spatial_merge_size,
                 stride=self.spatial_merge_size,
             )
-            grid = grid.view(d * self.spatial_merge_size ** 2, -1).t()
+            grid = grid.view(d * self.spatial_merge_size**2, -1).t()
             permuted_tensor.append(grid)
 
         image_features = torch.cat(permuted_tensor, dim=0)
@@ -909,7 +909,7 @@ class PatchMerger(nn.Module):
     ) -> None:
         super().__init__()
 
-        mlp_input_dim = vision_encoder_dim * (spatial_merge_size ** 2)
+        mlp_input_dim = vision_encoder_dim * (spatial_merge_size**2)
 
         self.spatial_merge_size = spatial_merge_size
         self.mlp_input_dim = mlp_input_dim
@@ -982,8 +982,8 @@ def get_sub_grids(
         # Reshape image_tokens into a 2D grid
         h, w = image_sizes[image_index]
         image_grid = image_tokens.view(h, w, d).permute(2, 0, 1)[
-                     None, :, :, :
-                     ]  # 1 x d x h x w
+            None, :, :, :
+        ]  # 1 x d x h x w
         sub_grids = torch.nn.functional.unfold(
             image_grid, kernel_size=sub_grid_size, stride=sub_grid_size
         )
@@ -1009,9 +1009,11 @@ class Mistral3ForConditionalGeneration(nn.Module):
         multimodal_config = config.vision_config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = PixtralVisionModel(
-            config.vision_config, quant_config=quant_config
-        )
+        # self.vision_tower = PixtralVisionModel(
+        #     config.vision_config, quant_config=quant_config
+        # )
+
+        self.vision_tower = AutoModel.from_config(config=config.vision_config)
         self.multi_modal_projector = Mistral3MultiModalProjector(config)
 
         # init MistralForCausalLM
@@ -1059,7 +1061,6 @@ class Mistral3ForConditionalGeneration(nn.Module):
         )
 
     def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
-        print(f"type: {type(input_ids)}")
         pattern = MultiModalityDataPaddingPatternImageTokens(
             image_token_id=image_inputs.im_token_id
         )
@@ -1169,20 +1170,21 @@ class Mistral3ForConditionalGeneration(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         get_embedding: bool = False,
     ) -> LogitsProcessorOutput:
-        """Run forward pass for pixtral."""
-        merged_image_inputs = forward_batch.get_merged_image_inputs()
-        if (
-            forward_batch.forward_mode == ForwardMode.DECODE
-            or merged_image_inputs is None
-        ):
+        """Run forward pass for mistral3."""
+        if forward_batch.forward_mode == ForwardMode.DECODE:
             inputs_embeds = self.get_input_embeddings()(input_ids)
         else:
-            inputs_embeds = embed_image_inputs(
-                image_input=merged_image_inputs,
-                input_ids=input_ids,
-                input_embedding=self.get_input_embeddings(),
-                image_embedding_func=self.get_image_features,
-            )
+            image_inputs = forward_batch.reduce_image_inputs()
+            if image_inputs is None:
+                inputs_embeds = self.get_input_embeddings()(input_ids)
+            else:
+                inputs_embeds = embed_image_inputs(
+                    image_input=image_inputs,
+                    input_ids=input_ids,
+                    input_embedding=self.get_input_embeddings(),
+                    image_embedding_func=self.get_image_features,
+                )
+                forward_batch.image_inputs = None
         return self.language_model(
             input_ids=None,
             positions=positions,
@@ -1198,14 +1200,13 @@ class Mistral3ForConditionalGeneration(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
+            # (".gate_up_proj", ".gate_proj", 0),
+            # (".gate_up_proj", ".up_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            # print(f"name: {name}")
             # if "vision_tower" in name and "attention" in name:
             #     loaded = VisionAttention.load_weights(
             #         self, [(name, loaded_weight)]
@@ -1227,22 +1228,25 @@ class Mistral3ForConditionalGeneration(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
-            if "vision_tower" in name and "attention" in name:
-                name = name.replace("o_proj.", "proj.")
+            # if "vision_tower" in name and "attention" in name:
+            #     name = name.replace("o_proj.", "proj.")
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
 
                 if "vision_tower" in name:
-                    if (
-                        "attention" in name
-                        and self.vision_tower.transformer.layers[
-                        0
-                    ].attention.use_qkv_parallel
-                    ):
-                        pass
-                    else:
-                        continue
+                    continue
+
+                # if "vision_tower" in name:
+                #     if (
+                #         "attention" in name
+                #         and self.vision_tower.transformer.layers[
+                #         0
+                #     ].attention.use_qkv_parallel
+                #     ):
+                #         pass
+                #     else:
+                #         continue
 
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.

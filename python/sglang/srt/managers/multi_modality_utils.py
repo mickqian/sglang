@@ -107,7 +107,7 @@ class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern
         )[:num_image_tokens]
 
         input_ids_tensor[mask] = repeated_pad_values
-
+        print(f"input_ids: {input_ids_tensor.tolist()}")
         return input_ids_tensor.tolist()
 
 
@@ -159,6 +159,8 @@ def embed_image_inputs(
         input_ids.clamp_(min=0, max=vocab_size - 1)
 
         inputs_embeds = input_embedding(input_ids)
+
+        print(f"special_image_mask: {special_image_mask}")
 
         special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
             inputs_embeds.device

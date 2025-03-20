@@ -345,7 +345,7 @@ class VisionSdpaAttention(nn.Module):
         q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
 
         if self.softmax_in_single_precision:
-            scale = self.head_size ** -0.5
+            scale = self.head_size**-0.5
             k_transposed = rearrange(k, "b h s d -> b h d s")
             attn_weights = torch.matmul(q, k_transposed) * scale
             del k, k_transposed

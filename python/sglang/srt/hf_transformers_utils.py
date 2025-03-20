@@ -363,18 +363,6 @@ def get_tokenizer(
         client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
         tokenizer_name = client.get_local_dir()
 
-    print(f"tokenizer name: {tokenizer_name}")
-    # is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
-    # if is_from_mistral_org and tokenizer_mode != "mistral":
-    #     # tokenizer_mode = "mistral"
-    #     warnings.warn(
-    #         "It is strongly recommended to run mistral models with "
-    #         '`--tokenizer-mode "mistral"` to ensure correct '
-    #         "encoding and decoding.",
-    #         FutureWarning,
-    #         stacklevel=2,
-    #     )
-
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(

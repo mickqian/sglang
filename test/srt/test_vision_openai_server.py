@@ -619,6 +619,7 @@ class TestMistral3Server(TestOpenAIVisionServer):
                 "--trust-remote-code",
                 "--chat-template",
                 "mistral3",
+                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"

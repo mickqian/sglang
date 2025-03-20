@@ -388,7 +388,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         else:
             llm_input_ids = input_ids
 
-        merged_image_input = forward_batch.get_merged_image_inputs()
+        merged_image_input = forward_batch.reduce_image_inputs()
 
         if (
             not forward_batch.forward_mode.is_decode()

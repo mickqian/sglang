@@ -5,7 +5,6 @@ from sglang.srt.managers.image_processors.base_image_processor import (
     BaseImageProcessor as SGLangBaseImageProcessor,
 )
 from sglang.srt.managers.image_processors.base_image_processor import (
-    flatten_nested_list,
     get_global_processor,
     stack_nested_list,
 )
@@ -19,14 +18,13 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         self.image_token_id = hf_config.image_token_index
 
     @staticmethod
-    def _process_images_task(images, input_text):
+    def _process_single_image(input_text, images):
         processor = get_global_processor()
         print(f"processor: {type(processor)}")
 
         result = processor.__call__(
             text=input_text, prompt=input_text, images=images, return_tensors="pt"
         )
-        print(f"result: {result}")
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
@@ -38,9 +36,9 @@ class PixtralProcessor(SGLangBaseImageProcessor):
             loop = asyncio.get_event_loop()
             image_inputs = await loop.run_in_executor(
                 self.executor,
-                PixtralProcessor._process_images_task,
-                images,
+                PixtralProcessor._process_single_image,
                 input_text,
+                images,
             )
         else:
             image_inputs = self._processor(
@@ -85,7 +83,7 @@ class PixtralProcessor(SGLangBaseImageProcessor):
             "pixel_values": stack_nested_list(res["pixel_values"]),
             "image_hashes": base_out.image_hashes,
             "im_token_id": self.image_token_id,
-            "image_sizes": res["image_sizes"]
+            "image_sizes": res["image_sizes"],
         }
 
 

@@ -1,5 +1,3 @@
-from abc import abstractmethod
-from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Callable, List, Mapping, NamedTuple, Optional, Union
 
@@ -11,13 +9,12 @@ from torch import TensorType
 from transformers import (
     CONFIG_MAPPING,
     AutoConfig,
-    AutoImageProcessor,
-    AutoProcessor,
     BatchFeature,
     PretrainedConfig,
     ProcessorMixin,
 )
 from transformers.image_utils import ImageInput, is_valid_image, load_image
+from transformers.models.auto.processing_auto import PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import (
     ProcessingKwargs,
     _validate_images_text_input_order,
@@ -25,6 +22,7 @@ from transformers.processing_utils import (
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from typing_extensions import TypeVar, Unpack
 
+from sglang.srt.configs.utils import register_image_processor, register_processor
 from sglang.srt.managers.tokenizers.mistral import MistralTokenizer
 from sglang.utils import logger
 
@@ -38,6 +36,7 @@ _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _T = TypeVar("_T")
 
 _C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+
 
 #
 # @dataclass(frozen=True)
@@ -734,6 +733,15 @@ def is_image_or_image_url(elem):
     return is_url(elem) or is_valid_image(elem)
 
 
+def flatten_nested_list(nested_list):
+    if isinstance(nested_list, list):
+        return [
+            item for sublist in nested_list for item in flatten_nested_list(sublist)
+        ]
+    else:
+        return [nested_list]
+
+
 class PixtralProcessor(ProcessorMixin):
     r"""
     Constructs a Pixtral processor which wraps a Pixtral image processor and a Pixtral tokenizer into a single processor.
@@ -862,8 +870,16 @@ class PixtralProcessor(ProcessorMixin):
                 images, patch_size=self.patch_size, **output_kwargs["images_kwargs"]
             )
 
-            print(f"image p: {type(self.image_processor)}")
-            print(f"image_inputs: {image_inputs}")
+            # image_inputs["image_sizes"] = image_inputs["image_sizes"][0]
+            # image_inputs["pixel_values"] = image_inputs["pixel_values"][0]
+
+            image_inputs["image_sizes"] = flatten_nested_list(
+                image_inputs["image_sizes"]
+            )
+            image_inputs["pixel_values"] = flatten_nested_list(
+                image_inputs["pixel_values"]
+            )
+
         else:
             image_inputs = {}
 
@@ -884,7 +900,11 @@ class PixtralProcessor(ProcessorMixin):
 
             for sample in text:
                 while self.image_token in sample:
-                    height, width = next(image_sizes)
+                    image_size = next(image_sizes)
+                    if isinstance(image_size, list):
+                        image_size = image_size[0]
+                    height, width = image_size
+
                     num_height_tokens = height // (
                         self.patch_size * self.spatial_merge_size
                     )
@@ -909,6 +929,8 @@ class PixtralProcessor(ProcessorMixin):
                 prompt_strings.append(sample)
 
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
+        pixel_values = torch.stack(image_inputs["pixel_values"], dim=0)
+        image_inputs["pixel_values"] = pixel_values
         return BatchFeature(
             data={**text_inputs, **image_inputs},
             tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
@@ -965,7 +987,6 @@ from transformers.utils import TensorType, is_vision_available, logging
 from transformers.utils.import_utils import requires_backends
 
 logger = logging.get_logger(__name__)
-
 
 if is_vision_available():
     import PIL
@@ -1430,5 +1451,8 @@ class PixtralImageProcessor(BaseImageProcessor):
         )
 
 
-AutoImageProcessor.register(Mistral3Config, None, PixtralImageProcessor, None)
-AutoProcessor.register(Mistral3Config, PixtralProcessor, exist_ok=True)
+PROCESSOR_MAPPING_NAMES["pixtral"] = ""
+# the transformers compatible with sglang is <= 4.50, which has obsolete version of PixtralProcessor
+# FIXME: deregister `pixtral` from transformers to enable customized processor
+register_image_processor(Mistral3Config, PixtralImageProcessor)
+register_processor(Mistral3Config, PixtralProcessor)

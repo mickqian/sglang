@@ -1,14 +1,17 @@
+import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import PIL
 import torch
 import transformers
+from decord import VideoReader
+from numpy.distutils.cpuinfo import cpu
 from PIL import Image
 
 from sglang.srt.utils import load_image
@@ -70,6 +73,39 @@ class BaseImageProcessor(ABC):
             ),
             max_workers=int(os.environ.get("SGLANG_CPU_COUNT", os.cpu_count())),
         )
+
+    @abstractmethod
+    async def _process_single_image(self, input_text, images) -> dict:
+        pass
+
+    # TODO(mick): processing images async-ly can speedup, but if input_ids is expected from output,
+    # the images should be passed at once
+    async def process_images_hf(self, input_text, images: List, **kwargs):
+        res = []
+        for img_data in images:
+            res.append(
+                self._process_single_image(
+                    input_text=input_text, images=img_data, **kwargs
+                )
+            )
+        res = await asyncio.gather(*res)
+        return res
+
+    async def _process_images(self, images, input_text):
+        if self.executor is not None:
+            loop = asyncio.get_event_loop()
+            image_inputs = await loop.run_in_executor(
+                self.executor,
+                self._process_single_image,
+                input_text,
+                images,
+            )
+        else:
+            image_inputs = self._processor(
+                images=images, text=input_text, return_tensors="pt"
+            )
+
+        return image_inputs
 
     def _build_processor(self, server_args):
         """Init the global processor for multi modal models."""

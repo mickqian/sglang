@@ -506,11 +506,10 @@ def generate_chat_conv(
                 if num_image_url > 1:
                     image_token = conv.image_token
                 else:
-                    image_token = (
-                        conv.image_token + "\n"
-                        if conv.name != "qwen2-vl"
-                        else conv.image_token
+                    image_token_suffix = (
+                        "" if conv.name in ["qwen2-vl", "mistral3"] else ""
                     )
+                    image_token = image_token + image_token_suffix
                 for content in message.content:
                     if content.type == "text":
                         if num_image_url > 16:

@@ -247,6 +247,7 @@ class DefaultModelLoader(BaseModelLoader):
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+            # mistral-small-3.1 model has both hf safetensors and mistral safetensors in its repo
             disallowed_patterns = ["consolidated*.safetensors"]
         elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
@@ -275,12 +276,22 @@ class DefaultModelLoader(BaseModelLoader):
 
         hf_weights_files: List[str] = []
         for pattern in allow_patterns:
-            hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+            found_files = glob.glob(os.path.join(hf_folder, pattern))
+
+            filtered_files = []
+            for file in found_files:
+                is_disallowed = any(
+                    glob.fnmatch.fnmatch(file, os.path.join(hf_folder, dp))
+                    for dp in disallowed_patterns
+                )
+                if not is_disallowed:
+                    filtered_files.append(file)
+
+            hf_weights_files += filtered_files
             if len(hf_weights_files) > 0:
                 if pattern == "*.safetensors":
                     use_safetensors = True
                 break
-
 
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3
