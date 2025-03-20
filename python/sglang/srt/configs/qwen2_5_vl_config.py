@@ -1002,5 +1002,5 @@ class Qwen2_5_VLImageProcessor(BaseImageProcessor):
         return BatchFeature(data=data, tensor_type=return_tensors)
 
 
-register_image_processor(Qwen2_5_VLConfig, Qwen2_5_VLImageProcessor)
-register_processor(Qwen2_5_VLConfig, Qwen2_5_VLProcessor)
+# register_image_processor(Qwen2_5_VLConfig, Qwen2_5_VLImageProcessor)
+# register_processor(Qwen2_5_VLConfig, Qwen2_5_VLProcessor)

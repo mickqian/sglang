@@ -18,17 +18,21 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         self.image_token_id = hf_config.image_token_index
 
     @staticmethod
-    def _process_single_image(input_text, images):
+    def _process_single_image(input_text, images) -> dict:
         processor = get_global_processor()
         print(f"processor: {type(processor)}")
 
         result = processor.__call__(
             text=input_text, prompt=input_text, images=images, return_tensors="pt"
         )
+        print(
+            f"image processor pixel values shape: ", result["pixel_values"][0][0].shape
+        )
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
-            "image_sizes": result["image_sizes"],
+            # "image_sizes": result["image_sizes"],
+            # "image_sizes": [(2,2)],
         }
 
     async def _process_images(self, images, input_text):
@@ -67,6 +71,7 @@ class PixtralProcessor(SGLangBaseImageProcessor):
             image_data = []
         if not isinstance(image_data, list):
             image_data = [image_data]
+        print(f"input_ids image processor: {input_ids}")
 
         base_out = self.load_images(
             input_ids=input_ids,
@@ -77,13 +82,14 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         images = base_out.all_frames
         res = await self._process_images(images=images, input_text=base_out.input_text)
         print(f"image res: {res}")
+        print(f"input ids shape: ", res["input_ids"].numel())
 
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": stack_nested_list(res["pixel_values"]),
             "image_hashes": base_out.image_hashes,
             "im_token_id": self.image_token_id,
-            "image_sizes": res["image_sizes"],
+            # "image_sizes": res["image_sizes"],
         }
 
 

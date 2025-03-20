@@ -455,6 +455,7 @@ def generate_embedding_convs(
 
     return convs
 
+LINE_SEPARATOR = '\n'
 
 def generate_chat_conv(
     request: ChatCompletionRequest, template_name: str
@@ -507,13 +508,13 @@ def generate_chat_conv(
                     image_token = conv.image_token
                 else:
                     image_token_suffix = (
-                        "" if conv.name in ["qwen2-vl", "mistral3"] else ""
+                        "" if conv.name in ["qwen2-vl", "mistral3"] else LINE_SEPARATOR
                     )
-                    image_token = image_token + image_token_suffix
+                    image_token = conv.image_token + image_token_suffix
                 for content in message.content:
                     if content.type == "text":
                         if num_image_url > 16:
-                            real_content += "\n"  # for video
+                            real_content += LINE_SEPARATOR  # for video
                         real_content += content.text
                     elif content.type == "image_url":
                         # NOTE: Only works for llava

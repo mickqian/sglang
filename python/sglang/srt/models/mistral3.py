@@ -836,13 +836,12 @@ class Mistral3PatchMerger(nn.Module):
     def forward(
         self, image_features: torch.Tensor, image_sizes: torch.Tensor
     ) -> torch.Tensor:
-        image_sizes = [
-            (image_size[0] // self.patch_size, image_size[1] // self.patch_size)
-            for image_size in image_sizes
-        ]
+        print(f"image_sizes: {image_sizes}")
 
+        print(f"image_features shape: {image_features.shape}")
         tokens_per_image = [h * w for h, w in image_sizes]
         d = image_features.shape[-1]
+        print(f"{tokens_per_image=}")
 
         permuted_tensor = []
         for image_index, image_tokens in enumerate(
@@ -867,8 +866,13 @@ class Mistral3PatchMerger(nn.Module):
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(self, config: Mistral3Config):
         super().__init__()
+        self.config = config.vision_config
+        self.spatial_merge_size_square = config.spatial_merge_size**2
         self.norm = Mistral3RMSNorm(config.vision_config.hidden_size)
         self.patch_merger = Mistral3PatchMerger(config)
+        self.patch_size = self.config.patch_size
+        print(f"{self.patch_size=}")
+
         # We have hidden_size * the number of vision feature layers
         num_feature_layers = (
             1
@@ -887,13 +891,28 @@ class Mistral3MultiModalProjector(nn.Module):
             bias=config.multimodal_projector_bias,
         )
 
-    def forward(self, image_features: torch.Tensor, image_sizes: torch.Tensor):
+    def forward(self, images: List[torch.Tensor], image_features: torch.Tensor):
         image_features = self.norm(image_features)
-        image_features = self.patch_merger(image_features, image_sizes)
+        img_patch_dims = [
+            (img.shape[-2] // self.patch_size, img.shape[-1] // self.patch_size)
+            for img in images
+        ]
+        print(f"{images=}")
+        print(f"{images[0].shape=}")
+        print(f"{img_patch_dims=}")
+        feature_sizes = [image_feature.shape[0] for image_feature in image_features]
+        feature_sizes = [
+            feature_size // self.spatial_merge_size_square
+            for feature_size in feature_sizes
+        ]
+        image_features = self.patch_merger(image_features, image_sizes=img_patch_dims)
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+
+        # image_embeds = torch.split(hidden_states, feature_sizes)
+        image_embeds = hidden_states
+        return image_embeds
 
 
 class PatchMerger(nn.Module):
@@ -1009,11 +1028,11 @@ class Mistral3ForConditionalGeneration(nn.Module):
         multimodal_config = config.vision_config
         self.multimodal_config = multimodal_config
 
-        # self.vision_tower = PixtralVisionModel(
-        #     config.vision_config, quant_config=quant_config
-        # )
+        self.vision_tower = PixtralVisionModel(
+            config.vision_config, quant_config=quant_config
+        )
 
-        self.vision_tower = AutoModel.from_config(config=config.vision_config)
+        # self.vision_tower = AutoModel.from_config(config=config.vision_config)
         self.multi_modal_projector = Mistral3MultiModalProjector(config)
 
         # init MistralForCausalLM
@@ -1123,8 +1142,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
         """
 
         print("embedding image")
-        image_sizes = image_input.image_sizes
-        print(f"image_sizes: {image_sizes}")
+        print(f"pixel_values shape: {image_input.pixel_values.shape}")
 
         pixel_values = image_input.pixel_values.type(self.dtype).cuda()
 
@@ -1137,8 +1155,13 @@ class Mistral3ForConditionalGeneration(nn.Module):
 
         assert pixel_values.dim() == 5
         image_outputs = self.vision_tower(
-            pixel_values, image_sizes=image_sizes, output_hidden_states=True, **kwargs
+            pixel_values,
+            # image_sizes=image_sizes,
+            output_hidden_states=True,
+            **kwargs,
         )
+
+        print(f"vision tower out shape: ", image_outputs.hidden_states[0].shape)
         # If we have one vision feature layer, return the corresponding hidden states,
         # otherwise, select the hidden states of each feature layer and concatenate them
         if isinstance(vision_feature_layer, int):
@@ -1149,10 +1172,18 @@ class Mistral3ForConditionalGeneration(nn.Module):
                 for layer_idx in vision_feature_layer
             ]
             selected_image_feature = torch.cat(hs_pool, dim=-1)
+        print(f"selected_image_featureshape: {selected_image_feature.shape}")
+
+        print(f"image_outputs: {image_outputs=}")
+        print(f"image_outputs: {image_outputs.hidden_states=}")
+        # print(f"image_outputs shape: {image_outputs.shape}")
 
         image_features = self.multi_modal_projector(
-            selected_image_feature.squeeze(0), image_sizes
+            images=pixel_values, image_features=selected_image_feature.squeeze(0)
         )
+
+        print(f"image_features: {image_features.shape=}")
+
         return image_features
 
     def get_input_embeddings(self):
@@ -1178,6 +1209,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
             if image_inputs is None:
                 inputs_embeds = self.get_input_embeddings()(input_ids)
             else:
+                print(f"input_ids shape:{input_ids.shape}")
                 inputs_embeds = embed_image_inputs(
                     image_input=image_inputs,
                     input_ids=input_ids,
@@ -1228,25 +1260,25 @@ class Mistral3ForConditionalGeneration(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
-            # if "vision_tower" in name and "attention" in name:
-            #     name = name.replace("o_proj.", "proj.")
+            if "vision_tower" in name and "attention" in name:
+                name = name.replace("o_proj.", "proj.")
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
 
-                if "vision_tower" in name:
-                    continue
-
                 # if "vision_tower" in name:
-                #     if (
-                #         "attention" in name
-                #         and self.vision_tower.transformer.layers[
-                #         0
-                #     ].attention.use_qkv_parallel
-                #     ):
-                #         pass
-                #     else:
-                #         continue
+                #     continue
+
+                if "vision_tower" in name:
+                    if (
+                        "attention" in name
+                        and self.vision_tower.transformer.layers[
+                            0
+                        ].attention.use_qkv_parallel
+                    ):
+                        pass
+                    else:
+                        continue
 
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.

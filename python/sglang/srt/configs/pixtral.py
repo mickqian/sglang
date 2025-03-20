@@ -1,19 +1,25 @@
+from dataclasses import dataclass
+from enum import Enum
 from functools import cached_property
-from typing import Any, Callable, List, Mapping, NamedTuple, Optional, Union
+from typing import Any, Callable, Literal, Mapping, NamedTuple, Protocol
 
+import cv2
 import PIL
 import torch
 from mistral_common.protocol.instruct.messages import ImageChunk
-from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
-from torch import TensorType
+from mistral_common.tokens.tokenizers.multimodal import ImageEncoder, is_cv2_installed
+from PIL import Image
+from pydantic import BaseModel, ConfigDict
 from transformers import (
     CONFIG_MAPPING,
     AutoConfig,
     BatchFeature,
+    PixtralVisionConfig,
     PretrainedConfig,
     ProcessorMixin,
 )
-from transformers.image_utils import ImageInput, is_valid_image, load_image
+from transformers.image_utils import is_valid_image, load_image
+from transformers.models.auto.image_processing_auto import IMAGE_PROCESSOR_MAPPING_NAMES
 from transformers.models.auto.processing_auto import PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import (
     ProcessingKwargs,
@@ -22,9 +28,67 @@ from transformers.processing_utils import (
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from typing_extensions import TypeVar, Unpack
 
-from sglang.srt.configs.utils import register_image_processor, register_processor
-from sglang.srt.managers.tokenizers.mistral import MistralTokenizer
+from sglang.srt.configs.utils import (
+    register_image_processor,
+    register_processor,
+    remove_if_exists,
+)
+from sglang.srt.utils import print_warning_once
 from sglang.utils import logger
+
+
+def rename_class(new_name):
+    def decorator(cls):
+        return type(new_name, cls.__bases__, dict(cls.__dict__))
+
+    return decorator
+
+
+import math
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+from transformers.image_processing_utils import (
+    BaseImageProcessor,
+    BatchFeature,
+    get_size_dict,
+)
+from transformers.image_transforms import pad, resize, to_channel_dimension_format
+from transformers.image_utils import (
+    ChannelDimension,
+    ImageInput,
+    PILImageResampling,
+    get_image_size,
+    infer_channel_dimension_format,
+    is_scaled_image,
+    make_list_of_images,
+    to_numpy_array,
+    valid_images,
+    validate_kwargs,
+    validate_preprocess_arguments,
+)
+from transformers.utils import TensorType, is_vision_available, logging
+from transformers.utils.import_utils import requires_backends
+
+logger = logging.get_logger(__name__)
+
+if is_vision_available():
+    import PIL
+
+
+@dataclass
+class SpecialImageIDs:
+    img: int
+    img_break: int
+    img_end: int
+
+    @staticmethod
+    def from_tokenizer(tokenizer) -> "SpecialImageIDs":
+        return SpecialImageIDs(
+            img=tokenizer.get_control_token(SpecialTokens.img.value),
+            img_break=tokenizer.get_control_token(SpecialTokens.img_break.value),
+            img_end=tokenizer.get_control_token(SpecialTokens.img_end.value),
+        )
 
 
 class ImageSize(NamedTuple):
@@ -344,29 +408,56 @@ NestedTensors = Union[
 ]
 
 
-# Wrapper class
-class PixtralProcessorAdapter:
-    model_type = "pixtral"
-
+# A drop-in replacement for hf-compatible processor
+# transformers support for mistralai/Mistral-Small-3.1-24B-Instruct-2503 was **not throughly tested**
+# https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503#transformers-untested
+@rename_class("PixtralProcessor")
+class PixtralProcessorAdapter(ProcessorMixin):
     """
     Provide a HF-compatible interface for
     :class:`mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
     """
 
-    attributes = ["tokenizer"]
+    model_type = "pixtral"
+
+    attributes = ["image_processor", "tokenizer"]
+    valid_kwargs = [
+        "chat_template",
+        "patch_size",
+        "spatial_merge_size",
+        "image_token",
+        "image_break_token",
+        "image_end_token",
+    ]
     image_processor_class = "AutoImageProcessor"
-    tokenizer_class = "MixtralTokenizer"
+    tokenizer_class = "AutoTokenizer"
 
     def __init__(
         self,
-        tokenizer: MistralTokenizer,
+        image_processor=None,
+        tokenizer=None,
+        patch_size: int = 16,
+        spatial_merge_size: int = 1,
+        chat_template=None,
+        image_token="[IMG]",  # set the default and let users change if they have peculiar special tokens in rare cases
+        image_break_token="[IMG_BREAK]",
+        image_end_token="[IMG_END]",
         **kwargs,
     ) -> None:
         self.tokenizer = tokenizer
+        self.mm_encoder = ImageEncoder(
+            PretrainedConfig(
+                image_patch_size=14, max_image_size=1540, spatial_merge_size=2
+            ),
+            special_ids=SpecialImageIDs(img=10, img_break=12, img_end=13),
+        )
+        self.image_token = image_token
 
     @property
     def image_processor(self) -> ImageEncoder:
-        image_encoder = self.tokenizer.instruct.mm_encoder
+        # ImageEncoder
+        # image_encoder = self.tokenizer.instruct.mm_encoder
+        image_encoder = self.mm_encoder
         assert isinstance(image_encoder, ImageEncoder)
         return image_encoder
 
@@ -411,20 +502,57 @@ class PixtralProcessorAdapter:
 
             return {"input_ids": torch.tensor(input_ids)}
 
+        # input_ids = self.tokenizer(text).input_ids
+        print(f"input_ids")
+
         # Allow dummy text, which is used for profiling as well as token inputs
-        if any(len(t) > 0 for t in text):
-            raise ValueError(
-                "You've passed text inputs instead of token inputs. "
-                "Make sure to process your input via `mistral_common`'s "
-                "tokenizer or pass a chat completion request. "
-                "For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411."
-            )
+        # if any(len(t) > 0 for t in text):
+        #     raise ValueError(
+        #         "You've passed text inputs instead of token inputs. "
+        #         "Make sure to process your input via `mistral_common`'s "
+        #         "tokenizer or pass a chat completion request. "
+        #     )
+        # prompt_strings = text
+        # if images is not None:
+        #     # Replace the image token with the expanded image token sequence
+        #     image_sizes = iter(image_inputs["image_sizes"])
+        #     prompt_strings = []
+        #     replace_strings = []
+        #
+        #     for sample in text:
+        #         while self.image_token in sample:
+        #             image_size = next(image_sizes)
+        #             if isinstance(image_size, list):
+        #                 image_size = image_size[0]
+        #             height, width = image_size
+        #
+        #             num_height_tokens = height // (
+        #                 self.patch_size * self.spatial_merge_size
+        #             )
+        #             num_width_tokens = width // (
+        #                 self.patch_size * self.spatial_merge_size
+        #             )
+        #             replace_tokens = [
+        #                                  [self.image_token] * num_width_tokens + [self.image_break_token]
+        #                              ] * num_height_tokens
+        #             # Flatten list
+        #             replace_tokens = [
+        #                 item for sublist in replace_tokens for item in sublist
+        #             ]
+        #             replace_tokens[-1] = self.image_end_token
+        #             replace_str = "".join(replace_tokens)
+        #             replace_strings.append(replace_str)
+        #             sample = sample.replace(self.image_token, "<placeholder>", 1)
+        #
+        #         while "<placeholder>" in sample:
+        #             replace_str = replace_strings.pop(0)
+        #             sample = sample.replace("<placeholder>", replace_str, 1)
+        #         prompt_strings.append(sample)
 
         image_token_id = self.image_token_id
 
         images_processed = list[torch.Tensor]()
-        images_tokens = list[torch.Tensor]()
+        images_tokenss = list[torch.Tensor]()
         images_embed_is_patch = list[torch.Tensor]()
         images_num_patches = list[int]()
 
@@ -432,14 +560,15 @@ class PixtralProcessorAdapter:
             image_inputs = self.image_processor(ImageChunk(image=image))
             image_processed = torch.tensor(image_inputs.image)
             image_tokens = torch.tensor(image_inputs.tokens)
+            print(f"image_tokens: {image_tokens.shape}")
 
             images_processed.append(image_processed)
-            images_tokens.append(image_tokens)
+            images_tokenss.append(image_tokens)
             images_embed_is_patch.append(image_tokens == image_token_id)
             images_num_patches.append(len(image_tokens))
-
+        print(f"text {len(text)}")
         return {
-            "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
+            "input_ids": torch.cat(images_tokenss)[None].expand(len(text), -1),
             "images": images_processed,
             "embed_is_patch": images_embed_is_patch,
             "num_patches": torch.tensor(images_num_patches),
@@ -617,25 +746,6 @@ class Mistral3Config(PretrainedConfig):
         spatial_merge_size (`int`, *optional*, defaults to 2):
             The downsampling factor for the spatial merge operation.
 
-    Example:
-
-    ```python
-    >>> from transformers import Mistral3ForConditionalGeneration, Mistral3Config, PixtralVisionConfig, MistralConfig
-
-    >>> # Initializing a Pixtral-vision config
-    >>> vision_config = PixtralVisionConfig()
-
-    >>> # Initializing a Mistral config
-    >>> text_config = MistralConfig()
-
-    >>> # Initializing a Mistral3 configuration
-    >>> configuration = Mistral3Config(vision_config, text_config)
-
-    >>> # Initializing a model from the mistral3.1 configuration
-    >>> model = Mistral3ForConditionalGeneration(configuration)
-
-    >>> # Accessing the model configuration
-    >>> configuration = model.config
     ```"""
 
     model_type = "mistral3"
@@ -658,6 +768,7 @@ class Mistral3Config(PretrainedConfig):
         self.projector_hidden_act = projector_hidden_act
 
         self.vision_feature_layer = vision_feature_layer
+        print(f"CONFIG_MAPPING: {CONFIG_MAPPING}")
 
         if isinstance(vision_config, dict):
             vision_config["model_type"] = (
@@ -665,7 +776,9 @@ class Mistral3Config(PretrainedConfig):
                 if "model_type" in vision_config
                 else "pixtral"
             )
-            vision_config = CONFIG_MAPPING[vision_config["model_type"]](**vision_config)
+            config_cls = CONFIG_MAPPING[vision_config["model_type"]]
+            print(f"config_cls: {config_cls} for ", vision_config["model_type"])
+            vision_config = config_cls(**vision_config)
         elif vision_config is None:
             vision_config = CONFIG_MAPPING["pixtral"](
                 intermediate_size=4096,
@@ -742,6 +855,7 @@ def flatten_nested_list(nested_list):
         return [nested_list]
 
 
+# Copied from https://github.com/huggingface/transformers/blob/706703bba6c920b10aa7e7ee8163b06a8a03c450/src/transformers/models/pixtral/image_processing_pixtral.py
 class PixtralProcessor(ProcessorMixin):
     r"""
     Constructs a Pixtral processor which wraps a Pixtral image processor and a Pixtral tokenizer into a single processor.
@@ -777,7 +891,7 @@ class PixtralProcessor(ProcessorMixin):
         "image_break_token",
         "image_end_token",
     ]
-    image_processor_class = "AutoImageProcessor"
+    image_processor_class = "PixtralImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
     def __init__(
@@ -792,12 +906,50 @@ class PixtralProcessor(ProcessorMixin):
         image_end_token="[IMG_END]",
         **kwargs,
     ):
+        self.image_processor = image_processor
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
         self.image_token = image_token
         self.image_break_token = image_break_token
         self.image_end_token = image_end_token
+        print("bbbbbbbbbb")
+        print(f"{type(image_processor)}")
+        # transformers support for mistralai/Mistral-Small-3.1-24B-Instruct-2503 was **not throughly tested**
+        # https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503#transformers-untested
+        use_hf_version_image_processor = True
+        # if use_hf_version_image_processor:
+        #     ...
+        # else:
+        #     image_processor = PixtralImageProcessorFromMistralCommon()
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
+
+        self.mm_encoder = ImageEncoder(
+            PretrainedConfig(
+                image_patch_size=14, max_image_size=1540, spatial_merge_size=2
+            ),
+            special_ids=SpecialImageIDs(img=10, img_break=12, img_end=13),
+        )
+        self.image_token = image_token
+
+    @cached_property
+    def image_break_id(self) -> int:
+        return self.image_processor.special_ids.img_break
+
+    @cached_property
+    def image_token_id(self) -> int:
+        return self.image_processor.special_ids.img
+
+    @cached_property
+    def image_end_id(self) -> int:
+        return self.image_processor.special_ids.img_end
+
+    @cached_property
+    def image_size(self) -> int:
+        return self.image_processor.mm_config.max_image_size
+
+    @cached_property
+    def patch_size(self) -> int:
+        return self.image_processor.mm_config.image_patch_size
 
     def __call__(
         self,
@@ -870,9 +1022,9 @@ class PixtralProcessor(ProcessorMixin):
                 images, patch_size=self.patch_size, **output_kwargs["images_kwargs"]
             )
 
-            # image_inputs["image_sizes"] = image_inputs["image_sizes"][0]
-            # image_inputs["pixel_values"] = image_inputs["pixel_values"][0]
-
+            print(
+                f"0000 pixel values shape: ", image_inputs["pixel_values"][0][0].shape
+            )
             image_inputs["image_sizes"] = flatten_nested_list(
                 image_inputs["image_sizes"]
             )
@@ -931,6 +1083,7 @@ class PixtralProcessor(ProcessorMixin):
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
         pixel_values = torch.stack(image_inputs["pixel_values"], dim=0)
         image_inputs["pixel_values"] = pixel_values
+        print(f"input_ids shape 980: ", text_inputs["input_ids"].shape)
         return BatchFeature(
             data={**text_inputs, **image_inputs},
             tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
@@ -958,38 +1111,6 @@ class PixtralProcessor(ProcessorMixin):
         tokenizer_input_names = self.tokenizer.model_input_names
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
-
-
-import math
-from typing import Dict, List, Optional, Tuple, Union
-
-import numpy as np
-from transformers.image_processing_utils import (
-    BaseImageProcessor,
-    BatchFeature,
-    get_size_dict,
-)
-from transformers.image_transforms import pad, resize, to_channel_dimension_format
-from transformers.image_utils import (
-    ChannelDimension,
-    ImageInput,
-    PILImageResampling,
-    get_image_size,
-    infer_channel_dimension_format,
-    is_scaled_image,
-    make_list_of_images,
-    to_numpy_array,
-    valid_images,
-    validate_kwargs,
-    validate_preprocess_arguments,
-)
-from transformers.utils import TensorType, is_vision_available, logging
-from transformers.utils.import_utils import requires_backends
-
-logger = logging.get_logger(__name__)
-
-if is_vision_available():
-    import PIL
 
 
 # Adapted from function in image_transforms.py to ensure any transparent pixels are converted to white.
@@ -1089,6 +1210,7 @@ def get_resize_output_image_size(
     return num_height_tokens * patch_height, num_width_tokens * patch_width
 
 
+@rename_class("PixtralImageProcessorFast")
 class PixtralImageProcessor(BaseImageProcessor):
     r"""
     Constructs a Pixtral image processor.
@@ -1140,6 +1262,8 @@ class PixtralImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        print(f"111111using pixtral image processor")
+
         size = size if size is not None else {"longest_edge": 1024}
         patch_size = (
             patch_size if patch_size is not None else {"height": 16, "width": 16}
@@ -1280,6 +1404,32 @@ class PixtralImageProcessor(BaseImageProcessor):
             for image, size in zip(pixel_values, image_sizes)
         ]
         return pixel_values
+
+    @property
+    def image_processor(self) -> ImageEncoder:
+        image_encoder = self.tokenizer.instruct.mm_encoder
+        assert isinstance(image_encoder, ImageEncoder)
+        return image_encoder
+
+    @cached_property
+    def image_break_id(self) -> int:
+        return self.image_processor.special_ids.img_break
+
+    @cached_property
+    def image_token_id(self) -> int:
+        return self.image_processor.special_ids.img
+
+    @cached_property
+    def image_end_id(self) -> int:
+        return self.image_processor.special_ids.img_end
+
+    @cached_property
+    def image_size(self) -> int:
+        return self.image_processor.mm_config.max_image_size
+
+    @cached_property
+    def patch_size(self) -> int:
+        return self.image_processor.mm_config.image_patch_size
 
     def preprocess(
         self,
@@ -1437,22 +1587,385 @@ class PixtralImageProcessor(BaseImageProcessor):
 
             batch_images.append(image)
             batch_image_sizes.append(get_image_size(image, data_format))
+        #
+        # pixel_values = self._pad_for_batching(
+        #     pixel_values=batch_images,
+        #     image_sizes=batch_image_sizes,
+        #     input_data_format=data_format,
+        #     data_format=data_format,
+        # )
 
-        pixel_values = self._pad_for_batching(
-            pixel_values=batch_images,
-            image_sizes=batch_image_sizes,
-            input_data_format=data_format,
-            data_format=data_format,
-        )
+        image_token_id = self.image_token_id
 
+        images_processed = list[torch.Tensor]()
+        images_tokens = list[torch.Tensor]()
+        images_embed_is_patch = list[torch.Tensor]()
+        images_num_embeds = list[int]()
+        for image in images:
+            image_inputs = self.image_processor(ImageChunk(image=image))
+            image_processed = torch.tensor(image_inputs.image)
+            image_tokens = torch.tensor(image_inputs.tokens)
+
+            images_processed.append(image_processed)
+            images_tokens.append(image_tokens)
+            images_embed_is_patch.append(image_tokens == image_token_id)
+            images_num_embeds.append(len(image_tokens))
+
+        print(f"111111using pixtral image processor: {images_processed[0].shape}")
         return BatchFeature(
-            data={"pixel_values": pixel_values, "image_sizes": batch_image_sizes},
+            data={"pixel_values": images_processed, "image_sizes": batch_image_sizes},
             tensor_type=return_tensors,
         )
 
 
-PROCESSOR_MAPPING_NAMES["pixtral"] = ""
+class MistralBase(BaseModel):
+    """
+    Base class for all Mistral Pydantic models.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid", validate_default=True, use_enum_values=True
+    )
+
+
+class ImageURL(MistralBase):
+    url: str
+    detail: Optional[str] = None
+
+
+class ChunkTypes(str, Enum):
+    text = "text"
+    image = "image"
+    image_url = "image_url"
+
+
+class BaseContentChunk(MistralBase):
+    type: Literal[ChunkTypes.text, ChunkTypes.image, ChunkTypes.image_url]
+
+
+class ImageURLChunk(BaseContentChunk):
+    """
+    {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0
+    """
+
+    type: Literal[ChunkTypes.image_url] = ChunkTypes.image_url
+    image_url: Union[ImageURL, str]
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def get_url(self) -> str:
+        if isinstance(self.image_url, ImageURL):
+            return self.image_url.url
+        return self.image_url
+
+
+class ImageURLChunk(BaseContentChunk):
+    """
+    {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0
+    """
+
+    type: Literal[ChunkTypes.image_url] = ChunkTypes.image_url
+    image_url: Union[ImageURL, str]
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def get_url(self) -> str:
+        if isinstance(self.image_url, ImageURL):
+            return self.image_url.url
+        return self.image_url
+
+
+@dataclass
+class ImageEncoding:
+    tokens: List[int]
+    image: np.ndarray
+
+
+class MultiModalEncoder(Protocol):
+    def __call__(self, content: Union[ImageChunk, ImageURLChunk]) -> ImageEncoding:
+        """
+        Encode the given content.
+
+        Args:
+            content (ChunkContent): The content to be encoded.
+
+        Returns:
+            ImageEncoding: The encoded image content.
+        """
+        ...
+
+    @property
+    def image_token(self) -> int: ...
+
+
+# Copied from mistral_common.tokens.tokenizers.multimodal
+class ImageEncoder(MultiModalEncoder):
+    def __init__(
+        self, mm_config: PretrainedConfig, special_ids: SpecialImageIDs
+    ) -> None:
+        self.mm_config = mm_config
+        self.special_ids = special_ids
+
+    def _image_to_num_tokens(self, img: Image.Image) -> Tuple[int, int]:
+        w: Union[int, float]
+        h: Union[int, float]
+
+        w, h = img.size
+        ratio = max(
+            h / self.mm_config.max_image_size, w / self.mm_config.max_image_size
+        )
+        if ratio > 1:
+            w = round(w / ratio)
+            h = round(h / ratio)
+
+        width_tokens = (w - 1) // (
+            self.mm_config.image_patch_size * self.mm_config.spatial_merge_size
+        ) + 1
+        height_tokens = (h - 1) // (
+            self.mm_config.image_patch_size * self.mm_config.spatial_merge_size
+        ) + 1
+
+        return width_tokens, height_tokens
+
+    def __call__(self, content: Union[ImageChunk, ImageURLChunk]) -> ImageEncoding:
+        """
+        Converts ImageChunks to numpy image arrays and image token ids
+
+        Args:
+        image (ImageChunk, ImageURLChunk): ImageChunk to be converted
+
+        Returns:
+        ImageEncoding containing image token ids and processed image in numpy format
+        """
+        image = image_from_chunk(content)
+        w, h = self._image_to_num_tokens(image)
+        assert w > 0
+        assert h > 0
+        image_tokens = ([self.special_ids.img] * w + [self.special_ids.img_break]) * h
+        image_tokens[-1] = self.special_ids.img_end
+        new_image_size = (
+            w * self.mm_config.image_patch_size * self.mm_config.spatial_merge_size,
+            h * self.mm_config.image_patch_size * self.mm_config.spatial_merge_size,
+        )
+        processed_image = transform_image(image, new_image_size)
+        return ImageEncoding(tokens=image_tokens, image=processed_image)
+
+    @property
+    def image_token(self) -> int:
+        return self.special_ids.img
+
+
+class SpecialTokens(str, Enum):
+    bos = "<s>"
+    eos = "</s>"
+    begin_inst = "[INST]"
+    end_inst = "[/INST]"
+    begin_tools = "[AVAILABLE_TOOLS]"
+    end_tools = "[/AVAILABLE_TOOLS]"
+    begin_tool_results = "[TOOL_RESULTS]"
+    end_tool_results = "[/TOOL_RESULTS]"
+    tool_calls = "[TOOL_CALLS]"
+    img = "[IMG]"
+    img_break = "[IMG_BREAK]"
+    img_end = "[IMG_END]"
+    prefix = "[PREFIX]"
+    middle = "[MIDDLE]"
+    suffix = "[SUFFIX]"
+    begin_system = "[SYSTEM_PROMPT]"
+    end_system = "[/SYSTEM_PROMPT]"
+    begin_tool_content = "[TOOL_CONTENT]"
+
+
+def image_from_chunk(chunk: Union[ImageURLChunk, ImageChunk]) -> Image:
+    """Get a serializable image from a chunk."""
+    if isinstance(chunk, ImageChunk):
+        return chunk.image
+    if chunk.get_url().startswith("data:image"):
+        data = chunk.get_url().split(",")[1]
+        image_data = base64.b64decode(data)
+        return Image.open(BytesIO(image_data))
+    if chunk.get_url().startswith("http"):
+        return download_image(chunk.get_url())
+
+    raise RuntimeError(f"Unsupported image url scheme {chunk.get_url()}")
+
+
+def _convert_to_rgb(image: Image.Image) -> Image.Image:
+    """
+    Convert a PIL image to RGB.
+    We ensure transparent background becomes white.
+    """
+    if image.mode == "RGB":
+        return image
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    white_bg: Image.Image = Image.new("RGBA", image.size, "WHITE")
+    white_bg.paste(image, (0, 0), image)
+    return white_bg.convert("RGB")
+
+
+DATASET_MEAN = (0.48145466, 0.4578275, 0.40821073)  # RGB
+DATASET_STD = (0.26862954, 0.26130258, 0.27577711)  # RGB
+
+
+def normalize(
+    np_image: np.ndarray,
+    mean: Tuple[float, float, float],
+    std: Tuple[float, float, float],
+) -> np.ndarray:
+    """
+    Normalize a tensor image with mean and standard deviation.
+
+    Args:
+    image (np.ndarray): Image to be normalized.
+    mean (tuple[float, float, float]): Mean for each channel.
+    std (tuple[float, float, float]): Standard deviation for each channel.
+
+    Returns:
+    np.ndarray: Normalized image with shape (C, H, W).
+    """
+    np_image = np_image / 255.0
+
+    assert len(np_image.shape) == 3, f"{np_image.shape=}"
+    assert (
+        np_image.shape[2] == len(mean) == len(std)
+    ), f"{np_image.shape=}, {mean=}, {std=}"
+
+    np_image = (np_image - mean) / std
+
+    return np_image.transpose(2, 0, 1)
+
+
+def transform_image(image: Image.Image, new_size: Tuple[int, int]) -> np.ndarray:
+    if not is_cv2_installed():
+        raise ImportError(
+            "OpenCV is required for this function. Install it with 'pip install mistral_common[opencv]'"
+        )
+
+    np_image = cv2.resize(
+        np.array(_convert_to_rgb(image), dtype=np.float32),
+        new_size,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    return normalize(np_image, DATASET_MEAN, DATASET_STD)
+
+
+#
+# class PixtralImageProcessorFromMistralCommon(BaseImageProcessor):
+#     r"""
+#     Constructs a Pixtral image processor.
+#
+#     Args:
+#         do_resize (`bool`, *optional*, defaults to `True`):
+#             Whether to resize the image's (height, width) dimensions to the specified `size`. Can be overridden by
+#             `do_resize` in the `preprocess` method.
+#         size (`Dict[str, int]` *optional*, defaults to `{"longest_edge": 1024}`):
+#             Size of the maximum dimension of either the height or width dimension of the image. Used to control how
+#             images are resized. If either the height or width are greater than `size["longest_edge"]` then both the height and width are rescaled by `height / ratio`, `width /ratio` where `ratio = max(height / longest_edge, width / longest_edge)`
+#         patch_size (`Dict[str, int]` *optional*, defaults to `{"height": 16, "width": 16}`):
+#             Size of the patches in the model, used to calculate the output image size. Can be overridden by `patch_size` in the `preprocess` method.
+#         resample (`PILImageResampling`, *optional*, defaults to `Resampling.BICUBIC`):
+#             Resampling filter to use if resizing the image. Can be overridden by `resample` in the `preprocess` method.
+#         do_rescale (`bool`, *optional*, defaults to `True`):
+#             Whether to rescale the image by the specified scale `rescale_factor`. Can be overridden by `do_rescale` in
+#             the `preprocess` method.
+#         rescale_factor (`int` or `float`, *optional*, defaults to `1/255`):
+#             Scale factor to use if rescaling the image. Can be overridden by `rescale_factor` in the `preprocess`
+#             method.
+#         do_normalize (`bool`, *optional*, defaults to `True`):
+#             Whether to normalize the image. Can be overridden by `do_normalize` in the `preprocess` method.
+#         image_mean (`float` or `List[float]`, *optional*, defaults to `[0.48145466, 0.4578275, 0.40821073]`):
+#             Mean to use if normalizing the image. This is a float or list of floats the length of the number of
+#             channels in the image. Can be overridden by the `image_mean` parameter in the `preprocess` method.
+#         image_std (`float` or `List[float]`, *optional*, defaults to `[0.26862954, 0.26130258, 0.27577711]`):
+#             Standard deviation to use if normalizing the image. This is a float or list of floats the length of the
+#             number of channels in the image. Can be overridden by the `image_std` parameter in the `preprocess` method.
+#             Can be overridden by the `image_std` parameter in the `preprocess` method.
+#         do_convert_rgb (`bool`, *optional*, defaults to `True`):
+#             Whether to convert the image to RGB.
+#     """
+#
+#     model_input_names = ["pixel_values"]
+#
+#     def __init__(
+#         self,
+#         **kwargs,
+#     ) -> None:
+#         super().__init__(**kwargs)
+#         # TODO: remove the hard code
+#         self.mm_encoder = ImageEncoder(
+#             PretrainedConfig(
+#                 image_patch_size=14,
+#                 max_image_size=1540,
+#                 spatial_merge_size=2
+#             ),
+#             special_ids=SpecialImageIDs(img=10, img_break=12, img_end=13)
+#         )
+#
+#     def preprocess(
+#         self,
+#         images: ImageInput,
+#         do_resize: bool = None,
+#         size: Dict[str, int] = None,
+#         patch_size: Dict[str, int] = None,
+#         resample: PILImageResampling = None,
+#         do_rescale: bool = None,
+#         rescale_factor: float = None,
+#         do_normalize: bool = None,
+#         image_mean: Optional[Union[float, List[float]]] = None,
+#         image_std: Optional[Union[float, List[float]]] = None,
+#         do_convert_rgb: bool = None,
+#         return_tensors: Optional[Union[str, TensorType]] = None,
+#         data_format: Optional[ChannelDimension] = ChannelDimension.FIRST,
+#         input_data_format: Optional[Union[str, ChannelDimension]] = None,
+#         **kwargs,
+#     ) -> PIL.Image.Image:
+#         image = image_from_chunk(ImageChunk())
+#         mm_encoder = self.mm_encoder
+#         w, h = mm_encoder._image_to_num_tokens(image)
+#         assert w > 0
+#         assert h > 0
+#         image_tokens = ([mm_encoder.special_ids.img] * w + [mm_encoder.special_ids.img_break]) * h
+#         image_tokens[-1] = mm_encoder.special_ids.img_end
+#         new_image_size = (
+#             w * mm_encoder.mm_config.image_patch_size * self.mm_config.spatial_merge_size,
+#             h * mm_encoder.mm_config.image_patch_size * self.mm_config.spatial_merge_size,
+#         )
+#         processed_image = transform_image(image, new_image_size)
+#         image_inputs = {
+#             "image_sizes": new_image_size,
+#             "pixel_values": processed_image,
+#         }
+#         return BatchFeature(
+#             data={**text_inputs, **image_inputs},
+#             tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
+#         )
+#         return ImageEncoding(tokens=image_tokens, image=processed_image)
+#
+
+
 # the transformers compatible with sglang is <= 4.50, which has obsolete version of PixtralProcessor
 # FIXME: deregister `pixtral` from transformers to enable customized processor
 register_image_processor(Mistral3Config, PixtralImageProcessor)
-register_processor(Mistral3Config, PixtralProcessor)
+register_image_processor(PixtralVisionConfig, PixtralImageProcessor)
+
+# transformers support for mistralai/Mistral-Small-3.1-24B-Instruct-2503 was **not throughly tested**
+# https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503#transformers-untested
+use_hf_version_image_processor = False
+use_hf_version_image_processor = True
+processor_cls = (
+    PixtralProcessor if use_hf_version_image_processor else PixtralProcessorAdapter
+)
+
+if use_hf_version_image_processor:
+    print_warning_once(
+        "Using transformer version of processor, performance may be sub-optimal"
+    )
+
+
+remove_if_exists(PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
+remove_if_exists(IMAGE_PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
+
+register_processor(Mistral3Config, processor_cls)
+# register_processor(PixtralVisionConfig, processor_cls)
+# register_image_processor(PixtralVisionConfig, PixtralImageProcessor)

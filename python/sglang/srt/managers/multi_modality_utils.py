@@ -84,6 +84,38 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
         return padded_ids
 
 
+def print_info(t, name):
+    def hash_tensor(tensor):
+        # Flatten the tensor to a 1D array
+        flattened_tensor = tensor.flatten().cpu()
+        if flattened_tensor.dtype == torch.bfloat16:
+            flattened_tensor = flattened_tensor.to(torch.float32)
+
+        # Convert tensor elements to a byte string (assuming float32)
+        tensor_bytes = flattened_tensor.numpy().tobytes()
+
+        # Hash the byte string
+        tensor_hash = hash(tensor_bytes)
+
+        return tensor_hash
+        # print(tensor_hash)
+
+    print(f"name: {name}, shape: {t.shape}, dtype: {t.dtype}, stride: {t.stride()}")
+
+    max_diff = torch.max(t)
+
+    print(f"max: {max_diff}")
+    print(f"hash: {hash_tensor(t)}")
+    # 8. 平均误差
+    mean_diff = torch.mean(t)
+    print(f"mean: {mean_diff}")
+    print(f"l1: {torch.norm(t, p=1)}")
+    print(f"l2: {torch.norm(t, p=2)}")
+    print(f"")
+    print(f"")
+    print(f"")
+
+
 class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern):
     """In this pattern, data tokens should be represented as image tokens (e.g. <image><image>....<image>)"""
 
@@ -168,10 +200,14 @@ def embed_image_inputs(
 
         print(f"special_image_mask: {special_image_mask.shape}")
         print(f"inputs_embeds: {inputs_embeds.shape}")
-        print(f"image_embedding: {image_embedding}")
+        print(f"image_embedding 22: {image_embedding}")
         print(f"image_embedding: {image_embedding.shape}")
         print(f"input_ids: {input_ids.shape}")
         image_embedding = image_embedding.to(inputs_embeds.device, inputs_embeds.dtype)
+
+        print_info(image_embedding, "final image embeds")
+
+        # scatter the image embedding into inputs_embeds with mask
         inputs_embeds = inputs_embeds.masked_scatter(
             special_image_mask, image_embedding
         )
