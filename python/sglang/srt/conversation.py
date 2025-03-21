@@ -12,12 +12,13 @@
 # limitations under the License.
 # ==============================================================================
 """Conversation chat templates."""
-
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/main/fastchat/conversation.py
 import dataclasses
 from enum import IntEnum, auto
 from typing import Dict, List, Optional, Tuple, Union
+
+import mistral_common
 
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 
@@ -649,7 +650,8 @@ register_conv_template(
     Conversation(
         name="mistral3",
         system_message="You are a helpful assistant.",
-        system_template="<s>[SYSTEM_PROMPT]{system_message}[/SYSTEM_PROMPT]",
+        # <s> is already included in tokenizers
+        system_template="[SYSTEM_PROMPT]{system_message}[/SYSTEM_PROMPT]",
         roles=("user", "assistant"),
         sep="",
         sep2="",

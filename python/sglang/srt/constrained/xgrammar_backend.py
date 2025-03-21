@@ -119,7 +119,6 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
     ):
         super().__init__()
 
-        print(f"tokenizer: {type(tokenizer)}")
         tokenizer_info = TokenizerInfo.from_huggingface(
             tokenizer, vocab_size=vocab_size
         )

@@ -89,7 +89,6 @@ from sglang.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
 from sglang.srt.managers.session_controller import Session
-from sglang.srt.managers.tokenizers.mistral import MistralTokenizer
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
 from sglang.srt.managers.utils import validate_input_length
@@ -97,7 +96,7 @@ from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
@@ -108,6 +107,7 @@ from sglang.srt.utils import (
     crash_on_warnings,
     get_bool_env_var,
     get_zmq_socket,
+    kill_itself_when_parent_died,
     pyspy_dump_schedulers,
     set_gpu_proc_affinity,
     set_random_seed,
@@ -312,8 +312,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
 
         # Init the grammar backend for constrained generation
         self.grammar_queue: List[Req] = []
-        enable_grammar_backend = not isinstance(self.tokenizer, MistralTokenizer)
-        if enable_grammar_backend and not server_args.skip_tokenizer_init:
+        if not server_args.skip_tokenizer_init:
             self.grammar_backend = create_grammar_backend(
                 server_args, self.tokenizer, self.model_config.vocab_size
             )
@@ -1780,6 +1779,7 @@ def run_scheduler_process(
     dp_rank: Optional[int],
     pipe_writer,
 ):
+
     # Generate the prefix
     if dp_rank is None:
         prefix = f" TP{tp_rank}"

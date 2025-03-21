@@ -85,6 +85,8 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
 
 
 def print_info(t, name):
+    return
+
     def hash_tensor(tensor):
         # Flatten the tensor to a 1D array
         flattened_tensor = tensor.flatten().cpu()
@@ -129,7 +131,7 @@ class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern
         pad_values = image_inputs.pad_values
 
         input_ids_tensor = torch.tensor(input_ids)
-
+        print(f"input_ids: {input_ids}")
         mask = torch.isin(input_ids_tensor, self.image_token_id)
 
         num_image_tokens = mask.sum().item()
@@ -152,14 +154,18 @@ def embed_image_inputs(
     if image_input is None:
         return None
 
+    # boolean masking the special tokens
     special_image_mask = torch.isin(
         input_ids,
         torch.tensor(image_input.pad_values, device=input_ids.device),
     ).unsqueeze(-1)
 
+    print(f"input_ids: {input_ids}")
+
     num_image_tokens_in_input_ids = special_image_mask.sum()
 
     if num_image_tokens_in_input_ids == 0:
+        # unexpected
         inputs_embeds = input_embedding(input_ids)
     else:
         image_embedding = image_embedding_func(image_input)
@@ -175,7 +181,9 @@ def embed_image_inputs(
                 image_embedding.shape[0] * image_embedding.shape[1]
             )
         if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
-            num_image = num_image_tokens_in_input_ids // image_embedding.shape[1]
+            num_image = num_image_tokens_in_input_ids // (
+                1 if image_embedding.dim() == 2 else image_embedding.shape[1]
+            )
             image_embedding = image_embedding[:num_image, :]
             logger.warning(
                 f"Number of images does not match number of special image tokens in the input text. "
@@ -198,11 +206,9 @@ def embed_image_inputs(
             inputs_embeds.device
         )
 
-        print(f"special_image_mask: {special_image_mask.shape}")
         print(f"inputs_embeds: {inputs_embeds.shape}")
-        print(f"image_embedding 22: {image_embedding}")
-        print(f"image_embedding: {image_embedding.shape}")
-        print(f"input_ids: {input_ids.shape}")
+        print(f"image_embedding: {image_embedding}")
+        print(f"image_embedding shape: {image_embedding.shape}")
         image_embedding = image_embedding.to(inputs_embeds.device, inputs_embeds.dtype)
 
         print_info(image_embedding, "final image embeds")

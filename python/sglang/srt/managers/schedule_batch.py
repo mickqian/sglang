@@ -221,8 +221,10 @@ class ImageInputs:
                 setattr(ret, arg, obj[arg])
 
         # validate
-        assert isinstance(ret.pixel_values, torch.Tensor) or isinstance(
-            ret.pixel_values, np.ndarray
+        assert (
+            isinstance(ret.pixel_values, torch.Tensor)
+            or isinstance(ret.pixel_values, np.ndarray)
+            or isinstance(ret.pixel_values, list)
         )
 
         return ret

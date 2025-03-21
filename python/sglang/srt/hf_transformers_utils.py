@@ -19,7 +19,7 @@ import json
 import os
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Type, Union
+from typing import Dict, Optional, Type, Union
 
 import huggingface_hub
 import torch
@@ -60,13 +60,12 @@ from sglang.srt.configs import (
     Qwen2_5_VLConfig,
 )
 from sglang.srt.connector import create_remote_connector
-from sglang.srt.managers.tokenizers.mistral import MistralTokenizer, TokenizerBase
 from sglang.srt.utils import is_remote_url
 from sglang.utils import logger
 
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 MISTRAL_CONFIG_NAME = "params.json"
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, TokenizerBase]
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     ChatGLMConfig.model_type: ChatGLMConfig,
@@ -77,7 +76,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     MultiModalityConfig.model_type: MultiModalityConfig,
     Gemma3Config.model_type: Gemma3Config,
     Gemma3TextConfig.model_type: Gemma3TextConfig,
-    # PixtralProcessorAdapter.model_type: PixtralConfig,
     Mistral3Config.model_type: Mistral3Config,
 }
 
@@ -343,7 +341,7 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     tokenizer_revision: Optional[str] = None,
     **kwargs,
-) -> TokenizerBase:
+) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via Huggingface."""
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
@@ -364,44 +362,39 @@ def get_tokenizer(
         tokenizer_name = client.get_local_dir()
 
     tokenizer: AnyTokenizer
-    if tokenizer_mode == "mistral":
-        tokenizer = MistralTokenizer.from_pretrained(
-            str(tokenizer_name), revision=tokenizer_revision
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            tokenizer_revision=tokenizer_revision,
+            clean_up_tokenization_spaces=False,
+            **kwargs,
         )
-    else:
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                tokenizer_revision=tokenizer_revision,
-                clean_up_tokenization_spaces=False,
-                **kwargs,
-            )
-        except TypeError as e:
-            # The LLaMA tokenizer causes a protobuf error in some environments.
+    except TypeError as e:
+        # The LLaMA tokenizer causes a protobuf error in some environments.
+        err_msg = (
+            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
+            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
+            "original tokenizer."
+        )
+        raise RuntimeError(err_msg) from e
+    except ValueError as e:
+        # If the error pertains to the tokenizer class not existing or not
+        # currently being imported, suggest using the --trust-remote-code flag.
+        if not trust_remote_code and (
+            "does not exist or is not currently imported." in str(e)
+            or "requires you to execute the tokenizer file" in str(e)
+        ):
             err_msg = (
-                "Failed to load the tokenizer. If you are using a LLaMA V1 model "
-                f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
-                "original tokenizer."
+                "Failed to load the tokenizer. If the tokenizer is a custom "
+                "tokenizer not yet available in the HuggingFace transformers "
+                "library, consider setting `trust_remote_code=True` in LLM "
+                "or using the `--trust-remote-code` flag in the CLI."
             )
             raise RuntimeError(err_msg) from e
-        except ValueError as e:
-            # If the error pertains to the tokenizer class not existing or not
-            # currently being imported, suggest using the --trust-remote-code flag.
-            if not trust_remote_code and (
-                "does not exist or is not currently imported." in str(e)
-                or "requires you to execute the tokenizer file" in str(e)
-            ):
-                err_msg = (
-                    "Failed to load the tokenizer. If the tokenizer is a custom "
-                    "tokenizer not yet available in the HuggingFace transformers "
-                    "library, consider setting `trust_remote_code=True` in LLM "
-                    "or using the `--trust-remote-code` flag in the CLI."
-                )
-                raise RuntimeError(err_msg) from e
-            else:
-                raise e
+        else:
+            raise e
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         warnings.warn(

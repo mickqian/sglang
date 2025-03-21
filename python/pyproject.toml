@@ -24,7 +24,6 @@ runtime_common = [
     "huggingface_hub",
     "interegular",
     "llguidance>=0.6.15",
-    "mistral_common>=1.5.4",
     "modelscope",
     "ninja",
     "orjson",

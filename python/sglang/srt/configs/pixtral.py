@@ -775,7 +775,6 @@ class Mistral3Config(PretrainedConfig):
                 else "pixtral"
             )
             config_cls = CONFIG_MAPPING[vision_config["model_type"]]
-            print(f"config_cls: {config_cls} for ", vision_config["model_type"])
             vision_config = config_cls(**vision_config)
         elif vision_config is None:
             vision_config = CONFIG_MAPPING["pixtral"](
@@ -897,7 +896,7 @@ class PixtralProcessor(ProcessorMixin):
         image_processor=None,
         tokenizer=None,
         patch_size: int = 16,
-        spatial_merge_size: int = 1,
+        spatial_merge_size: int = 2,
         chat_template=None,
         image_token="[IMG]",  # set the default and let users change if they have peculiar special tokens in rare cases
         image_break_token="[IMG_BREAK]",
@@ -929,25 +928,57 @@ class PixtralProcessor(ProcessorMixin):
         )
         self.image_token = image_token
 
+    @property
+    def mistral_image_processor(self) -> ImageEncoder:
+        # ImageEncoder
+        # image_encoder = self.tokenizer.instruct.mm_encoder
+        image_encoder = self.mm_encoder
+        assert isinstance(image_encoder, ImageEncoder)
+        return image_encoder
+
     @cached_property
     def image_break_id(self) -> int:
-        return self.image_processor.special_ids.img_break
+        return self.mistral_image_processor.special_ids.img_break
 
     @cached_property
     def image_token_id(self) -> int:
-        return self.image_processor.special_ids.img
+        return self.mistral_image_processor.special_ids.img
 
     @cached_property
     def image_end_id(self) -> int:
-        return self.image_processor.special_ids.img_end
+        return self.mistral_image_processor.special_ids.img_end
 
     @cached_property
     def image_size(self) -> int:
-        return self.image_processor.mm_config.max_image_size
+        return self.mistral_image_processor.mm_config.max_image_size
 
     @cached_property
     def patch_size(self) -> int:
-        return self.image_processor.mm_config.image_patch_size
+        return self.mistral_image_processor.mm_config.image_patch_size
+
+    def _image_to_num_tokens(
+        self, size: Tuple[Union[int, float], Union[int, float]]
+    ) -> Tuple[int, int]:
+        mm_encoder = self.mm_encoder
+        w, h = size
+        ratio = max(
+            h / mm_encoder.mm_config.max_image_size,
+            w / mm_encoder.mm_config.max_image_size,
+        )
+        if ratio > 1:
+            w = round(w / ratio)
+            h = round(h / ratio)
+
+        width_tokens = (w - 1) // (
+            mm_encoder.mm_config.image_patch_size
+            * mm_encoder.mm_config.spatial_merge_size
+        ) + 1
+        height_tokens = (h - 1) // (
+            mm_encoder.mm_config.image_patch_size
+            * mm_encoder.mm_config.spatial_merge_size
+        ) + 1
+
+        return width_tokens, height_tokens
 
     def __call__(
         self,
@@ -992,6 +1023,7 @@ class PixtralProcessor(ProcessorMixin):
             - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
         """
         # check if images and text inputs are reversed for BC
+        print(f"text0 {text}")
         images, text = _validate_images_text_input_order(images, text)
 
         output_kwargs = self._merge_kwargs(
@@ -1000,6 +1032,29 @@ class PixtralProcessor(ProcessorMixin):
             **kwargs,
         )
 
+        image_token_id = self.image_token_id
+
+        images_processed = list[torch.Tensor]()
+        images_tokens = list[torch.Tensor]()
+        images_embed_is_patch = list[torch.Tensor]()
+        images_num_embeds = list[int]()
+        print(f"images len: {len(images)}")
+        for image in images:
+            image_inputs = self.mistral_image_processor(ImageChunk(image=image))
+            image_processed = torch.tensor(image_inputs.image)
+            image_tokens = torch.tensor(image_inputs.tokens)
+
+            images_processed.append(image_processed)
+            images_tokens.append(image_tokens)
+            images_embed_is_patch.append(image_tokens == image_token_id)
+            images_num_embeds.append(len(image_tokens))
+
+        for image in images_processed:
+            print(f"image shape: {image.shape}")
+
+        for img in images_tokens:
+            print(f"images_tokens shape: {img.shape}")
+            print(f"images_tokens: {img}")
         if images is not None:
             if is_image_or_image_url(images):
                 images = [images]
@@ -1052,12 +1107,25 @@ class PixtralProcessor(ProcessorMixin):
                         image_size = image_size[0]
                     height, width = image_size
 
-                    num_height_tokens = height // (
+                    num_height_tokens_0 = height // (
                         self.patch_size * self.spatial_merge_size
                     )
-                    num_width_tokens = width // (
+                    num_width_tokens_0 = width // (
                         self.patch_size * self.spatial_merge_size
                     )
+
+                    (
+                        num_width_tokens,
+                        num_height_tokens,
+                    ) = self._image_to_num_tokens(image_size)
+                    # if num_height_tokens != num_height_tokens_0:
+                    #     print("1111111111")
+                    # if num_width_tokens_0 != num_width_tokens:
+                    #     print("2222222")
+                    # print(f"{image_size=}")
+                    # print(f"{num_width_tokens=}")
+                    # print(f"{num_height_tokens=}")
+
                     replace_tokens = [
                         [self.image_token] * num_width_tokens + [self.image_break_token]
                     ] * num_height_tokens
@@ -1067,18 +1135,31 @@ class PixtralProcessor(ProcessorMixin):
                     ]
                     replace_tokens[-1] = self.image_end_token
                     replace_str = "".join(replace_tokens)
+                    # print(f"{image_size=}")
+                    # print(f"replace_str: {replace_str}")
+                    # print(f"{self.patch_size=}")
+                    # print(f"{self.spatial_merge_size=}")
                     replace_strings.append(replace_str)
+                    # print(f"before: {sample}")
                     sample = sample.replace(self.image_token, "<placeholder>", 1)
+                    # print(f"after: {sample}")
 
                 while "<placeholder>" in sample:
                     replace_str = replace_strings.pop(0)
+                    print(f"replacing <placeholder> with: {replace_str}")
+                    print(f"before: {sample}")
                     sample = sample.replace("<placeholder>", replace_str, 1)
+                    print(f"after: {sample}")
+
                 prompt_strings.append(sample)
 
+        # print(f"prompt_strings: {prompt_strings}")
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
         # pixel_values = torch.stack(image_inputs["pixel_values"], dim=0)
         # image_inputs["pixel_values"] = pixel_values
-        print(f"output_kwargs: {output_kwargs}")
+        # input_ids = torch.cat(images_tokens)[None].expand([''], -1),
+        image_inputs["pixel_values"] = images_processed
+        # image_inputs["input_ids"] = input_ids
         return BatchFeature(
             data={**text_inputs, **image_inputs},
             # tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
@@ -1105,7 +1186,7 @@ class PixtralProcessor(ProcessorMixin):
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.model_input_names
     def model_input_names(self):
         tokenizer_input_names = self.tokenizer.model_input_names
-        image_processor_input_names = self.image_processor.model_input_names
+        image_processor_input_names = self.mistral_image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
 
 
@@ -1258,7 +1339,7 @@ class PixtralImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        print(f"111111using pixtral image processor")
+        print("Using customed sglang ImageProcessor")
 
         size = size if size is not None else {"longest_edge": 1024}
         patch_size = (
@@ -1947,21 +2028,10 @@ register_image_processor(PixtralVisionConfig, PixtralImageProcessor)
 
 # transformers support for mistralai/Mistral-Small-3.1-24B-Instruct-2503 was **not throughly tested**
 # https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503#transformers-untested
-use_hf_version_image_processor = False
-use_hf_version_image_processor = True
-processor_cls = (
-    PixtralProcessor if use_hf_version_image_processor else PixtralProcessorAdapter
-)
-
-if use_hf_version_image_processor:
-    print_warning_once(
-        "Using transformer version of processor, performance may be sub-optimal"
-    )
-
 
 remove_if_exists(PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
 remove_if_exists(IMAGE_PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
 
-register_processor(Mistral3Config, processor_cls)
+register_processor(Mistral3Config, PixtralProcessor)
 # register_processor(PixtralVisionConfig, processor_cls)
 # register_image_processor(PixtralVisionConfig, PixtralImageProcessor)

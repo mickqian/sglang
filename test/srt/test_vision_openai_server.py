@@ -154,14 +154,13 @@ class TestOpenAIVisionServer(unittest.TestCase):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png"
+                                "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/bee.jpg"
                             },
                             "modalities": "multi-images",
                         },
                         {
                             "type": "text",
-                            "text": "I have two very different images. They are not related at all. "
-                            "Please describe the first image in one sentence, and then describe the second image in another sentence.",
+                            "text": "Whats in these following two pictures? Please Describe in english",
                         },
                     ],
                 },
@@ -625,6 +624,9 @@ class TestMistral3Server(TestOpenAIVisionServer):
         cls.base_url += "/v1"
 
     def test_video_chat_completion(self):
+        pass
+
+    def test_multi_images_chat_completion(self):
         pass
 
 

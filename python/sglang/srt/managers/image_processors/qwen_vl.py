@@ -10,12 +10,17 @@ from sglang.srt.managers.image_processor import BaseImageProcessor
 from sglang.srt.managers.image_processors.base_image_processor import (
     get_global_processor,
 )
+from sglang.srt.managers.multi_modality_utils import (
+    MultiModalityDataPaddingPatternTokenPairs,
+)
+from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(BaseImageProcessor):
+
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -28,6 +33,16 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
+
+    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+        # Get all special token IDs
+        im_start_id: int = image_inputs.im_start_id
+        im_end_id: int = image_inputs.im_end_id
+
+        media_token_pairs = [(im_start_id, im_end_id)]
+        pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
+
+        return pattern.pad_input_tokens(input_ids, image_inputs)
 
     @staticmethod
     def _process_images_task(images, input_text, _hf_config):

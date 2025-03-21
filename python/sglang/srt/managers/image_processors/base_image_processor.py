@@ -1,4 +1,3 @@
-import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
@@ -14,6 +13,7 @@ from decord import VideoReader
 from numpy.distutils.cpuinfo import cpu
 from PIL import Image
 
+from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.utils import load_image
 from sglang.utils import logger
 
@@ -107,6 +107,10 @@ class BaseImageProcessor(ABC):
     #
     #     return image_inputs
 
+    # @abstractmethod
+    # def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    #     ...
+
     def _build_processor(self, server_args):
         """Init the global processor for multi modal models."""
         from sglang.srt.hf_transformers_utils import get_processor
@@ -198,11 +202,9 @@ class BaseImageProcessor(ABC):
         if return_text:
             import re
 
-            # 使用转换后的字符串作为分割标记
             pattern = "(" + "|".join(re.escape(sep) for sep in [image_token_str]) + ")"
             text_parts = re.split(pattern, input_text)
 
-        # 其他代码保持不变
         MAX_NUM_FRAMES = 30
         estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
         total_frame_count = sum(estimated_frames_list)

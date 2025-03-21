@@ -47,7 +47,7 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
 
         if len(base_output.all_frames) == 0:
             return None
-        res = await self._process_images(
+        res = await self._process_single_image(
             images=base_output.all_frames, input_text=base_output.input_text
         )
 

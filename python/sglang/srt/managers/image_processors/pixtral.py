@@ -20,24 +20,13 @@ class PixtralProcessor(SGLangBaseImageProcessor):
     @staticmethod
     def _process_single_image(input_text, images) -> dict:
         processor = get_global_processor()
-        print(f"processor: {type(processor)}")
+        result = processor(text=input_text, prompt=input_text, images=images)
 
-        result = processor(
-            text=input_text,
-            prompt=input_text,
-            images=images
-            # , return_tensors="pt"
-            ,
-            # return_tensors=None
-        )
-        # print(
-        #     f"image processor pixel values shape: ", result["pixel_values"][0][0].shape
-        # )
+        for p in result["pixel_values"]:
+            print(f"pixel values shape: {p.shape}")
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],
-            # "image_sizes": result["image_sizes"],
-            # "image_sizes": [(2,2)],
         }
 
     async def _process_images(self, images, input_text):
@@ -76,8 +65,6 @@ class PixtralProcessor(SGLangBaseImageProcessor):
             image_data = []
         if not isinstance(image_data, list):
             image_data = [image_data]
-        print(f"input_ids image processor: {input_ids}")
-
         base_out = self.load_images(
             input_ids=input_ids,
             image_data=image_data,
@@ -87,11 +74,12 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         images = base_out.all_frames
         res = await self._process_images(images=images, input_text=base_out.input_text)
         print(f"image res: {res}")
+        print(f"image res: {base_out=}")
         print(f"input ids shape: ", res["input_ids"].numel())
 
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
-            "pixel_values": stack_nested_list(res["pixel_values"]),
+            "pixel_values": res["pixel_values"],
             "image_hashes": base_out.image_hashes,
             "im_token_id": self.image_token_id,
             # "image_sizes": res["image_sizes"],

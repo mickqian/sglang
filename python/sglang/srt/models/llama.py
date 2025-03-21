@@ -22,7 +22,6 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 from transformers import LlamaConfig
-from transformers.activations import ACT2FN
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -31,7 +30,6 @@ from sglang.srt.distributed import (
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -55,7 +53,6 @@ from sglang.srt.utils import add_prefix, make_layers
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
-first = True
 
 
 class LlamaMLP(nn.Module):
@@ -196,98 +193,14 @@ class MistralRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        global first
-        # if first:
-        #     print_info(hidden_states, "MistralRMSNorm hs0")
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
-        # if first:
-        #     print(input_dtype)
-        #     print_info(hidden_states, "MistralRMSNorm hs")
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        # if first:
-        #     print_info(variance, "MistralRMSNorm variance")
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        # if first:
-        #     print_info(variance, "MistralRMSNorm hidden_states 2")
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-def print_info(t, name):
-    def hash_tensor(tensor):
-        # Flatten the tensor to a 1D array
-        flattened_tensor = tensor.flatten().cpu()
-        if flattened_tensor.dtype == torch.bfloat16:
-            flattened_tensor = flattened_tensor.to(torch.float32)
-
-        # Convert tensor elements to a byte string (assuming float32)
-        tensor_bytes = flattened_tensor.numpy().tobytes()
-
-        # Hash the byte string
-        tensor_hash = hash(tensor_bytes)
-
-        return tensor_hash
-        # print(tensor_hash)
-
-    print(f"name: {name}, shape: {t.shape}, dtype: {t.dtype}, stride: {t.stride()}")
-
-    max_diff = torch.max(t)
-
-    print(f"max: {max_diff}")
-    print(f"hash: {hash_tensor(t)}")
-    # 8. 平均误差
-    mean_diff = torch.mean(t)
-    print(f"mean: {mean_diff}")
-    print(f"l1: {torch.norm(t, p=1)}")
-    print(f"l2: {torch.norm(t, p=2)}")
-    print(f"")
-    print(f"")
-    print(f"")
-
-
-class MistralMLP(nn.Module):
-    def __init__(
-        self,
-        config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
-        )
-        self.up_proj = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.up_proj",
-        )
-        self.down_proj = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
-        )
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        x_gate, _ = self.gate_proj(x)
-        x_gate = self.act_fn(x_gate)
-        x_up, _ = self.up_proj(x)
-        x_down, _ = self.down_proj(x_gate * x_up)
-        return x_down
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -329,8 +242,10 @@ class LlamaDecoderLayer(nn.Module):
             prefix=add_prefix("self_attn", prefix),
             bias=attention_bias,
         )
-        self.mlp = MistralMLP(
-            config=config,
+        self.mlp = LlamaMLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
@@ -351,55 +266,52 @@ class LlamaDecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         global first
         # Self Attention
+        if first:
+            print(f"first residual: {residual}")
+
         residual = hidden_states
 
-        if first:
-            print(f"aaaaa {self.input_layernorm.extra_repr()}")
-            print_info(self.input_layernorm.weight, "input norm")
-            print_info(residual, f"first residual")
-
-        hidden_states = hidden_states.unsqueeze(0)
         if residual is None:
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = hidden_states.squeeze(0)
 
         if first:
-            print(f"residual after norm: {residual}")
-            print_info(hidden_states, "hs after norm")
+            print(f"residual after attn1: {residual}")
+
+        if first:
+            print(f"hs after norm: {hidden_states}")
+            print(f"hs after norm: {hidden_states.shape}")
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
         )
-
         if first:
-            print_info(hidden_states, "hs after attn")
+            print(f"hs after attn: {hidden_states}")
 
         hidden_states = residual + hidden_states
         if first:
-            print_info(hidden_states, "hs after add res")
+            print(f"hs after residual: {hidden_states}")
+            print(f"residual after residual: {residual}")
 
         # Fully Connected
-        hidden_states = hidden_states.unsqueeze(0)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if first:
-            print_info(hidden_states, "hs after norm 2")
+            print(f"hs after norm 2: {hidden_states}")
 
         hidden_states = self.mlp(hidden_states)
         if first:
-            print_info(hidden_states, "hs after norm mlp")
+            print(f"hs after mlp: {hidden_states}")
+            print(f"hs after mlp: {hidden_states.shape}")
 
         hidden_states = residual + hidden_states
 
         if first:
-            print_info(hidden_states, "hs after norm res")
-
-        hidden_states = hidden_states.squeeze(0)
-
+            print(f"hs after res: {hidden_states}")
+            print(f"hs after res: {hidden_states.shape}")
         outputs = (hidden_states,)
         return outputs
 
@@ -442,6 +354,9 @@ class LlamaModel(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         global first
 
+        if first:
+            print(f"input_ids: {input_ids}")
+            print(f"positions: {positions}")
         if input_embeds is None:
             hidden_states = self.embed_tokens(input_ids)
         else:
@@ -500,6 +415,9 @@ class LlamaModel(nn.Module):
                 raise RuntimeError(
                     "Self attention has no KV cache scaling " "factor attribute!"
                 )
+
+
+first = True
 
 
 class LlamaForCausalLM(nn.Module):

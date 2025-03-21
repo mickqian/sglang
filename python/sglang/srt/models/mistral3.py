@@ -686,9 +686,16 @@ class PixtralVisionModel(PreTrainedModel):
         ]
 
         # flatten to a single sequence
-        patch_embeds = torch.cat(
-            [p.flatten(1).T for p in patch_embeds_list], dim=0
-        ).unsqueeze(0)
+        patch_embeds = [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list]
+
+        patch_embeds = torch.cat(patch_embeds, dim=1)
+
+        # patch_embeds = torch.cat(
+        #     [p.flatten(1).T for p in patch_embeds_list], dim=0
+        # ).unsqueeze(0)
+
+        print(f"flattened patch embeds shape: {patch_embeds.shape}")
+
         patch_embeds = self.ln_pre(patch_embeds)
         # positional embeddings
         position_ids = position_ids_in_meshgrid(
@@ -838,7 +845,7 @@ class Mistral3PatchMerger(nn.Module):
     def forward(
         self, image_features: torch.Tensor, image_sizes: torch.Tensor
     ) -> torch.Tensor:
-        print(f"image_sizes: {image_sizes}")
+        print(f"patch merger image_sizes: {image_sizes}")
 
         print(f"image_features shape: {image_features.shape}")
         tokens_per_image = [h * w for h, w in image_sizes]
@@ -897,9 +904,10 @@ class Mistral3MultiModalProjector(nn.Module):
             (img.shape[-2] // self.patch_size, img.shape[-1] // self.patch_size)
             for img in images
         ]
-        print(f"{images=}")
-        print(f"{images[0].shape=}")
+        for image in images:
+            print(f"mm projector {image.shape=}")
         print(f"{img_patch_dims=}")
+        print(f"{self.patch_size=}")
         feature_sizes = [image_feature.shape[0] for image_feature in image_features]
         feature_sizes = [
             feature_size // self.spatial_merge_size_square
@@ -1142,7 +1150,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
         """
 
         print("embedding image")
-        print(f"pixel_values shape: {image_input.pixel_values.shape}")
+        # print(f"pixel_values shape: {image_input.pixel_values.shape}")
         pixel_values = image_input.pixel_values
         if (
             isinstance(pixel_values, list)
@@ -1161,30 +1169,30 @@ class Mistral3ForConditionalGeneration(nn.Module):
         )
         pixel_values_new = []
         for pixel_value in pixel_values:
-            print(f"shape: {pixel_value.shape}")
             if pixel_value.dim() == 5:
                 pixel_value = pixel_value.view((-1,) + pixel_value.shape[2:])
 
             if pixel_value.dim() == 4:
                 # pixel_value = pixel_value.view((pixel_value.shape[0] * pixel_value.shape[1],) + pixel_value.shape[2:])
-                pixel_values = [p.squeeze(0) for p in pixel_value.split(1, dim=0)]
+                ps = [p.squeeze(0) for p in pixel_value.split(1, dim=0)]
 
+            if pixel_value.dim() == 3:
+                ps = [pixel_value]
             # print(f"shape: {pixel_value.shape}")
-            for p in pixel_values:
+            for p in ps:
                 assert p.dim() == 3
                 p = p.type(self.dtype).cuda()
                 pixel_values_new += [p]
 
         pixel_values = pixel_values_new
-        # pixel_values = image_input.pixel_values.type(self.dtype).cuda()
 
-        # vision_feature_layer = kwargs["vision_feature_layer"]
+        print(f"pixel_values len: {len(pixel_values)}")
+
         vision_feature_layer = self.config.vision_feature_layer
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         # this is not memory efficient at all (output_hidden_states=True) will save all the hidden states.
         image_outputs = self.vision_tower(
             pixel_values,
-            # image_sizes=image_sizes,
             output_hidden_states=False,
             **kwargs,
         )
