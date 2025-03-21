@@ -30,7 +30,6 @@ def register_image_processor(config, image_processor):
     remove_if_exists(IMAGE_PROCESSOR_MAPPING._model_mapping, config.model_type)
     # remove_if_exists(IMAGE_PROCESSOR_MAPPING_NAMES, config.model_type)
     # remove_if_exists(CONFIG_MAPPING_NAMES, config.model_type)
-    print(IMAGE_PROCESSOR_MAPPING_NAMES)
     # print(IMAGE_PROCESSOR_MAPPING.items())
     AutoImageProcessor.register(config, None, image_processor, None)
     CONFIG_MAPPING_NAMES[config.model_type] = config.__name__
@@ -43,8 +42,6 @@ def register_processor(config, processor):
     """
     register customized hf processor while removing hf impl
     """
-    print(PROCESSOR_MAPPING._config_mapping)
-    print(PROCESSOR_MAPPING._model_mapping)
     remove_if_exists(PROCESSOR_MAPPING._config_mapping, config.model_type)
     remove_if_exists(PROCESSOR_MAPPING._model_mapping, config.model_type)
     remove_if_exists(PROCESSOR_MAPPING_NAMES, config.model_type)

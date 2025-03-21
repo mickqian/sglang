@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional, Set, TypedDict, TypeVar, Union
 
+import numpy as np
 import torch
 from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 
@@ -671,16 +672,17 @@ class PixtralVisionModel(PreTrainedModel):
     ) -> Union[Tuple, BaseModelOutput]:
         """
         Returns:
-            pixel_values: tensor of token features for
-                all tokens of all images of shape (N_toks, D)
+            pixel_values: Each image to be processed will be a separate tensor
+                in pixel_values. This means it will be a list of tensors
+                because multiple requests batched can have multiple images,
+                each with their own shape potentially
         """
         # pass images through initial convolution independently
-        if len(pixel_values) > 1:
-            raise ValueError("Batching/padding not supported yet!")
+        # if len(pixel_values) > 1:
+        #     raise ValueError("Batching/padding not supported yet!")
         patch_embeds_list = [
-            self.patch_conv(img.to(self.dtype))
-            for sample in pixel_values
-            for img in sample
+            self.patch_conv(pixel_value.unsqueeze(0).to(self.dtype))
+            for pixel_value in pixel_values
         ]
 
         # flatten to a single sequence
@@ -871,8 +873,6 @@ class Mistral3MultiModalProjector(nn.Module):
         self.norm = Mistral3RMSNorm(config.vision_config.hidden_size)
         self.patch_merger = Mistral3PatchMerger(config)
         self.patch_size = self.config.patch_size
-        print(f"{self.patch_size=}")
-
         # We have hidden_size * the number of vision feature layers
         num_feature_layers = (
             1
@@ -1143,21 +1143,49 @@ class Mistral3ForConditionalGeneration(nn.Module):
 
         print("embedding image")
         print(f"pixel_values shape: {image_input.pixel_values.shape}")
+        pixel_values = image_input.pixel_values
+        if (
+            isinstance(pixel_values, list)
+            and len(pixel_values) != 0
+            and isinstance(pixel_values[0], np.ndarray)
+        ):
+            pixel_values = [torch.from_numpy(t) for t in pixel_values]
 
-        pixel_values = image_input.pixel_values.type(self.dtype).cuda()
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = [pixel_values]
+
+        assert (
+            isinstance(pixel_values, list)
+            and len(pixel_values) != 0
+            and isinstance(pixel_values[0], torch.Tensor)
+        )
+        pixel_values_new = []
+        for pixel_value in pixel_values:
+            print(f"shape: {pixel_value.shape}")
+            if pixel_value.dim() == 5:
+                pixel_value = pixel_value.view((-1,) + pixel_value.shape[2:])
+
+            if pixel_value.dim() == 4:
+                # pixel_value = pixel_value.view((pixel_value.shape[0] * pixel_value.shape[1],) + pixel_value.shape[2:])
+                pixel_values = [p.squeeze(0) for p in pixel_value.split(1, dim=0)]
+
+            # print(f"shape: {pixel_value.shape}")
+            for p in pixel_values:
+                assert p.dim() == 3
+                p = p.type(self.dtype).cuda()
+                pixel_values_new += [p]
+
+        pixel_values = pixel_values_new
+        # pixel_values = image_input.pixel_values.type(self.dtype).cuda()
 
         # vision_feature_layer = kwargs["vision_feature_layer"]
         vision_feature_layer = self.config.vision_feature_layer
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         # this is not memory efficient at all (output_hidden_states=True) will save all the hidden states.
-        if pixel_values.dim() == 4:
-            pixel_values = pixel_values.unsqueeze(dim=0)
-
-        assert pixel_values.dim() == 5
         image_outputs = self.vision_tower(
             pixel_values,
             # image_sizes=image_sizes,
-            output_hidden_states=True,
+            output_hidden_states=False,
             **kwargs,
         )
 

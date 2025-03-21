@@ -22,12 +22,17 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         processor = get_global_processor()
         print(f"processor: {type(processor)}")
 
-        result = processor.__call__(
-            text=input_text, prompt=input_text, images=images, return_tensors="pt"
+        result = processor(
+            text=input_text,
+            prompt=input_text,
+            images=images
+            # , return_tensors="pt"
+            ,
+            # return_tensors=None
         )
-        print(
-            f"image processor pixel values shape: ", result["pixel_values"][0][0].shape
-        )
+        # print(
+        #     f"image processor pixel values shape: ", result["pixel_values"][0][0].shape
+        # )
         return {
             "input_ids": result["input_ids"],
             "pixel_values": result["pixel_values"],

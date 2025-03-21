@@ -313,14 +313,12 @@ class Conversation:
                     ret += role
             return ret
         elif self.sep_style == SeparatorStyle.Mistral3:
-            ret = "<s>"
+            ret = system_prompt
             print(self.messages)
             for i, (role, message) in enumerate(self.messages):
                 if message:
                     if role == "assistant":
                         ret += message + "</s>"
-                    elif role == "system":
-                        ret += "[SYSTEM_PROMPT]" + message + "[/SYSTEM_PROMPT]"
                     elif role == "user":
                         ret += "[INST]" + message + "[/INST]"
             return ret
@@ -455,7 +453,9 @@ def generate_embedding_convs(
 
     return convs
 
-LINE_SEPARATOR = '\n'
+
+LINE_SEPARATOR = "\n"
+
 
 def generate_chat_conv(
     request: ChatCompletionRequest, template_name: str
@@ -648,7 +648,7 @@ register_conv_template(
 register_conv_template(
     Conversation(
         name="mistral3",
-        system_message="""""",
+        system_message="You are a helpful assistant.",
         system_template="<s>[SYSTEM_PROMPT]{system_message}[/SYSTEM_PROMPT]",
         roles=("user", "assistant"),
         sep="",

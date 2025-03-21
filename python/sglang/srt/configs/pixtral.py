@@ -768,8 +768,6 @@ class Mistral3Config(PretrainedConfig):
         self.projector_hidden_act = projector_hidden_act
 
         self.vision_feature_layer = vision_feature_layer
-        print(f"CONFIG_MAPPING: {CONFIG_MAPPING}")
-
         if isinstance(vision_config, dict):
             vision_config["model_type"] = (
                 vision_config["model_type"]
@@ -912,8 +910,8 @@ class PixtralProcessor(ProcessorMixin):
         self.image_token = image_token
         self.image_break_token = image_break_token
         self.image_end_token = image_end_token
-        print("bbbbbbbbbb")
-        print(f"{type(image_processor)}")
+        # print("bbbbbbbbbb")
+        # print(f"{type(image_processor)}")
         # transformers support for mistralai/Mistral-Small-3.1-24B-Instruct-2503 was **not throughly tested**
         # https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503#transformers-untested
         use_hf_version_image_processor = True
@@ -1022,15 +1020,12 @@ class PixtralProcessor(ProcessorMixin):
                 images, patch_size=self.patch_size, **output_kwargs["images_kwargs"]
             )
 
-            print(
-                f"0000 pixel values shape: ", image_inputs["pixel_values"][0][0].shape
-            )
-            image_inputs["image_sizes"] = flatten_nested_list(
-                image_inputs["image_sizes"]
-            )
-            image_inputs["pixel_values"] = flatten_nested_list(
-                image_inputs["pixel_values"]
-            )
+            # image_inputs["image_sizes"] = flatten_nested_list(
+            #     image_inputs["image_sizes"]
+            # )
+            # image_inputs["pixel_values"] = flatten_nested_list(
+            #     image_inputs["pixel_values"]
+            # )
 
         else:
             image_inputs = {}
@@ -1081,12 +1076,13 @@ class PixtralProcessor(ProcessorMixin):
                 prompt_strings.append(sample)
 
         text_inputs = self.tokenizer(prompt_strings, **output_kwargs["text_kwargs"])
-        pixel_values = torch.stack(image_inputs["pixel_values"], dim=0)
-        image_inputs["pixel_values"] = pixel_values
-        print(f"input_ids shape 980: ", text_inputs["input_ids"].shape)
+        # pixel_values = torch.stack(image_inputs["pixel_values"], dim=0)
+        # image_inputs["pixel_values"] = pixel_values
+        print(f"output_kwargs: {output_kwargs}")
         return BatchFeature(
             data={**text_inputs, **image_inputs},
-            tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
+            # tensor_type=output_kwargs["common_kwargs"]["return_tensors"],
+            tensor_type=None,
         )
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Llama
