@@ -481,7 +481,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values.type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
         return image_embeds
@@ -515,9 +515,10 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
             positions = forward_batch.mrope_positions
 
-        image = forward_batch.reduce_image_inputs()
-
-        if forward_batch.forward_mode.is_decode() or image is None:
+        if (
+            forward_batch.forward_mode.is_decode()
+            or not forward_batch.contains_image_inputs()
+        ):
             inputs_embeds = self.model.embed_tokens(input_ids)
         else:
             if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
@@ -525,11 +526,12 @@ class Qwen2VLForConditionalGeneration(nn.Module):
                     "multimodal section rotary embedding requires "
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
+            image = forward_batch.reduce_image_inputs()
             inputs_embeds = embed_image_inputs(
                 image_input=image,
                 input_ids=input_ids,
                 input_embedding=self.model.embed_tokens,
-                image_embedding_func=self._process_image_input,
+                image_embedding_func=self.get_image_feature,
             )
 
         hidden_states = self.model(

@@ -1128,7 +1128,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
         image_features = self._process_image_input(image_inputs)
         return image_features
 
-    def get_image_features(
+    def get_image_feature(
         self,
         image_input: ImageInputs,
         **kwargs,
@@ -1148,8 +1148,6 @@ class Mistral3ForConditionalGeneration(nn.Module):
         Returns:
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
-
-        print("embedding image")
         # print(f"pixel_values shape: {image_input.pixel_values.shape}")
         pixel_values = image_input.pixel_values
         if (
@@ -1185,8 +1183,6 @@ class Mistral3ForConditionalGeneration(nn.Module):
                 pixel_values_new += [p]
 
         pixel_values = pixel_values_new
-
-        print(f"pixel_values len: {len(pixel_values)}")
 
         vision_feature_layer = self.config.vision_feature_layer
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -1238,21 +1234,20 @@ class Mistral3ForConditionalGeneration(nn.Module):
         get_embedding: bool = False,
     ) -> LogitsProcessorOutput:
         """Run forward pass for mistral3."""
-        if forward_batch.forward_mode == ForwardMode.DECODE:
+        if (
+            forward_batch.forward_mode == ForwardMode.DECODE
+            or not forward_batch.contains_image_inputs()
+        ):
             inputs_embeds = self.get_input_embeddings()(input_ids)
         else:
             image_inputs = forward_batch.reduce_image_inputs()
-            if image_inputs is None:
-                inputs_embeds = self.get_input_embeddings()(input_ids)
-            else:
-                print(f"input_ids shape:{input_ids.shape}")
-                inputs_embeds = embed_image_inputs(
-                    image_input=image_inputs,
-                    input_ids=input_ids,
-                    input_embedding=self.get_input_embeddings(),
-                    image_embedding_func=self.get_image_features,
-                )
-                forward_batch.image_inputs = None
+            inputs_embeds = embed_image_inputs(
+                image_input=image_inputs,
+                input_ids=input_ids,
+                input_embedding=self.get_input_embeddings(),
+                image_embedding_func=self.get_image_feature,
+            )
+            forward_batch.image_inputs = None
         return self.language_model(
             input_ids=None,
             positions=positions,

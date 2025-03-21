@@ -4,7 +4,7 @@ import dataclasses
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import PIL
 import torch
@@ -13,7 +13,6 @@ from decord import VideoReader
 from numpy.distutils.cpuinfo import cpu
 from PIL import Image
 
-from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.utils import load_image
 from sglang.utils import logger
 
@@ -57,6 +56,8 @@ class BaseImageProcessorOutput:
 
 
 class BaseImageProcessor(ABC):
+    models = []
+
     def __init__(self, hf_config, server_args, _processor):
         self.hf_config = hf_config
         self._processor = _processor

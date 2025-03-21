@@ -1959,7 +1959,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         )
         self.logits_processor = LogitsProcessor(config)
 
-    def get_image_embedding(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values
         bs, n = pixel_values.shape[0:2]
         pixel_values = pixel_values.to(
@@ -1983,18 +1983,18 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
 
-        merged_image_inputs = forward_batch.reduce_image_inputs()
         if (
             forward_batch.forward_mode == ForwardMode.DECODE
-            or merged_image_inputs is None
+            or not forward_batch.contains_image_inputs()
         ):
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
         else:
+            image_inputs = forward_batch.reduce_image_inputs()
             inputs_embeds = embed_image_inputs(
-                image_input=merged_image_inputs,
+                image_input=image_inputs,
                 input_ids=input_ids,
                 input_embedding=self.language_model.model.embed_tokens,
-                image_embedding_func=self.get_image_embedding,
+                image_embedding_func=self.get_image_feature,
             )
 
         return self.language_model(

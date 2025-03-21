@@ -35,7 +35,6 @@ from transformers.activations import ACT2FN
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 
 from sglang.srt.configs import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -372,6 +371,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         pos_ids = []
         for i in range(grid_thw.size(0)):
             t, h, w = grid_thw[i].tolist()
+            # for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
 
             hpos_ids = hpos_ids.reshape(
@@ -513,7 +513,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values.type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
         return image_embeds
@@ -558,7 +558,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-            tp_size = get_tensor_model_parallel_world_size()
+            # image = forward_batch.reduce_image_inputs()
+
+            # tp_size = get_tensor_model_parallel_world_size()
 
             # hidden_chunk_size = image_embeds.shape[-1] // tp_size
             # rank = get_tensor_model_parallel_rank()
@@ -570,7 +572,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 image_input=image,
                 input_ids=input_ids,
                 input_embedding=self.model.embed_tokens,
-                image_embedding_func=self._process_image_input,
+                image_embedding_func=self.get_image_feature,
             )
 
         hidden_states = self.model(

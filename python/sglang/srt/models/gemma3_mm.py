@@ -28,6 +28,7 @@ from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.layernorm import Gemma3RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.managers.multi_modality_utils import embed_image_inputs
 from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import (
@@ -258,7 +259,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
-    def get_image_features(self, pixel_values: torch.Tensor):
+    def get_image_feature(self, pixel_values: torch.Tensor):
         """
         Projects the last hidden state from the vision model into language model space.
 
@@ -296,7 +297,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
             return inputs_embeds
         else:
             # print(f"image tokens from input_ids: {inputs_embeds[special_image_mask].numel()}")
-            image_features = self.get_image_features(image_input.pixel_values)
+            image_features = self.get_image_feature(image_input.pixel_values)
 
             # print(f"image tokens from image embeddings: {image_features.numel()}")
             num_image_tokens_in_embedding = (
@@ -388,20 +389,20 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         else:
             llm_input_ids = input_ids
 
-        merged_image_input = forward_batch.reduce_image_inputs()
-
         if (
-            not forward_batch.forward_mode.is_decode()
-            and merged_image_input is not None
+            forward_batch.forward_mode.is_decode()
+            or not forward_batch.contains_image_inputs()
         ):
-            inputs_embeds = self.embed_image_inputs(
-                input_ids=llm_input_ids,
-                forward_batch=forward_batch,
-                image_input=merged_image_input,
-            )
-        else:
             llm_input_ids.clamp_(min=0, max=self.vocab_size - 1)
             inputs_embeds = self.get_input_embeddings()(llm_input_ids)
+        else:
+            image_input = forward_batch.reduce_image_inputs()
+            inputs_embeds = embed_image_inputs(
+                image_input=image_input,
+                input_ids=llm_input_ids,
+                input_embedding=self.get_input_embeddings(),
+                image_embedding_func=self.get_image_feature,
+            )
 
         outputs = self.language_model(
             input_ids=None,

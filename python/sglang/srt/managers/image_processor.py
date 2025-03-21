@@ -1,5 +1,6 @@
 # TODO: also move pad_input_ids into this module
 import importlib
+import inspect
 import logging
 import pkgutil
 from functools import lru_cache
@@ -44,11 +45,16 @@ def import_image_processors():
             except Exception as e:
                 logger.warning(f"Ignore import error when loading {name}: " f"{e}")
                 continue
-            if hasattr(module, "ImageProcessorMapping"):
-                entry = module.ImageProcessorMapping
-                if isinstance(entry, dict):
-                    for processor_name, cls in entry.items():
-                        IMAGE_PROCESSOR_MAPPING[processor_name] = cls
+            all_members = inspect.getmembers(module, inspect.isclass)
+            classes = [
+                member
+                for name, member in all_members
+                if member.__module__ == module.__name__
+            ]
+            for cls in classes:
+                if issubclass(cls, BaseImageProcessor):
+                    for arch in getattr(cls, "models"):
+                        IMAGE_PROCESSOR_MAPPING[arch] = cls
 
 
 # also register processors

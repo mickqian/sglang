@@ -20,6 +20,7 @@ from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
 # Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(BaseImageProcessor):
+    models = [Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration]
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
@@ -199,9 +200,3 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
             "video_token_id": self.video_token_id,
             "second_per_grid_ts": ret["second_per_grid_ts"],
         }
-
-
-ImageProcessorMapping = {
-    Qwen2VLForConditionalGeneration: Qwen2_5VLImageProcessor,
-    Qwen2_5_VLForConditionalGeneration: Qwen2_5VLImageProcessor,
-}

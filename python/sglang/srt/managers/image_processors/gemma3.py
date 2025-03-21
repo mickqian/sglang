@@ -1,4 +1,3 @@
-import asyncio
 from typing import List, Union
 
 from transformers.utils import logging
@@ -17,6 +16,8 @@ logger = logging.get_logger(__name__)
 
 
 class Gemma3SGLangImageProcessor(SGLangBaseImageProcessor):
+    models = [Gemma3ForConditionalGeneration]
+
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "<start_of_image>"
@@ -68,7 +69,7 @@ class Gemma3SGLangImageProcessor(SGLangBaseImageProcessor):
             discard_alpha_channel=True,
         )
 
-        ret = await self._process_images(
+        ret = await self._process_single_image(
             input_text=base_output.input_text, images=base_output.all_frames
         )
 
@@ -79,8 +80,3 @@ class Gemma3SGLangImageProcessor(SGLangBaseImageProcessor):
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
         }
-
-
-ImageProcessorMapping = {
-    Gemma3ForConditionalGeneration: Gemma3SGLangImageProcessor,
-}

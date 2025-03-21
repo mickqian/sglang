@@ -414,7 +414,6 @@ def get_processor(
     tokenizer_revision: Optional[str] = None,
     **kwargs,
 ):
-    # FIXME
     processor = AutoProcessor.from_pretrained(
         tokenizer_name,
         *args,

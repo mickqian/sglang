@@ -27,7 +27,6 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.managers.tokenizers.mistral import MistralTokenizer
 
 try:
     from outlines.fsm.json_schema import convert_json_schema_to_str
@@ -917,7 +916,6 @@ def v1_chat_generate_request(
 
     # NOTE: with openai API, the prompt's logprobs are always not computed
 
-    tokenizer = tokenizer_manager.tokenizer
     for request in all_requests:
         # Prep the data needed for the underlying GenerateReqInput:
         #  - prompt: The full prompt string.
@@ -925,17 +923,6 @@ def v1_chat_generate_request(
         #  - image_data: None or a list of image strings (URLs or base64 strings).
         #    None skips any image processing in GenerateReqInput.
         if not isinstance(request.messages, str):
-            is_mixtral_tokenizer = isinstance(
-                tokenizer_manager.tokenizer, MistralTokenizer
-            )
-            # if is_mixtral_tokenizer:
-            #     prompt_data = tokenizer.apply_chat_template(
-            #         messages=request.messages,
-            #     )
-            #     prompt_ids = prompt_data
-            #     print(f"prompt_data: {prompt_data}")
-            # image_data = None
-
             # Apply chat template and its stop strings.
             tools = None
             if request.tools and request.tool_choice != "none":
@@ -961,10 +948,7 @@ def v1_chat_generate_request(
                         for content in content_list:
                             if content["type"] == "text":
                                 openai_compatible_messages.append(
-                                    {
-                                        "role": message.role,
-                                        "content": content["text"],
-                                    }
+                                    {"role": message.role, "content": content["text"]}
                                 )
                 if openai_compatible_messages[-1]["role"] == "assistant":
                     assistant_prefix = openai_compatible_messages[-1]["content"]
@@ -1008,18 +992,13 @@ def v1_chat_generate_request(
                 print(f"prompt: {prompt}")
                 image_data = conv.image_data
                 modalities = conv.modalities
+                stop = conv.stop_str or []
                 if request.stop:
                     if isinstance(request.stop, str):
                         stop.append(request.stop)
                     else:
                         stop.extend(request.stop)
-                stop = conv.stop_str or []
-
-                if is_mixtral_tokenizer:
-                    pass
-                else:
-                    prompt_ids = tokenizer_manager.tokenizer.encode(prompt)
-
+                prompt_ids = tokenizer_manager.tokenizer.encode(prompt)
         else:
             # Use the raw prompt and stop strings if the messages is already a string.
             prompt_ids = request.messages

@@ -1,4 +1,3 @@
-import asyncio
 from typing import List, Union
 
 import torch
@@ -11,6 +10,8 @@ from sglang.srt.models.minicpmv import MiniCPMV
 
 
 class MiniCPMVImageProcessor(BaseImageProcessor):
+    models = [MiniCPMV]
+
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "(<image>./</image>)"
@@ -110,7 +111,6 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
         print("2222")
         tgt_sizes = torch.stack(tgt_sizes_flat)
         print(f"{tgt_sizes.shape}")
-        # print(f"pixel values type: ", type(res["pixel_values"]))
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": pixel_values,
@@ -122,6 +122,3 @@ class MiniCPMVImageProcessor(BaseImageProcessor):
             "slice_start_id": slice_start_id,
             "slice_end_id": slice_end_id,
         }
-
-
-ImageProcessorMapping = {MiniCPMV: MiniCPMVImageProcessor}

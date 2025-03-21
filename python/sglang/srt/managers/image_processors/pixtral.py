@@ -6,12 +6,13 @@ from sglang.srt.managers.image_processors.base_image_processor import (
 )
 from sglang.srt.managers.image_processors.base_image_processor import (
     get_global_processor,
-    stack_nested_list,
 )
 from sglang.srt.models.mistral3 import Mistral3ForConditionalGeneration
 
 
 class PixtralProcessor(SGLangBaseImageProcessor):
+    models = [Mistral3ForConditionalGeneration]
+
     def __init__(self, hf_config, server_args, processor):
         super().__init__(hf_config, server_args, processor)
         self.image_token = processor.image_token
@@ -82,8 +83,4 @@ class PixtralProcessor(SGLangBaseImageProcessor):
             "pixel_values": res["pixel_values"],
             "image_hashes": base_out.image_hashes,
             "im_token_id": self.image_token_id,
-            # "image_sizes": res["image_sizes"],
         }
-
-
-ImageProcessorMapping = {Mistral3ForConditionalGeneration: PixtralProcessor}

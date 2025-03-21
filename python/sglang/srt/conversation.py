@@ -12,13 +12,12 @@
 # limitations under the License.
 # ==============================================================================
 """Conversation chat templates."""
+
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/main/fastchat/conversation.py
 import dataclasses
 from enum import IntEnum, auto
 from typing import Dict, List, Optional, Tuple, Union
-
-import mistral_common
 
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 

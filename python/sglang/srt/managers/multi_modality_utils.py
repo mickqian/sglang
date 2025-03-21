@@ -151,16 +151,17 @@ def embed_image_inputs(
     input_embedding: nn.Embedding,
     image_embedding_func,
 ) -> Optional[torch.Tensor]:
+    print(f"Embedding image input")
     if image_input is None:
         return None
+
+    placeholder_token_ids = image_input.pad_values
 
     # boolean masking the special tokens
     special_image_mask = torch.isin(
         input_ids,
-        torch.tensor(image_input.pad_values, device=input_ids.device),
+        torch.tensor(placeholder_token_ids, device=input_ids.device),
     ).unsqueeze(-1)
-
-    print(f"input_ids: {input_ids}")
 
     num_image_tokens_in_input_ids = special_image_mask.sum()
 
@@ -168,6 +169,8 @@ def embed_image_inputs(
         # unexpected
         inputs_embeds = input_embedding(input_ids)
     else:
+        print(f"Getting image feature")
+
         image_embedding = image_embedding_func(image_input)
 
         # assert image_embedding.shape[0] == input_ids.shape[0], f"{image_embedding.shape[0]} vs input_ids.shape[0]"
@@ -181,9 +184,7 @@ def embed_image_inputs(
                 image_embedding.shape[0] * image_embedding.shape[1]
             )
         if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
-            num_image = num_image_tokens_in_input_ids // (
-                1 if image_embedding.dim() == 2 else image_embedding.shape[1]
-            )
+            num_image = num_image_tokens_in_input_ids // image_embedding.shape[1]
             image_embedding = image_embedding[:num_image, :]
             logger.warning(
                 f"Number of images does not match number of special image tokens in the input text. "

@@ -1,13 +1,13 @@
 from collections import OrderedDict
+from typing import Type
 
-from transformers import AutoImageProcessor, AutoProcessor
+from transformers import AutoImageProcessor, AutoProcessor, PretrainedConfig
 from transformers.models.auto import IMAGE_PROCESSOR_MAPPING
 from transformers.models.auto.configuration_auto import (
     CONFIG_MAPPING,
     CONFIG_MAPPING_NAMES,
     MODEL_NAMES_MAPPING,
 )
-from transformers.models.auto.image_processing_auto import IMAGE_PROCESSOR_MAPPING_NAMES
 from transformers.models.auto.processing_auto import (
     PROCESSOR_MAPPING,
     PROCESSOR_MAPPING_NAMES,
@@ -19,10 +19,11 @@ def remove_if_exists(mapping, key):
         if isinstance(mapping, OrderedDict):
             mapping.pop(key)
             mapping.popitem(key)
-            # del mapping[key]
 
 
-def register_image_processor(config, image_processor):
+def register_image_processor(
+    config: Type[PretrainedConfig], image_processor: Type[AutoImageProcessor]
+):
     """
     register customized hf image processor while removing hf impl
     """
@@ -38,7 +39,7 @@ def register_image_processor(config, image_processor):
     CONFIG_MAPPING._extra_content[config.model_type] = config
 
 
-def register_processor(config, processor):
+def register_processor(config: Type[PretrainedConfig], processor: Type[AutoProcessor]):
     """
     register customized hf processor while removing hf impl
     """

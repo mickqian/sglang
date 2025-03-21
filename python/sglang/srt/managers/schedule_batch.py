@@ -181,8 +181,6 @@ class ImageInputs:
     slice_end_id: Optional[int] = None
     tgt_sizes: Optional[list] = None
 
-    num_patches: Optional[int] = None
-
     # denotes the number of valid image tokens in each image
     images_emb_mask: Optional[torch.BoolTensor] = None
 
@@ -214,7 +212,6 @@ class ImageInputs:
             "slice_end_id",
             "tgt_sizes",
             "images_emb_mask",
-            "num_patches",
         ]
         for arg in optional_args:
             if arg in obj:
@@ -268,7 +265,6 @@ class ImageInputs:
             "aspect_ratio_mask",
             # "image_grid_thws",
             "image_seq_mask",
-            "num_patches",
             "image_spatial_crop",
             "tgt_sizes",
         ]
@@ -501,6 +497,7 @@ class Req:
                 message=self.to_abort_message,
             )
             return
+
         if len(self.output_ids) >= self.sampling_params.max_new_tokens:
             self.finished_reason = FINISH_LENGTH(
                 length=self.sampling_params.max_new_tokens
