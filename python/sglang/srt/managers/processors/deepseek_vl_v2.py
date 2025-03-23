@@ -37,9 +37,15 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
 
     @staticmethod
     def _process_images_task(image, input_text, max_req_input_len):
-        return get_global_processor().__call__(
+        processor = get_global_processor()
+        res = processor.__call__(
             conversations=input_text, images=image, max_req_input_len=max_req_input_len
         )
+
+        image_token_id = processor.image_token_id
+
+        res["im_token_id"] = image_token_id
+        return res
 
     async def _process_images(self, image_data, input_text, max_req_input_len):
         if self.executor is not None:
@@ -55,6 +61,7 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
             image_inputs = self._process_images_task(
                 image_data, input_text, max_req_input_len
             )
+
         return image_inputs
 
     async def process_data_async(
@@ -66,11 +73,11 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
         if not isinstance(image_data, list):
             image_data = [image_data]
 
-        images, data_hashes, image_sizes = [], [], []
+        images, image_sizes = [], [], []
 
         image_token = self.IMAGE_TOKEN
         base_output = self.load_mm_data(
-            input_ids,
+            input_ids=input_ids,
             image_data=image_data,
             multimodal_tokens=MultimodalSpecialTokens(image_token=image_token),
             max_req_input_len=max_req_input_len,
@@ -78,8 +85,6 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
         res = await self._process_images(
             base_output.images, base_output.input_text, max_req_input_len
         )
-        pixel_values = res["images"]
-        input_ids = res["input_ids"]
         images_seq_mask = res["images_seq_mask"]
         images_spatial_crop = res["images_spatial_crop"]
         batched_images_spatial_crop = []
@@ -87,11 +92,12 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
         batched_images_spatial_crop = torch.stack(batched_images_spatial_crop, dim=0)
 
         return {
-            "input_ids": input_ids.tolist(),
-            "pixel_values": pixel_values,
-            "data_hashes": data_hashes,
+            "input_ids": res["input_ids"].tolist(),
+            "pixel_values": res["images"],
+            "im_token_id": res["im_token_id"],
+            "image_hashes": base_output.data_hashes,
             "image_sizes": image_sizes,
-            "image_seq_mask": images_seq_mask,
+            "images_emb_mask": images_seq_mask,
             "image_spatial_crop": batched_images_spatial_crop,
             "modalities": request_obj.modalities or ["image"],
         }

@@ -174,7 +174,7 @@ def embed_mm_inputs(
     mm_input: MultimodalInputs,
     input_ids: torch.Tensor,
     input_embedding: nn.Embedding,
-    mm_data_embedding_func,
+    mm_data_embedding_func: Callable[[MultimodalInputs, List[int]], torch.Tensor],
     placeholder_token_ids: List[int] = None,
 ) -> Optional[torch.Tensor]:
     """
@@ -187,24 +187,53 @@ def embed_mm_inputs(
     if mm_input is None:
         return None
 
+    print(f"{mm_input=}")
+
+    # we assume mm data appears in the same order as in pad_values and pixel_values
+    # TODO: consider audio input here
     placeholder_token_ids = placeholder_token_ids or mm_input.pad_values
 
-    # boolean masking the special tokens
-    special_image_mask = torch.isin(
-        input_ids,
-        torch.tensor(placeholder_token_ids, device=input_ids.device),
-    ).unsqueeze(-1)
+    placeholder_tensor = torch.tensor(placeholder_token_ids, device=input_ids.device)
+
+    placeholder_masks = torch.isin(input_ids, placeholder_tensor)
+    print(f"{placeholder_masks.shape=}")
+
+    unique_elements = torch.unique(input_ids[placeholder_masks], return_counts=False)
+
+    print(f"{unique_elements=}")
+
+    mask = (unique_elements.unsqueeze(1) == placeholder_tensor).any(dim=1)
+
+    # 获取符合条件的索引
+    appearing_image_indices = torch.nonzero(mask, as_tuple=True)[0].cpu().tolist()
+
+    print(f"{appearing_image_indices=}")
+    print(f"{mask=}")
+    # indices of
+    placeholder_masks = placeholder_masks.float().argmax(dim=-1)
+    print(f"{placeholder_masks=}")
+    # return
+    special_image_mask = (placeholder_masks > 0).unsqueeze(-1)
+
+    # num_image_tokens_in_input_ids = special_image_mask.sum()
+    # print(f"{placeholder_token_ids=}")
+    # print(f"{input_ids=}")
+    # # boolean masking the special tokens
+    # special_image_mask = torch.isin(
+    #     input_ids,
+    #     torch.tensor(placeholder_token_ids, device=input_ids.device),
+    # ).unsqueeze(-1)
 
     num_image_tokens_in_input_ids = special_image_mask.sum()
 
-    if num_image_tokens_in_input_ids == 0:
+    if len(appearing_image_indices) == 0:
         # unexpected
         inputs_embeds = input_embedding(input_ids)
     else:
         # print(f"Getting image feature")
-        image_embedding = mm_data_embedding_func(mm_input)
+        image_embedding = mm_data_embedding_func(mm_input, appearing_image_indices)
 
-        # print(f"image_embedding: {image_embedding.shape}")
+        print(f"image_embedding: {image_embedding.shape}")
 
         if image_embedding.dim() == 2:
             num_image_tokens_in_embedding = image_embedding.shape[0]
@@ -212,8 +241,12 @@ def embed_mm_inputs(
             num_image_tokens_in_embedding = (
                 image_embedding.shape[0] * image_embedding.shape[1]
             )
+
         if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
-            num_image = num_image_tokens_in_input_ids // image_embedding.shape[1]
+            num_image = num_image_tokens_in_input_ids // image_embedding.shape[0]
+            print(f"{image_embedding.shape=}")
+            print(f"{num_image}")
+            # TODO: radix cache will split input_ids, so extracting the prefix may have some issues
             image_embedding = image_embedding[:num_image, :]
             logger.warning(
                 f"Number of images does not match number of special image tokens in the input text. "
@@ -222,7 +255,8 @@ def embed_mm_inputs(
             )
 
             # TODO: chunked prefill will split special tokens from input_ids into several passes, failing the embedding
-            # a fix may be cache the unfinished image embedding and consumed image tokens for future reuse
+            # a fix may be cache the unfinished image embedding for future reuse, determine the tokens to embed with
+            # extend_start_loc and extend_seq_lens
             if num_image_tokens_in_input_ids > num_image_tokens_in_embedding:
                 chunked_prefill_size = global_server_args_dict["chunked_prefill_size"]
                 if chunked_prefill_size != -1:
@@ -236,7 +270,6 @@ def embed_mm_inputs(
         # filled with the hash values of the image for the prefix matching in the radix attention.
         # There values are useless because their embeddings will be replaced by vision embeddings anyway.
         input_ids.clamp_(min=0, max=vocab_size - 1)
-
         inputs_embeds = input_embedding(input_ids)
 
         special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
@@ -278,7 +311,8 @@ def general_mm_embed_routine(
     input_ids: torch.Tensor,
     forward_batch: ForwardBatch,
     embed_tokens: nn.Embedding,
-    image_embedding_func: Callable[[MultimodalInputs], torch.Tensor],
+    image_embedding_func: Callable[[MultimodalInputs, List[int]], torch.Tensor],
+    placeholder_token_ids: List[int] = None,
 ):
     """
     a general wrapper function to get final input embeds from multimodal models
@@ -296,6 +330,7 @@ def general_mm_embed_routine(
             input_ids=input_ids,
             input_embedding=embed_tokens,
             mm_data_embedding_func=image_embedding_func,
+            placeholder_token_ids=placeholder_token_ids,
         )
         # once used, image_inputs is useless
         # just being defensive here

@@ -1,6 +1,8 @@
 import asyncio
 from typing import List, Union
 
+import torch
+
 from sglang.srt.managers.processors.base_processor import (
     BaseProcessor,
     MultimodalSpecialTokens,
@@ -68,15 +70,15 @@ class JanusProProcessor(BaseProcessor):
             ),
             max_req_input_len=max_req_input_len,
         )
-        images = base_out.images
-        res = await self._process_images(images=images, input_text=base_out.input_text)
+        res = await self._process_images(
+            images=base_out.images, input_text=base_out.input_text
+        )
         print(res)
         print(base_out)
-        print("", res["images_emb_mask"].shape)
+        print(res["pixel_values"].shape)
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
-            "pixel_values": res["pixel_values"],
-            "images_emb_mask": res["images_emb_mask"],
+            "pixel_values": torch.split(res["pixel_values"], 1, dim=0),
             "data_hashes": base_out.data_hashes,
             "im_start_id": res["im_start_id"],
             "im_end_id": res["im_end_id"],

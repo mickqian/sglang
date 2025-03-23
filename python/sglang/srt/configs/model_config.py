@@ -459,7 +459,7 @@ def is_generation_model(model_architectures: List[str], is_embedding: bool = Fal
         return not is_embedding
 
 
-multimodal_model = [
+multimodal_model_archs = [
     "DeepseekVL2ForCausalLM",
     "LlavaLlamaForCausalLM",
     "LlavaQwenForCausalLM",
@@ -479,7 +479,8 @@ multimodal_model = [
 
 def is_multimodal_model(model_architectures: List[str]):
     if any(
-        multi_model_arch in model_architectures for multi_model_arch in multimodal_model
+        multi_model_arch in model_architectures
+        for multi_model_arch in multimodal_model_archs
     ):
         return True
     else:

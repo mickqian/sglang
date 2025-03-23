@@ -154,7 +154,9 @@ class TestOpenAIVisionServer(unittest.TestCase):
                     "content": [
                         {
                             "type": "image_url",
-                            "image_url": {"url": IMAGE_MAN_IRONING_URL},
+                            "image_url": {
+                                "url": "https://raw.githubusercontent.com/sgl-project/sglang/main/test/lang/example_image.png"
+                            },
                             "modalities": "multi-images",
                         },
                         {
@@ -528,7 +530,6 @@ class TestVLMContextLengthIssue(unittest.TestCase):
                 "--context-length",
                 "300",
                 "--mem-fraction-static=0.80",
-                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"
@@ -658,7 +659,6 @@ class TestDeepseekVL2Server(TestOpenAIVisionServer):
                 "deepseek-vl2",
                 "--context-length",
                 "4096",
-                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"

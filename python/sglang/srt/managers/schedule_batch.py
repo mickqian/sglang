@@ -170,7 +170,7 @@ class MultimodalInputs:
     second_per_grid_ts: Optional[List[torch.Tensor]] = None
 
     # deepseek vl2 related
-    image_seq_mask: Optional[List[torch.Tensor]] = None
+    images_emb_mask: Optional[List[torch.Tensor]] = None
     image_spatial_crop: Optional[List[torch.Tensor]] = None
 
     # The id of the single-image placeholder token
@@ -184,9 +184,6 @@ class MultimodalInputs:
     slice_end_id: Optional[int] = None
     # [num_images, 2 (w, h)]
     tgt_sizes: Optional[list] = None
-
-    # denotes the number of valid image tokens in each image
-    images_emb_mask: Optional[torch.BoolTensor] = None
 
     # audio
     audio_start_id: Optional[torch.Tensor] = None
@@ -213,7 +210,7 @@ class MultimodalInputs:
             "aspect_ratio_ids",
             "aspect_ratio_mask",
             "image_grid_thws",
-            "image_seq_mask",
+            "images_emb_mask",
             "image_spatial_crop",
             "im_token_id",
             "im_start_id",
@@ -221,7 +218,6 @@ class MultimodalInputs:
             "slice_start_id",
             "slice_end_id",
             "tgt_sizes",
-            "images_emb_mask",
             "audio_start_id",
             "audio_end_id",
             "audio_features",
@@ -232,10 +228,11 @@ class MultimodalInputs:
                 setattr(ret, arg, obj[arg])
 
         # validate
-        assert (
-            isinstance(ret.pixel_values, torch.Tensor)
-            or isinstance(ret.pixel_values, np.ndarray)
-            or isinstance(ret.pixel_values, list)
+        if ret.pixel_values is not None and not isinstance(ret.pixel_values, list):
+            ret.pixel_values = [ret.pixel_values]
+
+        assert ret.pixel_values is None or isinstance(ret.pixel_values, list), type(
+            ret.pixel_values
         )
 
         return ret
@@ -244,26 +241,29 @@ class MultimodalInputs:
         """
         merge image inputs when requests are being merged
         """
-        if isinstance(self.pixel_values, list):
-            # in some rare cases, pixel values are list of patches with different shapes
-            # e.g. minicpm
-            self.pixel_values += other.pixel_values
-        else:
-            assert (
-                self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
-            ), f"{self.pixel_values.shape[1:]} vs {other.pixel_values.shape[1:]}"
-            self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
+        # if isinstance(self.pixel_values, list):
+        # in some rare cases, pixel values are list of patches with different shapes
+        # e.g. minicpm
+        self.pixel_values += other.pixel_values
+        # else:
+        #     assert (
+        #         self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
+        #     ), f"{self.pixel_values.shape[1:]} vs {other.pixel_values.shape[1:]}"
+        #     self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
 
         # args would be stacked along first dim
+        # usually these are already tensors
         stack_args = [
             "audio_features",
             # TODO: merge with image_grid_thws, basically the same thing
             "tgt_sizes",
+            "image_spatial_crop",
         ]
         for arg in stack_args:
-            if getattr(self, arg, None) is not None:
-                setattr(self, arg, getattr(other, arg))
+            if getattr(self, arg, None) is None:
+                setattr(self, arg, getattr(other, arg, None))
             elif getattr(other, arg, None) is not None:
+                # self and other both not None
                 setattr(
                     self,
                     arg,
@@ -289,15 +289,15 @@ class MultimodalInputs:
             "image_sizes",
             "image_offsets",
             "image_pad_len",
+            # "modalities", # modalities should be ["multi-images"] (one entry) even for multiple images
             "aspect_ratio_ids",
             "aspect_ratio_mask",
-            "image_seq_mask",
-            "image_spatial_crop",
+            "images_emb_mask",
         ]
         for arg in optional_args:
-            if getattr(self, arg, None) is not None:
-                print(f"{arg=}")
-                setattr(self, arg, getattr(self, arg) + getattr(other, arg))
+            self_arg = getattr(self, arg, None)
+            if self_arg is not None:
+                setattr(self, arg, self_arg + getattr(other, arg))
         # other args would be kept intact
 
 

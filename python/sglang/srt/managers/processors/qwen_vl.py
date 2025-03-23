@@ -146,35 +146,13 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         images = [resize_image(image) for image in base_output.images]
 
-        # res = []
-        # for image in images:
-        #     res.append(self._process_single_image([image], base_output.input_text))
-        # ret = await asyncio.gather(*res)
-
-        # image_grid_thw = []
-        # video_grid_thws = []
-        # pixel_values = []
-        # input_ids = (ret[0]["input_ids"].flatten().tolist(),)
-        # for single_image_res in ret:
-        #     image_grid_thw = torch.concat(
-        #         [image_grid_thw, single_image_res["image_grid_thw"]], dim=0
-        #     )
-        #     video_grid_thws = torch.concat(
-        #         [video_grid_thws, single_image_res["video_grid_thws"]], dim=0
-        #     )
-        #     pixel_values = torch.concat(
-        #         [pixel_values, single_image_res["pixel_values"]], dim=0
-        #     )
-
         ret = await self._process_single_image(
             images=images, input_text=base_output.input_text
         )
 
-        print(
-            f"image processor for {base_output.data_hashes.__len__()} images took: {time.time() - start}"
-        )
         image_grid_thws = torch.concat([ret["image_grid_thw"]])
         video_grid_thws = None
+
         return {
             "input_ids": ret["input_ids"].flatten().tolist(),
             "pixel_values": ret["pixel_values"],

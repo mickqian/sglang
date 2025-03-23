@@ -47,7 +47,10 @@ from sglang.srt.configs.janus_pro import *
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.managers.mm_utils import general_mm_embed_routine
+from sglang.srt.managers.mm_utils import (
+    MultiModalityDataPaddingPatternTokenPairs,
+    general_mm_embed_routine,
+)
 from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -1956,9 +1959,15 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         )
         self.logits_processor = LogitsProcessor(config)
 
-    def get_image_feature(self, image_input: MultimodalInputs) -> torch.Tensor:
-        pixel_values = image_input.pixel_values
+    def get_image_feature(
+        self, image_input: MultimodalInputs, appearing_data_indices: List[int]
+    ) -> torch.Tensor:
+        pixel_values = [image_input.pixel_values[i] for i in appearing_data_indices]
+        pixel_values = torch.concat(pixel_values, dim=0)
+
+        assert pixel_values.dim() == 5, pixel_values.shape
         bs, n = pixel_values.shape[0:2]
+
         pixel_values = pixel_values.to(
             device=self.vision_model.device, dtype=self.vision_model.dtype
         )
@@ -2008,7 +2017,11 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         helper = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
 
-        return helper.pad_input_tokens(input_ids, image_inputs)
+        ret = helper.pad_input_tokens(input_ids, image_inputs)
+
+        print(f"{ret=}")
+
+        return ret
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -2063,5 +2076,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 weight_loader(param, loaded_weight)
 
 
-AutoModel.register(config_class=MultiModalityConfig, model_class=MultiModalityCausalLM)
+AutoModel.register(
+    config_class=MultiModalityConfig, model_class=MultiModalityCausalLM, exist_ok=True
+)
 EntryClass = [MultiModalityCausalLM]

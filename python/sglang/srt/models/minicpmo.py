@@ -25,13 +25,7 @@ import torch.types
 from torch import nn
 from torch.nn.utils import weight_norm
 from tqdm import tqdm
-from transformers import (
-    LlamaConfig,
-    LlamaModel,
-    LogitsWarper,
-    PretrainedConfig,
-    PreTrainedModel,
-)
+from transformers import LlamaConfig, LlamaModel, PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
@@ -60,12 +54,14 @@ from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 from sglang.srt.utils import logger
 
 try:
+    from transformers import TypicalLogitsWarper as LogitsWarper
     from vector_quantize_pytorch import GroupedResidualFSQ
     from vocos import Vocos
     from vocos.pretrained import instantiate_class
 
     _tts_deps = True
 except:
+    LogitsWarper = None
     _tts_deps = False
 
 
@@ -1825,6 +1821,7 @@ class MiniCPMO(MiniCPMVBaseModel):
                                 )
                             input_embeds[i, audio_indices] = embs.to(input_embeds.dtype)
         input_embeds = input_embeds.squeeze(0)
+        print(f"input_embeds shape : {input_embeds.shape}")
         return input_embeds
 
     def get_image_features(
