@@ -234,7 +234,7 @@ class MultimodalInputs:
             or isinstance(ret.pixel_values, list)
         )
 
-        assert isinstance(ret.audio_features, list)
+        assert ret.audio_features is None or isinstance(ret.audio_features, list)
 
         return ret
 

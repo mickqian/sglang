@@ -1985,7 +1985,6 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-
         inputs_embeds = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,

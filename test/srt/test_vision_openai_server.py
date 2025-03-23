@@ -684,6 +684,7 @@ class TestJanusProServer(TestOpenAIVisionServer):
                 "janus-pro",
                 "--mem-fraction-static",
                 "0.4",
+                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"
