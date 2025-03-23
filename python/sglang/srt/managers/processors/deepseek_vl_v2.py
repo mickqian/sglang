@@ -111,7 +111,7 @@ class DeepseekVL2ImageProcessor(BaseProcessor):
             "input_ids": res["input_ids"].tolist(),
             "pixel_values": res["images"],
             "im_token_id": res["im_token_id"],
-            "image_hashes": base_output.image_hashes,
+            "data_hashes": base_output.data_hashes,
             "image_sizes": image_sizes,
             "images_emb_mask": images_seq_mask,
             "image_spatial_crop": batched_images_spatial_crop,

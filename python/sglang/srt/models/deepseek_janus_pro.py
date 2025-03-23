@@ -47,11 +47,8 @@ from sglang.srt.configs.janus_pro import *
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.managers.mm_utils import (
-    MultiModalityDataPaddingPatternTokenPairs,
-    general_mm_embed_routine,
-)
-from sglang.srt.managers.schedule_batch import MultimodalInputs
+from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternTokenPairs
+from sglang.srt.managers.schedule_batch import MultimodalInputs, global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
@@ -1915,6 +1912,114 @@ class MultiModalityPreTrainedModel(PreTrainedModel):
     base_model_prefix = "multi_modality"
     _no_split_modules = []
     _skip_keys_device_placement = "past_key_values"
+
+
+def embed_image_inputs(
+    image_input: MultimodalInputs,
+    input_ids: torch.Tensor,
+    input_embedding: nn.Embedding,
+    image_embedding_func,
+    placeholder_token_ids: List[int] = None,
+) -> Optional[torch.Tensor]:
+    """
+    Calculate the image embeddings if necessary, then scatter the result with
+    the help of a boolean mask denoting the embed locations
+
+    Returns:
+        final embedding: Optional[torch.Tensor]
+    """
+    if image_input is None:
+        return None
+
+    placeholder_token_ids = placeholder_token_ids or image_input.pad_values
+
+    # boolean masking the special tokens
+    special_image_mask = torch.isin(
+        input_ids,
+        torch.tensor(placeholder_token_ids, device=input_ids.device),
+    ).unsqueeze(-1)
+
+    num_image_tokens_in_input_ids = special_image_mask.sum()
+
+    if num_image_tokens_in_input_ids == 0:
+        # unexpected
+        inputs_embeds = input_embedding(input_ids)
+    else:
+        image_embedding = image_embedding_func(image_input)
+
+        if image_embedding.dim() == 2:
+            num_image_tokens_in_embedding = image_embedding.shape[0]
+        else:
+            num_image_tokens_in_embedding = (
+                image_embedding.shape[0] * image_embedding.shape[1]
+            )
+        if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
+            num_image = num_image_tokens_in_input_ids // image_embedding.shape[1]
+            image_embedding = image_embedding[:num_image, :]
+            logger.warning(
+                f"Number of images does not match number of special image tokens in the input text. "
+                f"Got {num_image_tokens_in_input_ids} image tokens in the text but {num_image_tokens_in_embedding} "
+                "tokens from image embeddings."
+            )
+
+            # TODO: chunked prefill will split special tokens from input_ids into several passes, failing the embedding
+            # a fix may be cache the unfinished image embedding for future reuse, determine the tokens to embed with
+            # extend_start_loc and extend_seq_lens
+            if num_image_tokens_in_input_ids > num_image_tokens_in_embedding:
+                chunked_prefill_size = global_server_args_dict["chunked_prefill_size"]
+                if chunked_prefill_size != -1:
+                    logger.warning(
+                        "You may want to avoid this issue by raising `chunked_prefill_size`, or disabling chunked_prefill"
+                    )
+
+        vocab_size = input_embedding.num_embeddings
+        # Important: clamp after getting original image regions
+        # Clamp input ids. This is because the input_ids for the image tokens are
+        # filled with the hash values of the image for the prefix matching in the radix attention.
+        # There values are useless because their embeddings will be replaced by vision embeddings anyway.
+        input_ids.clamp_(min=0, max=vocab_size - 1)
+        inputs_embeds = input_embedding(input_ids)
+
+        special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
+            inputs_embeds.device
+        )
+
+        inputs_embeds = inputs_embeds.masked_scatter(
+            special_image_mask,
+            image_embedding.to(inputs_embeds.device, inputs_embeds.dtype),
+        )
+    return inputs_embeds
+
+
+def general_mm_embed_routine(
+    input_ids: torch.Tensor,
+    forward_batch: ForwardBatch,
+    embed_tokens: nn.Embedding,
+    image_embedding_func: Callable[[MultimodalInputs], torch.Tensor],
+    placeholder_token_ids: List[int] = None,
+):
+    """
+    a general wrapper function to get final input embeds from multimodal models
+    with a language model as causal model
+    """
+    if (
+        forward_batch.forward_mode.is_decode()
+        or not forward_batch.contains_image_inputs()
+    ):
+        inputs_embeds = embed_tokens(input_ids)
+    else:
+        image = forward_batch.merge_mm_inputs()
+        inputs_embeds = embed_image_inputs(
+            image_input=image,
+            input_ids=input_ids,
+            input_embedding=embed_tokens,
+            image_embedding_func=image_embedding_func,
+            placeholder_token_ids=placeholder_token_ids,
+        )
+        # once used, image_inputs is useless
+        # just being defensive here
+        forward_batch.image_inputs = None
+    return inputs_embeds
 
 
 # Copied and adapted from:

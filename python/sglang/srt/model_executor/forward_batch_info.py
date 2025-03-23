@@ -361,14 +361,24 @@ class ForwardBatch:
 
         return merged
 
+    # def contains_image_inputs(self) -> bool:
+    #     """ """
+    #     if self.mm_inputs is None:
+    #         return False
+    #     return any(
+    #         mm_input.pixel_values is not None and mm_input.pixel_values != []
+    #         for mm_input in self.mm_inputs
+    #         if mm_input is not None
+    #     )
+
     def contains_image_inputs(self) -> bool:
         """ """
         if self.mm_inputs is None:
-            return False
+            return True
         return any(
-            mm_input.pixel_values is not None and mm_input.pixel_values != []
-            for mm_input in self.mm_inputs
-            if mm_input is not None
+            image_input.pixel_values is not None and image_input.pixel_values is not []
+            for image_input in self.mm_inputs
+            if image_input is not None
         )
 
     def contains_audio_inputs(self) -> bool:
