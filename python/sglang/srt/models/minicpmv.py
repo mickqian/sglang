@@ -52,7 +52,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
-    embed_image_inputs,
+    embed_mm_inputs,
 )
 from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -871,14 +871,13 @@ class MiniCPMVBaseModel(nn.Module):
             # Clamp input ids. This is because the input_ids for the image tokens are
             # filled with the hash values of the image for the prefix matching in the radix attention.
             # There values are useless because their embeddings will be replaced by vision embeddings anyway.
-            image_inputs = forward_batch.merge_image_inputs()
-            inputs_embeds = embed_image_inputs(
-                image_input=image_inputs,
+            mm_input = forward_batch.merge_mm_inputs()
+            inputs_embeds = embed_mm_inputs(
+                mm_input=mm_input,
                 input_ids=input_ids,
                 input_embedding=self.get_input_embeddings(),
-                image_embedding_func=self.get_image_features,
-                placeholder_token_ids=[image_inputs.im_token_id]
-                + image_inputs.pad_values,
+                mm_data_embedding_func=self.get_image_features,
+                placeholder_token_ids=[mm_input.im_token_id] + mm_input.pad_values,
             )
 
         hidden_states = self.llm.model(
@@ -925,7 +924,7 @@ class MiniCPMVBaseModel(nn.Module):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_image_features(self, image_inputs: ImageInputs) -> torch.Tensor:
+    def get_image_features(self, image_inputs: MultimodalInputs) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -1037,7 +1036,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
 
     def get_image_features(
         self,
-        image_inputs: ImageInputs,
+        image_inputs: MultimodalInputs,
     ) -> torch.Tensor:
         # list of tensors
         pixel_values = image_inputs.pixel_values

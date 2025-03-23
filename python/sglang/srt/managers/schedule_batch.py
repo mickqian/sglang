@@ -234,6 +234,8 @@ class MultimodalInputs:
             or isinstance(ret.pixel_values, list)
         )
 
+        assert isinstance(ret.audio_features, list)
+
         return ret
 
     def merge(self, other: MultimodalInputs):
@@ -253,7 +255,6 @@ class MultimodalInputs:
         # args would be stacked along first dim
         # usually these are already tensors
         stack_args = [
-            "audio_features",
             # TODO: merge with image_grid_thws, basically the same thing
             "tgt_sizes",
             "image_spatial_crop",
@@ -285,6 +286,7 @@ class MultimodalInputs:
 
         # args needed to be merged
         optional_args = [
+            "audio_features",
             "image_sizes",
             "image_offsets",
             "image_pad_len",

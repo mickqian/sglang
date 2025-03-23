@@ -16,8 +16,8 @@ from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.conversation import generate_chat_conv
-from sglang.srt.managers.mm_utils import embed_image_inputs
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.mm_utils import embed_mm_inputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
@@ -230,14 +230,14 @@ class TestMiniCPMVLogits(VisionLLMLogitsBase):
             # sglang
             model = self.get_sglang_model()
             input_ids = inputs["input_ids"].to(self.device).flatten()
-            sglang_output = embed_image_inputs(
-                image_input=ImageInputs(
+            sglang_output = embed_mm_inputs(
+                mm_input=MultimodalInputs(
                     pixel_values=inputs["pixel_values"][0],
                     tgt_sizes=inputs["tgt_sizes"][0],
                 ),
                 input_ids=input_ids,
                 input_embedding=model.get_input_embeddings(),
-                image_embedding_func=model.get_image_features,
+                mm_data_embedding_func=model.get_image_features,
                 placeholder_token_ids=[
                     self.processor.tokenizer.unk_token_id,
                 ],

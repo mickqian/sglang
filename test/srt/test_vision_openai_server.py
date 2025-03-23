@@ -479,6 +479,7 @@ class TestQwen2VLServer(TestOpenAIVisionServer):
                 "qwen2-vl",
                 "--mem-fraction-static",
                 "0.4",
+                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"

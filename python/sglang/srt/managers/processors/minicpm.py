@@ -129,8 +129,6 @@ class MiniCPMImageProcessor(BaseProcessor):
                 f"{len(pixel_values)} vs. {len(tgt_sizes)}"
             )
 
-        # tgt_sizes = [tgt_size for tgt_size in tgt_sizes if isinstance(tgt_size, torch.Tensor)]
-        # tgt_sizes = torch.vstack(tgt_sizes).type(torch.int32)
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
         for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
@@ -148,7 +146,8 @@ class MiniCPMImageProcessor(BaseProcessor):
             tgt_sizes = None
         else:
             tgt_sizes = torch.stack(tgt_sizes_flat)
-
+        if not isinstance(res["audio_features"], list):
+            res["audio_features"] = [res["audio_features"]]
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": pixel_values,

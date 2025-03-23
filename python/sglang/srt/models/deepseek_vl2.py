@@ -265,7 +265,7 @@ class DeepseekVL2ForCausalLM(nn.Module):
     def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         return input_ids
 
-    def get_image_feature(self, image_input: ImageInputs):
+    def get_image_feature(self, image_input: MultimodalInputs):
         pixel_values = image_input.pixel_values.type(
             next(self.vision.parameters()).dtype
         ).to(device=next(self.vision.parameters()).device)

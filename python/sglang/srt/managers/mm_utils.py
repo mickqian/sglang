@@ -176,7 +176,6 @@ def embed_mm_inputs(
     input_embedding: nn.Embedding,
     mm_data_embedding_func,
     placeholder_token_ids: List[int] = None,
-    placeholder_token_ids: List[int] = None,
 ) -> Optional[torch.Tensor]:
     """
     Calculate the image embeddings if necessary, then scatter the result with
@@ -188,7 +187,7 @@ def embed_mm_inputs(
     if mm_input is None:
         return None
 
-    placeholder_token_ids = placeholder_token_ids or image_input.pad_values
+    placeholder_token_ids = placeholder_token_ids or mm_input.pad_values
 
     # boolean masking the special tokens
     special_image_mask = torch.isin(
@@ -200,7 +199,7 @@ def embed_mm_inputs(
     print(f"{num_image_tokens_in_input_ids}")
     print(f"{input_ids}")
 
-    return
+    # return
     if num_image_tokens_in_input_ids == 0:
         # unexpected
         inputs_embeds = input_embedding(input_ids)

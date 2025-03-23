@@ -286,7 +286,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         image_features = self.multi_modal_projector(vision_outputs)
         return image_features
 
-    def embed_image_inputs(
+    def embed_mm_inputs(
         self,
         input_ids: torch.Tensor,
         forward_batch: ForwardBatch,
