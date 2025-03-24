@@ -30,22 +30,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import AutoModel, Qwen2VLConfig
+from transformers import Qwen2VLConfig
 from transformers.activations import ACT2FN
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
-from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
-    Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
 )
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VLForConditionalGeneration,
-)
 
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -57,7 +48,7 @@ from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_mm_embed_routine,
 )
-from sglang.srt.managers.schedule_batch import MultimodalInputs
+from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -523,9 +514,16 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def get_image_feature(self, image_input: MultimodalInputs) -> torch.Tensor:
-        pixel_values = image_input.pixel_values.type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
+    def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
+        # in qwen-vl, last dim is the same
+        pixel_values = torch.cat([item.pixel_values for item in items], dim=0).type(
+            self.visual.dtype
+        )
+        image_grid_thws = torch.stack([item.image_grid_thws for item in items], dim=0)
+        image_grid_thws = image_grid_thws.flatten(0, 1)
+        assert pixel_values.dim() == 2, pixel_values.dim()
+        assert image_grid_thws.dim() == 2, image_grid_thws.dim()
+        image_embeds = self.visual(pixel_values, grid_thw=image_grid_thws)
         return image_embeds
 
     def _process_video_input(self, video_input: Qwen2VLVideoInputs) -> torch.Tensor:
@@ -570,26 +568,21 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                     f"(3, seq_len) positions, but got {positions.size()}"
                 )
 
-        inputs_embeds = general_mm_embed_routine(
+        input_embeds, hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
-            embed_tokens=self.get_input_embeddings(),
-            mm_data_embedding_func=self.get_image_feature,
-        )
-
-        hidden_states = self.model(
-            input_ids=None,
+            language_model=self.model,
+            image_data_embedding_func=self.get_image_feature,
             positions=positions,
-            forward_batch=forward_batch,
-            input_embeds=inputs_embeds,
+            get_embedding=get_embedding,
         )
 
-        if not get_embedding:
+        if get_embedding:
+            return self.pooler(input_embeds, forward_batch)
+        else:
             return self.logits_processor(
                 input_ids, hidden_states, self.lm_head, forward_batch
             )
-        else:
-            return self.pooler(hidden_states, forward_batch)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

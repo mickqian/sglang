@@ -67,6 +67,7 @@ from sglang.srt.managers.io_struct import (
     HealthCheckOutput,
     InitWeightsUpdateGroupReqInput,
     InitWeightsUpdateGroupReqOutput,
+    MultimodalEmbeddingReqInput,
     OpenSessionReqInput,
     OpenSessionReqOutput,
     ProfileReq,
@@ -112,7 +113,7 @@ from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
@@ -237,7 +238,7 @@ class Scheduler(
             self.enable_overlap = False
             logger.info("Overlap scheduler is disabled for embedding models.")
         if self.model_config.is_multimodal:
-            self.enable_overlap = False
+            self.enable_overlap = True
             logger.info("Overlap scheduler is disabled for multimodal models.")
 
         # Launch a tensor parallel worker
@@ -409,6 +410,7 @@ class Scheduler(
                 (SetInternalStateReq, self.set_internal_state),
                 (RpcReqInput, self.handle_rpc_request),
                 (ExpertDistributionReq, self.expert_distribution_handle),
+                (MultimodalEmbeddingReqInput, self.handle_mm_data_embedding_request),
             ]
         )
 
@@ -935,6 +937,38 @@ class Scheduler(
             self.grammar_queue.append(req)
         else:
             self._add_request_to_queue(req)
+
+    def handle_mm_data_embedding_request(
+        self,
+        recv_req: MultimodalEmbeddingReqInput,
+    ):
+        # Create a new request
+
+        req = Req(recv_req.rid, mm_inputs=recv_req.mm_inputs)
+        req.tokenizer = self.tokenizer
+
+        image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
+        # Expand a single image token into multiple dummy tokens for receiving image embeddings
+        req.origin_input_ids = self.pad_input_ids_func(
+            req.origin_input_ids, image_inputs
+        )
+        req.extend_image_inputs(image_inputs)
+
+        if len(req.origin_input_ids) >= self.max_req_input_len:
+            error_msg = (
+                "Multimodal prompt is too long after expanding multimodal tokens. "
+                f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
+            )
+            logger.error(error_msg)
+            req.origin_input_ids = [0]
+            req.multimodal_inputs = None
+            req.sampling_params.max_new_tokens = 0
+            req.finished_reason = FINISH_ABORT(
+                error_msg, HTTPStatus.BAD_REQUEST, "BadRequestError"
+            )
+            self._add_request_to_queue(req)
+
+        self._add_request_to_queue(req)
 
     def _add_request_to_queue(self, req: Req):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:

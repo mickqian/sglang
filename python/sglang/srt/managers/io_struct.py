@@ -302,6 +302,19 @@ class TokenizedGenerateReqInput:
 
 
 @dataclass
+class MultimodalEmbeddingReqInput:
+    # The request id
+    rid: str
+    # The input text
+    mm_inputs: dict
+    input_text: str
+    # The input token ids
+    input_ids: List[int]
+    # The image inputs
+    image_inputs: dict
+
+
+@dataclass
 class EmbeddingReqInput:
     # The input prompt. It can be a single prompt or a batch of prompts.
     text: Optional[Union[List[str], str]] = None
