@@ -1,4 +1,8 @@
 import asyncio
+import concurrent
+import concurrent.futures
+import multiprocessing as mp
+import os
 from typing import List, Optional, Union
 
 import numpy as np
@@ -6,7 +10,9 @@ import numpy as np
 from sglang.srt.managers.multimodal_processors.base_processor import (
     BaseMultimodalProcessor,
     get_global_processor,
+    init_global_processor,
 )
+from sglang.srt.managers.schedule_batch import MultimodalDataItem
 from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.models.llava import LlavaMistralForCausalLM, LlavaQwenForCausalLM
 from sglang.srt.models.llavavid import LlavaVidForCausalLM
@@ -19,6 +25,12 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
+        self.executor = concurrent.futures.ProcessPoolExecutor(
+            initializer=init_global_processor,
+            mp_context=mp.get_context("fork"),
+            initargs=(server_args,),
+            max_workers=int(os.environ.get("SGLANG_CPU_WORKERS", os.cpu_count())),
+        )
 
     @staticmethod
     def _process_single_image_task(
@@ -83,7 +95,10 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
             )
         else:
             return self._process_single_image_task(
-                image_data, aspect_ratio, grid_pinpoints
+                image_data,
+                aspect_ratio,
+                grid_pinpoints,
+                self._processor.image_processor,
             )
 
     async def process_mm_data_async(
@@ -134,14 +149,21 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
                 pixel_values, image_hash, image_size = await self._process_single_image(
                     image_data[0], aspect_ratio, grid_pinpoints
                 )
-                data_hashes = [image_hash]
                 image_sizes = [image_size]
         else:
             raise ValueError(f"Invalid image data: {image_data}")
-
+        modality = (
+            request_obj.modalities[0]
+            if isinstance(request_obj.modalities, list)
+            and len(request_obj.modalities) != 0
+            else "image"
+        )
         return {
-            "pixel_values": pixel_values,
-            "data_hashes": data_hashes,
-            "image_sizes": image_sizes,
-            "modalities": request_obj.modalities or ["image"],
+            "items": [
+                MultimodalDataItem(
+                    pixel_values=pixel_values,
+                    image_sizes=image_sizes,
+                    modality=modality,
+                )
+            ],
         }
