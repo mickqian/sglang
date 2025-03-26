@@ -567,6 +567,13 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
 
+            if "visual" in name:
+                name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue

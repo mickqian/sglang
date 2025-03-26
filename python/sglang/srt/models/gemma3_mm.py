@@ -358,8 +358,9 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         """Load weights for the model."""
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
-
         for name, loaded_weight in weights:
+            print(f"{loaded_weight.shape=}")
+
             if "language_model" in name:
                 # Gemma3ForCausalLM.load_weights(self, [(name.replace("language_model.", ""), loaded_weight)])
                 causal_loaded_params = Gemma3ForCausalLM.load_weights(

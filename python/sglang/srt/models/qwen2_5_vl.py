@@ -30,11 +30,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import Qwen2VLConfig
 from transformers.activations import ACT2FN
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
+    Qwen2_5_VLConfig,
     Qwen2_5_VLVisionConfig,
+)
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionPatchEmbed,
+    Qwen2_5_VisionRotaryEmbedding,
 )
 
 from sglang.srt.hf_transformers_utils import get_processor
@@ -44,10 +48,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.managers.mm_utils import (
-    MultiModalityDataPaddingPatternTokenPairs,
-    general_mm_embed_routine,
-)
+from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -137,7 +138,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            use_qkv_parallel=False,
+            use_qkv_parallel=True,
             use_context_forward=use_context_forward,
             softmax_in_single_precision=softmax_in_single_precision,
             flatten_batch=flatten_batch,
@@ -170,33 +171,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         norm2 = self.norm2(x)
         mlp = self.mlp(norm2)
         x = x + mlp
-        return x
-
-
-class Qwen2_5_VisionPatchEmbed(nn.Module):
-
-    def __init__(
-        self,
-        patch_size: int = 14,
-        temporal_patch_size: int = 2,
-        in_chans: int = 3,
-        embed_dim: int = 1152,
-    ) -> None:
-        super().__init__()
-        self.patch_size = patch_size
-        self.temporal_patch_size = temporal_patch_size
-        self.embed_dim = embed_dim
-
-        kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(
-            in_chans, embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=False
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        target_dtype = self.proj.weight.dtype
-        L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x.to(dtype=target_dtype)).view(L, self.embed_dim)
         return x
 
 
@@ -244,21 +218,6 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         return out
 
 
-class Qwen2_5_VisionRotaryEmbedding(nn.Module):
-
-    def __init__(self, dim: int, theta: float = 10000.0) -> None:
-        super().__init__()
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
-        freqs = torch.outer(seq, self.inv_freq)
-        return freqs
-
-
 class Qwen2_5_VisionTransformer(nn.Module):
 
     def __init__(
@@ -275,7 +234,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         spatial_merge_size: int = vision_config.spatial_merge_size
         self.spatial_merge_size = spatial_merge_size
         self.spatial_merge_unit: int = spatial_merge_size * spatial_merge_size
-        in_chans: int = vision_config.in_channels
+        in_channels: int = vision_config.in_channels
         hidden_size: int = vision_config.hidden_size
         depth: int = vision_config.depth
         num_heads: int = vision_config.num_heads
@@ -286,7 +245,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
-            in_chans=in_chans,
+            in_channels=in_channels,
             embed_dim=hidden_size,
         )
 
@@ -469,7 +428,7 @@ cached_get_processor = lru_cache(get_processor)
 class Qwen2_5_VLForConditionalGeneration(nn.Module):
     def __init__(
         self,
-        config: Qwen2VLConfig,
+        config: Qwen2_5_VLConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -485,6 +444,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             prefix=add_prefix("visual", prefix),
         )
 
+        # self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(
+        #     config.vision_config
+        # )
         self.model = Qwen2Model(
             config,
             quant_config,
@@ -506,13 +468,14 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
     def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
-        im_start_id: int = image_inputs.im_start_id
-        im_end_id: int = image_inputs.im_end_id
-
-        media_token_pairs = [(im_start_id, im_end_id)]
-        pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
-
-        return pattern.pad_input_tokens(input_ids, image_inputs)
+        # im_start_id: int = image_inputs.im_start_id
+        # im_end_id: int = image_inputs.im_end_id
+        #
+        # media_token_pairs = [(im_start_id, im_end_id)]
+        # pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
+        #
+        # return pattern.pad_input_tokens(input_ids, image_inputs)
+        return input_ids
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # in qwen-vl, last dim is the same
@@ -555,14 +518,16 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 otherwise it will be `(seq_len,).
                 (Use input_metadata.mrope_positions to replace it)
         """
-        if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
+        rope_type = self.config.rope_scaling.get("rope_type", None)
+        is_mrope_enabled = rope_type == "mrope" or rope_type == "default"
+        if is_mrope_enabled:
             positions = forward_batch.mrope_positions
 
         if not (
             forward_batch.forward_mode.is_decode()
             or not forward_batch.contains_image_inputs()
         ):
-            if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
+            if is_mrope_enabled:
                 assert positions.ndim == 2 and positions.size(0) == 3, (
                     "multimodal section rotary embedding requires "
                     f"(3, seq_len) positions, but got {positions.size()}"
@@ -574,6 +539,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             language_model=self.model,
             image_data_embedding_func=self.get_image_feature,
             positions=positions,
+            placeholder_token_ids=[self.config.image_token_id],
             get_embedding=get_embedding,
         )
 
@@ -587,9 +553,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
             ("gate_up_proj", "up_proj", 1),
             ("gate_up_proj", "gate_proj", 0),
         ]
@@ -597,12 +563,17 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "visual" in name:
+                name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                if "visual" in name:
-                    continue
+
                 name = name.replace(weight_name, param_name)
 
                 # Skip loading extra bias for GPTQ models.
@@ -613,26 +584,22 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if "visual" in name and "qkv.weight" in name:
-                    visual_num_heads = self.config.vision_config.num_heads
-                    visual_embed_dim = self.config.vision_config.hidden_size
-                    head_size = visual_embed_dim // visual_num_heads
-                    loaded_weight = loaded_weight.view(
-                        3, visual_num_heads, head_size, visual_embed_dim
-                    )
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1, visual_embed_dim)
-                elif "visual" in name and "qkv.bias" in name:
-                    visual_num_heads = self.config.vision_config.num_heads
-                    visual_embed_dim = self.config.vision_config.hidden_size
-                    head_size = visual_embed_dim // visual_num_heads
-                    loaded_weight = loaded_weight.view(3, visual_num_heads, head_size)
-                    loaded_weight = loaded_weight.transpose(0, 1)
-                    loaded_weight = loaded_weight.reshape(-1)
-
-                if "visual" in name:
-                    # adapt to VisionAttention
-                    name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                # if "visual" in name and "qkv.weight" in name:
+                #     visual_num_heads = self.config.vision_config.num_heads
+                #     visual_embed_dim = self.config.vision_config.hidden_size
+                #     head_size = visual_embed_dim // visual_num_heads
+                #     loaded_weight = loaded_weight.view(
+                #         3, visual_num_heads, head_size, visual_embed_dim
+                #     )
+                #     loaded_weight = loaded_weight.transpose(0, 1)
+                #     loaded_weight = loaded_weight.reshape(-1, visual_embed_dim)
+                # elif "visual" in name and "qkv.bias" in name:
+                #     visual_num_heads = self.config.vision_config.num_heads
+                #     visual_embed_dim = self.config.vision_config.hidden_size
+                #     head_size = visual_embed_dim // visual_num_heads
+                #     loaded_weight = loaded_weight.view(3, visual_num_heads, head_size)
+                #     loaded_weight = loaded_weight.transpose(0, 1)
+                #     loaded_weight = loaded_weight.reshape(-1)
 
                 try:
                     # Skip loading extra bias for GPTQ models.

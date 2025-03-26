@@ -1147,8 +1147,12 @@ class MiniCPMV:
             if name.startswith("model.vision_tower") and name not in params_dict:
                 continue
 
-            # adapt to VisionAttention
-            name = name.replace(r"self_attn.out_proj", r"self_attn.proj")
+            if "vpm" in name and "out_proj" in name:
+                name = name.replace(r"attn.out_proj", r"attn.proj")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                continue
 
             if "sampler" in name:
                 param = params_dict[name]
@@ -1165,6 +1169,7 @@ class MiniCPMV:
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
+                print(f"{name=}")
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break

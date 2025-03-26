@@ -178,13 +178,13 @@ class MultiModalityDataPaddingPatternImageTokens(MultiModalityDataPaddingPattern
 def get_embedding_and_mask(
     data_embedding_func: Callable[[List[MultimodalDataItem]], torch.Tensor],
     appearing_items: List[MultimodalDataItem],
+    placeholder_tensor: torch.Tensor,
     input_ids: torch.Tensor,
 ):
     """
     Get the multimodal embedding and its mask from input_ids
 
     """
-
     # 1. Get the embedding
     embedding = data_embedding_func(appearing_items)
 
@@ -193,10 +193,6 @@ def get_embedding_and_mask(
         num_image_tokens_in_embedding = embedding.shape[0]
     else:
         num_image_tokens_in_embedding = embedding.shape[0] * embedding.shape[1]
-
-    placeholder_tensor = torch.tensor(
-        [item.pad_value for item in appearing_items], device=input_ids.device
-    )
 
     # the mask of multimodal tokens from input_ids
     special_image_mask = torch.isin(
@@ -276,6 +272,15 @@ def embed_mm_inputs(
         appearing_items = [
             item for item in mm_inputs.items if item.pad_value in appearing_pad_values
         ]
+
+        using_all_items = False
+        if len(appearing_items) == 0:
+            logger.warning(
+                "No multimodal data item's pad value exist in placeholder ids. Using all items"
+            )
+            using_all_items = True
+            appearing_items = mm_inputs.items
+
         embeddings, masks = [], []
 
         # 2. Get multimodal embedding separately
@@ -287,6 +292,14 @@ def embed_mm_inputs(
             embedding, mask = get_embedding_and_mask(
                 data_embedding_func=image_data_embedding_func,
                 appearing_items=[item for item in appearing_items if item.is_image()],
+                placeholder_tensor=(
+                    placeholder_tensor
+                    if using_all_items
+                    else torch.tensor(
+                        [item.pad_value for item in appearing_items],
+                        device=input_ids.device,
+                    )
+                ),
                 input_ids=input_ids,
             )
             embeddings += [embedding]
@@ -300,6 +313,14 @@ def embed_mm_inputs(
             embedding, mask = get_embedding_and_mask(
                 data_embedding_func=audio_data_embedding_func,
                 appearing_items=[item for item in appearing_items if item.is_audio()],
+                placeholder_tensor=(
+                    placeholder_tensor
+                    if using_all_items
+                    else torch.tensor(
+                        [item.pad_value for item in appearing_items],
+                        device=input_ids.device,
+                    )
+                ),
                 input_ids=input_ids,
             )
             embeddings += [embedding]
@@ -337,7 +358,7 @@ def general_mm_embed_routine(
     placeholder_token_ids: List[int] = None,
     get_embedding: bool = False,
     **kwargs,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     A general wrapper function to get final input embeds from multimodal models with a language model as causal model
 
@@ -376,6 +397,7 @@ def general_mm_embed_routine(
     if get_embedding:
         hidden_states = None
     else:
+        # inputs_embeds = inputs_embeds.unsqueeze(0)
         hidden_states = language_model(
             input_ids=None,
             forward_batch=forward_batch,
