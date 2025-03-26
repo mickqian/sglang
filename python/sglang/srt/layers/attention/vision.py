@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.nn import Parameter
 
 from sglang.srt.distributed import parallel_state
 from sglang.srt.distributed import utils as dist_utils
@@ -19,7 +20,7 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb, rotate_half
+from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
 from sglang.srt.utils import add_prefix
 
 
@@ -94,7 +95,7 @@ class VisionAttention(nn.Module):
             input_size=embed_dim,
             output_size=embed_dim,
             quant_config=quant_config,
-            prefix=add_prefix("out_proj", prefix),
+            prefix=add_prefix("proj", prefix),
         )
 
     def forward(
@@ -179,6 +180,65 @@ class VisionAttention(nn.Module):
             output = output.view(bsz, s, -1)
 
         return output
+
+    def load_weights(
+        self,
+        name: str,
+        weight: torch.Tensor,
+        shard_id: Optional[str] = None,
+    ):
+        """Load weights by name into the appropriate layer.
+
+        Args:
+            name: The name of the parameter to load (e.g. "qkv_proj" or "proj")
+            weight: The weight tensor to load
+            shard_id: For QKV projections, can be "q", "k", or "v"
+        """
+        if name == "qkv_proj":
+            if isinstance(self.qkv_proj, QKVParallelLinear):
+                # Handle QKV projection weights with possible sharding
+                for param_name, param in self.qkv_proj.named_parameters():
+                    if "weight" in param_name:
+                        self.qkv_proj.weight_loader(param, weight, shard_id)
+                    elif "bias" in param_name:
+                        self.qkv_proj.weight_loader(param, weight)
+            else:
+                # Handle ColumnParallelLinear case
+                for param_name, param in self.qkv_proj.named_parameters():
+                    self.qkv_proj.weight_loader(param, weight)
+        elif name == "proj":
+            # Handle output projection weights
+            for param_name, param in self.proj.named_parameters():
+                self.proj.weight_loader(param, weight)
+        else:
+            raise ValueError(f"Unknown weight name {name} in VisionAttention")
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: Optional[str] = None,
+    ):
+        """Load weights into both QKV and output projection layers.
+
+        Args:
+            param: The parameter to load weights into
+            loaded_weight: The weight tensor to load
+            loaded_shard_id: For QKV projections, can be "q", "k", or "v"
+        """
+
+        if param in self.qkv_proj.parameters():
+            # Handle QKV projection weights
+            if isinstance(self.qkv_proj, QKVParallelLinear):
+                self.qkv_proj.weight_loader(param, loaded_weight, loaded_shard_id)
+            else:
+                # For ColumnParallelLinear case
+                self.qkv_proj.weight_loader(param, loaded_weight)
+        elif param in self.proj.parameters():
+            # Handle output projection weights
+            self.proj.weight_loader(param, loaded_weight)
+        else:
+            raise ValueError(f"Unknown parameter {param} in VisionAttention")
 
 
 class VisionSdpaAttention(nn.Module):

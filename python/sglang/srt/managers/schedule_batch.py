@@ -160,30 +160,29 @@ class MultimodalDataItem:
 
     modality: Modality
 
-    hash: int = None
-    pad_value: int = None
-
-    aspect_ratio_id: Optional[List[torch.Tensor]] = None
-    aspect_ratio_mask: Optional[List[torch.Tensor]] = None
-
-    image_sizes: Tuple[int, int] = None
-    image_offsets: Optional[list] = None
-
-    # the real data, pixel_values or audio_features
+    # modality: image
     # data: Union[List[torch.Tensor], List[np.array]]
     pixel_values: Union[torch.Tensor, np.array] = None
+    # [num_images, (n, w, h)]
+    tgt_size: Tuple[int, int] = None
+    image_sizes: Tuple[int, int] = None
+    image_offsets: Optional[list] = None
     image_grid_thws: Union[torch.Tensor, np.array] = None
-    video_grid_thws: Union[torch.Tensor, np.array] = None
-
+    aspect_ratio_id: Optional[List[torch.Tensor]] = None
+    aspect_ratio_mask: Optional[List[torch.Tensor]] = None
     image_emb_mask: Optional[torch.Tensor] = None
     image_spatial_crop: Optional[torch.Tensor] = None
     second_per_grid_ts: Optional[List[torch.Tensor]] = None
 
-    # [num_images, (n, w, h)]
-    tgt_size: Tuple[int, int] = None
+    # modality: video
+    video_grid_thws: Union[torch.Tensor, np.array] = None
 
+    # modality: audio
     audio_features: Union[torch.Tensor, np.array] = None
     audio_feature_lens: Optional[List[torch.Tensor]] = None
+
+    hash: int = None
+    pad_value: int = None
 
     @staticmethod
     def is_empty_list(l):
@@ -228,6 +227,9 @@ class MultimodalDataItem:
             self.modality == Modality.VIDEO
         ) and not MultimodalDataItem.is_empty_list(self.pixel_values)
 
+    def is_valid(self) -> bool:
+        return self.is_image() or self.is_video() or self.is_audio()
+
     def validate(self):
         ...
         # TODO
@@ -267,11 +269,7 @@ class MultimodalInputs:
         )
 
         assert isinstance(ret.mm_items, list)
-        ret.mm_items = [
-            item
-            for item in ret.mm_items
-            if item.is_audio() or item.is_image() or item.is_video()
-        ]
+        ret.mm_items = [item for item in ret.mm_items if item.is_valid()]
 
         assert len(ret.mm_items) != 0
 
@@ -306,8 +304,8 @@ class MultimodalInputs:
         """ """
         return any(item.is_audio() for item in self.mm_items)
 
-    def collect_image_inputs(self) -> List[torch.Tensor]:
-        return [item.pixel_values for item in self.mm_items if item.is_image()]
+    def contains_mm_input(self) -> bool:
+        return any(True for item in self.mm_items if item.is_valid())
 
     def merge(self, other: MultimodalInputs):
         """

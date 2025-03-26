@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 import math
-from typing import List, Union
+from typing import List, Optional, Union
 
 import torch
 from PIL import Image

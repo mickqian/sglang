@@ -141,7 +141,6 @@ def get_embedding_and_mask(
         num_mm_tokens_in_embedding = embedding.shape[0]
     else:
         num_mm_tokens_in_embedding = embedding.shape[0] * embedding.shape[1]
-
     # the mask of multimodal tokens from input_ids
     special_multimodal_mask = torch.isin(
         input_ids,
@@ -259,6 +258,14 @@ def embed_mm_inputs(
                         device=input_ids.device,
                     )
                 ),
+                placeholder_tensor=(
+                    placeholder_tensor
+                    if using_all_items
+                    else torch.tensor(
+                        [item.pad_value for item in appearing_items],
+                        device=input_ids.device,
+                    )
+                ),
                 input_ids=input_ids,
             )
             embeddings += [embedding]
@@ -278,6 +285,14 @@ def embed_mm_inputs(
                     if using_all_items
                     else torch.tensor(
                         [item.pad_value for item in items],
+                        device=input_ids.device,
+                    )
+                ),
+                placeholder_tensor=(
+                    placeholder_tensor
+                    if using_all_items
+                    else torch.tensor(
+                        [item.pad_value for item in appearing_items],
                         device=input_ids.device,
                     )
                 ),
@@ -357,6 +372,7 @@ def general_mm_embed_routine(
     if get_embedding:
         hidden_states = None
     else:
+        # inputs_embeds = inputs_embeds.unsqueeze(0)
         hidden_states = language_model(
             input_ids=None,
             forward_batch=forward_batch,
