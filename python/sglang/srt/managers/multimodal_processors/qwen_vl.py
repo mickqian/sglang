@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import time
 from typing import List, Union
@@ -13,13 +14,14 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.models.qwen2_5_omni import Qwen2_5OmniModel
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
-    models = [Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration]
+    models = [Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration, Qwen2_5OmniModel]
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
@@ -142,23 +144,36 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         resize_tasks = [resize_image_async(image) for image in base_output.images]
         resized_images = await asyncio.gather(*resize_tasks)
 
-        ret = self.process_images_fast(
+        res = self.process_images_fast(
             images=resized_images, input_text=base_output.input_text
         )
 
-        image_grid_thws = torch.concat([ret["image_grid_thw"]])
+        items = []
+
+        if len(res["pixel_values"]) != 0:
+            image_grid_thws = torch.concat([res["image_grid_thw"]])
+            item = MultimodalDataItem(
+                pixel_values=res["pixel_values"],
+                image_grid_thws=image_grid_thws,
+                modality="image",
+            )
+            items += [item]
+
+        if res["audio_features"] is not None and len(res["audio_features"]) != 0:
+            # res["audio_features"] = [res["audio_features"]]
+            audio_features = torch.concat([ret["audios_inputs"]])
+
+            item = MultimodalDataItem(
+                audio_features=[res["audio_features"]],
+                audio_feature_lens=res["audio_feature_lens"],
+                modality="audio",
+            )
+            items += [item]
+
         video_grid_thws = None
         return {
-            "input_ids": ret["input_ids"].flatten().tolist(),
-            "items": [
-                MultimodalDataItem(
-                    pixel_values=ret["pixel_values"],
-                    image_grid_thws=image_grid_thws,
-                    video_grid_thws=video_grid_thws,
-                    second_per_grid_ts=ret["second_per_grid_ts"],
-                    modality="image",
-                )
-            ],
+            "input_ids": res["input_ids"].flatten().tolist(),
+            "items": items,
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
             "im_token_id": self.image_token_id,
