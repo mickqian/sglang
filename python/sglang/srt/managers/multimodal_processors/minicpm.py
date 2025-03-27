@@ -144,7 +144,7 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
             # res["audio_features"] = [res["audio_features"]]
             item = MultimodalDataItem(
                 audio_features=[res["audio_features"]],
-                audio_feature_lens=res["audio_feature_lens"],
+                audio_feature_len=res["audio_feature_lens"],
                 modality="audio",
             )
             items += [item]
