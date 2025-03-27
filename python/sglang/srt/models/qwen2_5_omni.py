@@ -1846,7 +1846,6 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        print(f"Qwen2_5OmniDecoderLayer attn: {config._attn_implementation}")
         if (
             config.use_sliding_window
             and config._attn_implementation != "flash_attention_2"
@@ -2261,10 +2260,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         is_mrope_enabled = rope_type == "mrope" or rope_type == "default"
         if is_mrope_enabled:
             positions = forward_batch.mrope_positions
-            if positions.dim() == 2:
-                positions = positions.unsqueeze(1)
-            if positions.shape[0] == 1:
-                positions = positions.expand(3, -1, -1)
+            if positions is not None:
+                if positions.dim() == 2:
+                    positions = positions.unsqueeze(1)
+                if positions.shape[0] == 1:
+                    positions = positions.expand(3, -1, -1)
             # print(f"{positions=}")
             # print(f"{positions.shape=}")
 
