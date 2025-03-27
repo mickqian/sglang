@@ -294,8 +294,6 @@ class MultimodalInputs:
             if item.is_audio() or item.is_image() or item.is_video()
         ]
 
-        assert len(ret.items) != 0
-
         # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
         # Please note that if the `input_ids` is later used in the model forward,
         # you also need to clamp the values within the range of [0, vocab_size) to avoid out-of-bound

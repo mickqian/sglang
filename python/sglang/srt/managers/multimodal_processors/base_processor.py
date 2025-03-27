@@ -1,11 +1,10 @@
-import asyncio
 import concurrent
 import concurrent.futures
 import dataclasses
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 import PIL
@@ -57,9 +56,21 @@ class BaseMultiModalProcessorOutput:
 
 @dataclasses.dataclass
 class MultimodalSpecialTokens:
-    image_token: Optional[str] = None
-    video_token: Optional[str] = None
-    audio_token: Optional[str] = None
+    image_token: Optional[Union[int, str]] = None
+    video_token: Optional[Union[int, str]] = None
+    audio_token: Optional[Union[int, str]] = None
+
+    def convert_to_str(self, token: Union[str, int], processor) -> str:
+        if token is None:
+            return token
+        if isinstance(token, str):
+            return token
+        return processor.tokenizer.convert_ids_to_tokens([token])[0]
+
+    def convert_to_strs(self, processor):
+        self.image_token = self.convert_to_str(self.image_token, processor)
+        self.video_token = self.convert_to_str(self.video_token, processor)
+        self.audio_token = self.convert_to_str(self.audio_token, processor)
 
     def collect(self) -> list[str]:
         return [
@@ -133,6 +144,8 @@ class BaseMultimodalProcessor(ABC):
         estimate the total frame count from all visual input
         """
         # Before processing inputs
+        if not isinstance(image_data, list):
+            return []
         estimated_frames_list = []
         for image in image_data:
             if isinstance(image, str) and image.startswith("video:"):
@@ -202,13 +215,13 @@ class BaseMultimodalProcessor(ABC):
 
         # TODO(mick): load from server_args, env, or sampling_params
         MAX_NUM_FRAMES = 30
-        estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
-        total_frame_count = sum(estimated_frames_list)
-        # a heuristic value, suggesting the maximum fraction of frames to embed from all visual inputs.
-        # e.g., 0.1 suggests that 1 frame out of 10 input frames should be used
-        scaling_factor = min(1.0, MAX_NUM_FRAMES / max(1, total_frame_count))
-
-        assert len(image_data) == len(estimated_frames_list)
+        # estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
+        # total_frame_count = sum(estimated_frames_list)
+        # # a heuristic value, suggesting the maximum fraction of frames to embed from all visual inputs.
+        # # e.g., 0.1 suggests that 1 frame out of 10 input frames should be used
+        # scaling_factor = min(1.0, MAX_NUM_FRAMES / max(1, total_frame_count))
+        #
+        # assert len(image_data) == len(estimated_frames_list)
         # Submit all tasks
         futures = []
         task_info = []
@@ -218,19 +231,19 @@ class BaseMultimodalProcessor(ABC):
             if text_part == multimodal_tokens.image_token:
                 data = image_data[image_index]
                 is_video = isinstance(data, str) and data.startswith("video:")
-                estimated_frames = estimated_frames_list[image_index]
-                frame_count_limit = max(1, int(estimated_frames * scaling_factor))
+                # estimated_frames = estimated_frames_list[image_index]
+                # frame_count_limit = max(1, int(estimated_frames * scaling_factor))
                 futures.append(
                     self.io_executor.submit(
                         BaseMultimodalProcessor._load_single_item,
                         data,
                         is_video,
                         False,
-                        frame_count_limit,
+                        None,
                         discard_alpha_channel,
                     )
                 )
-                task_info.append(("image", data, frame_count_limit))
+                task_info.append(("image", data, None))
                 image_index += 1
             elif text_part == multimodal_tokens.audio_token:
                 data = audio_data[audio_index]
@@ -269,17 +282,12 @@ class BaseMultimodalProcessor(ABC):
 
         """
         # start = time.time()
-        if isinstance(multimodal_tokens.image_token, int):
-            multimodal_tokens.image_token = (
-                self._processor.tokenizer.convert_ids_to_tokens(
-                    multimodal_tokens.image_token
-                )
-            )
-        else:
-            multimodal_tokens.image_token = multimodal_tokens.image_token
+
+        multimodal_tokens.convert_to_strs(self._processor)
+        print(f"{multimodal_tokens=}")
+        print(f"{prompt=}")
 
         assert isinstance(prompt, str)
-
         if isinstance(prompt, list) and return_text:
             assert len(prompt) and isinstance(prompt[0], int)
             prompt = self._processor.tokenizer.decode(prompt)

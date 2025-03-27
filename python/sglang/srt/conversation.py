@@ -651,7 +651,7 @@ register_conv_template(
 register_conv_template(
     Conversation(
         name="qwen2-5-o",
-        system_message="You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.",
+        system_message="You are a helpful assistant.",
         system_template="<|im_start|>system\n{system_message}",
         roles=("<|im_start|>user", "<|im_start|>assistant"),
         sep="<|im_end|>\n",
