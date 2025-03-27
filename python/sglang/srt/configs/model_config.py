@@ -79,7 +79,7 @@ class ModelConfig:
         self.is_image_gen = is_image_gen_model(self.hf_config.architectures)
         self.is_audio_model = is_audio_model(self.hf_config.architectures)
         self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
-        self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.dtype = _get_and_verify_dtype(self.hf_config, self.hf_text_config, dtype)
 
         # Derive context length
         derived_context_len = get_context_length(self.hf_text_config)
@@ -364,15 +364,23 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 # adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/config.py
 def _get_and_verify_dtype(
+    hf_config: PretrainedConfig,
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
-    config_dtype = getattr(config, "torch_dtype", None)
+    config_dtype = None
+    if hasattr(hf_config, "torch_dtype"):
+        config_dtype = torch.bfloat16
+    if not config_dtype:
+        config_dtype = getattr(config, "torch_dtype", None)
     if config_dtype is None:
         config_dtype = torch.float32
 
+    print(f"{dtype=}")
+    print(f"{config=}")
+    print(f"{config_dtype=}")
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":

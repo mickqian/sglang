@@ -1134,6 +1134,7 @@ def apply_rotary_pos_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
     unsqueeze_dim=1,
+    **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     orig_q_dtype = q.dtype
     orig_k_dtype = k.dtype
@@ -1148,6 +1149,60 @@ def apply_rotary_pos_emb(
     q_embed = q_embed.to(orig_q_dtype)
     k_embed = k_embed.to(orig_k_dtype)
 
+    return q_embed, k_embed
+
+
+def apply_multimodal_rotary_pos_emb(
+    q, k, cos, sin, mrope_section, unsqueeze_dim=1, **kwargs
+):
+    """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors (https://qwenlm.github.io/blog/qwen2-vl/).
+
+    Explanation:
+        Multimodal 3D rotary position embedding is an extension to 1D rotary position embedding. The input embedding
+        sequence contains vision (images / videos) embedding and text embedding or just contains text embedding. For
+        vision embedding part, we apply rotary position embedding on temporal, height and width dimension separately.
+        Here we split the channel dimension to 3 chunks for the temporal, height and width rotary position embedding.
+        For text embedding part, we just apply 1D rotary position embedding. The three rotary position index (temporal,
+        height and width) of text embedding is always the same, so the text embedding rotary position embedding has no
+        difference with modern LLMs.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        mrope_section(`List(int)`):
+            Multimodal rope section is for channel dimension of temporal, height and width in rope calculation.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    if q.dim() == 3:
+        q = q.unsqueeze(0)
+    if k.dim() == 3:
+        k = k.unsqueeze(0)
+    mrope_section = mrope_section * 2
+    print(f"b {q.shape=}")
+    print(f"b {k.shape=}")
+    print(f"b {cos.shape=}")
+    print(f"b {sin.shape=}")
+    cos = torch.cat(
+        [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1
+    ).unsqueeze(unsqueeze_dim)
+    sin = torch.cat(
+        [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1
+    ).unsqueeze(unsqueeze_dim)
+
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    print(f"a {q_embed.shape=}")
+    print(f"a {q_embed.shape=}")
     return q_embed, k_embed
 
 
