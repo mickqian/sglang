@@ -35,7 +35,7 @@ from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionCon
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.activation import QuickGELU
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import OmniAttention
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
@@ -148,7 +148,7 @@ class Qwen2VisionBlock(nn.Module):
             softmax_in_single_precision = True
             use_context_forward = False
 
-        self.attn = VisionAttention(
+        self.attn = OmniAttention(
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,

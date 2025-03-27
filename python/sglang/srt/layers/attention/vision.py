@@ -270,9 +270,9 @@ QKV_BACKEND_IMPL = {
 }
 
 
-class VisionAttention(nn.Module):
+class OmniAttention(nn.Module):
     r"""
-        Multi-headed attention without any cache, mostly used for ViT.
+        Multi-headed attention without any cache, mostly used for multimodal transformers.
 
 
     Args:
@@ -300,6 +300,7 @@ class VisionAttention(nn.Module):
         flatten_batch: bool = False,
         prefix: str = "",
         proj_bias: bool = True,
+        **kwargs
     ):
         super().__init__()
         world_size = parallel_state.get_tensor_model_parallel_world_size()
@@ -325,14 +326,23 @@ class VisionAttention(nn.Module):
         self.q_size = self.num_attention_heads_per_partition * self.head_size
         self.kv_size = self.num_attention_kv_heads_per_partition * self.head_size
 
-        self.qkv_backend = QKV_BACKEND_IMPL[qkv_backend](
-            head_dim=self.head_size,
-            num_heads=self.num_attention_heads_per_partition,
-            num_kv_heads=self.num_attention_kv_heads_per_partition,
-            dropout=dropout,
-            flatten_batch=flatten_batch,
-            softmax_in_single_precision=softmax_in_single_precision,
-        )
+        if qkv_backend == "radix":
+            self.qkv_backend = RadixAttention(
+                head_dim=self.head_size,
+                num_heads=self.num_attention_heads_per_partition,
+                scaling=self.head_size ** -0.5,
+                num_kv_heads=self.num_attention_kv_heads_per_partition,
+                layer_id=kwargs["layer_id"]
+            )
+        else:
+            self.qkv_backend = QKV_BACKEND_IMPL[qkv_backend](
+                head_dim=self.head_size,
+                num_heads=self.num_attention_heads_per_partition,
+                num_kv_heads=self.num_attention_kv_heads_per_partition,
+                dropout=dropout,
+                flatten_batch=flatten_batch,
+                softmax_in_single_precision=softmax_in_single_precision,
+            )
 
         self.use_qkv_parallel = use_qkv_parallel
         num_key_value_heads = num_key_value_heads or num_heads
@@ -491,6 +501,7 @@ class VisionAttention(nn.Module):
 
         if isinstance(self.qkv_backend, RadixAttention):
             output = self.qkv_backend.forward(q=q, k=k, v=v, **kwargs)
+            output = output.unsqueeze(0)
         else:
             output = self.qkv_backend.forward(
                 q=q,
@@ -500,6 +511,8 @@ class VisionAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
                 attention_mask=attention_mask,
             )
+
+        assert output.dim() == 3, output.shape
 
         if self.use_qkv_parallel:
             # [b * s, h, head_size] --> [b, s, h * head_size]

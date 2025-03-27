@@ -42,7 +42,7 @@ from torch.nn.init import trunc_normal_
 from transformers import PretrainedConfig
 
 from sglang.srt.layers.activation import get_act_fn
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import OmniAttention
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -194,7 +194,7 @@ class Idefics2EncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.self_attn = VisionAttention(
+        self.self_attn = OmniAttention(
             embed_dim=config.hidden_size,
             num_heads=self.num_heads,
             projection_size=config.intermediate_size,

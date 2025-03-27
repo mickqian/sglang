@@ -44,7 +44,7 @@ from torch.nn.init import trunc_normal_
 from transformers import AutoModel, PreTrainedModel
 
 from sglang.srt.configs.janus_pro import *
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import OmniAttention
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.managers.mm_utils import (
@@ -527,7 +527,7 @@ class VisionTransformerBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = VisionAttention(
+        self.attn = OmniAttention(
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
