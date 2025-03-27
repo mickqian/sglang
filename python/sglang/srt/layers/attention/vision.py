@@ -15,11 +15,7 @@ from sglang.srt.distributed import utils as dist_utils
 from sglang.srt.layers.attention.triton_ops.prefill_attention import (
     context_attention_fwd,
 )
-from sglang.srt.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import (
@@ -350,12 +346,19 @@ class VisionAttention(nn.Module):
                 prefix=add_prefix("qkv_proj", prefix),
             )
         else:
-            self.qkv_proj = ColumnParallelLinear(
-                input_size=embed_dim,
-                output_size=3 * projection_size,
-                quant_config=quant_config,
-                prefix=add_prefix("qkv_proj", prefix),
+            self.q_proj = nn.Linear(embed_dim, num_heads * self.head_size, bias=True)
+            self.k_proj = nn.Linear(
+                embed_dim, num_key_value_heads * self.head_size, bias=True
             )
+            self.v_proj = nn.Linear(
+                embed_dim, num_key_value_heads * self.head_size, bias=True
+            )
+            # self.qkv_proj = ColumnParallelLinear(
+            #     input_size=embed_dim,
+            #     output_size=3 * projection_size,
+            #     quant_config=quant_config,
+            #     prefix=add_prefix("qkv_proj", prefix),
+            # )
         self.proj = RowParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
@@ -379,6 +382,7 @@ class VisionAttention(nn.Module):
         Returns:
              [s, b, head * head_size]
         """
+        global first
         if x.dim() == 2:
             x = x.unsqueeze(0)
         bsz, s, _ = x.shape
@@ -389,6 +393,8 @@ class VisionAttention(nn.Module):
             qkv, _ = self.qkv_proj(x)
 
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            if first:
+                print(f"after q proj {q=}")
 
             # [b, s, embed_dim] --> [b * s, head, head_size]
             q = q.reshape(bsz * s, head, -1).contiguous()
@@ -396,29 +402,51 @@ class VisionAttention(nn.Module):
             v = v.reshape(bsz * s, kv_head, -1).contiguous()
         else:
             # [b, s, embed_dim] --> [s, b, embed_dim]
-            x = rearrange(x, "b s ... -> s b ...")
+            # x = rearrange(x, "b s ... -> s b ...")
             # [s, b, embed_dim] --> [s, b, head * 3 * head_size]
-            qkv, _ = self.qkv_proj(x)
+            # qkv, _ = self.qkv_proj(x)
+            print(f"{x.shape=}")
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+            q = rearrange(
+                q,
+                "s b (h head_size) -> b s h head_size",
+                h=self.num_attention_heads_per_partition,
+            ).contiguous()
+
+            k = rearrange(
+                k,
+                "s b (h head_size) -> b s h head_size",
+                h=self.num_attention_kv_heads_per_partition,
+            ).contiguous()
+
+            v = rearrange(
+                v,
+                "s b (h head_size) -> b s h head_size",
+                h=self.num_attention_kv_heads_per_partition,
+            ).contiguous()
+
             # [s, b, head * 3 * head_size] --> [s, b, head, 3 * head_size]
-            new_x_shape = qkv.size()[:-1] + (
-                head,
-                3 * self.hidden_size_per_attention_head,
-            )
-            qkv = qkv.view(*new_x_shape)
+            # new_x_shape = qkv.size()[:-1] + (
+            #     head,
+            #     3 * self.hidden_size_per_attention_head,
+            # )
+            # qkv = qkv.view(*new_x_shape)
 
             # [s, b, head, 3 * head_size] --> 3 [s, b, head, head_size]
-            q, k, v = dist_utils.split_tensor_along_last_dim(qkv, 3)
-
+            # q, k, v = dist_utils.split_tensor_along_last_dim(qkv, 3)
+            print(f"{q.shape=}")
+            print(f"{k.shape=}")
             # [s, b, head, head_size] --> [b, s, head, head_size]
-            q, k, v = [
-                rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-            ]
+            # q, k, v = [
+            #     rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
+            # ]
 
         if position_embeddings is not None:
             if not self.rotary_embed:
                 raise RuntimeError()
             cos, sin = position_embeddings
-            global first
 
             original_shape_q = q.shape
             original_shape_k = k.shape
@@ -447,15 +475,22 @@ class VisionAttention(nn.Module):
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
 
-        if self.use_qkv_parallel:
-            pass
-        else:
+        if q.dim() == 4:
             # [b, s, head, head_size] --> [b * s, head, head_size]
-            q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
+            q = rearrange(q, "b s ... -> (b s) ...")
+        if k.dim() == 4:
+            # [b, s, head, head_size] --> [b * s, head, head_size]
+            k = rearrange(k, "b s ... -> (b s) ...")
+        if v.dim() == 4:
+            # [b, s, head, head_size] --> [b * s, head, head_size]
+            v = rearrange(v, "b s ... -> (b s) ...")
+
+        assert q.dim() == 3, q.dim()
+        assert k.dim() == 3, k.dim()
+        assert v.dim() == 3, v.dim()
 
         if isinstance(self.qkv_backend, RadixAttention):
             output = self.qkv_backend.forward(q=q, k=k, v=v, **kwargs)
-
         else:
             output = self.qkv_backend.forward(
                 q=q,
