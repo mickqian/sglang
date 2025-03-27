@@ -69,7 +69,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             audios=audios,
             padding=True,
             return_tensors="pt",
-            **kwargs
+            **kwargs,
         )
         print(f"{result=}")
         return {

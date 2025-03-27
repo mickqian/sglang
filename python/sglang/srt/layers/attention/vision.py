@@ -138,6 +138,7 @@ class VisionAttention(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -446,7 +447,7 @@ class VisionSdpaAttention(nn.Module):
             k = rearrange(k, "b h s d -> b h d s")
             # print(f"401 {q.shape=}")
             # print(f"401 {k.shape=}")
-            attn_weights = torch.matmul(q, k) / math.sqrt(self.head_dim)
+            attn_weights = torch.matmul(q, k) / math.sqrt(self.head_size)
             # print(f"401 {attn_weights.shape=}")
 
             if attention_mask is not None:  # no matter the length, we just slice it

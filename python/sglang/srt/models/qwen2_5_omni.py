@@ -49,7 +49,6 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
-    QWEN2_5_OMNI_ATTENTION_CLASSES,
     Qwen2MLP,
     Qwen2RMSNorm,
 )
@@ -70,6 +69,7 @@ from sglang.srt.configs.qwen2_5_o import (
     Qwen2_5OmniToken2WavConfig,
     Qwen2_5OmniVisionEncoderConfig,
 )
+from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
@@ -1869,25 +1869,24 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
             flatten_batch = True
 
         self.rope_scaling = config.rope_scaling
-        self.self_attn = QWEN2_5_OMNI_ATTENTION_CLASSES[config._attn_implementation](
-            config, layer_idx
-        )
-        # self.self_attn = VisionAttention(
-        #     embed_dim=config.hidden_size,
-        #     num_heads=config.num_attention_heads,
-        #     num_key_value_heads=config.num_key_value_heads,
-        #     projection_size=config.hidden_size,
-        #     use_qkv_parallel=True,
-        #     use_context_forward=use_context_forward,
-        #     softmax_in_single_precision=softmax_in_single_precision,
-        #     flatten_batch=flatten_batch,
-        #     quant_config=quant_config,
-        #     rotary_embed="multimodal",
-        #     mrope_section=self.rope_scaling["mrope_section"],
-        #     prefix=add_prefix("attn", prefix),
-        #     proj_bias=False
+        # self.self_attn = QWEN2_5_OMNI_ATTENTION_CLASSES[config._attn_implementation](
+        #     config, layer_idx
         # )
-        # text_config = config.thinker_config.text_config
+        self.self_attn = VisionAttention(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            projection_size=config.hidden_size,
+            use_qkv_parallel=True,
+            use_context_forward=use_context_forward,
+            softmax_in_single_precision=softmax_in_single_precision,
+            flatten_batch=flatten_batch,
+            quant_config=quant_config,
+            rotary_embed="multimodal",
+            mrope_section=self.rope_scaling["mrope_section"],
+            prefix=add_prefix("attn", prefix),
+            proj_bias=False,
+        )
         text_config = config
         self.mlp = Qwen2MLP(
             text_config
@@ -1953,14 +1952,12 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         assert hidden_states.dim() == 2, hidden_states.shape
         hidden_states = self.input_layernorm(hidden_states)
 
-        if hidden_states.dim() == 2:
-            hidden_states = hidden_states.unsqueeze(0)
         if first:
             print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         # Self Attention
         hidden_states = self.self_attn(
-            # x=hidden_states,
-            hidden_states=hidden_states,
+            x=hidden_states,
+            # hidden_states=hidden_states,
             position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_value=past_key_value,
@@ -2044,7 +2041,7 @@ class Qwen2_5OmniThinkerModel(nn.Module):
             positions = positions.unsqueeze(0)
         assert positions.dim() == 3, positions.shape
         # create position embeddings to be shared across the decoder layers
-        print(f"{hidden_states=}")
+        # print(f"{hidden_states=}")
         position_embeddings = self.rotary_emb(hidden_states, positions)
 
         # past_seen_tokens = 0
@@ -2077,7 +2074,7 @@ class Qwen2_5OmniThinkerModel(nn.Module):
                 attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
             )
-            hidden_states = layer_output[0]
+            # hidden_states = layer_output[0]
 
             if first:
                 print(f"{layer_idx=} {hidden_states=}")
@@ -4563,7 +4560,7 @@ class Qwen2_5OmniModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
-        print(f"{params_dict.keys()}")
+        # print(f"{params_dict.keys()}")
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -4576,15 +4573,16 @@ class Qwen2_5OmniModel(nn.Module):
             # print(f"{name=}")
             # print(f"{loaded_weight.shape=}")
 
-            # if "thinker" in name:
-            #     name = name.replace(".o_proj", ".proj")
+            if "thinker" in name:
+                name = name.replace(".o_proj", ".proj")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                continue
-                # if "mlp." in name:
-                #     ...
-                # else:
-                #     continue
+                # continue
+                if "mlp." in name:
+                    continue
+                    # ...
+                else:
+                    ...
                 if weight_name not in name:
                     continue
 
@@ -4599,7 +4597,6 @@ class Qwen2_5OmniModel(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                # print(f"4987 {name=}")
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
