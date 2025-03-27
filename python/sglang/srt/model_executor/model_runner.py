@@ -159,7 +159,7 @@ class ModelRunner:
         )
 
         # CPU offload
-        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024 ** 3))
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
 
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
@@ -258,13 +258,13 @@ class ModelRunner:
                 logger.info("Automatically turn off --chunked-prefill-size for mllama.")
                 server_args.chunked_prefill_size = -1
 
-            if self.model_config.hf_config.architectures == [
-                "Qwen2VLForConditionalGeneration"
-            ] or self.model_config.hf_config.architectures == [
-                "Qwen2_5_VLForConditionalGeneration"
-            ] or self.model_config.hf_config.architectures == [
-                "Qwen2_5OmniModel"
-            ]:
+            if (
+                self.model_config.hf_config.architectures
+                == ["Qwen2VLForConditionalGeneration"]
+                or self.model_config.hf_config.architectures
+                == ["Qwen2_5_VLForConditionalGeneration"]
+                or self.model_config.hf_config.architectures == ["Qwen2_5OmniModel"]
+            ):
                 # TODO: qwen2-vl series does not support radix cache now, set disable_radix_cache=True automatically
                 logger.info(
                     "Automatically turn off --chunked-prefill-size and disable radix cache for qwen-vl series."
@@ -891,7 +891,7 @@ class ModelRunner:
             key = "model.layers." + str(i) + ".self_attn" + selected_channel
             self.sorted_channels.append(
                 torch.tensor(channel_config[key])[
-                :, : self.server_args.ds_heavy_channel_num
+                    :, : self.server_args.ds_heavy_channel_num
                 ]
                 .contiguous()
                 .cuda()
