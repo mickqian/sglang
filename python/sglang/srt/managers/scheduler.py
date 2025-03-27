@@ -236,9 +236,10 @@ class Scheduler(
         if not self.is_generation:
             self.enable_overlap = False
             logger.info("Overlap scheduler is disabled for embedding models.")
-        # if self.model_config.is_multimodal:
-        #     self.enable_overlap = False
-        #     logger.info("Overlap scheduler is disabled for multimodal models.")
+        if self.model_config.is_multimodal:
+            self.enable_overlap = False
+            # self.enable_overlap = True
+            logger.info("Overlap scheduler is disabled for multimodal models.")
 
         # Launch a tensor parallel worker
         if self.enable_overlap:

@@ -646,6 +646,22 @@ register_conv_template(
     )
 )
 
+# Reference: https://huggingface.co/docs/transformers/main/model_doc/qwen2_vl#usage-example
+register_conv_template(
+    Conversation(
+        name="qwen2-5-o",
+        system_message="You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.",
+        system_template="<|im_start|>system\n{system_message}",
+        roles=("<|im_start|>user", "<|im_start|>assistant"),
+        sep="<|im_end|>\n",
+        sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
+        stop_str=["<|im_end|>"],
+        image_token="<|vision_bos|><|IMAGE|><|vision_end|>",
+        video_token="<|vision_bos|><|VIDEO|><|vision_end|>",
+        # audio_token="<|vision_bos|><|AUDIO|><|vision_end|>",
+    )
+)
+
 register_conv_template(
     Conversation(
         name="deepseek-vl2",
