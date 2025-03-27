@@ -17,7 +17,7 @@ from transformers.models.mllama.modeling_mllama import (
 import sglang.srt.distributed.parallel_state as ps
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.activation import get_act_fn
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import OmniAttention
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -194,7 +194,7 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.is_gated = is_gated
         self.intermediate_size = config.intermediate_size
 
-        self.self_attn = VisionAttention(
+        self.self_attn = OmniAttention(
             self.hidden_size,
             self.num_attention_heads,
             self.hidden_size,
