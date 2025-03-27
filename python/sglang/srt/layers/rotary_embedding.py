@@ -929,6 +929,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         context_len: int,
         seq_len: int,
     ) -> List[List[int]]:
+        print(f"{mrope_position_delta=}")
+        print(f"{context_len=}")
+        print(f"{seq_len=}")
         return [
             list(
                 range(
