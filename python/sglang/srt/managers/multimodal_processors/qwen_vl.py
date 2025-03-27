@@ -34,28 +34,39 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
-        self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
-        self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
-        self.image_token_id = hf_config.image_token_id
-        self.video_token_id = hf_config.video_token_id
+
+        arch = hf_config.architectures[0]
+        if arch == Qwen2_5OmniModel.__name__:
+            self.image_token_id = hf_config.thinker_config.image_token_index
+            self.audio_token_id = hf_config.thinker_config.audio_token_index
+            self.IM_START_TOKEN_ID = hf_config.thinker_config.vision_start_token_id
+            self.video_token_id = hf_config.thinker_config.video_token_index
+            self.IM_END_TOKEN_ID = hf_config.thinker_config.vision_end_token_id
+        else:
+            self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
+            self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
+            self.image_token_id = hf_config.image_token_id
+            self.audio_token_id = None
+            self.video_token_id = hf_config.video_token_id
         self.NUM_TOKEN_PER_FRAME = 770
         self.IMAGE_FACTOR = 28
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
 
-    def process_images_fast(self, images, input_text):
+    def process_images_fast(self, input_text, images=None, audios=None, videos=None):
         if isinstance(images, list) and len(images) == 0:
             images = None
         processor = self._processor
         result = processor.__call__(
             text=[input_text],
             images=images,
+            audios=audios,
             padding=True,
             return_tensors="pt",
             device="cuda",
         )
-
+        print(f"{result=}")
         return {
             "input_ids": result.input_ids,
             "pixel_values": getattr(result, "pixel_values", None),
@@ -75,16 +86,18 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
     ):
         start = time.time()
 
-        if not image_data:
-            return None
         if isinstance(image_data, str):
             image_data = [image_data]
 
-        image_token = self.IMAGE_TOKEN
+        # processor = self._processor
+        # print(f"{processor.__dict__.keys()}")
+        # print(f"{processor.tokenizer.__dict__.keys()}")
         base_output = self.load_mm_data(
             prompt=input_ids,
             image_data=image_data,
-            multimodal_tokens=MultimodalSpecialTokens(image_token=image_token),
+            multimodal_tokens=MultimodalSpecialTokens(
+                image_token=self.image_token_id, audio_token=self.audio_token_id
+            ),
             max_req_input_len=max_req_input_len,
         )
 
@@ -149,16 +162,24 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         async def resize_image_async(image):
             return resize_image(image)
 
-        resize_tasks = [resize_image_async(image) for image in base_output.images]
-        resized_images = await asyncio.gather(*resize_tasks)
+        resized_images = base_output.images
+        if base_output.images:
+            resize_tasks = [resize_image_async(image) for image in resized_images]
+            resized_images = await asyncio.gather(*resize_tasks)
 
         res = self.process_images_fast(
-            images=resized_images, input_text=base_output.input_text
+            input_text=base_output.input_text,
+            images=resized_images,
+            audios=base_output.audios,
         )
 
         items = []
 
-        if len(res["pixel_values"]) != 0:
+        if (
+            hasattr(res, "pixel_values")
+            and res["pixel_values"]
+            and len(res["pixel_values"]) != 0
+        ):
             image_grid_thws = torch.concat([res["image_grid_thw"]])
             item = MultimodalDataItem(
                 pixel_values=res["pixel_values"],
@@ -167,9 +188,13 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             )
             items += [item]
 
-        if res["audio_features"] is not None and len(res["audio_features"]) != 0:
+        if (
+            hasattr(res, "audio_features")
+            and res["audio_features"] is not None
+            and len(res["audio_features"]) != 0
+        ):
             # res["audio_features"] = [res["audio_features"]]
-            audio_features = torch.concat([ret["audios_inputs"]])
+            audio_features = torch.concat([res["audios_inputs"]])
 
             item = MultimodalDataItem(
                 audio_features=[res["audio_features"]],
@@ -179,7 +204,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             items += [item]
 
         video_grid_thws = None
-
+        print(f"{base_output=}")
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             # "items": items,

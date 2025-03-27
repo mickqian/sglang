@@ -70,6 +70,7 @@ from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2MLP
@@ -988,7 +989,6 @@ class Qwen2_5OmniAudioEncoderLayer(nn.Module):
     def __init__(self, config: Qwen2_5OmniAudioEncoderConfig, layer_id: int = 0):
         super().__init__()
         self.embed_dim = config.d_model
-        print(f"Qwen2_5OmniAudioEncoderLayer {config._attn_implementation}")
         self.self_attn = QWEN2_5_OMNI_AUDIO_ATTENTION_CLASSES[
             config._attn_implementation
         ](
@@ -2267,7 +2267,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
                     positions = positions.expand(3, -1, -1)
             # print(f"{positions=}")
             # print(f"{positions.shape=}")
-
+        print(f"{positions=}")
+        print(f"{input_ids=}")
         # 2. Merge text , audios , image and video
         # if input_ids.shape[1] != 1:
         #     if input_features is not None:
@@ -4449,6 +4450,17 @@ class Qwen2_5OmniModel(nn.Module):
         config.enable_audio_output = False
         if config.enable_audio_output:
             self.enable_talker()
+
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
+        # Get all special token IDs
+        # im_start_id: int = image_inputs.im_start_id
+        # im_end_id: int = image_inputs.im_end_id
+        #
+        # media_token_pairs = [(im_start_id, im_end_id)]
+        # pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
+        #
+        # return pattern.pad_input_tokens(input_ids, image_inputs)
+        return input_ids
 
     def enable_talker(self):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration(

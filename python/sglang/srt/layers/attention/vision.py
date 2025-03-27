@@ -184,21 +184,21 @@ class VisionAttention(nn.Module):
             original_shape_q = q.shape
             original_numel_k = k.numel()
             original_shape_k = k.shape
-            print(f"{original_shape_q=}")
-            print(f"{original_shape_k=}")
+            # print(f"{original_shape_q=}")
+            # print(f"{original_shape_k=}")
 
             # [total_tokens, head, head_size]
             q = q.view(head, -1, self.head_size)
             k = k.view(kv_head, -1, self.head_size)
-            print(f"{q.shape=}")
-            print(f"{k.shape=}")
+            # print(f"{q.shape=}")
+            # print(f"{k.shape=}")
             q, k = self.rotary_embed(
                 q=q, k=k, cos=cos, sin=sin, mrope_section=self.mrope_section
             )
             # assert original_numel_k == k.nuem(
 
-            print(f"{q.shape=}")
-            print(f"{k.shape=}")
+            # print(f"{q.shape=}")
+            # print(f"{k.shape=}")
             # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
