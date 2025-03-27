@@ -32,7 +32,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import ConvTranspose1d, Parameter
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, EncoderDecoderCache, SlidingWindowCache, StaticCache
+from transformers.cache_utils import (
+    Cache,
+    DynamicCache,
+    EncoderDecoderCache,
+    SlidingWindowCache,
+    StaticCache,
+)
 from transformers.configuration_qwen2_5_omni import (
     Qwen2_5OmniAudioEncoderConfig,
     Qwen2_5OmniBigVGANConfig,
@@ -46,7 +52,11 @@ from transformers.configuration_qwen2_5_omni import (
 )
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, ModelOutput
+from transformers.modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPast,
+    ModelOutput,
+)
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.utils import (
@@ -628,7 +638,7 @@ class Qwen2_5OmniAudioAttention(nn.Module):
             dtype=query_states.dtype,
         )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[transformers., cu_seqlens[i - 1]: cu_seqlens[i], cu_seqlens[i - 1]: cu_seqlens[i]] = 0
+            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
 
         attn_weights = attn_weights + attention_mask
 
