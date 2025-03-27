@@ -1878,7 +1878,8 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
             num_key_value_heads=config.num_key_value_heads,
             projection_size=config.hidden_size,
             use_qkv_parallel=True,
-            use_context_forward=use_context_forward,
+            # qkv_backend="radix",
+            qkv_backend="sdpa",
             softmax_in_single_precision=softmax_in_single_precision,
             flatten_batch=flatten_batch,
             quant_config=quant_config,
@@ -1908,6 +1909,7 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        forward_batch: ForwardBatch,
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
@@ -1964,6 +1966,7 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
             cache_position=cache_position,
             # position_ids=positions,
             position_embeddings=position_embeddings,
+            forward_batch=forward_batch,
         )
         hidden_states = hidden_states[0].squeeze(0)
         if hidden_states.dim() == 3:
@@ -2070,12 +2073,11 @@ class Qwen2_5OmniThinkerModel(nn.Module):
                 past_key_values=past_key_values,
                 cache_position=cache_position,
                 hidden_states=hidden_states,
-                # forward_batch=forward_batch,
+                forward_batch=forward_batch,
                 attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
             )
-            # hidden_states = layer_output[0]
-
+            hidden_states = layer_output
             if first:
                 print(f"{layer_idx=} {hidden_states=}")
 
@@ -2302,9 +2304,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         Returns:
         ```"""
-
-        # 1. Extract the input embeddings
-        inputs_embeds = self.get_input_embeddings()(input_ids)
 
         rope_type = self.text_config.rope_scaling.get("rope_type", None)
         is_mrope_enabled = rope_type == "mrope" or rope_type == "default"
