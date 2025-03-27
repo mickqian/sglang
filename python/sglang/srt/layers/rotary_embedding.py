@@ -1191,10 +1191,6 @@ def apply_multimodal_rotary_pos_emb(
     if k.dim() == 3:
         k = k.unsqueeze(0)
     mrope_section = mrope_section * 2
-    # print(f"b {q.shape=}")
-    # print(f"b {k.shape=}")
-    # print(f"b {cos.shape=}")
-    # print(f"b {sin.shape=}")
     cos = torch.cat(
         [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1
     ).unsqueeze(unsqueeze_dim)
@@ -1204,8 +1200,6 @@ def apply_multimodal_rotary_pos_emb(
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    # print(f"a {q_embed.shape=}")
-    # print(f"a {q_embed.shape=}")
     return q_embed, k_embed
 
 

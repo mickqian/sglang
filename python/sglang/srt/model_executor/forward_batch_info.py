@@ -383,7 +383,7 @@ class ForwardBatch:
             for i, _ in enumerate(mrope_positions_list):
                 mrope_position_delta = (
                     0
-                    if batch.multimodal_inputs[i] is None
+                    if batch.multimodal_inputs[i] is None or batch.multimodal_inputs[i].mrope_position_delta is None
                     else batch.multimodal_inputs[i].mrope_position_delta
                 )
                 mrope_positions_list[i] = MRotaryEmbedding.get_next_input_positions(
@@ -402,13 +402,13 @@ class ForwardBatch:
                 if mm_input is None or not mm_input.contains_mm_input():
                     # text only
                     mrope_positions = [
-                        [
-                            pos
-                            for pos in range(
-                                extend_prefix_len, extend_prefix_len + extend_seq_len
-                            )
-                        ]
-                    ] * 3
+                                          [
+                                              pos
+                                              for pos in range(
+                                              extend_prefix_len, extend_prefix_len + extend_seq_len
+                                          )
+                                          ]
+                                      ] * 3
                 else:
                     image_grid_thws_list = [
                         item.image_grid_thws
@@ -447,8 +447,8 @@ class ForwardBatch:
                     mrope_positions, mrope_position_delta = (
                         MRotaryEmbedding.get_input_positions(
                             input_tokens=self.input_ids[
-                                extend_start_loc : extend_start_loc + extend_seq_len
-                            ].tolist(),
+                                         extend_start_loc: extend_start_loc + extend_seq_len
+                                         ].tolist(),
                             image_grid_thw=image_grid_thw,
                             video_grid_thw=video_grid_thw,
                             image_token_id=hf_config.image_token_id,

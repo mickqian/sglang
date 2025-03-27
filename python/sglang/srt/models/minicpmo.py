@@ -1558,7 +1558,7 @@ class MiniCPMO(MiniCPMBaseModel):
         )
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
-            [item.audio_feature_lens for item in items if item.audio_feature_lens]
+            [item.audio_feature_len for item in items if item.audio_feature_len]
         )
 
         # exist audio
@@ -1666,7 +1666,7 @@ class MiniCPMO(MiniCPMBaseModel):
         )
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
-            [item.audio_feature_lens for item in items if item.audio_feature_lens]
+            [item.audio_feature_len for item in items if item.audio_feature_len]
         )
 
         final_audio_embeds = []

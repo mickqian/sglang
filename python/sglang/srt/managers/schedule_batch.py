@@ -179,8 +179,10 @@ class MultimodalDataItem:
 
     # modality: audio
     audio_features: Union[torch.Tensor, np.array] = None
-    audio_feature_lens: Optional[List[torch.Tensor]] = None
+    audio_feature_len: Optional[List[torch.Tensor]] = None
 
+    # general
+    feature_attention_mask: Optional[torch.Tensor] = None
     hash: int = None
     pad_value: int = None
 

@@ -189,16 +189,17 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             items += [item]
 
         if (
-            hasattr(res, "audio_features")
-            and res["audio_features"] is not None
-            and len(res["audio_features"]) != 0
+            hasattr(res, "input_features")
+            and res["input_features"] is not None
+            and len(res["input_features"]) != 0
         ):
             # res["audio_features"] = [res["audio_features"]]
             audio_features = torch.concat([res["audios_inputs"]])
 
             item = MultimodalDataItem(
-                audio_features=[res["audio_features"]],
-                audio_feature_lens=res["audio_feature_lens"],
+                audio_features=[res["input_features"]],
+                audio_feature_len=res["audio_feature_lens"],
+                feature_attention_mask=res[ "attention_mask"],
                 modality="audio",
             )
             items += [item]
@@ -207,7 +208,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         print(f"{base_output=}")
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
-            # "items": items,
             "items": items,
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,

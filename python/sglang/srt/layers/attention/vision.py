@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -30,6 +31,8 @@ ROTARY_EMBED_CLASSES = {
     "normal": apply_rotary_pos_emb,
     "multimodal": apply_multimodal_rotary_pos_emb,
 }
+
+first = 10
 
 
 class VisionAttention(nn.Module):
@@ -64,6 +67,7 @@ class VisionAttention(nn.Module):
         mrope_section: Optional[int] = None,
         flatten_batch: bool = False,
         prefix: str = "",
+        proj_bias: bool = True,
     ):
         super().__init__()
         self.use_context_forward = use_context_forward
@@ -123,6 +127,7 @@ class VisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
+            bias=proj_bias,
             quant_config=quant_config,
             prefix=add_prefix("proj", prefix),
         )
@@ -180,25 +185,31 @@ class VisionAttention(nn.Module):
             if not self.rotary_embed:
                 raise RuntimeError()
             cos, sin = position_embeddings
+            global first
 
             original_shape_q = q.shape
-            original_numel_k = k.numel()
             original_shape_k = k.shape
             # print(f"{original_shape_q=}")
             # print(f"{original_shape_k=}")
-
+            if first:
+                print(f"b {q=}")
+                print(f"b {k=}")
             # [total_tokens, head, head_size]
             q = q.view(head, -1, self.head_size)
             k = k.view(kv_head, -1, self.head_size)
-            # print(f"{q.shape=}")
-            # print(f"{k.shape=}")
+            # print(f"b {q.shape=}")
+
+            # print(f"b {k.shape=}")
+            # print(f"b {cos=}")
+            # print(f"b {sin=}")
+            # print(f"b {sin.shape=}")
             q, k = self.rotary_embed(
                 q=q, k=k, cos=cos, sin=sin, mrope_section=self.mrope_section
             )
             # assert original_numel_k == k.nuem(
-
-            # print(f"{q.shape=}")
-            # print(f"{k.shape=}")
+            if first:
+                print(f"a {q=}")
+                print(f"a {k=}")
             # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
@@ -229,6 +240,9 @@ class VisionAttention(nn.Module):
             # [s, b, h * head_size] --> [b, s, h * head_size]
             output = output.view(bsz, s, -1)
 
+        if first > 0:
+            print(f"{output=}")
+            first -= 1
         return output
 
     def load_weights(
@@ -399,6 +413,7 @@ class VisionSdpaAttention(nn.Module):
         Returns:
              [b * s, h, head_size]
         """
+        global first
 
         s = q.shape[0] // bsz
 
@@ -423,7 +438,6 @@ class VisionSdpaAttention(nn.Module):
         # print(f"400 {k.shape=}")
         # print(f"400 {v.shape=}")
         if self.softmax_in_single_precision:
-            scale = self.head_size**-0.5
             num_key_value_groups = self.num_heads // self.num_kv_heads
             k = repeat_kv(k, num_key_value_groups)
             v = repeat_kv(v, num_key_value_groups)
@@ -432,20 +446,29 @@ class VisionSdpaAttention(nn.Module):
             k = rearrange(k, "b h s d -> b h d s")
             # print(f"401 {q.shape=}")
             # print(f"401 {k.shape=}")
-            attn_weights = torch.matmul(q, k) * scale
+            attn_weights = torch.matmul(q, k) / math.sqrt(self.head_dim)
             # print(f"401 {attn_weights.shape=}")
 
-            # del k, k
             if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask[:, :, :, : k.shape[-2]]
+                # extract s
+                causal_mask = attention_mask[:, :, :, : k.shape[-1]]
+                if first > 0:
+                    print(f"{k.shape=}")
+                    print(f"{attention_mask.shape=}")
+                    print(f"{k.shape[-1]=}")
+                    print(f"{causal_mask=}")
                 attn_weights = attn_weights + causal_mask
-                del attention_mask
             # attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
             # attn_weights = attn_weights + attention_mask
             # full-precision
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
             ).to(q.dtype)
+            # if first > 0:
+            #     print(f"{attn_weights=}")
+            #     print(f"{q=}")
+            #     print(f"{k=}")
+            #     print(f"{v=}")
             attn_weights = nn.functional.dropout(
                 attn_weights, p=self.dropout, training=False
             )
@@ -453,7 +476,6 @@ class VisionSdpaAttention(nn.Module):
             # print(f"451 {v.shape=}")
 
             output = torch.matmul(attn_weights, v)
-            del attn_weights, v
         else:
             # SDPA
             # [b, h, s, head_size]
