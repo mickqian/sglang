@@ -73,6 +73,7 @@ class Conversation:
     stop_str: Union[str, List[str]] = None
     # The string that represents an image token in the prompt
     image_token: str = "<image>"
+    video_token: str = "<video>"
     audio_token: str = "<audio>"
 
     image_data: Optional[List[str]] = None
