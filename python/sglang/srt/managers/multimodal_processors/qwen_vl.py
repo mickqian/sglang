@@ -35,8 +35,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         super().__init__(hf_config, server_args, _processor)
         self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 
-        arch = hf_config.architectures[0]
-        if arch == Qwen2_5OmniModel.__name__:
+        if self.arch == Qwen2_5OmniModel.__name__:
             self.image_token_id = hf_config.thinker_config.image_token_index
             self.audio_token_id = hf_config.thinker_config.audio_token_index
             self.IM_START_TOKEN_ID = hf_config.thinker_config.vision_start_token_id
@@ -58,13 +57,19 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if isinstance(images, list) and len(images) == 0:
             images = None
         processor = self._processor
+        kwargs = {}
+        if self.arch == Qwen2_5OmniModel.__name__:
+            # not supported for now
+            ...
+        else:
+            kwargs["device"] = "cuda"
         result = processor.__call__(
             text=[input_text],
             images=images,
             audios=audios,
             padding=True,
             return_tensors="pt",
-            device="cuda",
+            **kwargs
         )
         print(f"{result=}")
         return {
@@ -199,7 +204,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             item = MultimodalDataItem(
                 audio_features=[res["input_features"]],
                 audio_feature_len=res["audio_feature_lens"],
-                feature_attention_mask=res[ "attention_mask"],
+                feature_attention_mask=res["attention_mask"],
                 modality="audio",
             )
             items += [item]

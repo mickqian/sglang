@@ -989,7 +989,7 @@ def v1_chat_generate_request(
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
-                prompt = "hi"
+                # prompt = "hi"
                 image_data = conv.image_data
                 audio_data = conv.audio_data
                 modalities = conv.modalities
