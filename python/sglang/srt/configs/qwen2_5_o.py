@@ -1,6 +1,8 @@
 from transformers import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
+from sglang.utils import logger
+
 
 class Qwen2_5OmniVisionEncoderConfig(PretrainedConfig):
     r"""

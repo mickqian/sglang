@@ -20,8 +20,16 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
+from sglang.srt.layers.rotary_embedding import (
+    apply_multimodal_rotary_pos_emb,
+    apply_rotary_pos_emb,
+)
 from sglang.srt.utils import add_prefix
+
+ROTARY_EMBED_CLASSES = {
+    "normal": apply_rotary_pos_emb,
+    "multimodal": apply_multimodal_rotary_pos_emb,
+}
 
 
 class VisionAttention(nn.Module):
@@ -44,12 +52,16 @@ class VisionAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
+        num_key_value_heads: int,
         projection_size: int,
         use_qkv_parallel: bool,
         quant_config: Optional[QuantizationConfig] = None,
         dropout: float = 0.0,
         use_context_forward: bool = True,
         softmax_in_single_precision: bool = False,
+        rotary_embed: Optional[str] = None,
+        # TODO: only for mm rotary embed, refactor this
+        mrope_section: Optional[int] = None,
         flatten_batch: bool = False,
         prefix: str = "",
     ):
@@ -61,26 +73,43 @@ class VisionAttention(nn.Module):
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
+
+        self.rotary_embed = None
+        if rotary_embed is not None:
+            # if not rotary_embed in ROTARY_EMBED_CLASSES:
+            self.rotary_embed = ROTARY_EMBED_CLASSES[rotary_embed]
+        self.mrope_section = mrope_section
+
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, world_size
         )
+        self.num_attention_kv_heads_per_partition = dist_utils.divide(
+            num_key_value_heads, world_size
+        )
+
+        self.q_size = self.num_attention_heads_per_partition * self.head_size
+        self.kv_size = self.num_attention_kv_heads_per_partition * self.head_size
 
         if self.use_context_forward:
             self.qkv_backend = VisionTritonAttention()
         else:
             self.qkv_backend = VisionSdpaAttention(
                 head_size=self.head_size,
+                num_heads=self.num_attention_heads_per_partition,
+                num_kv_heads=self.num_attention_kv_heads_per_partition,
                 dropout=dropout,
                 flatten_batch=flatten_batch,
                 softmax_in_single_precision=softmax_in_single_precision,
             )
 
         self.use_qkv_parallel = use_qkv_parallel
+        num_key_value_heads = num_key_value_heads or num_heads
         if use_qkv_parallel:
             self.qkv_proj = QKVParallelLinear(
                 hidden_size=embed_dim,
                 head_size=self.head_size,
                 total_num_heads=num_heads,
+                total_num_kv_heads=num_key_value_heads,
                 quant_config=quant_config,
                 prefix=add_prefix("qkv_proj", prefix),
             )
@@ -112,15 +141,21 @@ class VisionAttention(nn.Module):
         Returns:
              [s, b, head * head_size]
         """
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
         bsz, s, _ = x.shape
         head = self.num_attention_heads_per_partition
+        kv_head = self.num_attention_kv_heads_per_partition
         if self.use_qkv_parallel:
             # [b, s, embed_dim] --> [b, s, embed_dim]
             qkv, _ = self.qkv_proj(x)
-            q, k, v = qkv.chunk(3, dim=-1)
+
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             # [b, s, embed_dim] --> [b * s, head, head_size]
-            q, k, v = [x.reshape(bsz * s, head, -1).contiguous() for x in (q, k, v)]
+            q = q.reshape(bsz * s, head, -1).contiguous()
+            k = k.reshape(bsz * s, kv_head, -1).contiguous()
+            v = v.reshape(bsz * s, kv_head, -1).contiguous()
         else:
             # [b, s, embed_dim] --> [s, b, embed_dim]
             x = rearrange(x, "b s ... -> s b ...")
@@ -142,16 +177,31 @@ class VisionAttention(nn.Module):
             ]
 
         if position_embeddings is not None:
+            if not self.rotary_embed:
+                raise RuntimeError()
             cos, sin = position_embeddings
-            original_shape = q.shape
+
+            original_shape_q = q.shape
+            original_numel_k = k.numel()
+            original_shape_k = k.shape
+            print(f"{original_shape_q=}")
+            print(f"{original_shape_k=}")
+
             # [total_tokens, head, head_size]
+            q = q.view(head, -1, self.head_size)
+            k = k.view(kv_head, -1, self.head_size)
+            print(f"{q.shape=}")
+            print(f"{k.shape=}")
+            q, k = self.rotary_embed(
+                q=q, k=k, cos=cos, sin=sin, mrope_section=self.mrope_section
+            )
+            # assert original_numel_k == k.nuem(
+
+            print(f"{q.shape=}")
+            print(f"{k.shape=}")
+            # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
-            k = k.view(-1, head, self.head_size)
-
-            q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
-            q = q.view(original_shape)
-            k = k.view(original_shape)
+            k = k.view(-1, kv_head, self.head_size)
 
         if self.use_qkv_parallel:
             pass
@@ -241,6 +291,20 @@ class VisionAttention(nn.Module):
             raise ValueError(f"Unknown parameter {param} in VisionAttention")
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 class VisionSdpaAttention(nn.Module):
     r"""
     Scaled Dot Product Attention inner product
@@ -250,12 +314,16 @@ class VisionSdpaAttention(nn.Module):
     def __init__(
         self,
         head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
         dropout: float = 0.0,
         flatten_batch: bool = False,
         softmax_in_single_precision: bool = False,
     ):
         super().__init__()
         self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         self.flatten_batch = flatten_batch
         self.softmax_in_single_precision = softmax_in_single_precision
         self.dropout = dropout
@@ -341,21 +409,39 @@ class VisionSdpaAttention(nn.Module):
             )
 
         if attention_mask is None:
-            if self.softmax_in_single_precision:
-                raise RuntimeError("Empty attention mask")
+            ...
+            # if self.softmax_in_single_precision:
+            #     raise RuntimeError("Empty attention mask")
         else:
             attention_mask = attention_mask.to(device=q.device)
 
+        # print(f"396 {q.shape=}")
+        # print(f"396 {k.shape=}")
+        # print(f"396 {v.shape=}")
         q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
-
+        # print(f"399 {q.shape=}")
+        # print(f"400 {k.shape=}")
+        # print(f"400 {v.shape=}")
         if self.softmax_in_single_precision:
             scale = self.head_size**-0.5
-            k_transposed = rearrange(k, "b h s d -> b h d s")
-            attn_weights = torch.matmul(q, k_transposed) * scale
-            del k, k_transposed
-            attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
-            attn_weights = attn_weights + attention_mask
-            del attention_mask
+            num_key_value_groups = self.num_heads // self.num_kv_heads
+            k = repeat_kv(k, num_key_value_groups)
+            v = repeat_kv(v, num_key_value_groups)
+            # print(f"424 {k.shape=}")
+            # print(f"426 {v.shape=}")
+            k = rearrange(k, "b h s d -> b h d s")
+            # print(f"401 {q.shape=}")
+            # print(f"401 {k.shape=}")
+            attn_weights = torch.matmul(q, k) * scale
+            # print(f"401 {attn_weights.shape=}")
+
+            # del k, k
+            if attention_mask is not None:  # no matter the length, we just slice it
+                causal_mask = attention_mask[:, :, :, : k.shape[-2]]
+                attn_weights = attn_weights + causal_mask
+                del attention_mask
+            # attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
+            # attn_weights = attn_weights + attention_mask
             # full-precision
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
@@ -363,6 +449,9 @@ class VisionSdpaAttention(nn.Module):
             attn_weights = nn.functional.dropout(
                 attn_weights, p=self.dropout, training=False
             )
+            # print(f"451 {attn_weights.shape=}")
+            # print(f"451 {v.shape=}")
+
             output = torch.matmul(attn_weights, v)
             del attn_weights, v
         else:
@@ -379,7 +468,6 @@ class VisionSdpaAttention(nn.Module):
 
         # [b, h, s, head_size] --> [b * s, h, head_size]
         output = rearrange(output, "b h s d -> (b s) h d")
-
         return output
 
 

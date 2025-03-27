@@ -38,6 +38,7 @@ from sglang.srt.configs import (
     ExaoneConfig,
     MultiModalityConfig,
 )
+from sglang.srt.configs.qwen2_5_o import Qwen2_5OmniConfig
 from sglang.srt.connector import create_remote_connector
 from sglang.srt.utils import is_remote_url
 
@@ -47,6 +48,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     ExaoneConfig.model_type: ExaoneConfig,
     DeepseekVL2Config.model_type: DeepseekVL2Config,
     MultiModalityConfig.model_type: MultiModalityConfig,
+    Qwen2_5OmniConfig.model_type: Qwen2_5OmniConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
@@ -83,7 +85,10 @@ def get_hf_text_config(config: PretrainedConfig):
     if hasattr(config, "language_config"):
         return config.language_config
     if hasattr(config, "thinker_config"):
-        return config.thinker_config
+        thinker_config = config.thinker_config
+        if hasattr(thinker_config, "text_config"):
+            return thinker_config.text_config
+        return thinker_config
     else:
         return config
 
@@ -108,9 +113,8 @@ def get_config(
     # FIXME: Pour contents of janus-pro's langauge_config to first-level
     if isinstance(model, str) and text_config is not None:
         for key, val in text_config.__dict__.items():
-            if key == "architectures":
-                continue
-            setattr(config, key, val)
+            if not hasattr(config, key):
+                setattr(config, key, val)
 
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]

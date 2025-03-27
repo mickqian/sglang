@@ -218,6 +218,7 @@ class CudaGraphRunner:
             self.out_cache_loc = torch.zeros((self.max_num_token,), dtype=torch.int64)
             self.positions = torch.zeros((self.max_num_token,), dtype=torch.int64)
             self.mrope_positions = torch.zeros((3, self.max_bs), dtype=torch.int64)
+            print(f"{self.mrope_positions.shape=}")
 
             # Speculative_inference
             if (
@@ -368,6 +369,7 @@ class CudaGraphRunner:
         else:
             encoder_lens = None
         mrope_positions = self.mrope_positions[:, :bs]
+        print(f"373 {self.mrope_positions.shape=}")
 
         if self.enable_dp_attention:
             self.global_num_tokens_gpu.copy_(

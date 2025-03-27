@@ -472,6 +472,7 @@ class ForwardBatch:
             axis=1,
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
+        print(f"aaaa {self.mrope_positions.shape=}")
 
 
 def compute_position_triton(
