@@ -76,7 +76,7 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
             return input_ids
 
         for start_idx, end_idx in zip(start_indices, end_indices):
-            padded_ids.extend(input_ids[last_idx: start_idx + 1])
+            padded_ids.extend(input_ids[last_idx : start_idx + 1])
 
             if input_ids[start_idx] in start_token_ids:
                 data_idx += 1
@@ -136,15 +136,15 @@ class MultModalityDataPaddingPatternSingleToken(MultiModalityDataPaddingPattern)
                 non_image_tokens = input_ids[: image_indices[image_cnt]]
             else:
                 non_image_tokens = input_ids[
-                                   image_indices[image_cnt - 1] + 1: image_indices[image_cnt]
-                                   ]
+                    image_indices[image_cnt - 1] + 1 : image_indices[image_cnt]
+                ]
             input_ids_with_image.extend(non_image_tokens)
             mm_inputs.image_offsets.append(len(input_ids_with_image))
             pad_ids = pad_values * (
                 (num_image_tokens + len(pad_values)) // len(pad_values)
             )
             input_ids_with_image.extend(pad_ids[:num_image_tokens])
-        input_ids_with_image.extend(input_ids[image_indices[-1] + 1:])
+        input_ids_with_image.extend(input_ids[image_indices[-1] + 1 :])
 
         return input_ids_with_image
 
