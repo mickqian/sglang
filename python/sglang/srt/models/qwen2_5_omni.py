@@ -75,11 +75,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.mm_utils import general_mm_embed_routine
-from sglang.srt.managers.schedule_batch import (
-    MultimodalDataItem,
-    MultimodalInputs,
-    flatten_nested_list,
-)
+from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 
@@ -1854,18 +1850,14 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
                 "unexpected results may be encountered."
             )
         attn_implementation = config._attn_implementation
-        # config._attn_implementation = "sdpa"
         if attn_implementation == "sdpa":
-            use_context_forward = False
             softmax_in_single_precision = False
             flatten_batch = True
         elif attn_implementation == "flash_attention_2":
             softmax_in_single_precision = False
-            use_context_forward = True
             flatten_batch = True
         elif attn_implementation == "eager":
             softmax_in_single_precision = True
-            use_context_forward = False
             flatten_batch = True
 
         self.rope_scaling = config.rope_scaling
@@ -1877,7 +1869,8 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_key_value_heads=config.num_key_value_heads,
             projection_size=config.hidden_size,
-            use_qkv_parallel=True,
+            # use_qkv_parallel=True,
+            use_qkv_parallel=False,
             # qkv_backend="radix",
             qkv_backend="sdpa",
             softmax_in_single_precision=softmax_in_single_precision,
@@ -1955,6 +1948,7 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         if first:
+            print(f"hidden_states before proj {hidden_states=}")
             print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         # Self Attention
         hidden_states = self.self_attn(
@@ -2266,24 +2260,27 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         return image_embeds
 
     def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
-        audio_feature_lengths = torch.cat(
-            flatten_nested_list([item.audio_feature_len for item in items]), dim=0
-        )
-        feature_attention_masks = torch.cat(
+        # audio_feature_lengths = torch.cat(
+        #     flatten_nested_list([item.audio_feature_len for item in items]), dim=0
+        # )
+
+        feature_attention_mask = torch.cat(
             [item.feature_attention_mask for item in items]
         )
+        audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+
         input_features = torch.cat([item.audio_features for item in items])
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(
                 audio_feature_lengths
                 if audio_feature_lengths is not None
-                else feature_attention_masks.sum(-1)
+                else feature_attention_mask.sum(-1)
             )
         )
         feature_lens = (
             audio_feature_lengths
             if audio_feature_lengths is not None
-            else feature_attention_masks.sum(-1)
+            else feature_attention_mask.sum(-1)
         )
         audio_outputs = self.audio_tower(
             input_features,
@@ -2535,47 +2532,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
             }
         )
         return model_inputs
-
-    def _update_model_kwargs_for_generation(
-        self,
-        outputs: ModelOutput,
-        model_kwargs: Dict[str, Any],
-        is_encoder_decoder: bool = False,
-        num_new_tokens: int = 1,
-    ) -> Dict[str, Any]:
-        # update attention_mask
-        if getattr(outputs, "attention_mask", None) is not None:
-            model_kwargs["attention_mask"] = outputs.attention_mask
-
-        model_kwargs = super()._update_model_kwargs_for_generation(
-            outputs, model_kwargs, is_encoder_decoder, num_new_tokens
-        )
-
-        if getattr(outputs, "rope_deltas", None) is not None:
-            model_kwargs["rope_deltas"] = outputs.rope_deltas
-
-        return model_kwargs
-
-    def get_rope_index(
-        self,
-        raw_input_ids,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        raw_attention_mask=None,
-        use_audio_in_video=False,
-        audio_seqlens=None,
-        second_per_grids=None,
-    ):
-        return super().get_rope_index(
-            raw_input_ids,
-            image_grid_thw,
-            video_grid_thw,
-            raw_attention_mask,
-            use_audio_in_video,
-            audio_seqlens,
-            second_per_grids,
-            padding_side="left",
-        )
 
 
 ############################
@@ -4574,12 +4530,15 @@ class Qwen2_5OmniModel(nn.Module):
 
             if "thinker" in name:
                 name = name.replace(".o_proj", ".proj")
-
+            print(f"{name=}")
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # continue
                 if "mlp." in name:
                     continue
                     # ...
+
+                elif "self_attn." in name:
+                    continue
                 else:
                     ...
                 if weight_name not in name:
