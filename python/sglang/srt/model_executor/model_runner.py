@@ -159,7 +159,7 @@ class ModelRunner:
         )
 
         # CPU offload
-        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024 ** 3))
 
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
@@ -889,7 +889,7 @@ class ModelRunner:
             key = "model.layers." + str(i) + ".self_attn" + selected_channel
             self.sorted_channels.append(
                 torch.tensor(channel_config[key])[
-                    :, : self.server_args.ds_heavy_channel_num
+                :, : self.server_args.ds_heavy_channel_num
                 ]
                 .contiguous()
                 .cuda()
@@ -1037,7 +1037,24 @@ class ModelRunner:
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
         mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+
+        def has_rope_scaling(data):
+            if isinstance(data, dict):
+                if "rope_scaling" in data:
+                    return data["rope_scaling"]
+                for value in data.values():
+                    child = has_rope_scaling(value)
+                    if child is not None:
+                        return child
+            elif isinstance(data, (list, tuple)):
+                for item in data:
+                    child = has_rope_scaling(item)
+                    if child is not None:
+                        return child
+            return None
+
+        # rope_scaling = has_rope_scaling(self.model_config.hf_config)
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {}) or getattr(self.model_config.hf_text_config, "rope_scaling", {})
         if rope_scaling is None:
             return False
         rope_type = rope_scaling.get("rope_type", None)

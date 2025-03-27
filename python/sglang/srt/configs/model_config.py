@@ -378,9 +378,6 @@ def _get_and_verify_dtype(
     if config_dtype is None:
         config_dtype = torch.float32
 
-    print(f"{dtype=}")
-    print(f"{config=}")
-    print(f"{config_dtype=}")
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
