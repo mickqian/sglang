@@ -681,7 +681,8 @@ class TestOpenAIOmniServer(TestOpenAIVisionServer):
         # a fragment of Trump's speech
         audio_response = self.get_audio_response(
             AUDIO_TRUMP_SPEECH_URL,
-            "I have an audio sample. Please repeat the person's words",
+            # "I have an audio sample. Please repeat the person's words",
+            "Repeat what does the person say in the audio",
             category="speech",
         )
         assert "thank you" in audio_response
@@ -718,7 +719,8 @@ class TestQwen2_5_oServer(TestOpenAIOmniServer):
                 "--trust-remote-code",
                 "--chat-template",
                 "qwen2-5-o",
-                "--disable-cuda-graph",
+                "--mem-fraction-static",
+                "0.6",
             ],
         )
         cls.base_url += "/v1"

@@ -33,8 +33,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
-        self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
-
         if self.arch == Qwen2_5OmniModel.__name__:
             self.image_token_id = hf_config.thinker_config.image_token_index
             self.audio_token_id = hf_config.thinker_config.audio_token_index
@@ -59,20 +57,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         processor = self._processor
         kwargs = {}
         if self.arch == Qwen2_5OmniModel.__name__:
-            # kwargs["padding"] = True
-            # not supported for now
-            ...
+            kwargs["audios"] = audios
         else:
             kwargs["device"] = "cuda"
         result = processor.__call__(
             text=[input_text],
             images=images,
-            audios=audios,
             padding=True,
             return_tensors="pt",
             **kwargs,
         )
-        print(f"{result=}")
         return result
 
     async def process_mm_data_async(
@@ -88,7 +82,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             image_data = [image_data]
         audio_data = request_obj.audio_data
 
-        # processor = self._processor
         is_omni = self.arch == Qwen2_5OmniModel.__name__
         if audio_data and is_omni:
             prompt = prompt.replace(
@@ -105,6 +98,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             ),
             max_req_input_len=max_req_input_len,
         )
+
+        print(f"{base_output=}")
 
         def smart_resize(
             height: int,
@@ -178,6 +173,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             audios=base_output.audios,
         )
 
+        print(f"{res=}")
+
         items = []
 
         if "pixel_values" in res and res["pixel_values"] is not None:
@@ -191,8 +188,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         if "input_features" in res and res["input_features"] is not None:
             audio_features = res["input_features"]
-            # res["audio_features"] = [res["audio_features"]]
-            # audio_features = torch.concat([res["audios_inputs"]])
             print(f"{audio_features.shape=}")
             item = MultimodalDataItem(
                 audio_features=res["input_features"],
@@ -202,17 +197,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             )
             items += [item]
 
-        kwargs = {}
-        if self.arch == Qwen2_5OmniModel.__name__:
-            ...
-            # mrope_positions, mrope_position_delta, input_ids = compute_mrope(res["input_ids"], items, self.hf_config)
-            # kwargs["mrope_positions"] = mrope_positions
-            # kwargs["mrope_position_delta"] = mrope_position_delta
-        else:
-            input_ids = res["input_ids"]
-
-        input_ids = input_ids.flatten().tolist()
-        print(f"{len(input_ids)=}")
+        input_ids = res["input_ids"].flatten().tolist()
         video_grid_thws = None
         print(f"{base_output=}")
         print(f"{res=}")

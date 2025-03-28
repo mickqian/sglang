@@ -2035,9 +2035,6 @@ def apply_rotary_pos_emb(
     return q_embed, k_embed
 
 
-first = True
-
-
 def apply_multimodal_rotary_pos_emb(
     q, k, cos, sin, mrope_section, unsqueeze_dim=1, **kwargs
 ):

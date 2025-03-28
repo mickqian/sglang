@@ -285,7 +285,7 @@ class BaseMultimodalProcessor(ABC):
         # start = time.time()
 
         multimodal_tokens.convert_to_strs(self._processor)
-
+        print(f"converted")
         assert isinstance(prompt, str)
 
         if isinstance(prompt, list) and return_text:
@@ -293,6 +293,8 @@ class BaseMultimodalProcessor(ABC):
             prompt = self._processor.tokenizer.decode(prompt)
         else:
             prompt = prompt
+        print(f"to prompt")
+
         if return_text:
             import re
 

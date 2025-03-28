@@ -14,7 +14,11 @@ from sglang.srt.distributed import utils as dist_utils
 from sglang.srt.layers.attention.triton_ops.prefill_attention import (
     context_attention_fwd,
 )
-from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
+from sglang.srt.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import (
@@ -27,8 +31,6 @@ ROTARY_EMBED_CLASSES = {
     "normal": apply_rotary_pos_emb,
     "multimodal": apply_multimodal_rotary_pos_emb,
 }
-
-first = 10
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -141,8 +143,6 @@ class VisionSdpaAttention(nn.Module):
         Returns:
              [b * s, h, head_size]
         """
-        global first
-
         s = q.shape[0] // bsz
 
         # [b, 1, s, s]
@@ -180,28 +180,14 @@ class VisionSdpaAttention(nn.Module):
             if attention_mask is not None:  # no matter the length, we just slice it
                 # extract s
                 causal_mask = attention_mask[:, :, :, : k.shape[-1]]
-                if first > 0:
-                    print(f"{k.shape=}")
-                    # print(f"{attention_mask.shape=}")
-                    # print(f"{k.shape[-1]=}")
-                    # print(f"{causal_mask=}")
                 attn_weights = attn_weights + causal_mask
-            # attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
-            # attn_weights = attn_weights + attention_mask
             # full-precision
             attn_weights = nn.functional.softmax(
                 attn_weights, dim=-1, dtype=torch.float32
             ).to(q.dtype)
-            # if first > 0:
-            #     print(f"{attn_weights=}")
-            #     print(f"{q=}")
-            #     print(f"{k=}")
-            #     print(f"{v=}")
             attn_weights = nn.functional.dropout(
                 attn_weights, p=self.dropout, training=False
             )
-            # print(f"451 {attn_weights.shape=}")
-            # print(f"451 {v.shape=}")
 
             output = torch.matmul(attn_weights, v)
         else:
@@ -269,6 +255,7 @@ QKV_BACKEND_IMPL = {
 
 
 class MMAttention(nn.Module):
+    # class VisionAttention(nn.Module):
     r"""
         Multi-headed attention without any cache, mostly used for multimodal transformers.
 
@@ -287,12 +274,12 @@ class MMAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         use_qkv_parallel: bool,
-        qkv_backend: str,
+        qkv_backend: str = "sdpa",
         num_key_value_heads: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         dropout: float = 0.0,
         softmax_in_single_precision: bool = False,
-        rotary_embed: Optional[str] = None,
+        rotary_embed: Optional[str] = "normal",
         # TODO: only for mm rotary embed, refactor this
         mrope_section: Optional[int] = None,
         flatten_batch: bool = False,
@@ -354,19 +341,19 @@ class MMAttention(nn.Module):
                 prefix=add_prefix("qkv_proj", prefix),
             )
         else:
-            self.q_proj = nn.Linear(embed_dim, num_heads * self.head_size, bias=True)
-            self.k_proj = nn.Linear(
-                embed_dim, num_key_value_heads * self.head_size, bias=True
-            )
-            self.v_proj = nn.Linear(
-                embed_dim, num_key_value_heads * self.head_size, bias=True
-            )
-            # self.qkv_proj = ColumnParallelLinear(
-            #     input_size=embed_dim,
-            #     output_size=3 * projection_size,
-            #     quant_config=quant_config,
-            #     prefix=add_prefix("qkv_proj", prefix),
+            # self.q_proj = nn.Linear(embed_dim, num_heads * self.head_size, bias=True)
+            # self.k_proj = nn.Linear(
+            #     embed_dim, num_key_value_heads * self.head_size, bias=True
             # )
+            # self.v_proj = nn.Linear(
+            #     embed_dim, num_key_value_heads * self.head_size, bias=True
+            # )
+            self.qkv_proj = ColumnParallelLinear(
+                input_size=embed_dim,
+                output_size=3 * projection_size,
+                quant_config=quant_config,
+                prefix=add_prefix("qkv_proj", prefix),
+            )
         self.proj = RowParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
@@ -390,7 +377,6 @@ class MMAttention(nn.Module):
         Returns:
              [s, b, head * head_size]
         """
-        global first
         if x.dim() == 2:
             x = x.unsqueeze(0)
         bsz, s, _ = x.shape
@@ -401,8 +387,6 @@ class MMAttention(nn.Module):
             qkv, _ = self.qkv_proj(x)
 
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            if first:
-                print(f"after q proj {q=}")
 
             # [b, s, embed_dim] --> [b * s, head, head_size]
             q = q.reshape(bsz * s, head, -1).contiguous()
@@ -410,77 +394,58 @@ class MMAttention(nn.Module):
             v = v.reshape(bsz * s, kv_head, -1).contiguous()
         else:
             # [b, s, embed_dim] --> [s, b, embed_dim]
-            # x = rearrange(x, "b s ... -> s b ...")
+            x = rearrange(x, "b s ... -> s b ...")
             # [s, b, embed_dim] --> [s, b, head * 3 * head_size]
-            # qkv, _ = self.qkv_proj(x)
+            qkv, _ = self.qkv_proj(x)
             # print(f"{x.shape=}")
-            q = self.q_proj(x)
-            k = self.k_proj(x)
-            v = self.v_proj(x)
-            q = rearrange(
-                q,
-                "s b (h head_size) -> b s h head_size",
-                h=self.num_attention_heads_per_partition,
-            ).contiguous()
-
-            k = rearrange(
-                k,
-                "s b (h head_size) -> b s h head_size",
-                h=self.num_attention_kv_heads_per_partition,
-            ).contiguous()
-
-            v = rearrange(
-                v,
-                "s b (h head_size) -> b s h head_size",
-                h=self.num_attention_kv_heads_per_partition,
-            ).contiguous()
+            # q = self.q_proj(x)
+            # k = self.k_proj(x)
+            # v = self.v_proj(x)
+            # q = rearrange(
+            #     q,
+            #     "s b (h head_size) -> b s h head_size",
+            #     h=self.num_attention_heads_per_partition,
+            # ).contiguous()
+            #
+            # k = rearrange(
+            #     k,
+            #     "s b (h head_size) -> b s h head_size",
+            #     h=self.num_attention_kv_heads_per_partition,
+            # ).contiguous()
+            #
+            # v = rearrange(
+            #     v,
+            #     "s b (h head_size) -> b s h head_size",
+            #     h=self.num_attention_kv_heads_per_partition,
+            # ).contiguous()
 
             # [s, b, head * 3 * head_size] --> [s, b, head, 3 * head_size]
-            # new_x_shape = qkv.size()[:-1] + (
-            #     head,
-            #     3 * self.hidden_size_per_attention_head,
-            # )
-            # qkv = qkv.view(*new_x_shape)
+            new_x_shape = qkv.size()[:-1] + (
+                head,
+                3 * self.hidden_size_per_attention_head,
+            )
+            qkv = qkv.view(*new_x_shape)
 
             # [s, b, head, 3 * head_size] --> 3 [s, b, head, head_size]
-            # q, k, v = dist_utils.split_tensor_along_last_dim(qkv, 3)
-            # print(f"{q.shape=}")
-            # print(f"{k.shape=}")
+            q, k, v = dist_utils.split_tensor_along_last_dim(qkv, 3)
+            print(f"{q.shape=}")
+            print(f"{k.shape=}")
             # [s, b, head, head_size] --> [b, s, head, head_size]
-            # q, k, v = [
-            #     rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-            # ]
+            q, k, v = [
+                rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
+            ]
 
         if position_embeddings is not None:
             if not self.rotary_embed:
                 raise RuntimeError()
             cos, sin = position_embeddings
 
-            original_shape_q = q.shape
-            original_shape_k = k.shape
-            # print(f"{original_shape_q=}")
-            # print(f"{original_shape_k=}")
-            if first:
-                ...
-                # print(f"b {q=}")
-                # print(f"b {k=}")
             # [total_tokens, head, head_size]
             q = q.view(head, -1, self.head_size)
             k = k.view(kv_head, -1, self.head_size)
-            # print(f"b {q.shape=}")
-
-            # print(f"b {k.shape=}")
-            # print(f"b {cos=}")
-            # print(f"b {sin=}")
-            # print(f"b {sin.shape=}")
             q, k = self.rotary_embed(
                 q=q, k=k, cos=cos, sin=sin, mrope_section=self.mrope_section
             )
-            # assert original_numel_k == k.nuem(
-            if first:
-                ...
-                # print(f"a {q=}")
-                # print(f"a {k=}")
             # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
@@ -535,9 +500,6 @@ class MMAttention(nn.Module):
             # [s, b, h * head_size] --> [b, s, h * head_size]
             output = output.view(bsz, s, -1)
 
-        if first > 0:
-            # print(f"{output=}")
-            first -= 1
         return output
 
     def load_weights(

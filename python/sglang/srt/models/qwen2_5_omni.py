@@ -30,15 +30,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from transformers.activations import ACT2FN
-from transformers.cache_utils import EncoderDecoderCache, StaticCache
+from transformers.cache_utils import EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionRotaryEmbedding,
 )
-from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
 from sglang.srt.configs.qwen2_5_o import (
     Qwen2_5OmniAudioEncoderConfig,
@@ -53,21 +51,17 @@ from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import (
-    apply_multimodal_rotary_pos_emb,
-    get_rope,
-    rotate_half,
-)
+from sglang.srt.layers.rotary_embedding import get_rope, rotate_half
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Attention, Qwen2MLP
-from sglang.srt.models.stablelm import StableLmForCausalLM
 from sglang.srt.utils import add_prefix
 from sglang.utils import logger
 
+# Copied and adapted from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py
 ############################
 #      Start Thinker       #
 ############################
@@ -262,214 +256,8 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 
-class Qwen2_5OmniAudioFlashAttention2(Qwen2_5OmniAudioAttention):
-    """
-    Qwen2.5OmniThinker flash attention module. This module inherits from `Qwen2_5OmniAudioAttention` as the weights of the module stays
-    untouched. The only required change would be on the forward pass where it needs to correctly call the public API of
-    flash attention and deal with padding tokens in case the input contains any of them.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
-        # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
-        # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
-        self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        past_key_value: Optional[EncoderDecoderCache] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        layer_head_mask: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if isinstance(past_key_value, StaticCache):
-            raise ValueError(
-                "The `static` cache implementation is not compatible with `attn_implementation='flash_attention_2'`. "
-                "Use `attn_implementation='sdpa'` in the meantime, and open an issue at https://github.com/huggingface/transformers"
-            )
-        # Qwen2.5OmniThinkerFlashAttention2 attention does not support output_attentions
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-        seq_length, all_dim = hidden_states.size()
-        query_states = (hidden_states @ self.q_proj.weight.t()) + (
-            self.q_proj.bias if self.q_proj.bias is not None else 0
-        )
-        query_states = query_states.reshape(seq_length, self.num_heads, -1)
-
-        if past_key_value is not None:
-            is_updated = past_key_value.is_updated.get(self.layer_idx)
-            if is_cross_attention:
-                # after the first generated id, we can subsequently re-use all key/value_states from cache
-                past_key_value.is_updated[self.layer_idx] = True
-                past_key_value = past_key_value.cross_attention_cache
-            else:
-                past_key_value = past_key_value.self_attention_cache
-
-        # use key_value_states if cross attention
-        current_states = (
-            key_value_states if key_value_states is not None else hidden_states
-        )
-        if is_cross_attention and past_key_value and is_updated:
-            # reuse k,v, cross_attentions
-            key_states = past_key_value.key_cache[self.layer_idx]
-            value_states = past_key_value.value_cache[self.layer_idx]
-        else:
-            key_states = (current_states @ self.k_proj.weight.t()) + (
-                self.k_proj.bias if self.k_proj.bias is not None else 0
-            )
-            key_states = key_states.reshape(seq_length, self.num_heads, -1)
-            value_states = (current_states @ self.v_proj.weight.t()) + (
-                self.v_proj.bias if self.v_proj.bias is not None else 0
-            )
-            value_states = value_states.reshape(seq_length, self.num_heads, -1)
-
-            if past_key_value is not None:
-                # save all key/value_states to cache to be re-used for fast auto-regressive generation
-                cache_position = cache_position if not is_cross_attention else None
-                key_states, value_states = past_key_value.update(
-                    key_states,
-                    value_states,
-                    self.layer_idx,
-                    {"cache_position": cache_position},
-                )
-
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(
-            query_states,
-            key_states,
-            value_states,
-            cu_seqlens,
-            cu_seqlens,
-            max_seqlen,
-            max_seqlen,
-            dropout_p=0.0,
-        )
-        attn_output = attn_output.reshape(seq_length, all_dim)
-        attn_output = (attn_output @ self.out_proj.weight.t()) + (
-            self.out_proj.bias if self.out_proj.bias is not None else 0
-        )
-
-        attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
-
-
-class Qwen2_5OmniAudioSdpaAttention(Qwen2_5OmniAudioAttention):
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        past_key_value: Optional[EncoderDecoderCache] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        layer_head_mask: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
-        if layer_head_mask is not None:
-            # TODO: Improve this warning with e.g. `model.config._attn_implementation = "manual"` once this is implemented.
-            logger.warning_once(
-                "Qwen2_5OmniThinkerModel is using Qwen2_5OmniThinkerSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` or `layer_head_mask` not None. Falling back to the manual attention"
-                ' implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-            return super().forward(
-                hidden_states,
-                key_value_states=key_value_states,
-                past_key_value=past_key_value,
-                cu_seqlens=cu_seqlens,
-                layer_head_mask=layer_head_mask,
-                cache_position=cache_position,
-            )
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-        seq_length, _ = hidden_states.size()
-
-        # get query proj
-        query_states = self.q_proj(hidden_states).reshape(
-            seq_length, self.num_heads, -1
-        )
-
-        if past_key_value is not None:
-            is_updated = past_key_value.is_updated.get(self.layer_idx)
-            if is_cross_attention:
-                # after the first generated id, we can subsequently re-use all key/value_states from cache
-                past_key_value.is_updated[self.layer_idx] = True
-                past_key_value = past_key_value.cross_attention_cache
-            else:
-                past_key_value = past_key_value.self_attention_cache
-
-        # use key_value_states if cross attention
-        current_states = (
-            key_value_states if key_value_states is not None else hidden_states
-        )
-        if is_cross_attention and past_key_value and is_updated:
-            # reuse k,v, cross_attentions
-            key_states = past_key_value.key_cache[self.layer_idx]
-            value_states = past_key_value.value_cache[self.layer_idx]
-        else:
-            key_states = self.k_proj(current_states).reshape(
-                seq_length, self.num_heads, -1
-            )
-            value_states = self.v_proj(current_states).reshape(
-                seq_length, self.num_heads, -1
-            )
-            if past_key_value is not None:
-                # save all key/value_states to cache to be re-used for fast auto-regressive generation
-                cache_position = cache_position if not is_cross_attention else None
-                key_states, value_states = past_key_value.update(
-                    key_states,
-                    value_states,
-                    self.layer_idx,
-                    {"cache_position": cache_position},
-                )
-
-        attention_mask = torch.zeros(
-            [1, seq_length, key_states.shape[0]],
-            device=query_states.device,
-            dtype=torch.bool,
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
-
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
-        query_states = query_states.transpose(0, 1)
-        key_states = key_states.transpose(0, 1)
-        value_states = value_states.transpose(0, 1)
-
-        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
-        # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-        )
-        attn_output = attn_output.transpose(0, 1)
-        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
-        # partitioned across GPUs when using tensor-parallelism.
-        attn_output = attn_output.reshape(seq_length, self.embed_dim)
-        attn_output = self.out_proj(attn_output)
-        return attn_output, None, past_key_value
-
-
 QWEN2_5_OMNI_AUDIO_ATTENTION_CLASSES = {
     "eager": Qwen2_5OmniAudioAttention,
-    "flash_attention_2": Qwen2_5OmniAudioFlashAttention2,
-    "sdpa": Qwen2_5OmniAudioSdpaAttention,
 }
 
 
@@ -690,8 +478,6 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
         chunk_lengths = torch.where(
             chunk_lengths == 0, self.n_window * 2, chunk_lengths
         )
-        print(f"{input_features.shape=}")
-        print(f"{chunk_lengths.tolist()=}")
         chunk_list = input_features.split(chunk_lengths.tolist(), dim=1)
         padded_feature, padded_mask, padded_mask_after_cnn = (
             self.padded_and_mask_function(
@@ -846,22 +632,13 @@ class Qwen2_5OmniMLP(nn.Module):
         )
 
 
-first = True
-
-QWEN2_5_OMNI_VISION_ATTENTION_CLASSES = {
-    "eager": Qwen2_5OmniVisionAttention,
-}
-
-
 class Qwen2_5OmniVisionBlock(nn.Module):
-    def __init__(self, config, attn_implementation: str = "sdpa") -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None
+    ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(config.hidden_size, eps=1e-6)
         self.norm2 = RMSNorm(config.hidden_size, eps=1e-6)
-        # self.attn = QWEN2_5_OMNI_VISION_ATTENTION_CLASSES[attn_implementation](
-        #     config.hidden_size, num_heads=config.num_heads
-        # )
-        # self.attn = Qwen2_5_VLVisionAttention(dim=config.hidden_size, num_heads=config.num_heads)
         self.attn = Qwen2_5OmniVisionAttention(
             dim=config.hidden_size, num_heads=config.num_heads
         )
@@ -1172,9 +949,6 @@ class Qwen2_5OmniRotaryEmbedding(nn.Module):
             position_ids = position_ids.unsqueeze(1)
         assert position_ids.dim() == 3, position_ids.shape
 
-        # if first:
-        #     print(f"{x=}")
-        #     print(f"{position_ids=}")
         if "dynamic" in self.rope_type:
             self._dynamic_frequency_update(position_ids, device=x.device)
 
@@ -1206,9 +980,6 @@ class Qwen2_5OmniRotaryEmbedding(nn.Module):
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling
         sin = sin * self.attention_scaling
-        # if first:
-        #     print(f"{cos=}")
-        # return
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
@@ -1284,14 +1055,11 @@ class Qwen2_5_OmniAttention(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )
-        self.use_mm_rotary = False
-        # print(f"{self.num_heads=}")
-        # print(f"{self.head_dim=}")
         self.attn = RadixAttention(
             num_heads=self.num_heads,
             head_dim=self.head_dim,
             scaling=self.scaling // 2,
-            num_kv_heads=self.num_heads if self.use_mm_rotary else self.num_kv_heads,
+            num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
             prefix=add_prefix("attn", prefix),
         )
@@ -1310,59 +1078,10 @@ class Qwen2_5_OmniAttention(nn.Module):
         forward_batch: ForwardBatch,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        global first
-        if first:
-            print(f"before qkv proj: {hidden_states=}")
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if first:
-            ...
-            # print(f"after qvk proj: {q=}")
-            # print(f"after qvk proj: {q.shape=}")
-            # print(f"after qvk proj: {k=}")
-            # print(f"after qvk proj: {v=}")
-        # q, k = self.rotary_emb(position_ids, q, k)
-
-        if self.use_mm_rotary:
-            q = rearrange(q, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
-            k = rearrange(k, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
-            if first:
-                ...
-                # print(f"before rotary: {q=}")
-                # print(f"before rotary: {q.shape=}")
-                # print(f"before rotary: {k=}")
-                # print(f"before rotary: {k.shape=}")
-            cos, sin = position_embeddings
-
-            # input shape: [b, h, s, head_dim]
-            q, k = apply_multimodal_rotary_pos_emb(q, k, cos, sin, self.mrope_section)
-
-            if first:
-                ...
-                # print(f"after rotary: {q=}")
-                # print(f"after rotary: {k=}")
-                # print(f"after rotary: {v=}")
-
-            v = rearrange(v, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
-
-            k = repeat_kv(k, self.num_key_value_groups)
-            v = repeat_kv(v, self.num_key_value_groups)
-
-            if first:
-                ...
-                # print(f"after repeat: {k=}")
-                # print(f"after repeat: {v=}")
-                # print(f"after repeat: {q=}")
-        else:
-            q, k = self.rotary_emb(position_ids, q, k)
-        if first:
-            ...
-            # print(f"{q.shape=}")
-            # print(f"{k.shape=}")
-            # print(f"{v.shape=}")
-            # print(f"{forward_batch.out_cache_loc=}")
-            # print(f"{forward_batch.encoder_out_cache_loc=}")
+        q, k = self.rotary_emb(position_ids, q, k)
 
         attn_output = self.attn(q, k, v, forward_batch)
 
@@ -1414,7 +1133,6 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         #     flatten_batch = True
 
         self.rope_scaling = config.rope_scaling
-
         hidden_size = config.hidden_size
         head_num = config.num_attention_heads
         kv_head_num = config.num_key_value_heads
@@ -1503,26 +1221,16 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-        global first
 
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        if first:
-            ...
-            # print(f"hidden_states before proj {hidden_states=}")
-            # print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         hidden_states = self.self_attn(
             positions=position_ids,
-            # position_ids=position_ids,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
-            # position_embeddings=position_embeddings,
         )
 
-        if first:
-            ...
-            # print(f"Qwen2_5OmniDecoderLayer after self_attn: {hidden_states=}")
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -1575,21 +1283,14 @@ class Qwen2_5OmniThinkerModel(nn.Module):
             input_embeds = self.embed_tokens(input_ids)
 
         hidden_states = input_embeds
-        position_embeddings = self.rotary_emb(hidden_states, positions)
-
         for layer_idx, decoder_layer in enumerate(self.layers):
             layer_output = decoder_layer(
                 positions=positions,
                 position_ids=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
-                # attention_mask=causal_mask,
-                position_embeddings=position_embeddings,
             )
             hidden_states = layer_output
-            if first:
-                ...
-                # print(f"{layer_idx=} {hidden_states=}")
 
         if hidden_states.dim() == 1:
             hidden_states = hidden_states.unsqueeze(0)
@@ -1597,9 +1298,6 @@ class Qwen2_5OmniThinkerModel(nn.Module):
         assert hidden_states.dim() == 2, hidden_states.shape
         hidden_states = self.norm(hidden_states)
 
-        if first:
-            print(f"Qwen2_5OmniThinkerModel final {hidden_states=}")
-            first = False
         return hidden_states
 
 
@@ -1664,13 +1362,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         )
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            print(f"1737 {feature_attention_mask=}")
-            print(f"1737 {feature_attention_mask.shape=}")
-            print(f"1737 {input_features=}")
             input_features = input_features.permute(0, 2, 1)[
                 feature_attention_mask.bool()
             ].permute(1, 0)
-            print(f"1739 {input_features.shape=}")
         else:
             audio_feature_lengths = None
 
@@ -1717,14 +1411,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
                 assert input_ids.shape[0] == 1, input_ids.shape
                 input_ids = input_ids.squeeze(0)
 
-        # print(f"{input_ids=}")
-        # print(f"{input_ids.shape=}")
-        # print(f"{positions=}")
-        # print(f"{positions.shape=}")
-        # print(f"{input_ids.shape=}")
-        # print(f"{input_ids.tolist()=}")
-        # print(f"{forward_batch.mm_inputs=}")
-        # print(f"{forward_batch.contains_mm_inputs()=}")
         _, hs = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -1738,8 +1424,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
             ],
             positions=positions,
         )
-        # print(f"{positions=}")
-        # print(f"{input_ids=}")
         return self.logits_processor(input_ids, hs, self.lm_head, forward_batch)
 
 
@@ -1826,7 +1510,6 @@ class Qwen2_5OmniModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
-        # print(f"{params_dict.keys()}")
         for name, loaded_weight in weights:
 
             if "rotary_emb.inv_freq" in name:
