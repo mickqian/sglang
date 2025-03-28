@@ -58,6 +58,9 @@ from transformers.utils import (
     is_torchdynamo_compiling,
 )
 
+from sglang.srt.layers.rotary_embedding import get_rope
+from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
+from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.configs.qwen2_5_o import (
     Qwen2_5OmniAudioEncoderConfig,
     Qwen2_5OmniBigVGANConfig,
@@ -1848,38 +1851,97 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
-        attn_implementation = config._attn_implementation
-        if attn_implementation == "sdpa":
-            softmax_in_single_precision = False
-            flatten_batch = True
-        elif attn_implementation == "flash_attention_2":
-            softmax_in_single_precision = False
-            flatten_batch = True
-        elif attn_implementation == "eager":
-            softmax_in_single_precision = True
-            flatten_batch = True
+        # attn_implementation = config._attn_implementation
+        # if attn_implementation == "sdpa":
+        #     softmax_in_single_precision = False
+        #     flatten_batch = True
+        # elif attn_implementation == "flash_attention_2":
+        #     softmax_in_single_precision = False
+        #     flatten_batch = True
+        # elif attn_implementation == "eager":
+        #     softmax_in_single_precision = True
+        #     flatten_batch = True
+        # attn_implementation = config._attn_implementation
+        # config._attn_implementation = "eager"
+        # if attn_implementation == "sdpa":
+        #     use_context_forward = False
+        #     softmax_in_single_precision = False
+        #     flatten_batch = True
+        # elif attn_implementation == "flash_attention_2":
+        #     softmax_in_single_precision = False
+        #     use_context_forward = True
+        #     flatten_batch = True
+        # elif attn_implementation == "eager":
+        #     softmax_in_single_precision = True
+        #     use_context_forward = False
+        #     flatten_batch = True
 
         self.rope_scaling = config.rope_scaling
         # self.self_attn = QWEN2_5_OMNI_ATTENTION_CLASSES[config._attn_implementation](
         #     config, layer_idx
         # )
-        self.self_attn = OmniAttention(
-            embed_dim=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            projection_size=config.hidden_size,
-            # use_qkv_parallel=True,
-            use_qkv_parallel=False,
-            qkv_backend="radix",
-            softmax_in_single_precision=softmax_in_single_precision,
-            layer_id=layer_idx,
-            flatten_batch=flatten_batch,
+        # self.self_attn = OmniAttention(
+        #     embed_dim=config.hidden_size,
+        #     num_heads=config.num_attention_heads,
+        #     num_key_value_heads=config.num_key_value_heads,
+        #     projection_size=config.hidden_size,
+        #     # use_qkv_parallel=True,
+        #     use_qkv_parallel=False,
+        #     qkv_backend="radix",
+        #     softmax_in_single_precision=softmax_in_single_precision,
+        #     layer_id=layer_idx,
+        #     flatten_batch=flatten_batch,
+        #     quant_config=quant_config,
+        #     prefix=add_prefix("qkv_proj", prefix),
+        # )
+        hidden_size = config.hidden_size
+        head_num = config.num_attention_heads
+        kv_head_num = config.num_key_value_heads
+        head_dim = hidden_size // head_num
+        self.qkv_proj = QKVParallelLinear(
+            config.hidden_size,
+            head_dim,
+            head_num,
+            kv_head_num,
+            bias=True,
             quant_config=quant_config,
-            rotary_embed="multimodal",
-            mrope_section=self.rope_scaling["mrope_section"],
-            prefix=add_prefix("attn", prefix),
-            proj_bias=False,
+            prefix=add_prefix("qkv_proj", prefix),
         )
+        self.o_proj = RowParallelLinear(
+            head_num * head_dim,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=add_prefix("o_proj", prefix),
+        )
+
+        self.q_size = head_num * head_dim
+        self.kv_size = kv_head_num * head_dim
+
+        self.self_attn = RadixAttention(
+            num_heads=config.num_attention_heads,
+            head_dim=head_dim,
+            scaling=head_dim**-0.5,
+            num_kv_heads=kv_head_num,
+            layer_id=layer_idx,
+            prefix=add_prefix("attn", prefix),
+        )
+        # self.self_attn = VisionAttention(
+        #     embed_dim=config.hidden_size,
+        #     num_heads=config.num_attention_heads,
+        #     num_key_value_heads=config.num_key_value_heads,
+        #     projection_size=config.hidden_size,
+        #     use_qkv_parallel=True,
+        #     # qkv_backend="radix",
+        #     qkv_backend="sdpa",
+        #     softmax_in_single_precision=softmax_in_single_precision,
+        #     flatten_batch=flatten_batch,
+        #     quant_config=quant_config,
+        #     rotary_embed="multimodal",
+        #     mrope_section=self.rope_scaling["mrope_section"],
+        #     prefix=add_prefix("attn", prefix),
+        #     proj_bias=False,
+        # )
         text_config = config
         self.mlp = Qwen2MLP(
             text_config
@@ -1894,6 +1956,13 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         # )
         self.post_attention_layernorm = Qwen2RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.rotary_emb = get_rope(
+            head_dim,
+            rotary_dim=head_dim,
+            max_position=config.max_position_embeddings,
+            base=config.rope_theta,
+            rope_scaling=config.rope_scaling,
         )
 
     def forward(
@@ -1937,41 +2006,50 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         #     hidden_states = hidden_states.unsqueeze(0)
         # assert hidden_states.dim() == 2, hidden_states.shape
 
-        if hidden_states.dim() == 3:
-            hidden_states = hidden_states.squeeze(0)
-        if hidden_states.dim() == 1:
-            hidden_states = hidden_states.unsqueeze(0)
         residual = hidden_states
-
-        assert hidden_states.dim() == 2, hidden_states.shape
         hidden_states = self.input_layernorm(hidden_states)
 
         if first:
             print(f"hidden_states before proj {hidden_states=}")
             print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         # Self Attention
-        hidden_states = self.self_attn(
-            x=hidden_states,
-            # hidden_states=hidden_states,
-            # position_ids=position_ids,
-            # attention_mask=attention_mask,
-            # past_key_value=past_key_value,
-            # cache_position=cache_position,
-            # position_ids=positions,
-            position_embeddings=position_embeddings,
-            forward_batch=forward_batch,
-        )
-        hidden_states = hidden_states[0].squeeze(0)
-        if hidden_states.dim() == 3:
-            hidden_states = hidden_states.squeeze(0)
+        # hidden_states = self.self_attn(
+        #     x=hidden_states,
+        #     # hidden_states=hidden_states,
+        #     # position_ids=position_ids,
+        #     # attention_mask=attention_mask,
+        #     # past_key_value=past_key_value,
+        #     # cache_position=cache_position,
+        #     # position_ids=positions,
+        #     position_embeddings=position_embeddings,
+        #     forward_batch=forward_batch,
+        # )
+        # hidden_states = hidden_states[0].squeeze(0)
+        # if hidden_states.dim() == 3:
+        #     hidden_states = hidden_states.squeeze(0)
 
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(position_ids, q, k)
+        attn_output = self.self_attn(q, k, v, forward_batch)
+        hidden_states, _ = self.o_proj(attn_output)
+        # hidden_states = self.self_attn(
+        #     # x=hidden_states,
+        #     hidden_states=hidden_states,
+        #     position_ids=position_ids,
+        #     attention_mask=attention_mask,
+        #     past_key_value=past_key_value,
+        #     cache_position=cache_position,
+        #     # position_ids=positions,
+        #     position_embeddings=position_embeddings,
+        #     # forward_batch=forward_batch,
+        # )
         if first:
             print(f"Qwen2_5OmniDecoderLayer after self_attn: {hidden_states=}")
         hidden_states = residual + hidden_states
 
         # if hidden_states.dim() == 3:
         #     hidden_states = hidden_states.flatten(0, 1)
-        assert hidden_states.dim() == 2
         # Fully Connected
         residual = hidden_states
 
@@ -2029,16 +2107,10 @@ class Qwen2_5OmniThinkerModel(nn.Module):
             input_embeds = self.embed_tokens(input_ids)
 
         hidden_states = input_embeds
-        if positions.dim() == 2:
-            positions = positions.unsqueeze(0)
-
-        if positions.dim() == 1:
-            positions = positions.unsqueeze(0)
-            positions = positions.unsqueeze(0)
-        assert positions.dim() == 3, positions.shape
+        # assert positions.dim() == 3, positions.shape
         # create position embeddings to be shared across the decoder layers
         # print(f"{hidden_states=}")
-        position_embeddings = self.rotary_emb(hidden_states, positions)
+        # position_embeddings = self.rotary_emb(hidden_states, positions)
 
         # past_seen_tokens = 0
         # past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -2068,7 +2140,7 @@ class Qwen2_5OmniThinkerModel(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
                 attention_mask=causal_mask,
-                position_embeddings=position_embeddings,
+                # position_embeddings=position_embeddings,
             )
             hidden_states = layer_output
             if first:
@@ -2306,14 +2378,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         if is_mrope_enabled:
             positions = forward_batch.mrope_positions
-            if positions is not None:
-                if positions.dim() == 2:
-                    positions = positions.unsqueeze(1)
-                if positions.shape[0] == 1:
-                    positions = positions.expand(3, -1, -1)
         # print(f"{positions=}")
         # print(f"{positions.shape=}")
-
         _, hs = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -2411,7 +2477,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         #
         #     if attention_mask is not None:
         #         attention_mask = attention_mask.to(inputs_embeds.device)
-
         return self.logits_processor(input_ids, hs, self.lm_head, forward_batch)
 
     def prepare_inputs_for_generation(
@@ -4506,9 +4571,12 @@ class Qwen2_5OmniModel(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
+            (".qkv_proj", ".self_attn.q_proj", "q"),
+            (".qkv_proj", ".self_attn.k_proj", "k"),
+            (".qkv_proj", ".self_attn.v_proj", "v"),
+            # (".qkv_proj", ".q_proj", "q"),
+            # (".qkv_proj", ".k_proj", "k"),
+            # (".qkv_proj", ".v_proj", "v"),
             ("gate_up_proj", "up_proj", 1),
             ("gate_up_proj", "gate_proj", 0),
         ]
@@ -4518,6 +4586,8 @@ class Qwen2_5OmniModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if ".self_attn.o_proj" in name:
+                name = name.replace(".self_attn.o_proj", ".o_proj")
             # if "visual" in name:
             #     name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
             #     param = params_dict[name]
@@ -4527,17 +4597,18 @@ class Qwen2_5OmniModel(nn.Module):
             # print(f"{name=}")
             # print(f"{loaded_weight.shape=}")
 
-            if "thinker" in name:
-                name = name.replace(".o_proj", ".proj")
-            print(f"{name=}")
+            # print(f"{name=}")
+            # if "thinker" in name:
+            #     name = name.replace(".o_proj", ".proj")
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # continue
                 if "mlp." in name:
                     continue
                     # ...
 
-                elif "self_attn." in name:
-                    continue
+                # elif "self_attn." in name:
+                #     continue
                 else:
                     ...
                 if weight_name not in name:
