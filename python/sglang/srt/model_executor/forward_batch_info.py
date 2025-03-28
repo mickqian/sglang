@@ -452,15 +452,15 @@ class ForwardBatch:
                             ].tolist(),
                             image_grid_thw=image_grid_thw,
                             video_grid_thw=video_grid_thw,
-                            image_token_id=hf_config.image_token_id,
-                            video_token_id=hf_config.video_token_id,
-                            vision_start_token_id=hf_config.vision_start_token_id,
-                            vision_end_token_id=hf_config.vision_end_token_id,
-                            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                            image_token_id=hf_config.thinker_config.image_token_index,
+                            video_token_id=hf_config.thinker_config.video_token_index,
+                            vision_start_token_id=hf_config.thinker_config.vision_start_token_id,
+                            vision_end_token_id=hf_config.thinker_config.vision_end_token_id,
+                            spatial_merge_size=hf_config.thinker_config.vision_config.spatial_merge_size,
                             context_len=0,
                             seq_len=len(self.input_ids),
                             second_per_grid_ts=second_per_grid_ts,
-                            tokens_per_second=hf_config.vision_config.tokens_per_second,
+                            tokens_per_second=hf_config.thinker_config.vision_config.tokens_per_second,
                         )
                     )
                     batch.multimodal_inputs[i].mrope_position_delta = (

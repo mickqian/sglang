@@ -71,7 +71,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             return_tensors="pt",
             **kwargs,
         )
-        print(f"{result=}")
+        # print(f"{result=}")
         return {
             "input_ids": result.input_ids,
             "pixel_values": getattr(result, "pixel_values", None),
@@ -89,8 +89,15 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-        start = time.time()
-
+        if len(input_ids) == 1:
+            return {
+            "input_ids": input_ids,
+            "items": [],
+            "im_start_id": self.IM_START_TOKEN_ID,
+            "im_end_id": self.IM_END_TOKEN_ID,
+            "im_token_id": self.image_token_id,
+            "video_token_id": self.video_token_id,
+        }
         if isinstance(image_data, str):
             image_data = [image_data]
 
@@ -181,9 +188,10 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         items = []
 
         if (
-            hasattr(res, "pixel_values")
-            and res["pixel_values"]
-            and len(res["pixel_values"]) != 0
+            res["pixel_values"] is not None
+            # hasattr(res, "pixel_values")
+            # and res["pixel_values"]
+            # and len(res["pixel_values"]) != 0
         ):
             image_grid_thws = torch.concat([res["image_grid_thw"]])
             item = MultimodalDataItem(
@@ -210,7 +218,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             items += [item]
 
         video_grid_thws = None
-        print(f"{base_output=}")
         return {
             "input_ids": res["input_ids"].flatten().tolist(),
             "items": items,

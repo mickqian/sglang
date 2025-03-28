@@ -77,7 +77,7 @@ from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.managers.mm_utils import general_mm_embed_routine
+from sglang.srt.managers.mm_utils import MultiModalityDataPaddingPatternTokenPairs, general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -2009,9 +2009,9 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        if first:
-            print(f"hidden_states before proj {hidden_states=}")
-            print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
+        # if first:
+            # print(f"hidden_states before proj {hidden_states=}")
+            # print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         # Self Attention
         # hidden_states = self.self_attn(
         #     x=hidden_states,
@@ -2044,8 +2044,8 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         #     position_embeddings=position_embeddings,
         #     # forward_batch=forward_batch,
         # )
-        if first:
-            print(f"Qwen2_5OmniDecoderLayer after self_attn: {hidden_states=}")
+        # if first:
+            # print(f"Qwen2_5OmniDecoderLayer after self_attn: {hidden_states=}")
         hidden_states = residual + hidden_states
 
         # if hidden_states.dim() == 3:
@@ -2132,6 +2132,7 @@ class Qwen2_5OmniThinkerModel(nn.Module):
         )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
+            # print(f"{layer_idx=} {hidden_states.shape=}")
             layer_output = decoder_layer(
                 positions=positions,
                 position_ids=positions,
@@ -2143,17 +2144,12 @@ class Qwen2_5OmniThinkerModel(nn.Module):
                 # position_embeddings=position_embeddings,
             )
             hidden_states = layer_output
-            if first:
-                print(f"{layer_idx=} {hidden_states=}")
-
-        if hidden_states.dim() == 1:
-            hidden_states = hidden_states.unsqueeze(0)
 
         assert hidden_states.dim() == 2, hidden_states.shape
         hidden_states = self.norm(hidden_states)
 
         if first:
-            print(f"Qwen2_5OmniThinkerModel final {hidden_states=}")
+            # print(f"Qwen2_5OmniThinkerModel final {hidden_states=}")
             first = False
         return hidden_states
 
@@ -2320,13 +2316,14 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # in qwen-vl, last dim is the same
-        pixel_values = torch.cat([item.pixel_values for item in items], dim=0).type(
-            self.visual.dtype
-        )
-        image_grid_thws = torch.stack([item.image_grid_thws for item in items], dim=0)
+        # pixel_values = torch.cat([item.pixel_values for item in items], dim=0).type(
+        #     self.visual.dtype
+        # )
+        pixel_values = torch.cat([item.pixel_values for item in items], dim=0).to("cuda")
+        image_grid_thws = torch.stack([item.image_grid_thws for item in items], dim=0).to("cuda")
         image_grid_thws = image_grid_thws.flatten(0, 1)
-        assert pixel_values.dim() == 2, pixel_values.dim()
-        assert image_grid_thws.dim() == 2, image_grid_thws.dim()
+        # assert pixel_values.dim() == 2, pixel_values.dim()
+        # assert image_grid_thws.dim() == 2, image_grid_thws.dim()
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thws)
         return image_embeds
 
@@ -2378,8 +2375,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         if is_mrope_enabled:
             positions = forward_batch.mrope_positions
-        # print(f"{positions=}")
-        # print(f"{positions.shape=}")
+        # # print(f"{positions=}")
+        # # print(f"{positions.shape=}")
+        # # print(f"{forward_batch.mm_inputs=}")
         _, hs = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
@@ -4519,14 +4517,14 @@ class Qwen2_5OmniModel(nn.Module):
 
     def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
-        # im_start_id: int = image_inputs.im_start_id
-        # im_end_id: int = image_inputs.im_end_id
+        im_start_id: int = image_inputs.im_start_id
+        im_end_id: int = image_inputs.im_end_id
         #
-        # media_token_pairs = [(im_start_id, im_end_id)]
-        # pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
+        media_token_pairs = [(im_start_id, im_end_id)]
+        pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
         #
-        # return pattern.pad_input_tokens(input_ids, image_inputs)
-        return input_ids
+        return pattern.pad_input_tokens(input_ids, image_inputs)
+        # return input_ids
 
     def enable_talker(self):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration(
