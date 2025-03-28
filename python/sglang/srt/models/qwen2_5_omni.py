@@ -73,7 +73,7 @@ from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope, apply_multimodal_rotary_pos_emb
+from sglang.srt.layers.rotary_embedding import apply_multimodal_rotary_pos_emb, get_rope
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
@@ -1400,15 +1400,14 @@ class Qwen2_5_OmniAttention(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )
-
+        self.use_mm_rotary = False
         # print(f"{self.num_heads=}")
         # print(f"{self.head_dim=}")
         self.attn = RadixAttention(
             num_heads=self.num_heads,
             head_dim=self.head_dim,
             scaling=self.scaling,
-            # num_kv_heads=self.num_kv_heads,
-            num_kv_heads=self.num_heads,
+            num_kv_heads=self.num_heads if self.use_mm_rotary else self.num_kv_heads,
             layer_id=layer_id,
             prefix=add_prefix("attn", prefix),
         )
@@ -1433,52 +1432,49 @@ class Qwen2_5_OmniAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        s = q.shape[0]
+        if first:
+            print(f"after qvk proj: {q=}")
+            print(f"after qvk proj: {q.shape=}")
+            print(f"after qvk proj: {k=}")
+            print(f"after qvk proj: {v=}")
         cos, sin = position_embeddings
         # q, k = self.rotary_emb(position_ids, q, k)
 
-        q = rearrange(q, "s (head_dim h) -> 1 h s head_dim", head_dim=self.head_dim)
-        k = rearrange(k, "s (head_dim h) -> 1 h s head_dim", head_dim=self.head_dim)
-        if first:
-            print(f"before rotary: {q=}")
-            print(f"before rotary: {k=}")
-            print(f"before rotary: {v=}")
-        # input shape: [b, h, s, head_dim]
-        q, k = apply_multimodal_rotary_pos_emb(
-            q, k, cos, sin, self.mrope_section
-        )
+        if self.use_mm_rotary:
+            q = rearrange(q, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
+            k = rearrange(k, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
+            if first:
+                print(f"before rotary: {q=}")
+                print(f"before rotary: {q.shape=}")
+                print(f"before rotary: {k=}")
+                print(f"before rotary: {k.shape=}")
+            # input shape: [b, h, s, head_dim]
+            q, k = apply_multimodal_rotary_pos_emb(q, k, cos, sin, self.mrope_section)
+
+            if first:
+                print(f"after rotary: {q=}")
+                print(f"after rotary: {k=}")
+                print(f"after rotary: {v=}")
+
+            v = rearrange(v, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
+
+            k = repeat_kv(k, self.num_key_value_groups)
+            v = repeat_kv(v, self.num_key_value_groups)
+
+            if first:
+                print(f"after repeat: {k=}")
+                print(f"after repeat: {v=}")
+                print(f"after repeat: {q=}")
+        else:
+            q, k = self.rotary_emb(position_ids, q, k)
 
         if first:
-            print(f"after rotary: {q=}")
-            print(f"after rotary: {k=}")
-            print(f"after rotary: {v=}")
+            print(f"{q.shape=}")
+            print(f"{k.shape=}")
+            print(f"{v.shape=}")
 
-        v = rearrange(v, "s (head_dim h) -> 1 h s head_dim", head_dim=self.head_dim)
-
-        k = repeat_kv(k, self.num_key_value_groups)
-        v = repeat_kv(v, self.num_key_value_groups)
-
-        # cos, sin = position_embeddings
-        # print(f"{q.shape=}")
-        # print(f"{cos.shape=}")
-        # print(f"{sin.shape=}")
-        # s = q.shape[0]
-        # if q.dim() == 2:
-        #     q = q.reshape(1, -1, s, self.head_dim)
-        # if k.dim() == 2:
-        #     k = k.reshape(1, -1, s, self.head_dim)
-        # print(f"{q.shape=}")
-        # print(f"{k.shape=}")
-        # q, k = apply_multimodal_rotary_pos_emb(q, k, cos, sin, self.mrope_section)
-
-        # print(f"{q.shape=}")
-        k = k.reshape(s, -1).contiguous()
-        v = v.reshape(s, -1).contiguous()
-        # k = rearrange(k, "1 h s head_dim -> s (h head_dim)")
-        # q = rearrange(k, "1 h s head_dim -> s (h head_dim)")
-        # print(f"{k.shape=}")
-        # print(f"{v.shape=}")
         attn_output = self.attn(q, k, v, forward_batch)
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -1528,23 +1524,6 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
 
         self.rope_scaling = config.rope_scaling
 
-        # self.self_attn = QWEN2_5_OMNI_ATTENTION_CLASSES[config._attn_implementation](
-        #     config, layer_idx
-        # )
-        # self.self_attn = OmniAttention(
-        #     embed_dim=config.hidden_size,
-        #     num_heads=config.num_attention_heads,
-        #     num_key_value_heads=config.num_key_value_heads,
-        #     projection_size=config.hidden_size,
-        #     # use_qkv_parallel=True,
-        #     use_qkv_parallel=False,
-        #     qkv_backend="radix",
-        #     softmax_in_single_precision=softmax_in_single_precision,
-        #     layer_id=layer_idx,
-        #     flatten_batch=flatten_batch,
-        #     quant_config=quant_config,
-        #     prefix=add_prefix("qkv_proj", prefix),
-        # )
         hidden_size = config.hidden_size
         head_num = config.num_attention_heads
         kv_head_num = config.num_key_value_heads
@@ -1646,8 +1625,7 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = hidden_states
-        return outputs
+        return hidden_states
 
 
 class Qwen2_5OmniThinkerModel(nn.Module):
@@ -1758,9 +1736,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # in qwen-vl, last dim is the same
-        pixel_values = torch.cat([item.pixel_values for item in items], dim=0).type(
-            self.visual.dtype
-        ).to("cuda")
+        pixel_values = (
+            torch.cat([item.pixel_values for item in items], dim=0)
+            .type(self.visual.dtype)
+            .to("cuda")
+        )
         image_grid_thws = torch.stack([item.image_grid_thws for item in items], dim=0)
         image_grid_thws = image_grid_thws.flatten(0, 1)
         assert pixel_values.dim() == 2, pixel_values.dim()
@@ -1819,6 +1799,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
             if input_ids.dim() == 2:
                 assert input_ids.shape[0] == 1, input_ids.shape
                 input_ids = input_ids.squeeze(0)
+
+        print(f"{input_ids=}")
+        print(f"{input_ids.shape=}")
         # print(f"{positions.shape=}")
         # print(f"{input_ids.shape=}")
         # print(f"{input_ids.tolist()=}")

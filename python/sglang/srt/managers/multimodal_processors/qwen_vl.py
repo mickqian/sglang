@@ -178,10 +178,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         items = []
 
-        if (
-            "pixel_values" in res
-            and res["pixel_values"] is not None
-        ):
+        if "pixel_values" in res and res["pixel_values"] is not None:
             image_grid_thws = torch.concat([res["image_grid_thw"]])
             item = MultimodalDataItem(
                 pixel_values=res["pixel_values"],
