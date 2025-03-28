@@ -392,6 +392,7 @@ class ForwardBatch:
                     or batch.multimodal_inputs[i].mrope_position_delta is None
                     else batch.multimodal_inputs[i].mrope_position_delta
                 )
+                print(f"{mrope_position_delta=}")
                 mrope_positions_list[i] = MRotaryEmbedding.get_next_input_positions(
                     mrope_position_delta,
                     int(self.seq_lens[i]) - 1,
@@ -449,21 +450,23 @@ class ForwardBatch:
                         else torch.cat(second_per_grid_ts_list, dim=0)
                     )
                     if is_omni:
-                        mrope_positions, mrope_position_delta, input_ids = (
+                        # mrope_positions = getattr(mm_input, "mrope_positions")
+                        # mrope_position_delta = getattr(mm_input, "mrope_position_delta")
+
+                        mrope_positions, mrope_position_delta = (
                             MRotaryEmbedding.get_rope_index(
-                                raw_input_ids=self.input_ids[
+                                input_ids=self.input_ids[
                                     extend_start_loc : extend_start_loc + extend_seq_len
                                 ].unsqueeze(0),
-                                forward_mode=self.forward_mode,
                                 image_grid_thw=image_grid_thw,
                                 video_grid_thw=video_grid_thw,
                                 config=hf_config,
-                                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                # spatial_merge_size=hf_config.vision_config.spatial_merge_size,
                                 second_per_grids=second_per_grid_ts,
                                 # tokens_per_second=hf_config.vision_config.tokens_per_second,
                             )
                         )
-                        self.input_ids = input_ids
+                        # self.input_ids = input_ids
                     else:
                         # TODO: current qwen2-vl do not support radix cache since mrope position calculation
                         mrope_positions, mrope_position_delta = (

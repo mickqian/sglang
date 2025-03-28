@@ -31,7 +31,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-# from transformers.models.qwen2_5_omni import processing_qwen2_5_omni
 from torch.nn import ConvTranspose1d, Parameter
 from transformers.activations import ACT2FN
 from transformers.cache_utils import (
@@ -162,7 +161,7 @@ class Qwen2_5OmniAudioAttention(nn.Module):
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
                 f" and `num_heads`: {num_heads})."
             )
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.is_decoder = is_decoder
         self.is_causal = is_causal
 
@@ -250,9 +249,9 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
-            ...,
-            cu_seqlens[i - 1]: cu_seqlens[i],
-            cu_seqlens[i - 1]: cu_seqlens[i],
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
             ] = 0
 
         attn_weights = attn_weights + attention_mask
@@ -458,9 +457,9 @@ class Qwen2_5OmniAudioSdpaAttention(Qwen2_5OmniAudioAttention):
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
-            ...,
-            cu_seqlens[i - 1]: cu_seqlens[i],
-            cu_seqlens[i - 1]: cu_seqlens[i],
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
             ] = True
 
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
@@ -687,8 +686,8 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
         for index_ in range(feature_lens.shape[0]):
             feature_length = feature_lens_accum[index_ + 1] - feature_lens_accum[index_]
             each_audio_split_list = input_features[
-                                    :, feature_lens_accum[index_]: feature_lens_accum[index_ + 1]
-                                    ].split(self.n_window * 2, dim=1)
+                :, feature_lens_accum[index_] : feature_lens_accum[index_ + 1]
+            ].split(self.n_window * 2, dim=1)
 
             for each_audio_split in each_audio_split_list:
                 each_split_embed = nn.functional.gelu(self.conv1(each_audio_split))
@@ -778,7 +777,7 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -827,9 +826,9 @@ class Qwen2_5OmniVisionAttention(nn.Module):
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
-            ...,
-            cu_seqlens[i - 1]: cu_seqlens[i],
-            cu_seqlens[i - 1]: cu_seqlens[i],
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
             ] = 0
 
         q = q.transpose(0, 1)
@@ -917,9 +916,9 @@ class Qwen2_5OmniVisionSdpaAttention(nn.Module):
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[
-            ...,
-            cu_seqlens[i - 1]: cu_seqlens[i],
-            cu_seqlens[i - 1]: cu_seqlens[i],
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
             ] = True
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
@@ -1033,7 +1032,7 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
 class Qwen2_5OmniPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -1301,8 +1300,8 @@ class Qwen2_5OmniRotaryEmbedding(nn.Module):
             .expand(3, position_ids.shape[1], -1, 1)
         )
         position_ids_expanded = position_ids[
-                                :, :, None, :
-                                ].float()  # shape (3, bs, 1, positions)
+            :, :, None, :
+        ].float()  # shape (3, bs, 1, positions)
         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
         device_type = x.device.type
         device_type = (
@@ -1376,7 +1375,7 @@ class Qwen2_5_OmniAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
@@ -1472,6 +1471,8 @@ class Qwen2_5_OmniAttention(nn.Module):
             print(f"{q.shape=}")
             print(f"{k.shape=}")
             print(f"{v.shape=}")
+            print(f"{forward_batch.out_cache_loc=}")
+            print(f"{forward_batch.encoder_out_cache_loc=}")
 
         attn_output = self.attn(q, k, v, forward_batch)
 
@@ -1802,6 +1803,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         print(f"{input_ids=}")
         print(f"{input_ids.shape=}")
+        print(f"{positions=}")
         # print(f"{positions.shape=}")
         # print(f"{input_ids.shape=}")
         # print(f"{input_ids.tolist()=}")
@@ -1930,7 +1932,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
         if past_key_values is not None:
             if inputs_embeds is not None:  # Exception 1
-                input_ids = input_ids[:, -cache_position.shape[0]:]
+                input_ids = input_ids[:, -cache_position.shape[0] :]
             elif (
                 input_ids.shape[1] != cache_position.shape[0]
             ):  # Default case (the "else", a no op, is Exception 2)
@@ -2354,12 +2356,12 @@ class Qwen2_5OmniTalkerModel(nn.Module):
                     attention_mask = attention_mask[:, :target_length]
                 mask_length = attention_mask.shape[-1]
                 padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
-                                                                    :, None, None, :
-                                                                    ].to(causal_mask.device)
+                    :, None, None, :
+                ].to(causal_mask.device)
                 padding_mask = padding_mask == 0
                 causal_mask[:, :, :, :mask_length] = causal_mask[
-                                                     :, :, :, :mask_length
-                                                     ].masked_fill(padding_mask, min_dtype)
+                    :, :, :, :mask_length
+                ].masked_fill(padding_mask, min_dtype)
         return causal_mask
 
 
@@ -2518,7 +2520,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration(nn.Module, GenerationMixin):
         # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
         if past_key_values is not None:
             if inputs_embeds is not None:  # Exception 1
-                input_ids = input_ids[:, -cache_position.shape[0]:]
+                input_ids = input_ids[:, -cache_position.shape[0] :]
             elif (
                 input_ids.shape[1] != cache_position.shape[0]
             ):  # Default case (the "else", a no op, is Exception 2)
@@ -3317,7 +3319,7 @@ class DiTBlock(nn.Module):
             x=norm,
             rope=rope,
             mask=(block_diff >= -float(self.look_backward_block))
-                 & (block_diff <= float(self.look_ahead_block)),
+            & (block_diff <= float(self.look_ahead_block)),
         )
 
         # process attention output for input x
@@ -3433,7 +3435,7 @@ class UpSample1d(nn.Module):
         x = self.ratio * F.conv_transpose1d(
             x, self.filter.expand(C, -1, -1), stride=self.stride, groups=C
         )
-        x = x[..., self.pad_left: -self.pad_right]
+        x = x[..., self.pad_left : -self.pad_right]
 
         return x
 
@@ -3605,7 +3607,7 @@ class Qwen2_5OmniToken2WavBigVGANModel(nn.Module):
                 nn.ModuleList(
                     [
                         ConvTranspose1d(
-                            config.upsample_initial_channel // (2 ** i),
+                            config.upsample_initial_channel // (2**i),
                             config.upsample_initial_channel // (2 ** (i + 1)),
                             k,
                             u,

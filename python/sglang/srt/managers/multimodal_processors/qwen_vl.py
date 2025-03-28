@@ -7,6 +7,7 @@ from typing import List, Union
 import torch
 from PIL import Image
 
+from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.managers.multimodal_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
@@ -14,9 +15,50 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.models.qwen2_5_omni import Qwen2_5OmniModel
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
+
+
+def compute_mrope(input_ids, items: [MultimodalDataItem], hf_config):
+    hf_config = hf_config.thinker_config
+    image_grid_thw_list = [
+        item.image_grid_thws for item in items if item.image_grid_thws is not None
+    ]
+    image_grid_thws = (
+        torch.cat(image_grid_thw_list) if len(image_grid_thw_list) != 0 else None
+    )
+
+    video_grid_thws_list = [
+        item.video_grid_thws for item in items if item.video_grid_thws is not None
+    ]
+    video_grid_thws = (
+        torch.cat(video_grid_thws_list) if len(video_grid_thws_list) != 0 else None
+    )
+
+    second_per_grid_ts_list = [
+        item.second_per_grid_ts for item in items if item.second_per_grid_ts is not None
+    ]
+    second_per_grid_ts = (
+        torch.cat(second_per_grid_ts_list)
+        if len(second_per_grid_ts_list) != 0
+        else None
+    )
+
+    mrope_positions, mrope_position_delta, input_ids = MRotaryEmbedding.get_rope_index(
+        raw_input_ids=input_ids,
+        forward_mode=ForwardMode.EXTEND,
+        image_grid_thw=image_grid_thws,
+        video_grid_thw=video_grid_thws,
+        config=hf_config,
+        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+        # audio_seqlens=
+        second_per_grids=second_per_grid_ts,
+        # tokens_per_second=hf_config.vision_config.tokens_per_second,
+    )
+
+    return mrope_positions, mrope_position_delta, input_ids
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
@@ -164,8 +206,10 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         async def resize_image_async(image):
             return resize_image(image)
 
+        is_omni = self.arch == Qwen2_5OmniModel.__name__
+
         resized_images = base_output.images
-        if base_output.images:
+        if not is_omni and base_output.images:
             print(f"resizing")
             resize_tasks = [resize_image_async(image) for image in resized_images]
             resized_images = await asyncio.gather(*resize_tasks)
@@ -203,12 +247,25 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             )
             items += [item]
 
+        kwargs = {}
+        if self.arch == Qwen2_5OmniModel.__name__:
+            input_ids = res["input_ids"]
+
+            # mrope_positions, mrope_position_delta, input_ids = compute_mrope(res["input_ids"], items, self.hf_config)
+            # kwargs["mrope_positions"] = mrope_positions
+            # kwargs["mrope_position_delta"] = mrope_position_delta
+        else:
+            input_ids = res["input_ids"]
+
+        input_ids = input_ids.flatten().tolist()
+        print(f"{len(input_ids)=}")
         video_grid_thws = None
         return {
-            "input_ids": res["input_ids"].flatten().tolist(),
+            "input_ids": input_ids,
             "items": items,
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
             "im_token_id": self.image_token_id,
             "video_token_id": self.video_token_id,
+            **kwargs,
         }

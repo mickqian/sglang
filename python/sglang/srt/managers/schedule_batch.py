@@ -270,7 +270,7 @@ class MultimodalInputs:
     num_image_tokens: Optional[int] = None
 
     # QWen2-VL related
-    mrope_position_delta: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[int] = None
 
     # image
     im_token_id: Optional[torch.Tensor] = None
@@ -316,9 +316,11 @@ class MultimodalInputs:
             "audio_start_id",
             "audio_end_id",
         ]
-        for arg in optional_args:
-            if arg in obj:
-                setattr(ret, arg, obj[arg])
+        for key, val in obj.items():
+            setattr(ret, key, val)
+        # for arg in optional_args:
+        #     if arg in obj:
+        #         setattr(ret, arg, obj[arg])
 
         return ret
 
