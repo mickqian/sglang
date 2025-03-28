@@ -704,7 +704,7 @@ class TestOpenAIOmniServer(TestOpenAIVisionServer):
         self._test_audio_ambient_completion()
 
 
-class TestQwen25_oServer(TestOpenAIOmniServer):
+class TestQwen2_5_oServer(TestOpenAIOmniServer):
     @classmethod
     def setUpClass(cls):
         cls.model = "Qwen/Qwen2.5-Omni-7B"
@@ -718,6 +718,7 @@ class TestQwen25_oServer(TestOpenAIOmniServer):
                 "--trust-remote-code",
                 "--chat-template",
                 "qwen2-5-o",
+                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"

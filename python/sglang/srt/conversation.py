@@ -657,9 +657,9 @@ register_conv_template(
         sep="<|im_end|>\n",
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
         stop_str=["<|im_end|>"],
-        image_token="<|IMAGE|>",
-        video_token="<|VIDEO|>",
-        audio_token="<|AUDIO|>",
+        image_token="<|vision_bos|><|IMAGE|><|vision_eos|>",
+        video_token="<|vision_bos|><|VIDEO|><|vision_eos|>",
+        audio_token="<|audio_bos|><|AUDIO|><|audio_eos|>",
     )
 )
 

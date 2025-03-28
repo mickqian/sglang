@@ -383,6 +383,9 @@ class ForwardBatch:
         is_omni = hf_config.architectures[0] == "Qwen2_5OmniModel"
         if is_omni:
             hf_config = hf_config.thinker_config
+
+        is_omni = False
+
         mrope_positions_list = [None] * self.seq_lens.shape[0]
         if self.forward_mode.is_decode():
             for i, _ in enumerate(mrope_positions_list):
@@ -392,7 +395,6 @@ class ForwardBatch:
                     or batch.multimodal_inputs[i].mrope_position_delta is None
                     else batch.multimodal_inputs[i].mrope_position_delta
                 )
-                print(f"{mrope_position_delta=}")
                 mrope_positions_list[i] = MRotaryEmbedding.get_next_input_positions(
                     mrope_position_delta,
                     int(self.seq_lens[i]) - 1,
@@ -408,14 +410,18 @@ class ForwardBatch:
                 )
                 if multimodal_inputs is None:
                     # text only
-                    mrope_positions = [
+                    mrope_positions = torch.tensor(
                         [
-                            pos
-                            for pos in range(
-                                extend_prefix_len, extend_prefix_len + extend_seq_len
-                            )
+                            [
+                                pos
+                                for pos in range(
+                                    extend_prefix_len,
+                                    extend_prefix_len + extend_seq_len,
+                                )
+                            ]
                         ]
-                    ] * 3
+                        * 3
+                    )
                 else:
                     image_grid_thws_list = [
                         item.image_grid_thws
@@ -462,9 +468,6 @@ class ForwardBatch:
                     )
 
                     if is_omni:
-                        # mrope_positions = getattr(mm_input, "mrope_positions")
-                        # mrope_position_delta = getattr(mm_input, "mrope_position_delta")
-
                         mrope_positions, mrope_position_delta = (
                             MRotaryEmbedding.get_rope_index(
                                 input_ids=self.input_ids[
@@ -478,6 +481,8 @@ class ForwardBatch:
                                 # tokens_per_second=hf_config.vision_config.tokens_per_second,
                             )
                         )
+                        assert isinstance(mrope_positions, torch.Tensor)
+
                     else:
                         # TODO: current qwen2-vl do not support radix cache since mrope position calculation
                         mrope_positions, mrope_position_delta = (
@@ -501,13 +506,15 @@ class ForwardBatch:
                     batch.multimodal_inputs[i].mrope_position_delta = (
                         mrope_position_delta
                     )
+                assert isinstance(mrope_positions, torch.Tensor)
                 mrope_positions_list[i] = mrope_positions
 
         self.mrope_positions = torch.cat(
-            [torch.tensor(pos, device=device) for pos in mrope_positions_list],
+            mrope_positions_list,
             axis=1,
-        )
+        ).to(device=device)
         self.mrope_positions = self.mrope_positions.to(torch.int64)
+        print(f"{self.mrope_positions=}")
 
 
 def compute_position_triton(

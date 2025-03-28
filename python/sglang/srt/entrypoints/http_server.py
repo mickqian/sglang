@@ -766,7 +766,6 @@ def _wait_and_warmup(
             json_data["input_ids"] = json_data["input_ids"][0]
     else:
         json_data["text"] = ["The capital city of France is"] * server_args.dp_size
-        json_data["text"] = ["hi"] * server_args.dp_size
         # TODO Workaround the bug that embedding errors for list of size 1
         if server_args.dp_size == 1:
             json_data["text"] = json_data["text"][0]
@@ -779,21 +778,21 @@ def _wait_and_warmup(
         ).tolist()
         json_data["sampling_params"]["max_new_tokens"] = 0
 
-    # try:
-    #     res = requests.post(
-    #         url + request_name,
-    #         json=json_data,
-    #         headers=headers,
-    #         timeout=600,
-    #     )
-    #     assert res.status_code == 200, f"{res}"
-    # except Exception:
-    #     last_traceback = get_exception_traceback()
-    #     if pipe_finish_writer is not None:
-    #         pipe_finish_writer.send(last_traceback)
-    #     logger.error(f"Initialization failed. warmup error: {last_traceback}")
-    #     kill_process_tree(os.getpid())
-    #     return
+    try:
+        res = requests.post(
+            url + request_name,
+            json=json_data,
+            headers=headers,
+            timeout=600,
+        )
+        assert res.status_code == 200, f"{res}"
+    except Exception:
+        last_traceback = get_exception_traceback()
+        if pipe_finish_writer is not None:
+            pipe_finish_writer.send(last_traceback)
+        logger.error(f"Initialization failed. warmup error: {last_traceback}")
+        kill_process_tree(os.getpid())
+        return
 
     # Debug print
     # logger.info(f"{res.json()=}")

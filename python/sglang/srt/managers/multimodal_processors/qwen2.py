@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import math
-import time
 from typing import List, Union
 
 import torch
@@ -100,7 +99,9 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             image_data=image_data,
             audio_data=audio_data,
             multimodal_tokens=MultimodalSpecialTokens(
-                image_token=self.image_token_id, audio_token=self.audio_token_id
+                image_token=self.image_token_id,
+                audio_token=self.audio_token_id,
+                video_token=self.video_token_id,
             ),
             max_req_input_len=max_req_input_len,
         )

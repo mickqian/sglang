@@ -331,8 +331,8 @@ def embed_mm_inputs(
         input_ids.clamp_(min=0, max=vocab_size - 1)
         inputs_embeds = input_embedding(input_ids)
 
-        print(f"{embeddings=}")
-        print(f"{masks=}")
+        # print(f"{embeddings=}")
+        # print(f"{masks=}")
         # 4. scatter embeddings into input embedding
         for embedding, mask in zip(embeddings, masks):
             mask = mask.expand_as(inputs_embeds).to(inputs_embeds.device)

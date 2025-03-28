@@ -265,7 +265,6 @@ class VisionTritonAttention(nn.Module):
 QKV_BACKEND_IMPL = {
     "context_fwd": VisionTritonAttention,
     "sdpa": VisionSdpaAttention,
-    "radix": RadixAttention,
 }
 
 
@@ -286,10 +285,10 @@ class MMAttention(nn.Module):
         self,
         embed_dim: int,
         num_heads: int,
-        num_key_value_heads: int,
         projection_size: int,
         use_qkv_parallel: bool,
         qkv_backend: str,
+        num_key_value_heads: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         dropout: float = 0.0,
         softmax_in_single_precision: bool = False,
@@ -319,7 +318,7 @@ class MMAttention(nn.Module):
             num_heads, world_size
         )
         self.num_attention_kv_heads_per_partition = dist_utils.divide(
-            num_key_value_heads, world_size
+            num_key_value_heads or num_heads, world_size
         )
 
         self.q_size = self.num_attention_heads_per_partition * self.head_size

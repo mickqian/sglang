@@ -342,6 +342,7 @@ class ModelConfig:
                 )
 
     def get_hf_eos_token_id(self) -> Optional[Set[int]]:
+        eos_ids = None
         if self.hf_config.architectures[0] == "Qwen2_5OmniModel":
             eos_ids = getattr(self.hf_config.thinker_config, "eos_token_id", None)
         eos_ids = eos_ids or getattr(self.hf_config, "eos_token_id", None)

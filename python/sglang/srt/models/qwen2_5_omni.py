@@ -31,21 +31,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from torch.nn import Parameter
 from transformers.activations import ACT2FN
 from transformers.cache_utils import EncoderDecoderCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.utils import (
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VisionRotaryEmbedding,
 )
+from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
 from sglang.srt.configs.qwen2_5_o import (
     Qwen2_5OmniAudioEncoderConfig,
     Qwen2_5OmniConfig,
-    Qwen2_5OmniDiTConfig,
     Qwen2_5OmniTextConfig,
     Qwen2_5OmniThinkerConfig,
     Qwen2_5OmniVisionEncoderConfig,
@@ -56,21 +53,20 @@ from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import apply_multimodal_rotary_pos_emb, get_rope
+from sglang.srt.layers.rotary_embedding import (
+    apply_multimodal_rotary_pos_emb,
+    get_rope,
+    rotate_half,
+)
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.mm_utils import general_mm_embed_routine
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.qwen2 import Qwen2MLP
+from sglang.srt.models.qwen2 import Qwen2Attention, Qwen2MLP
+from sglang.srt.models.stablelm import StableLmForCausalLM
 from sglang.srt.utils import add_prefix
 from sglang.utils import logger
-
-if is_flash_attn_2_available():
-    pass
-else:
-    flash_attn_varlen_func = None
-
 
 ############################
 #      Start Thinker       #
@@ -769,13 +765,6 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
         return input_lengths, output_lengths
 
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
 def apply_rotary_pos_emb_vision(
     tensor: torch.Tensor, freqs: torch.Tensor
 ) -> torch.Tensor:
@@ -841,92 +830,6 @@ class Qwen2_5OmniVisionAttention(nn.Module):
         return attn_output
 
 
-class Qwen2_5OmniVisionFlashAttention2(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.q = nn.Linear(dim, dim, bias=True)
-        self.k = nn.Linear(dim, dim, bias=True)
-        self.v = nn.Linear(dim, dim, bias=True)
-        self.proj = nn.Linear(dim, dim)
-
-    def _apply_rotary_pos_emb_flashatt(
-        self, tensor: torch.Tensor, freqs: torch.Tensor
-    ) -> torch.Tensor:
-        tensor_ = tensor.float()
-        cos = freqs.cos()  # .type_as(tensor_)
-        sin = freqs.sin()  # .type_as(tensor_)
-        output = apply_rotary_emb(tensor_, cos, sin).type_as(tensor)
-        return output
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor = None,
-    ) -> torch.Tensor:
-        seq_length = hidden_states.shape[0]
-        q = self.q(hidden_states).reshape(seq_length, self.num_heads, -1)
-        k = self.k(hidden_states).reshape(seq_length, self.num_heads, -1)
-        v = self.v(hidden_states).reshape(seq_length, self.num_heads, -1)
-        q = self._apply_rotary_pos_emb_flashatt(q.unsqueeze(0), rotary_pos_emb).squeeze(
-            0
-        )
-        k = self._apply_rotary_pos_emb_flashatt(k.unsqueeze(0), rotary_pos_emb).squeeze(
-            0
-        )
-
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(
-            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen
-        ).reshape(seq_length, -1)
-        attn_output = self.proj(attn_output)
-        return attn_output
-
-
-class Qwen2_5OmniVisionSdpaAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.q = nn.Linear(dim, dim, bias=True)
-        self.k = nn.Linear(dim, dim, bias=True)
-        self.v = nn.Linear(dim, dim, bias=True)
-        self.proj = nn.Linear(dim, dim)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor = None,
-    ) -> torch.Tensor:
-        seq_length = hidden_states.shape[0]
-        q = self.q(hidden_states).reshape(seq_length, self.num_heads, -1)
-        k = self.k(hidden_states).reshape(seq_length, self.num_heads, -1)
-        v = self.v(hidden_states).reshape(seq_length, self.num_heads, -1)
-        q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
-        k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
-
-        attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v, attention_mask, dropout_p=0.0
-        )
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
-        attn_output = self.proj(attn_output)
-        return attn_output
-
-
 class Qwen2_5OmniMLP(nn.Module):
     def __init__(self, config, bias: bool = False):
         super().__init__()
@@ -947,8 +850,6 @@ first = True
 
 QWEN2_5_OMNI_VISION_ATTENTION_CLASSES = {
     "eager": Qwen2_5OmniVisionAttention,
-    "flash_attention_2": Qwen2_5OmniVisionFlashAttention2,
-    "sdpa": Qwen2_5OmniVisionSdpaAttention,
 }
 
 
@@ -957,8 +858,12 @@ class Qwen2_5OmniVisionBlock(nn.Module):
         super().__init__()
         self.norm1 = RMSNorm(config.hidden_size, eps=1e-6)
         self.norm2 = RMSNorm(config.hidden_size, eps=1e-6)
-        self.attn = QWEN2_5_OMNI_VISION_ATTENTION_CLASSES[attn_implementation](
-            config.hidden_size, num_heads=config.num_heads
+        # self.attn = QWEN2_5_OMNI_VISION_ATTENTION_CLASSES[attn_implementation](
+        #     config.hidden_size, num_heads=config.num_heads
+        # )
+        # self.attn = Qwen2_5_VLVisionAttention(dim=config.hidden_size, num_heads=config.num_heads)
+        self.attn = Qwen2_5OmniVisionAttention(
+            dim=config.hidden_size, num_heads=config.num_heads
         )
         self.mlp = Qwen2_5OmniMLP(config, bias=True)
 
@@ -1008,20 +913,6 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
             -1, self.embed_dim
         )
         return hidden_states
-
-
-class Qwen2_5_VisionRotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, theta: float = 10000.0) -> None:
-        super().__init__()
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
-        freqs = torch.outer(seq, self.inv_freq)
-        return freqs
 
 
 class Qwen2_5OmniPatchMerger(nn.Module):
@@ -1370,7 +1261,6 @@ class Qwen2_5_OmniAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
@@ -1400,7 +1290,7 @@ class Qwen2_5_OmniAttention(nn.Module):
         self.attn = RadixAttention(
             num_heads=self.num_heads,
             head_dim=self.head_dim,
-            scaling=self.scaling,
+            scaling=self.scaling // 2,
             num_kv_heads=self.num_heads if self.use_mm_rotary else self.num_kv_heads,
             layer_id=layer_id,
             prefix=add_prefix("attn", prefix),
@@ -1409,7 +1299,7 @@ class Qwen2_5_OmniAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            base=int(rope_theta),
             rope_scaling=rope_scaling,
         )
 
@@ -1427,28 +1317,32 @@ class Qwen2_5_OmniAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if first:
-            print(f"after qvk proj: {q=}")
-            print(f"after qvk proj: {q.shape=}")
-            print(f"after qvk proj: {k=}")
-            print(f"after qvk proj: {v=}")
-        cos, sin = position_embeddings
+            ...
+            # print(f"after qvk proj: {q=}")
+            # print(f"after qvk proj: {q.shape=}")
+            # print(f"after qvk proj: {k=}")
+            # print(f"after qvk proj: {v=}")
         # q, k = self.rotary_emb(position_ids, q, k)
 
         if self.use_mm_rotary:
             q = rearrange(q, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
             k = rearrange(k, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
             if first:
-                print(f"before rotary: {q=}")
-                print(f"before rotary: {q.shape=}")
-                print(f"before rotary: {k=}")
-                print(f"before rotary: {k.shape=}")
+                ...
+                # print(f"before rotary: {q=}")
+                # print(f"before rotary: {q.shape=}")
+                # print(f"before rotary: {k=}")
+                # print(f"before rotary: {k.shape=}")
+            cos, sin = position_embeddings
+
             # input shape: [b, h, s, head_dim]
             q, k = apply_multimodal_rotary_pos_emb(q, k, cos, sin, self.mrope_section)
 
             if first:
-                print(f"after rotary: {q=}")
-                print(f"after rotary: {k=}")
-                print(f"after rotary: {v=}")
+                ...
+                # print(f"after rotary: {q=}")
+                # print(f"after rotary: {k=}")
+                # print(f"after rotary: {v=}")
 
             v = rearrange(v, "s (h head_dim) -> 1 h s head_dim", head_dim=self.head_dim)
 
@@ -1456,18 +1350,19 @@ class Qwen2_5_OmniAttention(nn.Module):
             v = repeat_kv(v, self.num_key_value_groups)
 
             if first:
-                print(f"after repeat: {k=}")
-                print(f"after repeat: {v=}")
-                print(f"after repeat: {q=}")
+                ...
+                # print(f"after repeat: {k=}")
+                # print(f"after repeat: {v=}")
+                # print(f"after repeat: {q=}")
         else:
             q, k = self.rotary_emb(position_ids, q, k)
-
         if first:
-            print(f"{q.shape=}")
-            print(f"{k.shape=}")
-            print(f"{v.shape=}")
-            print(f"{forward_batch.out_cache_loc=}")
-            print(f"{forward_batch.encoder_out_cache_loc=}")
+            ...
+            # print(f"{q.shape=}")
+            # print(f"{k.shape=}")
+            # print(f"{v.shape=}")
+            # print(f"{forward_batch.out_cache_loc=}")
+            # print(f"{forward_batch.encoder_out_cache_loc=}")
 
         attn_output = self.attn(q, k, v, forward_batch)
 
@@ -1539,16 +1434,31 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.rope_scaling = config.rope_scaling
-        self.self_attn = Qwen2_5_OmniAttention(
+        rope_scaling = config.rope_scaling
+        rope_theta = getattr(config, "rope_theta", 1000000)
+        # self.self_attn = Qwen2_5_OmniAttention(
+        #     hidden_size=hidden_size,
+        #     num_heads=head_num,
+        #     num_kv_heads=kv_head_num,
+        #     layer_id=layer_idx,
+        #     quant_config=quant_config,
+        #     mrope_section=self.rope_scaling["mrope_section"],
+        #     prefix=add_prefix("self_attn", prefix),
+        # )
+        max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
+        self.self_attn = Qwen2Attention(
             hidden_size=hidden_size,
             num_heads=head_num,
             num_kv_heads=kv_head_num,
             layer_id=layer_idx,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
-            mrope_section=self.rope_scaling["mrope_section"],
+            # mrope_section=self.rope_scaling["mrope_section"],
             prefix=add_prefix("self_attn", prefix),
         )
+
         text_config = config
         self.mlp = Qwen2MLP(
             hidden_size=text_config.hidden_size,
@@ -1603,10 +1513,11 @@ class Qwen2_5OmniDecoderLayer(nn.Module):
             # print(f"hidden_states before proj {hidden_states=}")
             # print(f"Qwen2_5OmniDecoderLayer before self_attn: {hidden_states=}")
         hidden_states = self.self_attn(
-            position_ids=position_ids,
+            positions=position_ids,
+            # position_ids=position_ids,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
-            position_embeddings=position_embeddings,
+            # position_embeddings=position_embeddings,
         )
 
         if first:
@@ -1664,9 +1575,6 @@ class Qwen2_5OmniThinkerModel(nn.Module):
             input_embeds = self.embed_tokens(input_ids)
 
         hidden_states = input_embeds
-        # assert positions.dim() == 3, positions.shape
-        # create position embeddings to be shared across the decoder layers
-        # print(f"{hidden_states=}")
         position_embeddings = self.rotary_emb(hidden_states, positions)
 
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -1680,7 +1588,8 @@ class Qwen2_5OmniThinkerModel(nn.Module):
             )
             hidden_states = layer_output
             if first:
-                print(f"{layer_idx=} {hidden_states=}")
+                ...
+                # print(f"{layer_idx=} {hidden_states=}")
 
         if hidden_states.dim() == 1:
             hidden_states = hidden_states.unsqueeze(0)
@@ -1714,6 +1623,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         self.vocab_size = config.text_config.vocab_size
         self.model = Qwen2_5OmniThinkerModel(config.text_config)
+        # self.model = StableLmForCausalLM(config.text_config)
         text_config = config.text_config
         self.lm_head = ParallelLMHead(
             self.vocab_size,
@@ -1724,7 +1634,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
-        self.spatial_merge_size = config.vision_config.spatial_merge_size
         self.logits_processor = LogitsProcessor(config.text_config)
 
     def get_input_embeddings(self):
@@ -1745,9 +1654,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         return image_embeds
 
     def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
-        # audio_feature_lengths = torch.cat(
-        #     flatten_nested_list([item.audio_feature_len for item in items]), dim=0
-        # )
         input_features = (
             torch.cat([item.audio_features for item in items])
             .type(self.audio_tower.dtype)
@@ -1811,9 +1717,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
                 assert input_ids.shape[0] == 1, input_ids.shape
                 input_ids = input_ids.squeeze(0)
 
-        print(f"{input_ids=}")
-        print(f"{input_ids.shape=}")
-        print(f"{positions=}")
+        # print(f"{input_ids=}")
+        # print(f"{input_ids.shape=}")
+        # print(f"{positions=}")
         # print(f"{positions.shape=}")
         # print(f"{input_ids.shape=}")
         # print(f"{input_ids.tolist()=}")
@@ -1834,1250 +1740,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
         )
         # print(f"{positions=}")
         # print(f"{input_ids=}")
-        # 2. Merge text , audios , image and video
-        # if input_ids.shape[1] != 1:
-        #     if input_features is not None:
-        #         audio_feat_lengths, audio_output_lengths = (
-        #             self.audio_tower._get_feat_extract_output_lengths(
-        #                 audio_feature_lengths
-        #                 if audio_feature_lengths is not None
-        #                 else feature_attention_mask.sum(-1)
-        #             )
-        #         )
-        #         feature_lens = (
-        #             audio_feature_lengths
-        #             if audio_feature_lengths is not None
-        #             else feature_attention_mask.sum(-1)
-        #         )
-        #         audio_outputs = self.audio_tower(
-        #             input_features,
-        #             feature_lens=feature_lens,
-        #             aftercnn_lens=audio_feat_lengths,
-        #         )
-        #         audio_features = audio_outputs.last_hidden_state
-        #         if audio_features.shape[0] != sum(audio_output_lengths.tolist()):
-        #             raise ValueError(
-        #                 "length of audio_features should match audio_output_lengths"
-        #             )
-        #         audio_mask = (
-        #             (input_ids == self.config.audio_token_index)
-        #             .unsqueeze(-1)
-        #             .expand_as(inputs_embeds)
-        #         )
-        #         audio_features = audio_features.to(
-        #             inputs_embeds.device, inputs_embeds.dtype
-        #         )
-        #         inputs_embeds = inputs_embeds.masked_scatter(
-        #             audio_mask, audio_features
-        #         )
-        #         embeds_to_talker = embeds_to_talker.masked_scatter(
-        #             audio_mask, torch.zeros_like(audio_features)
-        #         )
-        #
-        #     if pixel_values is not None:
-        #         pixel_values = pixel_values.type(self.visual.get_dtype())
-        #         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-        #         image_mask = (
-        #             (input_ids == self.config.image_token_index)
-        #             .unsqueeze(-1)
-        #             .expand_as(inputs_embeds)
-        #         )
-        #         image_embeds = image_embeds.to(
-        #             inputs_embeds.device, inputs_embeds.dtype
-        #         )
-        #         inputs_embeds = inputs_embeds.masked_scatter(
-        #             image_mask, image_embeds
-        #         )
-        #         embeds_to_talker = embeds_to_talker.masked_scatter(
-        #             image_mask, torch.zeros_like(image_embeds)
-        #         )
-        #
-        #     if pixel_values_videos is not None:
-        #         pixel_values_videos = pixel_values_videos.type(
-        #             self.visual.get_dtype()
-        #         )
-        #         video_embeds = self.visual(
-        #             pixel_values_videos, grid_thw=video_grid_thw
-        #         )
-        #         video_mask = (
-        #             (input_ids == self.config.video_token_index)
-        #             .unsqueeze(-1)
-        #             .expand_as(inputs_embeds)
-        #         )
-        #         video_embeds = video_embeds.to(
-        #             inputs_embeds.device, inputs_embeds.dtype
-        #         )
-        #         inputs_embeds = inputs_embeds.masked_scatter(
-        #             video_mask, video_embeds
-        #         )
-        #         embeds_to_talker = embeds_to_talker.masked_scatter(
-        #             video_mask, torch.zeros_like(video_embeds)
-        #         )
-        #
-        #     if attention_mask is not None:
-        #         attention_mask = attention_mask.to(inputs_embeds.device)
         return self.logits_processor(input_ids, hs, self.lm_head, forward_batch)
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        cache_position=None,
-        position_ids=None,
-        use_cache=True,
-        pixel_values=None,
-        pixel_values_videos=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        input_features=None,
-        feature_attention_mask=None,
-        use_audio_in_video=False,
-        video_second_per_grid=None,
-        **kwargs,
-    ):
-        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
-        # Exception 1: when passing inputs_embeds, input_ids may be missing entries
-        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
-        if past_key_values is not None:
-            if inputs_embeds is not None:  # Exception 1
-                input_ids = input_ids[:, -cache_position.shape[0] :]
-            elif (
-                input_ids.shape[1] != cache_position.shape[0]
-            ):  # Default case (the "else", a no op, is Exception 2)
-                input_ids = input_ids[:, cache_position]
-
-        rope_deltas = kwargs.get("rope_deltas", None)
-        if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            input_features = input_features.permute(0, 2, 1)[
-                feature_attention_mask.bool()
-            ].permute(1, 0)
-        else:
-            audio_feature_lengths = None
-        if attention_mask is not None and position_ids is None:
-            if cache_position is None or (
-                cache_position is not None and cache_position[0] == 0
-            ):
-                delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
-                position_ids, rope_deltas, input_ids, attention_mask = (
-                    self.get_rope_index(
-                        input_ids,
-                        image_grid_thw,
-                        video_grid_thw,
-                        attention_mask,
-                        use_audio_in_video,
-                        audio_feature_lengths,
-                        video_second_per_grid,
-                    )
-                )
-                rope_deltas = rope_deltas - delta0
-
-            else:
-                batch_size, seq_length = input_ids.shape
-                delta = (
-                    cache_position[0] + rope_deltas
-                    if cache_position is not None and rope_deltas is not None
-                    else 0
-                )
-                position_ids = torch.arange(seq_length, device=input_ids.device)
-                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-                position_ids = position_ids.add(delta)
-                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-
-        if cache_position[0] != 0:
-            pixel_values = None
-            pixel_values_videos = None
-
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and cache_position[0] == 0:
-            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
-        else:
-            model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
-
-        if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
-            if model_inputs["inputs_embeds"] is not None:
-                batch_size, sequence_length, _ = inputs_embeds.shape
-                device = inputs_embeds.device
-            else:
-                batch_size, sequence_length = input_ids.shape
-                device = input_ids.device
-
-            dtype = self.lm_head.weight.dtype
-            min_dtype = torch.finfo(dtype).min
-
-            attention_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask,
-                sequence_length=sequence_length,
-                target_length=past_key_values.get_max_length(),
-                dtype=dtype,
-                device=device,
-                min_dtype=min_dtype,
-                cache_position=cache_position,
-                batch_size=batch_size,
-            )
-
-        model_inputs.update(
-            {
-                "position_ids": position_ids,
-                "past_key_values": past_key_values,
-                "use_cache": use_cache,
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
-                "pixel_values_videos": pixel_values_videos,
-                "image_grid_thw": image_grid_thw,
-                "video_grid_thw": video_grid_thw,
-                "input_features": input_features,
-                "feature_attention_mask": feature_attention_mask,
-                "audio_feature_lengths": audio_feature_lengths,
-                "rope_deltas": rope_deltas,
-            }
-        )
-        return model_inputs
-
-
-############################
-#       Start Talker       #
-############################
-
-
-@dataclass
-class Qwen2_5OmniTalkerCausalLMOutputWithPast(ModelOutput):
-    """
-    Base class for Qwen2.5OmniTalker causal language model (or autoregressive) outputs.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Language modeling loss (for next-token prediction).
-        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
-            `(batch_size, num_heads, sequence_length, embed_size_per_head)`)
-
-            Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used (see
-            `past_key_values` input) to speed up sequential decoding.
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-        attention_mask (`torch.FloatTensor`, *optional*):
-            Attentions mask, used to update attention mask and position_ids.
-        rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
-            The rope index difference between sequence length and multimodal rope.
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    logits: torch.FloatTensor = None
-    past_key_values: Optional[List[torch.FloatTensor]] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
-    attention_mask: Optional[torch.FloatTensor] = None
-    rope_deltas: Optional[torch.LongTensor] = None
-    thinker_reply_part: torch.FloatTensor = None
-
-
-# Using custom RoPE, will use LlamaRotaryEmbedding next version
-class RotaryEmbedding(nn.Module):
-    def __init__(self, dim, base=10000):
-        super().__init__()
-
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
-
-    def forward(self, x):
-        batch_size, seq_len = x.shape[0], x.shape[1]
-        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i , j -> i j", t.type_as(self.inv_freq), self.inv_freq)
-        freqs = torch.stack((freqs, freqs), dim=-1)
-        freqs = freqs.reshape(*freqs.shape[:-2], -1)
-        freqs = freqs.repeat(batch_size, *([1] * freqs.dim()))
-
-        return freqs.cos(), freqs.sin()
-
-
-class TDNNBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        dilation,
-    ):
-        super().__init__()
-        self.conv = nn.Conv1d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            dilation=dilation,
-            padding="same",
-            padding_mode="reflect",
-        )
-        self.activation = nn.ReLU()
-
-    def forward(self, x):
-        return self.activation(self.conv(x))
-
-
-class Res2NetBlock(torch.nn.Module):
-    """An implementation of Res2NetBlock w/ dilation.
-
-    Arguments
-    ---------
-    in_channels : int
-        The number of channels expected in the input.
-    out_channels : int
-        The number of output channels.
-    scale : int
-        The scale of the Res2Net block.
-    kernel_size: int
-        The kernel size of the Res2Net block.
-    dilation : int
-        The dilation of the Res2Net block.
-    """
-
-    def __init__(self, in_channels, out_channels, scale=8, kernel_size=3, dilation=1):
-        super().__init__()
-        assert in_channels % scale == 0
-        assert out_channels % scale == 0
-
-        in_channel = in_channels // scale
-        hidden_channel = out_channels // scale
-
-        self.blocks = nn.ModuleList(
-            [
-                TDNNBlock(
-                    in_channel,
-                    hidden_channel,
-                    kernel_size=kernel_size,
-                    dilation=dilation,
-                )
-                for i in range(scale - 1)
-            ]
-        )
-        self.scale = scale
-
-    def forward(self, x):
-        y = []
-        for i, x_i in enumerate(torch.chunk(x, self.scale, dim=1)):
-            if i == 0:
-                y_i = x_i
-            elif i == 1:
-                y_i = self.blocks[i - 1](x_i)
-            else:
-                y_i = self.blocks[i - 1](x_i + y_i)
-            y.append(y_i)
-        y = torch.cat(y, dim=1)
-        return y
-
-
-class SEBlock(nn.Module):
-    """An implementation of squeeze-and-excitation block.
-
-    Arguments
-    ---------
-    in_channels : int
-        The number of input channels.
-    se_channels : int
-        The number of output channels after squeeze.
-    out_channels : int
-        The number of output channels.
-    """
-
-    def __init__(self, in_channels, se_channels, out_channels):
-        super().__init__()
-
-        self.conv1 = nn.Conv1d(
-            in_channels=in_channels,
-            out_channels=se_channels,
-            kernel_size=1,
-            padding="same",
-            padding_mode="reflect",
-        )
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv1d(
-            in_channels=se_channels,
-            out_channels=out_channels,
-            kernel_size=1,
-            padding="same",
-            padding_mode="reflect",
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        s = x.mean(dim=2, keepdim=True)
-
-        s = self.relu(self.conv1(s))
-        s = self.sigmoid(self.conv2(s))
-
-        return s * x
-
-
-class AttentiveStatisticsPooling(nn.Module):
-    """This class implements an attentive statistic pooling layer for each channel.
-    It returns the concatenated mean and std of the input tensor.
-
-    Arguments
-    ---------
-    channels: int
-        The number of input channels.
-    attention_channels: int
-        The number of attention channels.
-    """
-
-    def __init__(self, channels, attention_channels=128):
-        super().__init__()
-
-        self.eps = 1e-12
-        self.tdnn = TDNNBlock(channels * 3, attention_channels, 1, 1)
-        self.tanh = nn.Tanh()
-        self.conv = nn.Conv1d(
-            in_channels=attention_channels,
-            out_channels=channels,
-            kernel_size=1,
-            padding="same",
-            padding_mode="reflect",
-        )
-
-    def _length_to_mask(self, length, max_len=None, dtype=None, device=None):
-        """Creates a binary mask for each sequence.
-
-        Reference: https://discuss.pytorch.org/t/how-to-generate-variable-length-mask/23397/3
-
-        Arguments
-        ---------
-        length : torch.LongTensor
-            Containing the length of each sequence in the batch. Must be 1D.
-        max_len : int
-            Max length for the mask, also the size of the second dimension.
-        dtype : torch.dtype, default: None
-            The dtype of the generated mask.
-        device: torch.device, default: None
-            The device to put the mask variable.
-
-        Returns
-        -------
-        mask : tensor
-            The binary mask.
-        """
-        assert len(length.shape) == 1
-
-        if max_len is None:
-            max_len = length.max().long().item()  # using arange to generate mask
-        mask = torch.arange(max_len, device=length.device, dtype=length.dtype).expand(
-            len(length), max_len
-        ) < length.unsqueeze(1)
-
-        mask = torch.as_tensor(mask, dtype=dtype, device=device)
-        return mask
-
-    def _compute_statistics(self, x, m, dim=2):
-        mean = (m * x).sum(dim)
-        std = torch.sqrt(
-            (m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(self.eps)
-        )
-        return mean, std
-
-    def forward(self, x):
-        """Calculates mean and std for a batch (input tensor).
-
-        Arguments
-        ---------
-        x : torch.Tensor
-            Tensor of shape [N, C, L].
-        """
-        L = x.shape[-1]
-
-        lengths = torch.ones(x.shape[0], device=x.device)
-
-        # Make binary mask of shape [N, 1, L]
-        mask = self._length_to_mask(
-            lengths * L, max_len=L, dtype=x.dtype, device=x.device
-        )
-        mask = mask.unsqueeze(1)
-
-        # Expand the temporal context of the pooling layer by allowing the
-        # self-attention to look at global properties of the utterance.
-        total = mask.sum(dim=2, keepdim=True)
-
-        mean, std = self._compute_statistics(x, mask / total)
-        mean = mean.unsqueeze(2).repeat(1, 1, L)
-        std = std.unsqueeze(2).repeat(1, 1, L)
-        attn = torch.cat([x, mean, std], dim=1)
-
-        # Apply layers
-        attn = self.conv(self.tanh(self.tdnn(attn)))
-
-        # Filter out zero-paddings
-        attn = attn.masked_fill(mask == 0, float("-inf"))
-
-        attn = F.softmax(attn, dim=2)
-        mean, std = self._compute_statistics(x, attn)
-        # Append mean and std of the batch
-        pooled_stats = torch.cat((mean, std), dim=1)
-        pooled_stats = pooled_stats.unsqueeze(2)
-
-        return pooled_stats
-
-
-class SERes2NetBlock(nn.Module):
-    """An implementation of building block in ECAPA-TDNN, i.e.,
-    TDNN-Res2Net-TDNN-SEBlock.
-
-    Arguments
-    ----------
-    out_channels: int
-        The number of output channels.
-    res2net_scale: int
-        The scale of the Res2Net block.
-    kernel_size: int
-        The kernel size of the TDNN blocks.
-    dilation: int
-        The dilation of the Res2Net block.
-    activation : torch class
-        A class for constructing the activation layers.
-    """
-
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        res2net_scale=8,
-        se_channels=128,
-        kernel_size=1,
-        dilation=1,
-    ):
-        super().__init__()
-        self.out_channels = out_channels
-        self.tdnn1 = TDNNBlock(
-            in_channels,
-            out_channels,
-            kernel_size=1,
-            dilation=1,
-        )
-        self.res2net_block = Res2NetBlock(
-            out_channels, out_channels, res2net_scale, kernel_size, dilation
-        )
-        self.tdnn2 = TDNNBlock(
-            out_channels,
-            out_channels,
-            kernel_size=1,
-            dilation=1,
-        )
-        self.se_block = SEBlock(out_channels, se_channels, out_channels)
-
-    def forward(self, x):
-        residual = x
-
-        x = self.tdnn1(x)
-        x = self.res2net_block(x)
-        x = self.tdnn2(x)
-        x = self.se_block(x)
-
-        return x + residual
-
-
-class ECAPA_TDNN(torch.nn.Module):
-    """An implementation of the speaker embedding model in a paper.
-    "ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation in
-    TDNN Based Speaker Verification" (https://arxiv.org/abs/2005.07143).
-
-    Arguments
-    ---------
-    device : str
-        Device used, e.g., "cpu" or "cuda".
-    activation : torch class
-        A class for constructing the activation layers.
-    channels : list of ints
-        Output channels for TDNN/SERes2Net layer.
-    kernel_sizes : list of ints
-        List of kernel sizes for each layer.
-    dilations : list of ints
-        List of dilations for kernels in each layer.
-    lin_neurons : int
-        Number of neurons in linear layers.
-    """
-
-    def __init__(self, config: Qwen2_5OmniDiTConfig):
-        super().__init__()
-        assert len(config.enc_channels) == len(config.enc_kernel_sizes)
-        assert len(config.enc_channels) == len(config.enc_dilations)
-        self.channels = config.enc_channels
-        self.blocks = nn.ModuleList()
-
-        # The initial TDNN layer
-        self.blocks.append(
-            TDNNBlock(
-                config.mel_dim,
-                config.enc_channels[0],
-                config.enc_kernel_sizes[0],
-                config.enc_dilations[0],
-            )
-        )
-
-        # SE-Res2Net layers
-        for i in range(1, len(config.enc_channels) - 1):
-            self.blocks.append(
-                SERes2NetBlock(
-                    config.enc_channels[i - 1],
-                    config.enc_channels[i],
-                    res2net_scale=config.enc_res2net_scale,
-                    se_channels=config.enc_se_channels,
-                    kernel_size=config.enc_kernel_sizes[i],
-                    dilation=config.enc_dilations[i],
-                )
-            )
-
-        # Multi-layer feature aggregation
-        self.mfa = TDNNBlock(
-            config.enc_channels[-1],
-            config.enc_channels[-1],
-            config.enc_kernel_sizes[-1],
-            config.enc_dilations[-1],
-        )
-
-        # Attentive Statistical Pooling
-        self.asp = AttentiveStatisticsPooling(
-            config.enc_channels[-1],
-            attention_channels=config.enc_attention_channels,
-        )
-
-        # Final linear transformation
-        self.fc = nn.Conv1d(
-            in_channels=config.enc_channels[-1] * 2,
-            out_channels=config.enc_dim,
-            kernel_size=1,
-            padding="same",
-            padding_mode="reflect",
-        )
-
-    def forward(self, x):
-        """Returns the embedding vector.
-
-        Arguments
-        ---------
-        x : torch.Tensor
-            Tensor of shape (batch, time, channel).
-        """
-        # Minimize transpose for efficiency
-        x = x.transpose(1, 2)
-
-        xl = []
-        for layer in self.blocks:
-            x = layer(x)
-            xl.append(x)
-
-        # Multi-layer feature aggregation
-        x = torch.cat(xl[1:], dim=1)
-        x = self.mfa(x)
-
-        # Attentive Statistical Pooling
-        x = self.asp(x)
-
-        # Final linear transformation
-        x = self.fc(x)
-
-        x = x.squeeze(-1)
-        return x
-
-
-class InputEmbedding(nn.Module):
-    def __init__(self, config: Qwen2_5OmniDiTConfig):
-        super().__init__()
-        self.proj = nn.Linear(
-            config.mel_dim + config.enc_dim + config.enc_emb_dim + config.emb_dim,
-            config.hidden_size,
-        )
-        self.spk_encoder = ECAPA_TDNN(config)
-
-    def forward(
-        self,
-        x,
-        spk,
-        cond,
-        code_embed,
-        drop_audio_cond=False,
-        code_embed_uncond=None,
-        cfg=True,
-    ):
-        if cfg:
-            x = torch.cat([x, x], dim=0)
-            spk = torch.cat([spk, torch.zeros_like(spk)], dim=0)
-            cond = torch.cat([cond, torch.zeros_like(cond)], dim=0)
-            code_embed = torch.cat([code_embed, code_embed_uncond], dim=0)
-        elif drop_audio_cond:  # cfg for cond audio
-            cond = torch.zeros_like(cond)
-            spk = torch.zeros_like(spk)
-        cond = self.spk_encoder(cond).unsqueeze(1).repeat(1, x.size(1), 1)
-        x = self.proj(torch.cat((x, cond, code_embed, spk), dim=-1))
-
-        return x
-
-
-# Transformer backbone using DiT blocks
-class CodecEmbedding(nn.Module):
-    def __init__(self, codec_num_embeds, codec_dim, repeats):
-        super().__init__()
-        self.repeats = repeats
-        self.codec_embed = nn.Embedding(codec_num_embeds + 1, codec_dim)
-
-    def forward(self, code, drop_code=False):
-        if drop_code:
-            code = torch.zeros_like(code)
-        code_embed = self.codec_embed(code)
-
-        code_embed = torch.repeat_interleave(code_embed, repeats=self.repeats, dim=1)
-        return code_embed
-
-
-# AdaLayerNormZero
-# return with modulated x for attn input, and params for later mlp modulation
-class AdaLayerNormZero(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-
-        self.silu = nn.SiLU()
-        self.linear = nn.Linear(dim, dim * 6)
-
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-
-    def forward(self, x, emb=None):
-        emb = self.linear(self.silu(emb))
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = torch.chunk(
-            emb, 6, dim=1
-        )
-
-        x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
-        return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
-
-
-# AdaLayerNormZero for final layer
-# return only with modulated x for attn input, cuz no more mlp modulation
-class AdaLayerNormZero_Final(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-
-        self.silu = nn.SiLU()
-        self.linear = nn.Linear(dim, dim * 2)
-
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-
-    def forward(self, x, emb):
-        emb = self.linear(self.silu(emb))
-        scale, shift = torch.chunk(emb, 2, dim=1)
-
-        x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
-        return x
-
-
-# FeedForward
-class FeedForward(nn.Module):
-    def __init__(self, dim, mult=4, dropout=0.0):
-        super().__init__()
-        inner_dim = int(dim * mult)
-
-        self.ff = nn.ModuleList(
-            [
-                nn.Linear(dim, inner_dim),
-                nn.GELU(approximate="tanh"),
-                nn.Dropout(dropout),
-                nn.Linear(inner_dim, dim),
-            ]
-        )
-
-    def forward(self, x):
-        for layer in self.ff:
-            x = layer(x)
-        return x
-
-
-# Modified from Llama with a different rotate function, will fixed in next release
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-
-    def rotate_half_codec(x):
-        # x = rearrange(x, "... (d r) -> ... d r", r=2)
-        x = x.reshape(*x.shape[:-1], -1, 2)
-        x1, x2 = x.unbind(dim=-1)
-        x = torch.stack((-x2, x1), dim=-1)
-        return x.reshape(*x.shape[:-2], -1)
-
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half_codec(q) * sin)
-    k_embed = (k * cos) + (rotate_half_codec(k) * sin)
-    return q_embed, k_embed
-
-
-class DiTAttention(nn.Module):
-    def __init__(self, config: Qwen2_5OmniDiTConfig):
-        super().__init__()
-
-        self.config = config
-        self.dim = config.hidden_size
-        self.heads = config.num_attention_heads
-        self.inner_dim = config.head_dim * config.num_attention_heads
-        self.dropout = config.dropout
-        self._attn_implementation = config._attn_implementation
-        self.is_causal = False
-
-        self.to_q = nn.Linear(config.hidden_size, self.inner_dim)
-        self.to_k = nn.Linear(config.hidden_size, self.inner_dim)
-        self.to_v = nn.Linear(config.hidden_size, self.inner_dim)
-
-        self.to_out = nn.ModuleList(
-            [nn.Linear(self.inner_dim, config.hidden_size), nn.Dropout(config.dropout)]
-        )
-
-    def forward(
-        self,
-        x,  # noised input x
-        rope=None,  # rotary position embedding for x
-        mask=None,
-    ) -> torch.Tensor:
-        batch_size = x.shape[0]
-
-        # `sample` projections.
-        query = self.to_q(x)
-        key = self.to_k(x)
-        value = self.to_v(x)
-
-        # attention
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // self.heads
-        query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
-
-        # apply rotary position embedding
-        # Due to training process, only first head is applied with RoPE, will be fixed at next release
-        cos, sin = rope
-        query[:, :1], key[:, :1] = apply_rotary_pos_emb(
-            query[:, :1], key[:, :1], cos, sin
-        )
-
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
-        x, _ = attention_interface(
-            self,
-            query,
-            key,
-            value,
-            attention_mask=mask,
-            is_causal=False,
-        )
-
-        # mask. e.g. inference got a batch with different target durations, mask out the padding
-        # x = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
-        x = x.reshape(batch_size, -1, self.heads * head_dim)
-        x = x.to(query.dtype)
-
-        # linear proj
-        x = self.to_out[0](x)
-        # dropout
-        x = self.to_out[1](x)
-
-        return x
-
-
-# time step conditioning embedding
-class SinusPositionEmbedding(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x, scale=1000):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device).float() * -emb)
-        emb = scale * x.unsqueeze(1) * emb.unsqueeze(0)
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb.type_as(x)
-
-
-class TimestepEmbedding(nn.Module):
-    def __init__(self, dim, freq_embed_dim=256):
-        super().__init__()
-        self.time_embed = SinusPositionEmbedding(freq_embed_dim)
-        self.time_mlp = nn.ModuleList(
-            [nn.Linear(freq_embed_dim, dim), nn.SiLU(), nn.Linear(dim, dim)]
-        )
-
-    def forward(self, timestep):  # noqa: F821
-        time_hidden = self.time_embed(timestep)
-        time_hidden = time_hidden.to(timestep.dtype)
-        for layer in self.time_mlp:
-            time_hidden = layer(time_hidden)  # b d
-        return time_hidden
-
-
-class DiTBlock(nn.Module):
-    def __init__(
-        self, config: Qwen2_5OmniDiTConfig, look_ahead_block=0, look_backward_block=0
-    ):
-        super().__init__()
-        self.attn_norm = AdaLayerNormZero(config.hidden_size)
-
-        self.attn = DiTAttention(config)
-        self.look_ahead_block = look_ahead_block
-        self.look_backward_block = look_backward_block
-        self.ff_norm = nn.LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
-        self.ff = FeedForward(
-            dim=config.hidden_size, mult=config.ff_mult, dropout=config.dropout
-        )
-
-    def forward(
-        self, x, t, rope=None, block_diff=None
-    ):  # x: noised input, t: time embedding
-        # pre-norm & modulation for attention input
-        norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
-
-        # attention
-        attn_output = self.attn(
-            x=norm,
-            rope=rope,
-            mask=(block_diff >= -float(self.look_backward_block))
-            & (block_diff <= float(self.look_ahead_block)),
-        )
-
-        # process attention output for input x
-        x = x + gate_msa.unsqueeze(1) * attn_output
-
-        norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        ff_output = self.ff(norm)
-        x = x + gate_mlp.unsqueeze(1) * ff_output
-
-        return x
-
-
-class SnakeBeta(nn.Module):
-    """
-    A modified Snake function which uses separate parameters for the magnitude of the periodic components
-    Shape:
-        - Input: (B, C, T)
-        - Output: (B, C, T), same shape as the input
-    Parameters:
-        - alpha - trainable parameter that controls frequency
-        - beta - trainable parameter that controls magnitude
-    References:
-        - This activation function is a modified version based on this paper by Liu Ziyin, Tilman Hartwig, Masahito Ueda:
-        https://arxiv.org/abs/2006.08195
-    """
-
-    def __init__(self, in_features, alpha=1.0):
-        super().__init__()
-        self.in_features = in_features
-
-        # initialize alpha
-        self.alpha = Parameter(torch.zeros(in_features) * alpha)
-        self.beta = Parameter(torch.zeros(in_features) * alpha)
-
-        self.no_div_by_zero = 0.000000001
-
-    def forward(self, x):
-        """
-        Forward pass of the function.
-        Applies the function to the input elementwise.
-        SnakeBeta ∶= x + 1/b * sin^2 (xa)
-        """
-        alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
-        beta = self.beta.unsqueeze(0).unsqueeze(-1)
-        alpha = torch.exp(alpha)
-        beta = torch.exp(beta)
-        x = x + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
-            torch.sin(x * alpha), 2
-        )
-
-        return x
-
-
-def kaiser_sinc_filter1d(
-    cutoff, half_width, kernel_size
-):  # return filter [1,1,kernel_size]
-    even = kernel_size % 2 == 0
-    half_size = kernel_size // 2
-
-    # For kaiser window
-    delta_f = 4 * half_width
-    A = 2.285 * (half_size - 1) * math.pi * delta_f + 7.95
-    if A > 50.0:
-        beta = 0.1102 * (A - 8.7)
-    elif A >= 21.0:
-        beta = 0.5842 * (A - 21) ** 0.4 + 0.07886 * (A - 21.0)
-    else:
-        beta = 0.0
-    window = torch.kaiser_window(
-        kernel_size, beta=beta, periodic=False, dtype=torch.float32
-    )
-
-    # ratio = 0.5/cutoff -> 2 * cutoff = 1 / ratio
-    if even:
-        time = torch.arange(-half_size, half_size) + 0.5
-    else:
-        time = torch.arange(kernel_size) - half_size
-    if cutoff == 0:
-        filter_ = torch.zeros_like(time)
-    else:
-        filter_ = 2 * cutoff * window * torch.sinc(2 * cutoff * time)
-        # Normalize filter to have sum = 1, otherwise we will have a small leakage
-        # of the constant component in the input signal.
-        filter_ /= filter_.sum()
-        filter = filter_.view(1, 1, kernel_size)
-
-    return filter
-
-
-class UpSample1d(nn.Module):
-    def __init__(self, ratio=2, kernel_size=None):
-        super().__init__()
-        self.ratio = ratio
-        self.kernel_size = (
-            int(6 * ratio // 2) * 2 if kernel_size is None else kernel_size
-        )
-        self.stride = ratio
-        self.pad = self.kernel_size // ratio - 1
-        self.pad_left = self.pad * self.stride + (self.kernel_size - self.stride) // 2
-        self.pad_right = (
-            self.pad * self.stride + (self.kernel_size - self.stride + 1) // 2
-        )
-        filter = kaiser_sinc_filter1d(
-            cutoff=0.5 / ratio, half_width=0.6 / ratio, kernel_size=self.kernel_size
-        )
-        self.register_buffer("filter", filter, persistent=False)
-
-    # x: [B, C, T]
-    def forward(self, x):
-        _, C, _ = x.shape
-
-        x = F.pad(x, (self.pad, self.pad), mode="replicate")
-        x = self.ratio * F.conv_transpose1d(
-            x, self.filter.expand(C, -1, -1), stride=self.stride, groups=C
-        )
-        x = x[..., self.pad_left : -self.pad_right]
-
-        return x
-
-
-class DownSample1d(nn.Module):
-    def __init__(self, ratio=2, kernel_size=None):
-        super().__init__()
-        cutoff = 0.5 / ratio
-        half_width = 0.6 / ratio
-        if cutoff < -0.0:
-            raise ValueError("Minimum cutoff must be larger than zero.")
-        if cutoff > 0.5:
-            raise ValueError("A cutoff above 0.5 does not make sense.")
-        self.kernel_size = kernel_size
-        self.even = kernel_size % 2 == 0
-        self.pad_left = kernel_size // 2 - int(self.even)
-        self.pad_right = kernel_size // 2
-        self.stride = ratio
-        filter = kaiser_sinc_filter1d(cutoff, half_width, kernel_size)
-        self.register_buffer("filter", filter, persistent=False)
-
-    def forward(self, x):
-        _, C, _ = x.shape
-
-        x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
-        out = F.conv1d(x, self.filter.expand(C, -1, -1), stride=self.stride, groups=C)
-
-        return out
-
-
-class TorchActivation1d(nn.Module):
-    def __init__(
-        self,
-        activation,
-        up_ratio: int = 2,
-        down_ratio: int = 2,
-        up_kernel_size: int = 12,
-        down_kernel_size: int = 12,
-    ):
-        super().__init__()
-        self.up_ratio = up_ratio
-        self.down_ratio = down_ratio
-        self.act = activation
-        self.upsample = UpSample1d(up_ratio, up_kernel_size)
-        self.downsample = DownSample1d(down_ratio, down_kernel_size)
-
-    # x: [B,C,T]
-    def forward(self, x):
-        x = self.upsample(x)
-        x = self.act(x)
-        x = self.downsample(x)
-
-        return x
-
-
-class AMPBlock(torch.nn.Module):
-    def __init__(
-        self,
-        channels,
-        kernel_size=3,
-        dilation=(1, 3, 5),
-    ):
-        super().__init__()
-
-        self.convs1 = nn.ModuleList(
-            [
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[0],
-                    padding=self._get_padding(kernel_size, dilation[0]),
-                ),
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[1],
-                    padding=self._get_padding(kernel_size, dilation[1]),
-                ),
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[2],
-                    padding=self._get_padding(kernel_size, dilation[2]),
-                ),
-            ]
-        )
-
-        self.convs2 = nn.ModuleList(
-            [
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    padding=self._get_padding(kernel_size, 1),
-                ),
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    padding=self._get_padding(kernel_size, 1),
-                ),
-                nn.Conv1d(
-                    channels,
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    padding=self._get_padding(kernel_size, 1),
-                ),
-            ]
-        )
-
-        self.num_layers = len(self.convs1) + len(
-            self.convs2
-        )  # total number of conv layers
-
-        self.activations = nn.ModuleList(
-            [
-                TorchActivation1d(activation=SnakeBeta(channels))
-                for _ in range(self.num_layers)
-            ]
-        )
-
-    def _get_padding(self, kernel_size, dilation=1):
-        return int((kernel_size * dilation - dilation) / 2)
-
-    def forward(self, x):
-        acts1, acts2 = self.activations[::2], self.activations[1::2]
-        for c1, c2, a1, a2 in zip(self.convs1, self.convs2, acts1, acts2):
-            xt = a1(x)
-            xt = c1(xt)
-            xt = a2(xt)
-            xt = c2(xt)
-            x = xt + x
-
-        return x
-
-
-class ODESolverRK4:
-    def __init__(self, func, y0):
-        self.func = func
-        self.y0 = y0
-
-        self._one_third = 1 / 3
-        self._two_thirds = 2 / 3
-
-    def _rk4_alt_step_func(self, func, t0, dt, t1, y0, f0=None):
-        k1 = f0
-        if k1 is None:
-            k1 = func(t0, y0)
-        k2 = func(t0 + dt * self._one_third, y0 + dt * k1 * self._one_third)
-        k3 = func(t0 + dt * self._two_thirds, y0 + dt * (k2 - k1 * self._one_third))
-        k4 = func(t1, y0 + dt * (k1 - k2 + k3))
-        return (k1 + 3 * (k2 + k3) + k4) * dt * 0.125
-
-    def _step_func(self, func, t0, dt, t1, y0):
-        f0 = func(t0, y0)
-        return self._rk4_alt_step_func(func, t0, dt, t1, y0, f0=f0), f0
-
-    def _linear_interp(self, t0, t1, y0, y1, t):
-        if t == t0:
-            return y0
-        if t == t1:
-            return y1
-        slope = (t - t0) / (t1 - t0)
-        return y0 + slope * (y1 - y0)
-
-    def integrate(self, t):
-        solution = torch.empty(
-            len(t), *self.y0.shape, dtype=self.y0.dtype, device=self.y0.device
-        )
-        solution[0] = self.y0
-
-        j = 1
-        y0 = self.y0
-        for t0, t1 in zip(t[:-1], t[1:]):
-            dt = t1 - t0
-            dy, f0 = self._step_func(self.func, t0, dt, t1, y0)
-            y1 = y0 + dy
-
-            while j < len(t) and t1 >= t[j]:
-                solution[j] = self._linear_interp(t0, t1, y0, y1, t[j])
-                j += 1
-            y0 = y1
-
-        return solution
 
 
 ############################
@@ -3165,38 +1828,10 @@ class Qwen2_5OmniModel(nn.Module):
         loaded_params: Set[str] = set()
         # print(f"{params_dict.keys()}")
         for name, loaded_weight in weights:
-            # print(f"{name=}")
 
             if "rotary_emb.inv_freq" in name:
                 continue
-            # if ".self_attn.o_proj" in name:
-            #     name = name.replace(".self_attn.o_proj", ".o_proj")
-            # if "visual" in name:
-            #     name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
-            #     param = params_dict[name]
-            #     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            #     weight_loader(param, loaded_weight)
-            #     continue
-            # print(f"{name=}")
-            # print(f"{loaded_weight.shape=}")
-
-            # print(f"{name=}")
-            # if "thinker" in name:
-            #     name = name.replace(".o_proj", ".proj")
-
-            # if "thinker" in name:
-            #     name = name.replace(".o_proj", ".proj")
-            # print(f"{name=}")
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                # continue
-                # if "mlp." in name:
-                #     continue
-                # ...
-
-                # elif "self_attn." in name:
-                #     continue
-                # else:
-                #     ...
                 if weight_name not in name:
                     continue
 

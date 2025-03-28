@@ -818,7 +818,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         use_audio_in_video: bool = False,
         audio_seqlens: Optional[torch.LongTensor] = None,
         tokens_per_second: Optional[int] = None,
-    ) -> Tuple[List[List[int]], int]:
+    ) -> Tuple[torch.Tensor, int]:
         """
         Get mrope input positions and delta value.
 
@@ -924,22 +924,25 @@ class MRotaryEmbedding(RotaryEmbedding):
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
 
-        return llm_positions.tolist(), mrope_position_delta
+        return llm_positions, mrope_position_delta
 
     @staticmethod
     def get_next_input_positions(
         mrope_position_delta: int,
         context_len: int,
         seq_len: int,
-    ) -> List[List[int]]:
-        return [
-            list(
-                range(
-                    context_len + mrope_position_delta, seq_len + mrope_position_delta
+    ) -> torch.Tensor:
+        return torch.tensor(
+            [
+                list(
+                    range(
+                        context_len + mrope_position_delta,
+                        seq_len + mrope_position_delta,
+                    )
                 )
-            )
-            for _ in range(3)
-        ]
+                for _ in range(3)
+            ]
+        )
 
     @staticmethod
     def get_llm_pos_ids_for_vision(
@@ -1280,7 +1283,7 @@ class MRotaryEmbedding(RotaryEmbedding):
 
     @staticmethod
     def get_rope_index(
-        input_ids: Optional[torch.LongTensor],
+        input_ids: Optional[torch.Tensor],
         config: Qwen2_5OmniThinkerConfig,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
