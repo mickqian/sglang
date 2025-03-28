@@ -182,9 +182,9 @@ class VisionSdpaAttention(nn.Module):
                 causal_mask = attention_mask[:, :, :, : k.shape[-1]]
                 if first > 0:
                     print(f"{k.shape=}")
-                    print(f"{attention_mask.shape=}")
-                    print(f"{k.shape[-1]=}")
-                    print(f"{causal_mask=}")
+                    # print(f"{attention_mask.shape=}")
+                    # print(f"{k.shape[-1]=}")
+                    # print(f"{causal_mask=}")
                 attn_weights = attn_weights + causal_mask
             # attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
             # attn_weights = attn_weights + attention_mask

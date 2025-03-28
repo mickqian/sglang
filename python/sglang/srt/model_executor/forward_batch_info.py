@@ -378,14 +378,18 @@ class ForwardBatch:
         self, model_runner: ModelRunner, batch: ModelWorkerBatch
     ):
         device = model_runner.device
-        hf_config = model_runner.model_config.hf_config
+        model_config = model_runner.model_config
+        hf_config = model_config.hf_config
+        is_omni = hf_config.architectures[0] == 'Qwen2_5OmniModel'
+        if is_omni:
+            hf_config = hf_config.thinker_config
         mrope_positions_list = [None] * self.seq_lens.shape[0]
         if self.forward_mode.is_decode():
             for i, _ in enumerate(mrope_positions_list):
                 mrope_position_delta = (
                     0
                     if batch.multimodal_inputs[i] is None
-                    or batch.multimodal_inputs[i].mrope_position_delta is None
+                       or batch.multimodal_inputs[i].mrope_position_delta is None
                     else batch.multimodal_inputs[i].mrope_position_delta
                 )
                 mrope_positions_list[i] = MRotaryEmbedding.get_next_input_positions(
@@ -404,33 +408,83 @@ class ForwardBatch:
                 if multimodal_inputs is None:
                     # text only
                     mrope_positions = [
-                        [
-                            pos
-                            for pos in range(
-                                extend_prefix_len, extend_prefix_len + extend_seq_len
-                            )
-                        ]
-                    ] * 3
+                                          [
+                                              pos
+                                              for pos in range(
+                                              extend_prefix_len, extend_prefix_len + extend_seq_len
+                                          )
+                                          ]
+                                      ] * 3
                 else:
-                    # TODO: current qwen2-vl do not support radix cache since mrope position calculation
-                    mrope_positions, mrope_position_delta = (
-                        MRotaryEmbedding.get_input_positions(
-                            input_tokens=self.input_ids[
-                                extend_start_loc : extend_start_loc + extend_seq_len
-                            ],
-                            image_grid_thw=multimodal_inputs.image_grid_thws,
-                            video_grid_thw=multimodal_inputs.video_grid_thws,
-                            image_token_id=multimodal_inputs.im_token_id,
-                            video_token_id=multimodal_inputs.video_token_id,
-                            vision_start_token_id=hf_config.vision_start_token_id,
-                            vision_end_token_id=hf_config.vision_end_token_id,
-                            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-                            context_len=0,
-                            seq_len=len(self.input_ids),
-                            second_per_grid_ts=multimodal_inputs.second_per_grid_ts,
-                            tokens_per_second=hf_config.vision_config.tokens_per_second,
-                        )
+                    image_grid_thws_list = [
+                        item.image_grid_thws
+                        for item in mm_input.items
+                        if item.image_grid_thws is not None
+                    ]
+                    image_grid_thw = (
+                        None
+                        if len(image_grid_thws_list) == 0
+                        else torch.cat(image_grid_thws_list, dim=0)
                     )
+
+                    video_grid_thws_list = [
+                        item.video_grid_thws
+                        for item in mm_input.items
+                        if item.video_grid_thws is not None
+                    ]
+                    video_grid_thw = (
+                        None
+                        if len(video_grid_thws_list) == 0
+                        else torch.cat(video_grid_thws_list, dim=0)
+                    )
+
+                    second_per_grid_ts_list = [
+                        item.second_per_grid_ts
+                        for item in mm_input.items
+                        if item.second_per_grid_ts is not None
+                    ]
+                    second_per_grid_ts = (
+                        None
+                        if len(second_per_grid_ts_list) == 0
+                        else torch.cat(second_per_grid_ts_list, dim=0)
+                    )
+                    if is_omni:
+                        mrope_positions, mrope_position_delta, input_ids = (
+                            MRotaryEmbedding.get_rope_index(
+
+                                raw_input_ids=self.input_ids[
+                                              extend_start_loc: extend_start_loc + extend_seq_len
+                                              ].unsqueeze(0),
+                                forward_mode=self.forward_mode,
+                                image_grid_thw=image_grid_thw,
+                                video_grid_thw=video_grid_thw,
+                                config=hf_config,
+                                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                second_per_grids=second_per_grid_ts,
+                                # tokens_per_second=hf_config.vision_config.tokens_per_second,
+                            )
+                        )
+                        self.input_ids = input_ids
+                    else:
+                        # TODO: current qwen2-vl do not support radix cache since mrope position calculation
+                        mrope_positions, mrope_position_delta = (
+                            MRotaryEmbedding.get_input_positions(
+                                input_tokens=self.input_ids[
+                                             extend_start_loc: extend_start_loc + extend_seq_len
+                                             ].tolist(),
+                                image_grid_thw=image_grid_thw,
+                                video_grid_thw=video_grid_thw,
+                                image_token_id=model_config.image_token_id,
+                                video_token_id=model_config.video_token_id,
+                                vision_start_token_id=hf_config.vision_start_token_id,
+                                vision_end_token_id=hf_config.vision_end_token_id,
+                                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                context_len=0,
+                                seq_len=len(self.input_ids),
+                                second_per_grid_ts=second_per_grid_ts,
+                                tokens_per_second=hf_config.vision_config.tokens_per_second,
+                            )
+                        )
                     batch.multimodal_inputs[i].mrope_position_delta = (
                         mrope_position_delta
                     )

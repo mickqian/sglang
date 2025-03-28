@@ -205,6 +205,9 @@ def get_embedding_and_mask(
         placeholder_tensor,
     ).unsqueeze(-1)
 
+    print(f"{input_ids.tolist()=}")
+    print(f"{special_image_mask.shape=}")
+    print(f"{embedding.shape=}")
     num_image_tokens_in_input_ids = special_image_mask.sum()
     if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
         logger.warning(
@@ -253,6 +256,7 @@ def embed_mm_inputs(
             final embedding: Optional[torch.Tensor]
     """
 
+    print(f"embed mm inputs")
     if mm_inputs is None:
         return None
 
@@ -269,6 +273,8 @@ def embed_mm_inputs(
     appearing_pad_values = torch.unique(
         input_ids[placeholder_masks], return_counts=False
     )
+
+    print(f"{appearing_pad_values=}")
 
     if appearing_pad_values.numel() == 0:
         # all been prefixed
@@ -294,6 +300,7 @@ def embed_mm_inputs(
             any(True for item in appearing_items if item.is_image())
             and image_data_embedding_func
         ):
+            print(f"embedding image")
             embedding, mask = get_embedding_and_mask(
                 data_embedding_func=image_data_embedding_func,
                 appearing_items=[item for item in appearing_items if item.is_image()],
@@ -324,6 +331,8 @@ def embed_mm_inputs(
         input_ids.clamp_(min=0, max=vocab_size - 1)
         inputs_embeds = input_embedding(input_ids)
 
+        print(f"{embeddings=}")
+        print(f"{masks=}")
         # 4. scatter embeddings into input embedding
         for embedding, mask in zip(embeddings, masks):
             mask = mask.expand_as(inputs_embeds).to(inputs_embeds.device)

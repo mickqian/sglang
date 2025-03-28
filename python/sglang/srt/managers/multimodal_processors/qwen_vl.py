@@ -55,6 +55,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         processor = self._processor
         kwargs = {}
         if self.arch == Qwen2_5OmniModel.__name__:
+            # kwargs["padding"] = True
             # not supported for now
             ...
         else:
@@ -165,6 +166,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         resized_images = base_output.images
         if base_output.images:
+            print(f"resizing")
             resize_tasks = [resize_image_async(image) for image in resized_images]
             resized_images = await asyncio.gather(*resize_tasks)
 
@@ -177,9 +179,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         items = []
 
         if (
-            hasattr(res, "pixel_values")
-            and res["pixel_values"]
-            and len(res["pixel_values"]) != 0
+            "pixel_values" in res
+            and res["pixel_values"] is not None
         ):
             image_grid_thws = torch.concat([res["image_grid_thw"]])
             item = MultimodalDataItem(
@@ -190,7 +191,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             items += [item]
 
         if (
-            hasattr(res, "input_features")
+            "input_features" in res
             and res["input_features"] is not None
             and len(res["input_features"]) != 0
         ):

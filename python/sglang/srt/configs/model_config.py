@@ -169,12 +169,16 @@ class ModelConfig:
 
         # Cache attributes
         self.hf_eos_token_id = self.get_hf_eos_token_id()
-        print(f"111111 {self.hf_eos_token_id=}")
+
+        config = self.hf_config
+
+        if config.architectures[0] == 'Qwen2_5OmniModel':
+            config = config.thinker_config
 
         # multimodal
-        self.image_token_id = getattr(self.hf_config, "image_token_id", None)
-        self.video_token_id = getattr(self.hf_config, "video_token_id", None)
-        self.audio_token_id = getattr(self.hf_config, "audio_token_id", None)
+        self.image_token_id = getattr(config, "image_token_id", None) or getattr(config, "image_token_index", None)
+        self.video_token_id = getattr(config, "video_token_id", None) or getattr(config, "video_token_index", None)
+        self.audio_token_id = getattr(config, "audio_token_id", None) or getattr(config, "audio_token_index", None)
 
     # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/config.py#L289
     def get_total_num_kv_heads(self) -> int:
@@ -206,6 +210,11 @@ class ModelConfig:
                 "kv_n_heads",
                 self.hf_config.num_attention_heads,
             )
+
+        # TODO: also for qwen2_5_vl
+        if self.hf_config.model_type in ["qwen2_5_omni"]:
+            print(f"{self.hf_config.thinker_config.text_config.num_attention_heads=}")
+            return self.hf_config.thinker_config.text_config.num_attention_heads
 
         attributes = [
             # For Falcon:
