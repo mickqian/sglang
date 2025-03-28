@@ -330,7 +330,7 @@ class MMAttention(nn.Module):
                 head_dim=self.head_size,
                 num_heads=self.num_attention_heads_per_partition,
                 num_kv_heads=self.num_attention_kv_heads_per_partition,
-                scaling=self.head_size ** -0.5,
+                scaling=self.head_size**-0.5,
                 layer_id=kwargs["layer_id"],
             )
         else:

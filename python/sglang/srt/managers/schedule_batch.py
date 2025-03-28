@@ -589,7 +589,6 @@ class Req:
         return all_ids[self.surr_offset :], self.read_offset - self.surr_offset
 
     def check_finished(self):
-        print(f"checking finished")
         if self.finished():
             return
 
