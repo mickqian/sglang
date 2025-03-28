@@ -1281,7 +1281,6 @@ class MRotaryEmbedding(RotaryEmbedding):
     @staticmethod
     def get_rope_index(
         input_ids: Optional[torch.LongTensor],
-        # forward_mode,
         config: Qwen2_5OmniThinkerConfig,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
@@ -1357,8 +1356,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         position_id_per_seconds = config.position_id_per_seconds
         seconds_per_chunk = config.seconds_per_chunk
         spatial_merge_size = config.vision_config.spatial_merge_size
-        print(f"{spatial_merge_size=}")
-        print(f"{type(spatial_merge_size)}")
 
         mrope_position_deltas = []
         if input_ids is not None and (

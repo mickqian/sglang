@@ -449,6 +449,18 @@ class ForwardBatch:
                         if len(second_per_grid_ts_list) == 0
                         else torch.cat(second_per_grid_ts_list, dim=0)
                     )
+
+                    attention_mask_list = [
+                        item.attention_mask
+                        for item in mm_input.items
+                        if item.attention_mask is not None
+                    ]
+                    attention_mask = (
+                        None
+                        if len(attention_mask_list) == 0
+                        else torch.cat(attention_mask_list, dim=0)
+                    )
+
                     if is_omni:
                         # mrope_positions = getattr(mm_input, "mrope_positions")
                         # mrope_position_delta = getattr(mm_input, "mrope_position_delta")
@@ -461,12 +473,11 @@ class ForwardBatch:
                                 image_grid_thw=image_grid_thw,
                                 video_grid_thw=video_grid_thw,
                                 config=hf_config,
-                                # spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                attention_mask=attention_mask,
                                 second_per_grids=second_per_grid_ts,
                                 # tokens_per_second=hf_config.vision_config.tokens_per_second,
                             )
                         )
-                        # self.input_ids = input_ids
                     else:
                         # TODO: current qwen2-vl do not support radix cache since mrope position calculation
                         mrope_positions, mrope_position_delta = (

@@ -7,7 +7,6 @@ from typing import List, Union
 import torch
 from PIL import Image
 
-from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.managers.multimodal_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
@@ -15,50 +14,14 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.managers.schedule_batch import MultimodalDataItem
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.models.qwen2_5_omni import Qwen2_5OmniModel
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
+logger = logging.getLogger(__name__)
 
-def compute_mrope(input_ids, items: [MultimodalDataItem], hf_config):
-    hf_config = hf_config.thinker_config
-    image_grid_thw_list = [
-        item.image_grid_thws for item in items if item.image_grid_thws is not None
-    ]
-    image_grid_thws = (
-        torch.cat(image_grid_thw_list) if len(image_grid_thw_list) != 0 else None
-    )
-
-    video_grid_thws_list = [
-        item.video_grid_thws for item in items if item.video_grid_thws is not None
-    ]
-    video_grid_thws = (
-        torch.cat(video_grid_thws_list) if len(video_grid_thws_list) != 0 else None
-    )
-
-    second_per_grid_ts_list = [
-        item.second_per_grid_ts for item in items if item.second_per_grid_ts is not None
-    ]
-    second_per_grid_ts = (
-        torch.cat(second_per_grid_ts_list)
-        if len(second_per_grid_ts_list) != 0
-        else None
-    )
-
-    mrope_positions, mrope_position_delta, input_ids = MRotaryEmbedding.get_rope_index(
-        raw_input_ids=input_ids,
-        forward_mode=ForwardMode.EXTEND,
-        image_grid_thw=image_grid_thws,
-        video_grid_thw=video_grid_thws,
-        config=hf_config,
-        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-        # audio_seqlens=
-        second_per_grids=second_per_grid_ts,
-        # tokens_per_second=hf_config.vision_config.tokens_per_second,
-    )
-
-    return mrope_positions, mrope_position_delta, input_ids
+QWEN_DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant."""
+QWEN_AUDIO_SYSTEM_PROMPT = """You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."""
 
 
 # Compatible with Qwen2VL and Qwen2_5VL
@@ -111,34 +74,31 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             **kwargs,
         )
         print(f"{result=}")
-        return {
-            "input_ids": result.input_ids,
-            "pixel_values": getattr(result, "pixel_values", None),
-            "image_grid_thw": getattr(result, "image_grid_thw", None),
-            "second_per_grid_ts": getattr(result, "second_per_grid_ts", None),
-            "video_grid_thws": getattr(result, "video_grid_thws", None),
-        }
+        return result
 
     async def process_mm_data_async(
         self,
         image_data: List[Union[str, bytes]],
-        input_ids,
+        prompt,
         request_obj,
         max_req_input_len,
         *args,
         **kwargs,
     ):
-        start = time.time()
-
         if isinstance(image_data, str):
             image_data = [image_data]
+        audio_data = request_obj.audio_data
 
         # processor = self._processor
-        # print(f"{processor.__dict__.keys()}")
-        # print(f"{processor.tokenizer.__dict__.keys()}")
+        is_omni = self.arch == Qwen2_5OmniModel.__name__
+        if audio_data and is_omni:
+            prompt = prompt.replace(
+                QWEN_DEFAULT_SYSTEM_PROMPT, QWEN_AUDIO_SYSTEM_PROMPT, 1
+            )
         base_output = self.load_mm_data(
-            prompt=input_ids,
+            prompt=prompt,
             image_data=image_data,
+            audio_data=audio_data,
             multimodal_tokens=MultimodalSpecialTokens(
                 image_token=self.image_token_id, audio_token=self.audio_token_id
             ),
@@ -206,11 +166,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         async def resize_image_async(image):
             return resize_image(image)
 
-        is_omni = self.arch == Qwen2_5OmniModel.__name__
-
         resized_images = base_output.images
-        if not is_omni and base_output.images:
-            print(f"resizing")
+        if base_output.images:
             resize_tasks = [resize_image_async(image) for image in resized_images]
             resized_images = await asyncio.gather(*resize_tasks)
 
@@ -231,26 +188,22 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             )
             items += [item]
 
-        if (
-            "input_features" in res
-            and res["input_features"] is not None
-            and len(res["input_features"]) != 0
-        ):
+        if "input_features" in res and res["input_features"] is not None:
+            audio_features = res["input_features"]
             # res["audio_features"] = [res["audio_features"]]
-            audio_features = torch.concat([res["audios_inputs"]])
-
+            # audio_features = torch.concat([res["audios_inputs"]])
+            print(f"{audio_features.shape=}")
             item = MultimodalDataItem(
-                audio_features=[res["input_features"]],
-                audio_feature_len=res["audio_feature_lens"],
-                feature_attention_mask=res["attention_mask"],
+                audio_features=res["input_features"],
+                feature_attention_mask=res["feature_attention_mask"],
+                attention_mask=res["attention_mask"],
                 modality="audio",
             )
             items += [item]
 
         kwargs = {}
         if self.arch == Qwen2_5OmniModel.__name__:
-            input_ids = res["input_ids"]
-
+            ...
             # mrope_positions, mrope_position_delta, input_ids = compute_mrope(res["input_ids"], items, self.hf_config)
             # kwargs["mrope_positions"] = mrope_positions
             # kwargs["mrope_position_delta"] = mrope_position_delta
@@ -260,6 +213,10 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         input_ids = input_ids.flatten().tolist()
         print(f"{len(input_ids)=}")
         video_grid_thws = None
+        print(f"{base_output=}")
+        print(f"{res=}")
+        print(f"{items=}")
+        print(f"{kwargs=}")
         return {
             "input_ids": input_ids,
             "items": items,
