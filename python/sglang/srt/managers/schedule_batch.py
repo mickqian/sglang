@@ -589,10 +589,12 @@ class Req:
         return all_ids[self.surr_offset :], self.read_offset - self.surr_offset
 
     def check_finished(self):
+        print(f"checking finished")
         if self.finished():
             return
 
         if self.to_abort:
+            print(f"{self.to_abort=}")
             self.finished_reason = FINISH_ABORT(
                 message=self.to_abort_message,
             )
@@ -608,7 +610,7 @@ class Req:
 
         if not self.sampling_params.ignore_eos:
             matched_eos = False
-
+            # print(f"{last_token_id=}")
             # Check stop token ids
             if self.sampling_params.stop_token_ids:
                 matched_eos = last_token_id in self.sampling_params.stop_token_ids

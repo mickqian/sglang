@@ -169,7 +169,12 @@ class ModelConfig:
 
         # Cache attributes
         self.hf_eos_token_id = self.get_hf_eos_token_id()
+        print(f"111111 {self.hf_eos_token_id=}")
+
+        # multimodal
         self.image_token_id = getattr(self.hf_config, "image_token_id", None)
+        self.video_token_id = getattr(self.hf_config, "video_token_id", None)
+        self.audio_token_id = getattr(self.hf_config, "audio_token_id", None)
 
     # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/config.py#L289
     def get_total_num_kv_heads(self) -> int:
@@ -322,7 +327,9 @@ class ModelConfig:
                 )
 
     def get_hf_eos_token_id(self) -> Optional[Set[int]]:
-        eos_ids = getattr(self.hf_config, "eos_token_id", None)
+        if self.hf_config.architectures[0] == "Qwen2_5OmniModel":
+            eos_ids = getattr(self.hf_config.thinker_config, "eos_token_id", None)
+        eos_ids = eos_ids or getattr(self.hf_config, "eos_token_id", None)
         if eos_ids:
             # it can be either int or list of int
             eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)

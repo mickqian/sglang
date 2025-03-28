@@ -269,7 +269,7 @@ QKV_BACKEND_IMPL = {
 }
 
 
-class OmniAttention(nn.Module):
+class MMAttention(nn.Module):
     r"""
         Multi-headed attention without any cache, mostly used for multimodal transformers.
 
@@ -299,7 +299,7 @@ class OmniAttention(nn.Module):
         flatten_batch: bool = False,
         prefix: str = "",
         proj_bias: bool = True,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         world_size = parallel_state.get_tensor_model_parallel_world_size()
@@ -329,9 +329,9 @@ class OmniAttention(nn.Module):
             self.qkv_backend = RadixAttention(
                 head_dim=self.head_size,
                 num_heads=self.num_attention_heads_per_partition,
-                scaling=self.head_size ** -0.5,
                 num_kv_heads=self.num_attention_kv_heads_per_partition,
-                layer_id=kwargs["layer_id"]
+                scaling=self.head_size ** -0.5,
+                layer_id=kwargs["layer_id"],
             )
         else:
             self.qkv_backend = QKV_BACKEND_IMPL[qkv_backend](
@@ -414,7 +414,7 @@ class OmniAttention(nn.Module):
             # x = rearrange(x, "b s ... -> s b ...")
             # [s, b, embed_dim] --> [s, b, head * 3 * head_size]
             # qkv, _ = self.qkv_proj(x)
-            print(f"{x.shape=}")
+            # print(f"{x.shape=}")
             q = self.q_proj(x)
             k = self.k_proj(x)
             v = self.v_proj(x)
@@ -445,8 +445,8 @@ class OmniAttention(nn.Module):
 
             # [s, b, head, 3 * head_size] --> 3 [s, b, head, head_size]
             # q, k, v = dist_utils.split_tensor_along_last_dim(qkv, 3)
-            print(f"{q.shape=}")
-            print(f"{k.shape=}")
+            # print(f"{q.shape=}")
+            # print(f"{k.shape=}")
             # [s, b, head, head_size] --> [b, s, head, head_size]
             # q, k, v = [
             #     rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
@@ -462,8 +462,9 @@ class OmniAttention(nn.Module):
             # print(f"{original_shape_q=}")
             # print(f"{original_shape_k=}")
             if first:
-                print(f"b {q=}")
-                print(f"b {k=}")
+                ...
+                # print(f"b {q=}")
+                # print(f"b {k=}")
             # [total_tokens, head, head_size]
             q = q.view(head, -1, self.head_size)
             k = k.view(kv_head, -1, self.head_size)
@@ -478,8 +479,9 @@ class OmniAttention(nn.Module):
             )
             # assert original_numel_k == k.nuem(
             if first:
-                print(f"a {q=}")
-                print(f"a {k=}")
+                ...
+                # print(f"a {q=}")
+                # print(f"a {k=}")
             # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)
@@ -500,7 +502,10 @@ class OmniAttention(nn.Module):
 
         if isinstance(self.qkv_backend, RadixAttention):
             output = self.qkv_backend.forward(q=q, k=k, v=v, **kwargs)
-            output = output.unsqueeze(0)
+            # output = output.unsqueeze(0)
+            output = rearrange(
+                output, "s (h d) -> s h d", d=self.head_size
+            ).contiguous()
         else:
             output = self.qkv_backend.forward(
                 q=q,
@@ -532,7 +537,7 @@ class OmniAttention(nn.Module):
             output = output.view(bsz, s, -1)
 
         if first > 0:
-            print(f"{output=}")
+            # print(f"{output=}")
             first -= 1
         return output
 
