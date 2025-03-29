@@ -24,7 +24,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 import logging
 from functools import lru_cache, partial
-from typing import Iterable, List, Optional, Tuple, Type
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -110,14 +110,11 @@ class Qwen2_5_VisionBlock(nn.Module):
         intermediate_dim: int,
         num_heads: int,
         hidden_act="silu",
-        norm_layer: Type[nn.Module] = None,
         attn_implementation: Optional[str] = "sdpa",
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        if norm_layer is None:
-            norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = Qwen2RMSNorm(dim, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(dim, eps=1e-6)
         if attn_implementation == "sdpa":
@@ -212,7 +209,7 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size**2)
+        self.hidden_size = context_dim * (spatial_merge_size ** 2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.ModuleList(
             [
@@ -301,7 +298,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     intermediate_dim=mlp_hidden_size,
                     num_heads=num_heads,
                     hidden_act=vision_config.hidden_act,
-                    norm_layer=norm_layer,
                     attn_implementation="sdpa",
                     quant_config=quant_config,
                     prefix=add_prefix(f"blocks.{i}", prefix),

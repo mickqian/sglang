@@ -84,6 +84,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         is_omni = self.arch == Qwen2_5OmniModel.__name__
         if audio_data and is_omni:
+            # refer to https://github.com/huggingface/transformers/blob/5efaed689114030ffaf51c02f6f82adcbfc72389/src/transformers/models/qwen2_5_omni/processing_qwen2_5_omni.py#L289
             prompt = prompt.replace(
                 QWEN_DEFAULT_SYSTEM_PROMPT, QWEN_AUDIO_SYSTEM_PROMPT, 1
             )

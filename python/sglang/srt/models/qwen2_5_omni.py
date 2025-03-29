@@ -58,6 +58,7 @@ from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInp
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Attention, Qwen2MLP
+from sglang.srt.models.qwen2_5_vl import Qwen2_5_VisionBlock
 from sglang.srt.utils import add_prefix
 from sglang.utils import logger
 
@@ -123,6 +124,7 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         is_causal: bool = False,
         layer_idx: Optional[int] = None,
         config: Optional[Qwen2_5OmniThinkerConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -263,7 +265,12 @@ QWEN2_5_OMNI_AUDIO_ATTENTION_CLASSES = {
 
 
 class Qwen2_5OmniAudioEncoderLayer(nn.Module):
-    def __init__(self, config: Qwen2_5OmniAudioEncoderConfig, layer_id: int = 0):
+    def __init__(
+        self,
+        config: Qwen2_5OmniAudioEncoderConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        layer_id: int = 0,
+    ):
         super().__init__()
         self.embed_dim = config.d_model
         self.self_attn = QWEN2_5_OMNI_AUDIO_ATTENTION_CLASSES[
@@ -273,6 +280,7 @@ class Qwen2_5OmniAudioEncoderLayer(nn.Module):
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
             config=config,
+            quant_config=quant_config,
         )
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -362,7 +370,11 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
     _no_split_modules = ["Qwen2_5OmniAudioEncoderLayer"]
     _supports_sdpa = True
 
-    def __init__(self, config: Qwen2_5OmniAudioEncoderConfig):
+    def __init__(
+        self,
+        config: Qwen2_5OmniAudioEncoderConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.config = config
         self.dropout = config.dropout
@@ -380,7 +392,10 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
         )
         self.audio_bos_eos_token = nn.Embedding(2, config.output_dim)
         self.layers = nn.ModuleList(
-            [Qwen2_5OmniAudioEncoderLayer(config) for _ in range(config.encoder_layers)]
+            [
+                Qwen2_5OmniAudioEncoderLayer(config, quant_config=quant_config)
+                for _ in range(config.encoder_layers)
+            ]
         )
         self.ln_post = nn.LayerNorm(config.d_model)
         self.avg_pooler = nn.AvgPool1d(2, stride=2)
@@ -617,25 +632,12 @@ class Qwen2_5OmniVisionAttention(nn.Module):
         return attn_output
 
 
-class Qwen2_5OmniMLP(nn.Module):
-    def __init__(self, config, bias: bool = False):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, hidden_state):
-        return self.down_proj(
-            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
-        )
-
-
 class Qwen2_5OmniVisionBlock(nn.Module):
     def __init__(
-        self, config, quant_config: Optional[QuantizationConfig] = None
+        self,
+        config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(config.hidden_size, eps=1e-6)
@@ -643,7 +645,26 @@ class Qwen2_5OmniVisionBlock(nn.Module):
         self.attn = Qwen2_5OmniVisionAttention(
             dim=config.hidden_size, num_heads=config.num_heads
         )
-        self.mlp = Qwen2_5OmniMLP(config, bias=True)
+
+        # self.attn = MMAttention(
+        #     embed_dim=config.hidden_size,
+        #     num_heads=config.num_heads,
+        #     projection_size=config.hidden_size,
+        #     use_qkv_parallel=True,
+        #     qkv_backend="sdpa",
+        #     softmax_in_single_precision=True,
+        #     quant_config=quant_config,
+        #     prefix=add_prefix("attn", prefix)
+        # )
+
+        # self.mlp = Qwen2_5OmniMLP(config, bias=True)
+        self.mlp = Qwen2MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=add_prefix("mlp", prefix),
+        )
 
     def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
@@ -651,6 +672,7 @@ class Qwen2_5OmniVisionBlock(nn.Module):
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
         )
+        print(f"{hidden_states.shape=}")
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 
@@ -713,8 +735,13 @@ class Qwen2_5OmniVisionEncoder(nn.Module):
     config_class = Qwen2_5OmniVisionEncoderConfig
     _no_split_modules = ["Qwen2_5OmniVisionBlock"]
 
-    def __init__(self, config, *inputs, **kwargs) -> None:
-        super().__init__(*inputs, **kwargs)
+    def __init__(
+        self,
+        config: Qwen2_5OmniVisionEncoderConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.fullatt_block_indexes = config.fullatt_block_indexes
@@ -732,7 +759,15 @@ class Qwen2_5OmniVisionEncoder(nn.Module):
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
         self.blocks = nn.ModuleList(
             [
-                Qwen2_5OmniVisionBlock(config, config._attn_implementation)
+                # Qwen2_5OmniVisionBlock(config, quant_config=quant_config)
+                Qwen2_5_VisionBlock(
+                    dim=config.hidden_size,
+                    intermediate_dim=config.intermediate_size,
+                    num_heads=config.num_heads,
+                    hidden_act=config.hidden_act,
+                    attn_implementation="eager",
+                    quant_config=quant_config,
+                )
                 for _ in range(config.depth)
             ]
         )
@@ -1248,7 +1283,11 @@ class Qwen2_5OmniThinkerModel(nn.Module):
     config_class = Qwen2_5OmniTextConfig
     _no_split_modules = ["Qwen2_5OmniDecoderLayer"]
 
-    def __init__(self, config: Qwen2_5OmniTextConfig):
+    def __init__(
+        self,
+        config: Qwen2_5OmniTextConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1258,7 +1297,7 @@ class Qwen2_5OmniThinkerModel(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                Qwen2_5OmniDecoderLayer(config, layer_idx)
+                Qwen2_5OmniDecoderLayer(config, layer_idx, quant_config=quant_config)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
@@ -1316,13 +1355,18 @@ class Qwen2_5OmniThinkerForConditionalGeneration(nn.Module):
 
         self.config = config
         self.text_config = config.text_config
-        self.audio_tower = Qwen2_5OmniAudioEncoder(config.audio_config)
+        self.audio_tower = Qwen2_5OmniAudioEncoder(
+            config.audio_config, quant_config=quant_config
+        )
 
-        self.visual = Qwen2_5OmniVisionEncoder(config.vision_config)
+        self.visual = Qwen2_5OmniVisionEncoder(
+            config.vision_config, quant_config=quant_config
+        )
 
         self.vocab_size = config.text_config.vocab_size
-        self.model = Qwen2_5OmniThinkerModel(config.text_config)
-        # self.model = StableLmForCausalLM(config.text_config)
+        self.model = Qwen2_5OmniThinkerModel(
+            config.text_config, quant_config=quant_config
+        )
         text_config = config.text_config
         self.lm_head = ParallelLMHead(
             self.vocab_size,
@@ -1458,9 +1502,6 @@ class Qwen2_5OmniModel(nn.Module):
         if config.enable_audio_output:
             self.enable_talker()
 
-    # def get_attention_sliding_window_size(self):
-    #     return get_attention_sliding_window_size(self.config)
-
     def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
         # im_start_id: int = image_inputs.im_start_id
@@ -1500,12 +1541,13 @@ class Qwen2_5OmniModel(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            # (".qkv_proj", ".self_attn.q_proj", "q"),
-            # (".qkv_proj", ".self_attn.k_proj", "k"),
-            # (".qkv_proj", ".self_attn.v_proj", "v"),
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            #
+            # (".qkv_proj.", ".q.", "q"),
+            # (".qkv_proj.", ".k.", "k"),
+            # (".qkv_proj.", ".v.", "v"),
             ("gate_up_proj", "up_proj", 1),
             ("gate_up_proj", "gate_proj", 0),
         ]
@@ -1519,8 +1561,13 @@ class Qwen2_5OmniModel(nn.Module):
                 if weight_name not in name:
                     continue
 
-                if "audio_tower" in name or "visual" in name or "talker" in name:
+                if "audio_tower" in name or "talker" in name:
                     continue
+
+                if "visual" in name:
+                    ...
+                    # if ".q." in name or ".k." in name or ".v." in name:
+                    #     continue
 
                 name = name.replace(weight_name, param_name)
 

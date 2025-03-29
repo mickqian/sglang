@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.nn import Parameter
 
 from sglang.srt.distributed import parallel_state
 from sglang.srt.distributed import utils as dist_utils
@@ -31,20 +32,6 @@ ROTARY_EMBED_CLASSES = {
     "normal": apply_rotary_pos_emb,
     "multimodal": apply_multimodal_rotary_pos_emb,
 }
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 class VisionSdpaAttention(nn.Module):
@@ -275,7 +262,6 @@ class MMAttention(nn.Module):
         projection_size: int,
         use_qkv_parallel: bool,
         qkv_backend: str = "sdpa",
-        num_key_value_heads: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         dropout: float = 0.0,
         softmax_in_single_precision: bool = False,
@@ -302,7 +288,7 @@ class MMAttention(nn.Module):
             num_heads, world_size
         )
         self.num_attention_kv_heads_per_partition = dist_utils.divide(
-            num_key_value_heads or num_heads, world_size
+            num_heads, world_size
         )
 
         self.q_size = self.num_attention_heads_per_partition * self.head_size
@@ -313,7 +299,7 @@ class MMAttention(nn.Module):
                 head_dim=self.head_size,
                 num_heads=self.num_attention_heads_per_partition,
                 num_kv_heads=self.num_attention_kv_heads_per_partition,
-                scaling=self.head_size**-0.5,
+                scaling=self.head_size ** -0.5,
                 layer_id=kwargs["layer_id"],
             )
         else:
@@ -327,13 +313,12 @@ class MMAttention(nn.Module):
             )
 
         self.use_qkv_parallel = use_qkv_parallel
-        num_key_value_heads = num_key_value_heads or num_heads
         if use_qkv_parallel:
             self.qkv_proj = QKVParallelLinear(
                 hidden_size=embed_dim,
                 head_size=self.head_size,
                 total_num_heads=num_heads,
-                total_num_kv_heads=num_key_value_heads,
+                total_num_kv_heads=num_heads,
                 quant_config=quant_config,
                 prefix=add_prefix("qkv_proj", prefix),
             )
@@ -436,14 +421,17 @@ class MMAttention(nn.Module):
             if not self.rotary_embed:
                 raise RuntimeError()
             cos, sin = position_embeddings
-
+            original_shape = q.shape
             # [total_tokens, head, head_size]
-            q = q.view(head, -1, self.head_size)
-            k = k.view(kv_head, -1, self.head_size)
+            # q = q.view(head, -1, self.head_size)
+            # k = k.view(kv_head, -1, self.head_size)
+
+            q = q.view(-1, head, self.head_size)
+            k = k.view(-1, head, self.head_size)
             q, k = self.rotary_embed(q=q, k=k, cos=cos, sin=sin)
             # -> [b * s, head, head_size]
-            q = q.view(-1, head, self.head_size)
-            k = k.view(-1, kv_head, self.head_size)
+            q = q.view(original_shape)
+            k = k.view(original_shape)
 
         if q.dim() == 4:
             # [b, s, head, head_size] --> [b * s, head, head_size]
@@ -459,21 +447,14 @@ class MMAttention(nn.Module):
         assert k.dim() == 3, k.dim()
         assert v.dim() == 3, v.dim()
 
-        if isinstance(self.qkv_backend, RadixAttention):
-            output = self.qkv_backend.forward(q=q, k=k, v=v, **kwargs)
-            # output = output.unsqueeze(0)
-            output = rearrange(
-                output, "s (h d) -> s h d", d=self.head_size
-            ).contiguous()
-        else:
-            output = self.qkv_backend.forward(
-                q=q,
-                k=k,
-                v=v,
-                bsz=bsz,
-                cu_seqlens=cu_seqlens,
-                attention_mask=attention_mask,
-            )
+        output = self.qkv_backend.forward(
+            q=q,
+            k=k,
+            v=v,
+            bsz=bsz,
+            cu_seqlens=cu_seqlens,
+            attention_mask=attention_mask,
+        )
 
         assert output.dim() == 3, output.shape
 

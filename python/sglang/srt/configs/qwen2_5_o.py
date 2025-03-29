@@ -15,10 +15,11 @@ from transformers.tokenization_utils_base import (
 from sglang.srt.configs.utils import register_image_processor, register_processor
 from sglang.utils import logger
 
-
 # Copied from:
 # 1. https://github.com/huggingface/transformers/blob/5efaed689114030ffaf51c02f6f82adcbfc72389/src/transformers/models/qwen2_5_omni/processing_qwen2_5_omni.py
 # 2. https://github.com/huggingface/transformers/blob/5efaed689114030ffaf51c02f6f82adcbfc72389/src/transformers/models/qwen2_5_omni/configuration_qwen2_5_omni.py
+
+
 class Qwen2_5OmniProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
         "text_kwargs": {
@@ -1298,11 +1299,6 @@ from typing import List, Optional, Union
 
 import numpy as np
 import torch
-
-from ...feature_extraction_utils import BatchFeature
-from ...image_utils import ImageInput, VideoInput
-from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from ...tokenization_utils_base import PaddingStrategy, PreTokenizedInput, TextInput
 
 
 class Qwen2_5OmniProcessorKwargs(ProcessingKwargs, total=False):

@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, List, Optional, Union
 
-import numpy as np
 import torch
 import triton
 import triton.language as tl
@@ -176,7 +175,7 @@ class ForwardBatch:
     extend_input_logprob_token_ids_gpu: Optional[torch.Tensor] = None
 
     # For multimodal
-    mm_inputs: Optional[List[MultimodalInputs]] = None
+    multimodal_inputss: Optional[List[MultimodalInputs]] = None
 
     # Encoder-decoder
     encoder_cached: Optional[List[bool]] = None
@@ -242,7 +241,7 @@ class ForwardBatch:
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
             out_cache_loc=batch.out_cache_loc,
-            mm_inputs=batch.multimodal_inputs,
+            multimodal_inputss=batch.multimodal_inputs,
             encoder_cached=batch.encoder_cached,
             encoder_lens=batch.encoder_lens,
             encoder_lens_cpu=batch.encoder_lens_cpu,
@@ -340,35 +339,35 @@ class ForwardBatch:
             if none, current batch contains no image input
 
         """
-        if not self.mm_inputs or all(x is None for x in self.mm_inputs):
+        if not self.multimodal_inputss or all(x is None for x in self.multimodal_inputss):
             return None
 
         # Filter out None values
-        valid_inputs = [x for x in self.mm_inputs if x is not None]
+        valid_inputs = [x for x in self.multimodal_inputss if x is not None]
 
         # Start with the first valid image input
         merged = valid_inputs[0]
 
         # Merge remaining inputs
-        for mm_input in valid_inputs[1:]:
-            merged.merge(mm_input)
+        for multimodal_inputs in valid_inputs[1:]:
+            merged.merge(multimodal_inputs)
 
         return merged
 
     def contains_image_inputs(self) -> bool:
-        if self.mm_inputs is None:
+        if self.multimodal_inputss is None:
             return False
         return any(
-            mm_input is not None and mm_input.contains_image_inputs()
-            for mm_input in self.mm_inputs
+            multimodal_inputs is not None and multimodal_inputs.contains_image_inputs()
+            for multimodal_inputs in self.multimodal_inputss
         )
 
     def contains_audio_inputs(self) -> bool:
-        if self.mm_inputs is None:
+        if self.multimodal_inputss is None:
             return False
         return any(
-            mm_input is not None and mm_input.contains_audio_inputs()
-            for mm_input in self.mm_inputs
+            multimodal_inputs is not None and multimodal_inputs.contains_audio_inputs()
+            for multimodal_inputs in self.multimodal_inputss
         )
 
     def contains_mm_inputs(self) -> bool:
@@ -389,7 +388,7 @@ class ForwardBatch:
                 mrope_position_delta = (
                     0
                     if batch.multimodal_inputs[i] is None
-                    or batch.multimodal_inputs[i].mrope_position_delta is None
+                       or batch.multimodal_inputs[i].mrope_position_delta is None
                     else batch.multimodal_inputs[i].mrope_position_delta
                 )
                 mrope_positions_list[i] = MRotaryEmbedding.get_next_input_positions(
@@ -399,22 +398,22 @@ class ForwardBatch:
                 )
         elif self.forward_mode.is_extend():
             extend_start_loc_cpu = self.extend_start_loc.cpu().numpy()
-            for i, multimodal_inputs in enumerate(batch.multimodal_inputs):
+            for i, mm_input in enumerate(batch.multimodal_inputs):
                 extend_start_loc, extend_seq_len, extend_prefix_len = (
                     extend_start_loc_cpu[i],
                     batch.extend_seq_lens[i],
                     batch.extend_prefix_lens[i],
                 )
-                if multimodal_inputs is None:
+                if mm_input is None:
                     # text only
                     mrope_positions = torch.tensor(
                         [
                             [
                                 pos
                                 for pos in range(
-                                    extend_prefix_len,
-                                    extend_prefix_len + extend_seq_len,
-                                )
+                                extend_prefix_len,
+                                extend_prefix_len + extend_seq_len,
+                            )
                             ]
                         ]
                         * 3
@@ -468,8 +467,8 @@ class ForwardBatch:
                         mrope_positions, mrope_position_delta = (
                             MRotaryEmbedding.get_rope_index(
                                 input_ids=self.input_ids[
-                                    extend_start_loc : extend_start_loc + extend_seq_len
-                                ].unsqueeze(0),
+                                          extend_start_loc: extend_start_loc + extend_seq_len
+                                          ].unsqueeze(0),
                                 image_grid_thw=image_grid_thw,
                                 video_grid_thw=video_grid_thw,
                                 config=hf_config,
@@ -483,11 +482,11 @@ class ForwardBatch:
 
                     else:
                         # TODO: current qwen2-vl do not support radix cache since mrope position calculation
-                        mrope_positions1, mrope_position_delta = (
+                        mrope_positions, mrope_position_delta = (
                             MRotaryEmbedding.get_input_positions(
                                 input_tokens=self.input_ids[
-                                    extend_start_loc : extend_start_loc + extend_seq_len
-                                ].tolist(),
+                                             extend_start_loc: extend_start_loc + extend_seq_len
+                                             ].tolist(),
                                 image_grid_thw=image_grid_thw,
                                 video_grid_thw=video_grid_thw,
                                 image_token_id=model_config.image_token_id,
