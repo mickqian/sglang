@@ -24,7 +24,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 import logging
 from functools import lru_cache, partial
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -209,7 +209,7 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.ModuleList(
             [
@@ -591,6 +591,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -642,6 +643,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        unloaded_params = params_dict.keys() - loaded_params
+        if unloaded_params:
+            logger.warn(
+                f"Some weights are not initialized from checkpoints: {sorted(unloaded_params)}"
+            )
 
 
 EntryClass = [Qwen2_5_VLForConditionalGeneration]

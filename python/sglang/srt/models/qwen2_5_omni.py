@@ -632,6 +632,22 @@ class Qwen2_5OmniVisionAttention(nn.Module):
         return attn_output
 
 
+class Qwen2_5OmniMLP(nn.Module):
+    def __init__(self, config, bias: bool = False):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_state):
+        return self.down_proj(
+            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+        )
+
+
 class Qwen2_5OmniVisionBlock(nn.Module):
     def __init__(
         self,
@@ -657,14 +673,14 @@ class Qwen2_5OmniVisionBlock(nn.Module):
         #     prefix=add_prefix("attn", prefix)
         # )
 
-        # self.mlp = Qwen2_5OmniMLP(config, bias=True)
-        self.mlp = Qwen2MLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            prefix=add_prefix("mlp", prefix),
-        )
+        self.mlp = Qwen2_5OmniMLP(config, bias=True)
+        # self.mlp = Qwen2MLP(
+        #     hidden_size=config.hidden_size,
+        #     intermediate_size=config.intermediate_size,
+        #     hidden_act=config.hidden_act,
+        #     quant_config=quant_config,
+        #     prefix=add_prefix("mlp", prefix),
+        # )
 
     def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
@@ -759,15 +775,15 @@ class Qwen2_5OmniVisionEncoder(nn.Module):
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
         self.blocks = nn.ModuleList(
             [
-                # Qwen2_5OmniVisionBlock(config, quant_config=quant_config)
-                Qwen2_5_VisionBlock(
-                    dim=config.hidden_size,
-                    intermediate_dim=config.intermediate_size,
-                    num_heads=config.num_heads,
-                    hidden_act=config.hidden_act,
-                    attn_implementation="eager",
-                    quant_config=quant_config,
-                )
+                Qwen2_5OmniVisionBlock(config, quant_config=quant_config)
+                # Qwen2_5_VisionBlock(
+                #     dim=config.hidden_size,
+                #     intermediate_dim=config.intermediate_size,
+                #     num_heads=config.num_heads,
+                #     hidden_act=config.hidden_act,
+                #     attn_implementation="eager",
+                #     quant_config=quant_config,
+                # )
                 for _ in range(config.depth)
             ]
         )
@@ -905,6 +921,9 @@ class Qwen2_5OmniVisionEncoder(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
         # Modification here
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -914,6 +933,7 @@ class Qwen2_5OmniVisionEncoder(nn.Module):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens_now,
+                # position_embeddings=position_embeddings,
                 rotary_pos_emb=rotary_pos_emb,
             )
         hidden_states = self.merger(hidden_states)
@@ -1561,13 +1581,14 @@ class Qwen2_5OmniModel(nn.Module):
                 if weight_name not in name:
                     continue
 
-                if "audio_tower" in name or "talker" in name:
+                if "audio_tower" in name or "visual" in name or "talker" in name:
                     continue
 
-                if "visual" in name:
-                    ...
-                    # if ".q." in name or ".k." in name or ".v." in name:
-                    #     continue
+                # if "visual" in name:
+                #     continue
+                #     ...
+                # if ".q." in name or ".k." in name or ".v." in name:
+                #     continue
 
                 name = name.replace(weight_name, param_name)
 
@@ -1580,6 +1601,10 @@ class Qwen2_5OmniModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # if "visual" in name:
+                #     # adapt to VisionAttention
+                #     name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+
                 if "talker" in name or "token2wav" in name:
                     continue
                 try:

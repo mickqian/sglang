@@ -163,10 +163,15 @@ class TestOpenAIVisionServer(CustomTestCase):
                             "image_url": {"url": IMAGE_SGL_LOGO_URL},
                             "modalities": "multi-images",
                         },
+                        # {
+                        #     "type": "image_url",
+                        #     "image_url": {"url": IMAGE_SGL_LOGO_URL},
+                        #     "modalities": "multi-images",
+                        # },
                         {
                             "type": "text",
-                            "text": "I have two very different images. They are not related at all. "
-                            "Please describe the first image in one sentence, and then describe the second image in another sentence.",
+                            "text": "I have some very different images. They are not related at all. "
+                            "Please describe all images in an separate sentence.",
                         },
                     ],
                 },
