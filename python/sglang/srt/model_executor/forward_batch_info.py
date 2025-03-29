@@ -465,7 +465,7 @@ class ForwardBatch:
                     )
 
                     if is_omni:
-                        mrope_positions, mrope_position_delta1 = (
+                        mrope_positions, mrope_position_delta = (
                             MRotaryEmbedding.get_rope_index(
                                 input_ids=self.input_ids[
                                     extend_start_loc : extend_start_loc + extend_seq_len
@@ -475,41 +475,40 @@ class ForwardBatch:
                                 config=hf_config,
                                 attention_mask=attention_mask,
                                 second_per_grids=second_per_grid_ts,
-                                # tokens_per_second=hf_config.vision_config.tokens_per_second,
                             )
                         )
                         assert isinstance(mrope_positions, torch.Tensor)
                         mrope_positions = mrope_positions.squeeze(1)
-                        mrope_position_delta1 = int(mrope_position_delta1.item())
+                        mrope_position_delta = int(mrope_position_delta.item())
 
-                    # else:
-                    # TODO: current qwen2-vl do not support radix cache since mrope position calculation
-                    mrope_positions1, mrope_position_delta = (
-                        MRotaryEmbedding.get_input_positions(
-                            input_tokens=self.input_ids[
-                                extend_start_loc : extend_start_loc + extend_seq_len
-                            ].tolist(),
-                            image_grid_thw=image_grid_thw,
-                            video_grid_thw=video_grid_thw,
-                            image_token_id=model_config.image_token_id,
-                            video_token_id=model_config.video_token_id,
-                            vision_start_token_id=hf_config.vision_start_token_id,
-                            vision_end_token_id=hf_config.vision_end_token_id,
-                            spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-                            context_len=0,
-                            seq_len=len(self.input_ids),
-                            second_per_grid_ts=second_per_grid_ts,
-                            tokens_per_second=getattr(
-                                hf_config.vision_config, "tokens_per_second", None
-                            ),
+                    else:
+                        # TODO: current qwen2-vl do not support radix cache since mrope position calculation
+                        mrope_positions1, mrope_position_delta = (
+                            MRotaryEmbedding.get_input_positions(
+                                input_tokens=self.input_ids[
+                                    extend_start_loc : extend_start_loc + extend_seq_len
+                                ].tolist(),
+                                image_grid_thw=image_grid_thw,
+                                video_grid_thw=video_grid_thw,
+                                image_token_id=model_config.image_token_id,
+                                video_token_id=model_config.video_token_id,
+                                vision_start_token_id=hf_config.vision_start_token_id,
+                                vision_end_token_id=hf_config.vision_end_token_id,
+                                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                                context_len=0,
+                                seq_len=len(self.input_ids),
+                                second_per_grid_ts=second_per_grid_ts,
+                                tokens_per_second=getattr(
+                                    hf_config.vision_config, "tokens_per_second", None
+                                ),
+                            )
                         )
-                    )
                     batch.multimodal_inputs[i].mrope_position_delta = (
-                        mrope_position_delta1
+                        mrope_position_delta
                     )
                     print(f"{mrope_positions.shape=}")
                     print(f"{mrope_position_delta=}")
-                    print(f"{mrope_position_delta1=}")
+                    # print(f"{mrope_position_delta1=}")
                     # print(f"{mrope_positions1.shape=}")
                     # assert mrope_positions.shape == mrope_positions1.shape, mrope_positions.shape
 

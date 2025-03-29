@@ -280,8 +280,6 @@ class MMAttention(nn.Module):
         dropout: float = 0.0,
         softmax_in_single_precision: bool = False,
         rotary_embed: Optional[str] = "normal",
-        # TODO: only for mm rotary embed, refactor this
-        mrope_section: Optional[int] = None,
         flatten_batch: bool = False,
         prefix: str = "",
         proj_bias: bool = True,
@@ -299,7 +297,6 @@ class MMAttention(nn.Module):
         if rotary_embed is not None:
             # if not rotary_embed in ROTARY_EMBED_CLASSES:
             self.rotary_embed = ROTARY_EMBED_CLASSES[rotary_embed]
-        self.mrope_section = mrope_section
 
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, world_size
@@ -443,9 +440,7 @@ class MMAttention(nn.Module):
             # [total_tokens, head, head_size]
             q = q.view(head, -1, self.head_size)
             k = k.view(kv_head, -1, self.head_size)
-            q, k = self.rotary_embed(
-                q=q, k=k, cos=cos, sin=sin, mrope_section=self.mrope_section
-            )
+            q, k = self.rotary_embed(q=q, k=k, cos=cos, sin=sin)
             # -> [b * s, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, kv_head, self.head_size)

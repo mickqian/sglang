@@ -61,7 +61,8 @@ from sglang.srt.models.qwen2 import Qwen2Attention, Qwen2MLP
 from sglang.srt.utils import add_prefix
 from sglang.utils import logger
 
-# Copied and adapted from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py
+# Copied and adapted from: https://github.com/huggingface/transformers/blob/5efaed689114030ffaf51c02f6f82adcbfc72389/src/transformers/models/qwen2_5_omni/modeling_qwen2_5_omni.py
+
 ############################
 #      Start Thinker       #
 ############################

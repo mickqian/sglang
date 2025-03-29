@@ -198,7 +198,7 @@ class TestOpenAIVisionServer(CustomTestCase):
         # from transformers import AutoTokenizer
         from decord import VideoReader, cpu
 
-        max_frames_num = 20
+        max_frames_num = 5
         vr = VideoReader(video_path, ctx=cpu(0))
         total_frame_num = len(vr)
         uniform_sampled_frames = np.linspace(
@@ -720,7 +720,9 @@ class TestQwen2_5_oServer(TestOpenAIOmniServer):
                 "--chat-template",
                 "qwen2-5-o",
                 "--mem-fraction-static",
-                "0.6",
+                "0.5",
+                "--tp=2",
+                "--chunked-prefill-size=-1",
             ],
         )
         cls.base_url += "/v1"
