@@ -33,7 +33,6 @@ from sglang.srt.configs.utils import (
     register_processor,
     remove_if_exists,
 )
-from sglang.srt.utils import print_warning_once
 from sglang.utils import logger
 
 
@@ -843,15 +842,6 @@ def is_image_or_image_url(elem):
     return is_url(elem) or is_valid_image(elem)
 
 
-def flatten_nested_list(nested_list):
-    if isinstance(nested_list, list):
-        return [
-            item for sublist in nested_list for item in flatten_nested_list(sublist)
-        ]
-    else:
-        return [nested_list]
-
-
 # Copied from https://github.com/huggingface/transformers/blob/706703bba6c920b10aa7e7ee8163b06a8a03c450/src/transformers/models/pixtral/image_processing_pixtral.py
 class PixtralProcessor(ProcessorMixin):
     r"""
@@ -1339,7 +1329,7 @@ class PixtralImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        print("Using customed sglang ImageProcessor")
+        print("Using customized sglang ImageProcessor")
 
         size = size if size is not None else {"longest_edge": 1024}
         patch_size = (
@@ -2033,5 +2023,3 @@ remove_if_exists(PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
 remove_if_exists(IMAGE_PROCESSOR_MAPPING_NAMES, PixtralVisionConfig.model_type)
 
 register_processor(Mistral3Config, PixtralProcessor)
-# register_processor(PixtralVisionConfig, processor_cls)
-# register_image_processor(PixtralVisionConfig, PixtralImageProcessor)

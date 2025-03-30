@@ -78,6 +78,15 @@ time_infos = {}
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
 
+def flatten_nested_list(nested_list):
+    if isinstance(nested_list, list):
+        return [
+            item for sublist in nested_list for item in flatten_nested_list(sublist)
+        ]
+    else:
+        return [nested_list]
+
+
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     return value.lower() in ("true", "1")

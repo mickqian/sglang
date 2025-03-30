@@ -7,6 +7,7 @@ from sglang.srt.managers.image_processors.base_image_processor import (
 from sglang.srt.managers.image_processors.base_image_processor import (
     get_global_processor,
 )
+from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.mistral3 import Mistral3ForConditionalGeneration
 
 
@@ -23,12 +24,10 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         processor = get_global_processor()
         result = processor(text=input_text, prompt=input_text, images=images)
 
+        print(f"{result=}")
         for p in result["pixel_values"]:
             print(f"pixel values shape: {p.shape}")
-        return {
-            "input_ids": result["input_ids"],
-            "pixel_values": result["pixel_values"],
-        }
+        return result
 
     async def _process_images(self, images, input_text):
         if self.executor is not None:
@@ -79,8 +78,14 @@ class PixtralProcessor(SGLangBaseImageProcessor):
         print(f"input ids shape: ", res["input_ids"].numel())
 
         return {
+            "mm_items": [
+                MultimodalDataItem(
+                    pixel_values=res["pixel_values"],
+                    image_sizes=res["image_sizes"],
+                    modality=Modality.IMAGE,
+                )
+            ],
             "input_ids": res["input_ids"].flatten().tolist(),
             "pixel_values": res["pixel_values"],
-            "image_hashes": base_out.image_hashes,
             "im_token_id": self.image_token_id,
         }

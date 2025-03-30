@@ -109,7 +109,7 @@ class BaseImageProcessor(ABC):
     #     return image_inputs
 
     # @abstractmethod
-    # def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    # def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
     #     ...
 
     def _build_processor(self, server_args):
@@ -238,7 +238,7 @@ class BaseImageProcessor(ABC):
                         if len(frames) == 0:
                             continue
 
-                    image_sizes += frames[0].size * len(frames)
+                    image_sizes += [frames[0].size] * len(frames)
                     hashes += [hash(image_file)] * len(frames)
                     images += frames
                     image_index += 1

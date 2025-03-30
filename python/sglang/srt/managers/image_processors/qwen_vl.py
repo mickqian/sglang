@@ -13,7 +13,7 @@ from sglang.srt.managers.image_processors.base_image_processor import (
 from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
 )
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
@@ -35,7 +35,7 @@ class Qwen2_5VLImageProcessor(BaseImageProcessor):
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
 
-    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
         im_start_id: int = image_inputs.im_start_id
         im_end_id: int = image_inputs.im_end_id

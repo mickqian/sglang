@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING, List, Optional, Union
 
-import numpy as np
 import torch
 import triton
 import triton.language as tl
@@ -43,7 +42,7 @@ from sglang.srt.utils import get_compiler_backend
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
-    from sglang.srt.managers.schedule_batch import ImageInputs, ModelWorkerBatch
+    from sglang.srt.managers.schedule_batch import ModelWorkerBatch, MultimodalInputs
     from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
@@ -176,7 +175,7 @@ class ForwardBatch:
     extend_input_logprob_token_ids_gpu: Optional[torch.Tensor] = None
 
     # For multimodal
-    image_inputs: Optional[List[ImageInputs]] = None
+    mm_inputs: Optional[List[MultimodalInputs]] = None
 
     # Encoder-decoder
     encoder_cached: Optional[List[bool]] = None
@@ -242,7 +241,7 @@ class ForwardBatch:
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
             out_cache_loc=batch.out_cache_loc,
-            image_inputs=batch.image_inputs,
+            mm_inputs=batch.image_inputs,
             encoder_cached=batch.encoder_cached,
             encoder_lens=batch.encoder_lens,
             encoder_lens_cpu=batch.encoder_lens_cpu,
@@ -332,39 +331,47 @@ class ForwardBatch:
 
         return ret
 
-    def reduce_image_inputs(self) -> Optional[ImageInputs]:
+    def merge_mm_inputs(self) -> Optional[MultimodalInputs]:
         """
-        Merge all image inputs in the batch into a single ImageInputs object.
+        Merge all image inputs in the batch into a single MultiModalInputs object.
 
         Returns:
             if none, current batch contains no image input
 
         """
-        if not self.image_inputs or all(x is None for x in self.image_inputs):
+        if not self.mm_inputs or all(x is None for x in self.mm_inputs):
             return None
 
         # Filter out None values
-        valid_inputs = [x for x in self.image_inputs if x is not None]
+        valid_inputs = [x for x in self.mm_inputs if x is not None]
 
         # Start with the first valid image input
         merged = valid_inputs[0]
 
         # Merge remaining inputs
-        for img_input in valid_inputs[1:]:
-            merged.merge(img_input)
-
-        if isinstance(merged.pixel_values, np.ndarray):
-            merged.pixel_values = torch.from_numpy(merged.pixel_values)
+        for mm_input in valid_inputs[1:]:
+            merged.merge(mm_input)
 
         return merged
 
     def contains_image_inputs(self) -> bool:
-        """ """
+        if self.mm_inputs is None:
+            return False
         return any(
-            image_input.pixel_values is not None and image_input.pixel_values is not []
-            for image_input in self.image_inputs
-            if image_input is not None
+            mm_input is not None and mm_input.contains_image_inputs()
+            for mm_input in self.mm_inputs
         )
+
+    def contains_audio_inputs(self) -> bool:
+        if self.mm_inputs is None:
+            return False
+        return any(
+            mm_input is not None and mm_input.contains_audio_inputs()
+            for mm_input in self.mm_inputs
+        )
+
+    def contains_mm_inputs(self) -> bool:
+        return self.contains_audio_inputs() or self.contains_image_inputs()
 
     def _compute_mrope_positions(
         self, model_runner: ModelRunner, batch: ModelWorkerBatch

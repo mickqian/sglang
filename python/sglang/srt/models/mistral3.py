@@ -2,23 +2,27 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional, Set, TypedDict, TypeVar, Union
+from typing import Callable, Optional, Set, TypeVar, Union
 
 import numpy as np
 import torch
-from transformers import AutoModel, PretrainedConfig, PreTrainedModel
+from transformers import (
+    AutoModel,
+    PixtralVisionConfig,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 
-from ..configs.pixtral import Mistral3Config, NestedTensors
+from ..configs.pixtral import Mistral3Config
 from ..layers.attention.vision import VisionAttention
-from ..layers.logits_processor import LogitsProcessorOutput
 from ..layers.quantization import QuantizationConfig
 from ..layers.rotary_embedding import rotate_half
 from ..managers.image_processor import MultiModalEmbeddings
-from ..managers.multi_modality_utils import (
+from ..managers.mm_utils import (
     MultiModalityDataPaddingPatternImageTokens,
-    general_causal_wrapper_for_mm,
+    general_mm_embed_routine,
 )
-from ..managers.schedule_batch import ImageInputs
+from ..managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from ..model_executor.forward_batch_info import ForwardBatch
 from ..model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from ..utils import add_prefix
@@ -163,81 +167,6 @@ def resolve_visual_encoder_outputs(
 #             mm_data=mm_data,
 #         )
 #
-
-
-def _embedding_count_expression(embeddings: NestedTensors) -> str:
-    """
-    Constructs a debugging representation of the number of embeddings in the
-    NestedTensors.
-    """
-
-    if isinstance(embeddings, torch.Tensor):
-        return " x ".join([str(dim) for dim in embeddings.shape[:-1]])
-
-    return " + ".join(_embedding_count_expression(inner) for inner in embeddings)
-
-
-def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
-    """
-    Recursively flattens and concatenates NestedTensors on all but the last
-    dimension.
-    """
-
-    if isinstance(embeddings, torch.Tensor):
-        # Flatten all but the last dimension.
-        return embeddings.flatten(0, -2)
-
-    return torch.cat(tuple(_flatten_embeddings(t) for t in embeddings))
-
-
-def _merge_multimodal_embeddings(
-    inputs_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor,
-    multimodal_embeddings: NestedTensors,
-) -> torch.Tensor:
-    """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
-
-    Note:
-        This updates ``inputs_embeds`` in place.
-    """
-    num_expected_tokens = is_multimodal.sum().item()
-    assert isinstance(num_expected_tokens, int)
-
-    flattened = _flatten_embeddings(multimodal_embeddings)
-    if flattened.shape[0] != num_expected_tokens:
-        expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {flattened.shape[0]} "
-            f"multimodal tokens to {num_expected_tokens} placeholders"
-        )
-
-    inputs_embeds[is_multimodal] = flattened
-    return inputs_embeds
-
-
-class PixtralImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-
-    images: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
-
-    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
-    """
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond
-    to patch tokens.
-
-    Shape: `(batch_size, num_images, num_embeds)`
-    """
-
-    num_patches: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size, num_images)`"""
 
 
 from typing import List, Optional, Tuple, Union
@@ -532,7 +461,7 @@ class PixtralAttentionLayer(nn.Module):
         hidden_states = self.feed_forward(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        outputs = hidden_states
 
         return outputs
 
@@ -555,9 +484,7 @@ class PixtralTransformer(nn.Module):
         inputs_embeds,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutput]:
+    ) -> torch.Tensor:
         r"""
         Args:
             inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
@@ -569,58 +496,24 @@ class PixtralTransformer(nn.Module):
                 - 0 for tokens that are **masked**.
 
                 [What are attention masks?](../glossary#attention-mask)
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = None
+        encoder_states = ()
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    encoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    position_embeddings,
-                )
-            else:
-                layer_outputs = encoder_layer(
-                    hidden_states,
-                    attention_mask,
-                    position_embeddings=position_embeddings,
-                )
-
-            hidden_states = layer_outputs[0]
-
-        if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(
-                v
-                for v in [hidden_states, encoder_states, all_attentions]
-                if v is not None
+            layer_outputs = encoder_layer(
+                hidden_states,
+                attention_mask,
+                position_embeddings=position_embeddings,
             )
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=[hidden_states],
-            attentions=all_attentions,
-        )
+
+            hidden_states = layer_outputs
+
+        encoder_states = encoder_states + (hidden_states,)
+
+        return encoder_states
 
 
 def generate_block_attention_mask(patch_embeds_list, tensor):
@@ -645,7 +538,7 @@ class PixtralVisionModel(PreTrainedModel):
     base_model_prefix = "vision_encoder"
 
     def __init__(
-        self, config: PretrainedConfig, quant_config: Optional[QuantizationConfig]
+        self, config: PixtralVisionConfig, quant_config: Optional[QuantizationConfig]
     ):
         super().__init__(config)
         self.config = config
@@ -656,6 +549,7 @@ class PixtralVisionModel(PreTrainedModel):
             stride=config.patch_size,
             bias=False,
         )
+        self.patch_size = config.patch_size
         self.ln_pre = PixtralRMSNorm(config.hidden_size, eps=1e-5)
         self.transformer = PixtralTransformer(config=config, quant_config=quant_config)
         self.patch_positional_embedding = PixtralRotaryEmbedding(
@@ -665,9 +559,7 @@ class PixtralVisionModel(PreTrainedModel):
     def forward(
         self,
         pixel_values: List[torch.Tensor],
-        output_hidden_states: Optional[bool] = False,
-        return_dict: Optional[bool] = None,
-        *args,
+        image_sizes: torch.Tensor,
         **kwargs,
     ) -> Union[Tuple, BaseModelOutput]:
         """
@@ -678,37 +570,47 @@ class PixtralVisionModel(PreTrainedModel):
                 each with their own shape potentially
         """
         # pass images through initial convolution independently
-        # if len(pixel_values) > 1:
-        #     raise ValueError("Batching/padding not supported yet!")
+
+        pixel_values = torch.stack(pixel_values, dim=0)
+
+        patch_embeds = self.patch_conv(pixel_values)
+
         patch_embeds_list = [
-            self.patch_conv(pixel_value.unsqueeze(0).to(self.dtype))
-            for pixel_value in pixel_values
+            embed[..., : (size[0] // self.patch_size), : (size[1] // self.patch_size)]
+            for embed, size in zip(patch_embeds, image_sizes)
         ]
 
+        print(f"{patch_embeds_list=}")
+        print(f"{image_sizes=}")
+
         # flatten to a single sequence
-        patch_embeds = [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list]
+        patch_embeds = torch.cat(
+            [p.flatten(1).T for p in patch_embeds_list], dim=0
+        ).unsqueeze(0)
 
-        patch_embeds = torch.cat(patch_embeds, dim=1)
-
-        # patch_embeds = torch.cat(
-        #     [p.flatten(1).T for p in patch_embeds_list], dim=0
-        # ).unsqueeze(0)
-
-        print(f"flattened patch embeds shape: {patch_embeds.shape}")
-
+        print(f"{patch_embeds.shape=}")
         patch_embeds = self.ln_pre(patch_embeds)
+
         # positional embeddings
         position_ids = position_ids_in_meshgrid(
             patch_embeds_list,
             max_width=self.config.image_size // self.config.patch_size,
-        ).to(self.device)
-
-        position_embedding = self.patch_positional_embedding(patch_embeds, position_ids)
+        )
+        position_embeddings = self.patch_positional_embedding(
+            patch_embeds, position_ids
+        )
 
         attention_mask = generate_block_attention_mask(
             [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
         )
-        return self.transformer(patch_embeds, attention_mask, position_embedding)
+
+        out = self.transformer(
+            patch_embeds,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+        )
+
+        return out
 
 
 def flatten_bn(
@@ -845,12 +747,12 @@ class Mistral3PatchMerger(nn.Module):
     def forward(
         self, image_features: torch.Tensor, image_sizes: torch.Tensor
     ) -> torch.Tensor:
-        print(f"patch merger image_sizes: {image_sizes}")
-
-        print(f"image_features shape: {image_features.shape}")
+        image_sizes = [
+            (image_size[0] // self.patch_size, image_size[1] // self.patch_size)
+            for image_size in image_sizes
+        ]
         tokens_per_image = [h * w for h, w in image_sizes]
         d = image_features.shape[-1]
-        print(f"{tokens_per_image=}")
 
         permuted_tensor = []
         for image_index, image_tokens in enumerate(
@@ -898,22 +800,9 @@ class Mistral3MultiModalProjector(nn.Module):
             bias=config.multimodal_projector_bias,
         )
 
-    def forward(self, images: List[torch.Tensor], image_features: torch.Tensor):
+    def forward(self, image_features: torch.Tensor, image_sizes: List[torch.Tensor]):
         image_features = self.norm(image_features)
-        img_patch_dims = [
-            (img.shape[-2] // self.patch_size, img.shape[-1] // self.patch_size)
-            for img in images
-        ]
-        for image in images:
-            print(f"mm projector {image.shape=}")
-        print(f"{img_patch_dims=}")
-        print(f"{self.patch_size=}")
-        feature_sizes = [image_feature.shape[0] for image_feature in image_features]
-        feature_sizes = [
-            feature_size // self.spatial_merge_size_square
-            for feature_size in feature_sizes
-        ]
-        image_features = self.patch_merger(image_features, image_sizes=img_patch_dims)
+        image_features = self.patch_merger(image_features, image_sizes=image_sizes)
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
@@ -1058,36 +947,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
         #     self.language_model.make_empty_intermediate_tensors
         # )
 
-    def _parse_and_validate_image_input(
-        self, **kwargs: object
-    ) -> Optional[PixtralImagePixelInputs]:
-        images = kwargs.pop("images", None)
-        if images is None:
-            return None
-
-        if not isinstance(images, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of images. " f"Got type: {type(images)}")
-
-        embed_is_patch = kwargs.pop("embed_is_patch")
-        if not isinstance(embed_is_patch, (torch.Tensor, list)):
-            raise ValueError(
-                "Incorrect type of embed_is_patch. " f"Got type: {type(embed_is_patch)}"
-            )
-
-        num_patches = kwargs.pop("num_patches")
-        if not isinstance(num_patches, (torch.Tensor, list)):
-            raise ValueError(
-                "Incorrect type of num_patches. " f"Got type: {type(num_patches)}"
-            )
-
-        return PixtralImagePixelInputs(
-            type="pixel_values",
-            images=flatten_bn(images),
-            embed_is_patch=embed_is_patch,
-            num_patches=num_patches,
-        )
-
-    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         pattern = MultiModalityDataPaddingPatternImageTokens(
             image_token_id=image_inputs.im_token_id
         )
@@ -1122,7 +982,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
         return embeds_flat.split(num_patches_per_image)
 
     def get_multimodal_embeddings(
-        self, image_inputs: ImageInputs
+        self, image_inputs: MultimodalInputs
     ) -> Optional[MultiModalEmbeddings]:
 
         image_features = self._process_image_input(image_inputs)
@@ -1130,7 +990,7 @@ class Mistral3ForConditionalGeneration(nn.Module):
 
     def get_image_feature(
         self,
-        image_input: ImageInputs,
+        items: List[MultimodalDataItem],
         **kwargs,
     ):
         """
@@ -1148,8 +1008,13 @@ class Mistral3ForConditionalGeneration(nn.Module):
         Returns:
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
-        # print(f"pixel_values shape: {image_input.pixel_values.shape}")
-        pixel_values = image_input.pixel_values
+
+        pixel_values = torch.concat([item.pixel_values for item in items])
+        image_sizes = [
+            torch.tensor(image_size)
+            for item in items
+            for image_size in item.image_sizes
+        ]
         if (
             isinstance(pixel_values, list)
             and len(pixel_values) != 0
@@ -1176,7 +1041,6 @@ class Mistral3ForConditionalGeneration(nn.Module):
 
             if pixel_value.dim() == 3:
                 ps = [pixel_value]
-            # print(f"shape: {pixel_value.shape}")
             for p in ps:
                 assert p.dim() == 3
                 p = p.type(self.dtype).cuda()
@@ -1188,30 +1052,23 @@ class Mistral3ForConditionalGeneration(nn.Module):
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         # this is not memory efficient at all (output_hidden_states=True) will save all the hidden states.
         image_outputs = self.vision_tower(
-            pixel_values,
-            output_hidden_states=False,
+            pixel_values=pixel_values,
+            image_sizes=image_sizes,
             **kwargs,
         )
 
-        print(f"vision tower out shape: ", image_outputs.hidden_states[0].shape)
+        print(f"vision tower out shape: ", image_outputs[0].shape)
         # If we have one vision feature layer, return the corresponding hidden states,
         # otherwise, select the hidden states of each feature layer and concatenate them
         if isinstance(vision_feature_layer, int):
-            selected_image_feature = image_outputs.hidden_states[vision_feature_layer]
+            selected_image_feature = image_outputs[vision_feature_layer]
         else:
-            hs_pool = [
-                image_outputs.hidden_states[layer_idx]
-                for layer_idx in vision_feature_layer
-            ]
+            hs_pool = [image_outputs[layer_idx] for layer_idx in vision_feature_layer]
             selected_image_feature = torch.cat(hs_pool, dim=-1)
-        print(f"selected_image_featureshape: {selected_image_feature.shape}")
-
-        print(f"image_outputs: {image_outputs=}")
-        print(f"image_outputs: {image_outputs.hidden_states=}")
-        # print(f"image_outputs shape: {image_outputs.shape}")
+        print(f"{selected_image_feature.shape=}")
 
         image_features = self.multi_modal_projector(
-            images=pixel_values, image_features=selected_image_feature.squeeze(0)
+            image_features=selected_image_feature.squeeze(0), image_sizes=image_sizes
         )
 
         print(f"image_features: {image_features.shape=}")
@@ -1232,23 +1089,17 @@ class Mistral3ForConditionalGeneration(nn.Module):
         forward_batch: ForwardBatch,
         inputs_embeds: Optional[torch.Tensor] = None,
         get_embedding: bool = False,
-    ) -> LogitsProcessorOutput:
+    ) -> torch.Tensor:
         """Run forward pass for mistral3."""
-        inputs_embeds = general_causal_wrapper_for_mm(
+        _, hs = general_mm_embed_routine(
             input_ids=input_ids,
             positions=positions,
             forward_batch=forward_batch,
-            embed_tokens=self.get_input_embeddings(),
-            image_embedding_func=self.get_image_feature,
+            language_model=self.language_model,
+            image_data_embedding_func=self.get_image_feature,
         )
 
-        return self.language_model(
-            input_ids=None,
-            positions=positions,
-            forward_batch=forward_batch,
-            input_embeds=inputs_embeds,
-            get_embedding=get_embedding,
-        )
+        return hs
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         """Load weights for the model."""
@@ -1326,7 +1177,6 @@ class Mistral3ForConditionalGeneration(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
-            # print(f"loaded: {name}")
             loaded_params.add(name)
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:

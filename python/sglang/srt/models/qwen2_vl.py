@@ -45,7 +45,7 @@ from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_causal_wrapper_for_mm,
 )
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # === Vision Inputs === #
 
 
-class Qwen2VLImageInputs(TypedDict):
+class Qwen2VLMultimodalInputs(TypedDict):
     pixel_values: torch.Tensor
     """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
@@ -472,7 +472,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
 
     # Use grid_t * grid_w * grid_h to pad tokens for each image
     # add replaced padding by unique image hash
-    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
         im_start_id: int = image_inputs.im_start_id
         im_end_id: int = image_inputs.im_end_id
@@ -481,7 +481,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
         pattern = MultiModalityDataPaddingPatternTokenPairs(media_token_pairs)
         return pattern.pad_input_tokens(input_ids, image_inputs)
 
-    def get_image_feature(self, image_input: ImageInputs) -> torch.Tensor:
+    def get_image_feature(self, image_input: MultimodalInputs) -> torch.Tensor:
         pixel_values = image_input.pixel_values.type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thws)
         return image_embeds

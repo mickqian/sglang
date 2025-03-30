@@ -19,7 +19,7 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb, rotate_half
+from sglang.srt.layers.rotary_embedding import apply_rotary_pos_emb
 from sglang.srt.utils import add_prefix
 
 
@@ -82,6 +82,7 @@ class VisionAttention(nn.Module):
                 head_size=self.head_size,
                 total_num_heads=num_heads,
                 quant_config=quant_config,
+                bias=bias,
                 prefix=add_prefix("qkv_proj", prefix),
             )
         else:
@@ -95,6 +96,7 @@ class VisionAttention(nn.Module):
             input_size=embed_dim,
             output_size=embed_dim,
             quant_config=quant_config,
+            bias=bias,
             prefix=add_prefix("out_proj", prefix),
         )
 
@@ -281,11 +283,10 @@ class VisionSdpaAttention(nn.Module):
                 s, cu_seqlens, flatten_batch=self.flatten_batch
             )
 
-        if attention_mask is None:
-            if self.softmax_in_single_precision:
-                raise RuntimeError("Empty attention mask")
-        else:
-            attention_mask = attention_mask.to(device=q.device)
+        if attention_mask is None and self.softmax_in_single_precision:
+            raise RuntimeError("Empty attention mask")
+
+        attention_mask = attention_mask.to(device=q.device)
 
         q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
 
@@ -294,7 +295,16 @@ class VisionSdpaAttention(nn.Module):
             k_transposed = rearrange(k, "b h s d -> b h d s")
             attn_weights = torch.matmul(q, k_transposed) * scale
             del k, k_transposed
-            attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
+            if attention_mask.dtype in (
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+                torch.bool,
+            ):
+                attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
+            else:
+                ...
             attn_weights = attn_weights + attention_mask
             del attention_mask
             # full-precision

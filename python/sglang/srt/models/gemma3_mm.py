@@ -29,7 +29,7 @@ from sglang.srt.layers.layernorm import Gemma3RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.multi_modality_utils import general_causal_wrapper_for_mm
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
@@ -176,7 +176,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         self.post_init()
 
     def pad_input_ids(
-        self, input_ids: List[int], image_inputs: ImageInputs
+        self, input_ids: List[int], image_inputs: MultimodalInputs
     ) -> List[int]:
         """Pad input IDs with image tokens."""
         # Get special token IDs
@@ -259,7 +259,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
     def get_input_embeddings(self) -> nn.Embedding:
         return self.language_model.get_input_embeddings()
 
-    def get_image_feature(self, image_input: ImageInputs):
+    def get_image_feature(self, image_input: MultimodalInputs):
         """
         Projects the last hidden state from the vision model into language model space.
 
@@ -276,61 +276,6 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         vision_outputs = self.vision_tower(pixel_values=pixel_values).last_hidden_state
         image_features = self.multi_modal_projector(vision_outputs)
         return image_features
-
-    def embed_image_inputs(
-        self,
-        input_ids: torch.Tensor,
-        forward_batch: ForwardBatch,
-        image_input: ImageInputs,
-    ) -> torch.Tensor:
-        if input_ids is None:
-            raise ValueError("Unimplemented")
-        # boolean-masking image tokens
-        special_image_mask = torch.isin(
-            input_ids,
-            torch.tensor(image_input.pad_values, device=input_ids.device),
-        ).unsqueeze(-1)
-        num_image_tokens_in_input_ids = special_image_mask.sum()
-
-        inputs_embeds = None
-        if num_image_tokens_in_input_ids == 0:
-            inputs_embeds = self.get_input_embeddings()(input_ids)
-            return inputs_embeds
-        else:
-            # print(f"image tokens from input_ids: {inputs_embeds[special_image_mask].numel()}")
-            image_features = self.get_image_feature(image_input.pixel_values)
-
-            # print(f"image tokens from image embeddings: {image_features.numel()}")
-            num_image_tokens_in_embedding = (
-                image_features.shape[0] * image_features.shape[1]
-            )
-
-            if num_image_tokens_in_input_ids != num_image_tokens_in_embedding:
-                num_image = num_image_tokens_in_input_ids // image_features.shape[1]
-                image_features = image_features[:num_image, :]
-                logger.warning(
-                    f"Number of images does not match number of special image tokens in the input text. "
-                    f"Got {num_image_tokens_in_input_ids} image tokens in the text but {num_image_tokens_in_embedding} "
-                    "tokens from image embeddings."
-                )
-
-            # Important: clamp after extracting original image boundaries
-            input_ids.clamp_(min=0, max=self.vocab_size - 1)
-
-            inputs_embeds = self.get_input_embeddings()(input_ids)
-
-            special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
-                inputs_embeds.device
-            )
-
-            image_features = image_features.to(
-                inputs_embeds.device, inputs_embeds.dtype
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(
-                special_image_mask, image_features
-            )
-
-        return inputs_embeds
 
     @torch.no_grad()
     def forward(

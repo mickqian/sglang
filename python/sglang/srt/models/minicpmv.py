@@ -53,7 +53,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.multi_modality_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
 )
-from sglang.srt.managers.schedule_batch import ImageInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
@@ -476,7 +476,7 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
     """
 
 
-MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs]
+MiniCPMVMultimodalInputs = Union[MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs]
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
@@ -765,7 +765,7 @@ class MiniCPMVBaseModel(nn.Module):
     def get_embedding(
         self,
         input_ids: torch.Tensor,
-        image_inputs: Optional[MiniCPMVImageInputs],
+        image_inputs: Optional[MiniCPMVMultimodalInputs],
     ) -> torch.Tensor:
         inputs_embeds: torch.Tensor = self.llm.get_input_embeddings(input_ids)
         if image_inputs is None:  # No image
@@ -791,7 +791,7 @@ class MiniCPMVBaseModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         **kwargs: object,
-    ) -> Optional[MiniCPMVImageInputs]:
+    ) -> Optional[MiniCPMVMultimodalInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
         im_start_id = kwargs.pop("im_start_id", None)
@@ -919,7 +919,7 @@ class MiniCPMVBaseModel(nn.Module):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_vision_hidden_states(self, data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(self, data: MiniCPMVMultimodalInputs) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -1031,7 +1031,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
 
     def get_vision_hidden_states(
         self,
-        data: MiniCPMVImageInputs,
+        data: MiniCPMVMultimodalInputs,
     ) -> torch.Tensor:
         pixel_values = data["data"]
         tgt_sizes = data["tgt_sizes"]
@@ -1067,7 +1067,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         )
         return self.resampler(vision_embedding, tgt_sizes)
 
-    def pad_input_ids(self, input_ids: List[int], image_inputs: ImageInputs):
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
         # Get all special token IDs
         im_start_id: int = image_inputs.im_start_id
         im_end_id: int = image_inputs.im_end_id
