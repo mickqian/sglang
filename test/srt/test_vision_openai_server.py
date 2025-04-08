@@ -633,7 +633,7 @@ class TestInternVL2_5Server(TestOpenAIVisionServer):
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=["--trust-remote-code", "--chat-template", "internvl2_5"],
+            other_args=["--trust-remote-code", "--chat-template", "internvl-2-5"],
         )
         cls.base_url += "/v1"
 

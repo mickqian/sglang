@@ -107,7 +107,6 @@ def get_config(
             if not hasattr(config, key):
                 setattr(config, key, val)
 
-
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision)
