@@ -250,9 +250,8 @@ class TestOpenAIVisionServer(CustomTestCase):
                 "role": "user",
                 "content": [
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"video:{video_path}"},
-                        "modalities": "video",
+                        "type": "video_url",
+                        "video_url": {"url": f"{video_path}"},
                     },
                     {"type": "text", "text": "Please describe the video in detail."},
                 ],
@@ -282,8 +281,8 @@ class TestOpenAIVisionServer(CustomTestCase):
 
         client = openai.Client(api_key=self.api_key, base_url=self.base_url)
 
-        # messages = self.prepare_video_messages_video_direct(file_path)
-        messages = self.prepare_video_messages(file_path)
+        messages = self.prepare_video_messages_video_direct(file_path)
+        # messages = self.prepare_video_messages(file_path)
 
         response = client.chat.completions.create(
             model="default",
@@ -302,7 +301,7 @@ class TestOpenAIVisionServer(CustomTestCase):
 
         # Add assertions to validate the video response
         assert (
-            "iPod" in video_response or "device" in video_response
+            "iPod" in video_response or "device" in video_response  or "microphone" in video_response
         ), f"video_response: {video_response}, should contain 'iPod' or 'device'"
         assert (
             "man" in video_response

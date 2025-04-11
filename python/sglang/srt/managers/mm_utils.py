@@ -3,7 +3,7 @@ Multi-modality utils
 """
 
 from abc import abstractmethod
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -96,7 +96,7 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
             return input_ids
 
         for start_idx, end_idx in zip(start_indices, end_indices):
-            padded_ids.extend(input_ids[last_idx : start_idx + 1])
+            padded_ids.extend(input_ids[last_idx: start_idx + 1])
 
             if input_ids[start_idx] in self.data_start_token_ids:
                 data_idx += 1
@@ -171,8 +171,8 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
             num_pad_values = len(pad_values)
             if num_regions > 0 and num_pad_values > 0:
                 pad_values = (pad_values * (num_regions // num_pad_values + 1))[
-                    :num_regions
-                ]
+                             :num_regions
+                             ]
             else:  # If no regions or no pad_values, this loop won't run anyway.
                 pad_values = []  # Ensure pad_values is empty if starts is empty
 
@@ -411,12 +411,9 @@ def embed_mm_inputs(
     extend_seq_lens: List[int],
     input_ids: torch.Tensor,
     input_embedding: nn.Embedding,
-    image_data_embedding_func: Callable[
-        [List[MultimodalDataItem]], torch.Tensor
-    ] = None,
-    audio_data_embedding_func: Callable[
-        [List[MultimodalDataItem]], torch.Tensor
-    ] = None,
+    data_embedding_mapping: Dict[
+        Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
+    ],
     placeholder_tokens: dict[Modality, List[int]] = None,
 ) -> Optional[torch.Tensor]:
     """
@@ -448,46 +445,47 @@ def embed_mm_inputs(
     embeddings, masks = [], []
 
     # 2. Get multimodal embedding separately
-    # TODO: make this more generic
-    # Try get image embedding if any
-    if (
-        any(True for item in item_flatten_list if item.is_image())
-        and image_data_embedding_func
-    ):
-        items = [item for item in item_flatten_list if item.is_image()]
-        placeholder_tensor = torch.tensor(
-            [item.pad_value for item in items],
-            device=input_ids.device,
-        )
-        # calculate per request items length offset
-        items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
-        items_offsets = []
-        for i, mm_inputs in enumerate(mm_inputs_list):
-            image_items = [item for item in mm_inputs.mm_items if item.is_image()]
-            items_size[i + 1] = len(image_items)
-            items_offsets.append(
-                flatten_nested_list(
-                    [
-                        item.image_offsets
-                        for item in mm_inputs.mm_items
-                        if item.is_image()
-                    ]
-                )
+    # Try get mm embedding if any
+    for modality in modalities:
+        items = [
+            item for item in appearing_items if item.is_modality(modality=modality)
+        ]
+        if (
+            len(items) != 0
+            and modality in data_embedding_mapping
+        ):
+            placeholder_tensor = torch.tensor(
+                [item.pad_value for item in items],
+                device=input_ids.device,
             )
-        items_size = torch.cumsum(items_size, dim=0).tolist()
+            # calculate per request items length offset
+            items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
+            items_offsets = []
+            for i, mm_inputs in enumerate(mm_inputs_list):
+                mm_items = [item for item in mm_inputs.mm_items if item.is_modality(modality=modality)]
+                items_size[i + 1] = len(mm_items)
+                items_offsets.append(
+                    flatten_nested_list(
+                        [
+                            item.image_offsets
+                            for item in mm_inputs.mm_items
+                        ]
+                    )
+                )
+            items_size = torch.cumsum(items_size, dim=0).tolist()
 
-        embedding, mask = get_embedding_and_mask(
-            data_embedding_func=image_data_embedding_func,
-            embedding_items=items,
-            placeholder_tensor=placeholder_tensor,
-            input_ids=input_ids,
-            items_size=items_size,
-            prefix_length=extend_prefix_lens,
-            extend_length=extend_seq_lens,
-            items_offset_list=items_offsets,
-        )
-        embeddings += [embedding]
-        masks += [mask]
+            embedding, mask = get_embedding_and_mask(
+                data_embedding_func=data_embedding_func,
+                embedding_items=items,
+                placeholder_tensor=placeholder_tensor,
+                input_ids=input_ids,
+                items_size=items_size,
+                prefix_length=extend_prefix_lens,
+                extend_length=extend_seq_lens,
+                items_offset_list=items_offsets,
+            )
+            embeddings += [embedding]
+            masks += [mask]
 
     # Try get audio embedding if any
     if (
@@ -554,12 +552,9 @@ def general_mm_embed_routine(
     input_ids: torch.Tensor,
     forward_batch: ForwardBatch,
     language_model: nn.Module,
-    image_data_embedding_func: Optional[
-        Callable[[List[MultimodalDataItem]], torch.Tensor]
-    ] = None,
-    audio_data_embedding_func: Optional[
-        Callable[[List[MultimodalDataItem]], torch.Tensor]
-    ] = None,
+    data_embedding_mapping: Dict[
+        Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
+    ],
     placeholder_tokens: Optional[dict[Modality, List[int]]] = None,
     **kwargs,
 ) -> torch.Tensor:
@@ -603,8 +598,7 @@ def general_mm_embed_routine(
             extend_seq_lens=extend_seq_lens,
             input_ids=input_ids,
             input_embedding=embed_tokens,
-            image_data_embedding_func=image_data_embedding_func,
-            audio_data_embedding_func=audio_data_embedding_func,
+            data_embedding_mapping=data_embedding_mapping,
             placeholder_tokens=placeholder_tokens,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models

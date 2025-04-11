@@ -19,6 +19,7 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
         super().__init__(hf_config, server_args, _processor)
         self.image_token = "(<image>./</image>)"
         self.audio_token = "(<audio>./</audio>)"
+        self.video_token = "(<video>./</video>)"
 
     async def process_mm_data_async(
         self,
@@ -43,6 +44,7 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
             image_data=image_data,
             multimodal_tokens=MultimodalSpecialTokens(
                 image_token=self.image_token,
+                video_token=self.video_token,
                 audio_token=self.audio_token,
             ),
         )
