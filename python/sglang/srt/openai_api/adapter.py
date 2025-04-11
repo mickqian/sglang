@@ -900,6 +900,7 @@ def v1_chat_generate_request(
     prompts = []
     sampling_params_list = []
     image_data_list = []
+    video_data_list = []
     audio_data_list = []
     return_logprobs = []
     logprob_start_lens = []
@@ -914,6 +915,7 @@ def v1_chat_generate_request(
         #  - prompt: The full prompt string.
         #  - stop: Custom stop tokens.
         #  - image_data: None or a list of image strings (URLs or base64 strings).
+        #  - video_data: None or a list of video strings (URLs).
         #  - audio_data: None or a list of audio strings (URLs).
         #    None skips any image processing in GenerateReqInput.
         strict_tag = None
@@ -987,12 +989,14 @@ def v1_chat_generate_request(
                     prompt = tokenizer_manager.tokenizer.decode(prompt_ids)
                 stop = request.stop
                 image_data = None
+                video_data = None
                 audio_data = None
                 modalities = []
             else:
                 conv = generate_chat_conv(request, chat_template_name)
                 prompt = conv.get_prompt()
                 image_data = conv.image_data
+                video_data = conv.video_data
                 audio_data = conv.audio_data
                 modalities = conv.modalities
                 stop = conv.stop_str or []
@@ -1007,6 +1011,7 @@ def v1_chat_generate_request(
             prompt_ids = request.messages
             stop = request.stop
             image_data = None
+            video_data = None
             audio_data = None
             modalities = []
             prompt = request.messages
@@ -1066,6 +1071,7 @@ def v1_chat_generate_request(
         sampling_params_list.append(sampling_params)
 
         image_data_list.append(image_data)
+        video_data_list.append(video_data)
         audio_data_list.append(audio_data)
         modalities_list.append(modalities)
     if len(all_requests) == 1:
@@ -1079,6 +1085,7 @@ def v1_chat_generate_request(
                 prompt_kwargs = {"input_ids": input_ids[0]}
         sampling_params_list = sampling_params_list[0]
         image_data_list = image_data_list[0]
+        video_data_list = video_data_list[0]
         audio_data_list = audio_data_list[0]
         return_logprobs = return_logprobs[0]
         logprob_start_lens = logprob_start_lens[0]
@@ -1098,6 +1105,7 @@ def v1_chat_generate_request(
     adapted_request = GenerateReqInput(
         **prompt_kwargs,
         image_data=image_data_list,
+        video_data=video_data_list,
         audio_data=audio_data_list,
         sampling_params=sampling_params_list,
         return_logprob=return_logprobs,

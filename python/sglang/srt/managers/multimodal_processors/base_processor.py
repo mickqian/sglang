@@ -4,14 +4,14 @@ import dataclasses
 import multiprocessing as mp
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import PIL
 from decord import VideoReader, cpu
 from PIL import Image
 
-from sglang.srt.utils import encode_video, load_audio, load_image, logger
+from sglang.srt.utils import load_audio, load_image, load_video, logger
 
 
 @dataclasses.dataclass
@@ -21,12 +21,13 @@ class BaseMultiModalProcessorOutput:
 
     # frames loaded from image and video, in given order
     images: Optional[list[PIL.Image]] = None
+    videos: Optional[list[VideoReader]] = None
 
     # audios
     audios: Optional[list[np.ndarray]] = None
 
     def normalize(self):
-        for field_name in ["image_sizes", "images", "audios"]:
+        for field_name in ["image_sizes", "images", "videos", "audios"]:
             field = getattr(self, field_name, None)
             if field is not None and isinstance(field, list) and len(field) == 0:
                 setattr(self, field_name, None)
@@ -34,9 +35,21 @@ class BaseMultiModalProcessorOutput:
 
 @dataclasses.dataclass
 class MultimodalSpecialTokens:
-    image_token: Optional[str] = None
-    video_token: Optional[str] = None
-    audio_token: Optional[str] = None
+    image_token: Optional[Union[int, str]] = None
+    video_token: Optional[Union[int, str]] = None
+    audio_token: Optional[Union[int, str]] = None
+
+    def convert_to_str(self, token: Union[str, int], processor) -> str:
+        if token is None:
+            return token
+        if isinstance(token, str):
+            return token
+        return processor.tokenizer.convert_ids_to_tokens([token])[0]
+
+    def convert_to_strs(self, processor):
+        self.image_token = self.convert_to_str(self.image_token, processor)
+        self.video_token = self.convert_to_str(self.video_token, processor)
+        self.audio_token = self.convert_to_str(self.audio_token, processor)
 
     def collect(self) -> list[str]:
         return [
@@ -117,6 +130,7 @@ class BaseMultimodalProcessor(ABC):
         multimodal_tokens: MultimodalSpecialTokens,
         max_req_input_len: int,
         image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
         audio_data: Optional[list] = None,
         return_text: Optional[bool] = True,
         discard_alpha_channel: bool = True,
@@ -130,14 +144,7 @@ class BaseMultimodalProcessor(ABC):
             discard_alpha_channel: if True, discards the alpha channel in the returned images
 
         """
-        if isinstance(multimodal_tokens.image_token, int):
-            multimodal_tokens.image_token = (
-                self._processor.tokenizer.convert_ids_to_tokens(
-                    multimodal_tokens.image_token
-                )
-            )
-        else:
-            multimodal_tokens.image_token = multimodal_tokens.image_token
+        multimodal_tokens.convert_to_strs(self._processor)
 
         if isinstance(prompt, list) and return_text:
             assert len(prompt) and isinstance(prompt[0], int)
@@ -155,88 +162,53 @@ class BaseMultimodalProcessor(ABC):
             # split text into list of normal text and special tokens
             text_parts = re.split(pattern, prompt)
 
-        # TODO(mick): load from server_args, env, or sampling_params
-        MAX_NUM_FRAMES = 30
-        estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
-        total_frame_count = sum(estimated_frames_list)
-        # a heuristic value, suggesting the maximum fraction of frames to embed from all visual inputs.
-        # e.g., 0.1 suggests that 1 frame out of 10 input frames should be used
-        scaling_factor = min(1.0, MAX_NUM_FRAMES / max(1, total_frame_count))
-
-        assert len(image_data) == len(estimated_frames_list)
-
-        image_index, audio_index = 0, 0
-        hashes, image_sizes, images, audios = [], [], [], []
+        image_index, video_index, audio_index = 0, 0, 0
+        image_sizes, images, videos, audios = [], [], [], []
         new_text = ""
+        print(f"{text_parts=}")
+        print(f"{multimodal_tokens=}")
         for index, text_part in enumerate(text_parts):
+            text = text_part
             try:
                 if text_part == multimodal_tokens.image_token:
-                    # load as image
-                    if len(images) >= MAX_NUM_FRAMES:
-                        frames_to_process = 0
-                    else:
-                        estimated_frames = estimated_frames_list[image_index]
-                        frames_to_process = max(
-                            1, int(estimated_frames * scaling_factor)
-                        )
-
-                    if frames_to_process == 0:
-                        frames = []
-                    else:
-                        image_file = image_data[image_index]
-                        if isinstance(image_file, str) and image_file.startswith(
-                            "video:"
-                        ):
-                            # video
-                            path = image_file[len("video:") :]
-                            frames = encode_video(
-                                path, frame_count_limit=frames_to_process
-                            )
-                        else:
-                            # image
-                            raw_image, _size = load_image(image_file)
-                            if discard_alpha_channel:
-                                raw_image = raw_image.convert("RGB")
-                            frames = [raw_image]
-                        if len(frames) == 0:
-                            continue
-
+                    # image
+                    raw_image, _size = load_image(image_data[image_index])
+                    if discard_alpha_channel:
+                        raw_image = raw_image.convert("RGB")
+                    frames = [raw_image]
                     image_sizes += frames[0].size * len(frames)
-
-                    # Generate a hashable value for the image file
-                    if isinstance(image_file, Image.Image):
-                        # For PIL.Image objects, use the ID as a hashable value
-                        hash_value = hash(id(image_file))
-                    else:
-                        # For other types (strings, etc.), use the regular hash
-                        hash_value = hash(image_file)
-
-                    hashes += [hash_value] * len(frames)
                     images += frames
                     image_index += 1
-                    if frames_to_process != 0:
-                        new_text += multimodal_tokens.image_token * len(frames)
-                    assert frames_to_process == len(frames)
+                elif text_part == multimodal_tokens.video_token:
+                    # load as video
+                    video_file = video_data[video_index]
+                    video = load_video(video_file)
+                    videos += [video]
+                    video_index += 1
                 elif text_part == multimodal_tokens.audio_token:
                     # load as audio
                     audio_file = audio_data[audio_index]
                     audio = load_audio(audio_file)
-                    hashes += [hash(audio_file)]
                     audios += [audio]
                     audio_index += 1
-                    new_text += multimodal_tokens.audio_token
                 else:
-                    # TODO(mick): handle video
                     # normal text
-                    new_text += text_part
+                    ...
+
+                new_text += text
 
             except Exception as e:
-                logger.error(f"An exception occurred while loading images: {e}")
-                raise RuntimeError(f"An exception occurred while loading images: {e}")
+                logger.error(
+                    f"An exception occurred while loading multimodal data: {e}"
+                )
+                raise RuntimeError(
+                    f"An exception occurred while loading multimodal data: {e}"
+                )
 
         out = BaseMultiModalProcessorOutput(
             images=images,
             audios=audios,
+            videos=videos,
             input_text=new_text,
         )
         out.normalize()
