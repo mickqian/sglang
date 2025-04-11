@@ -228,6 +228,10 @@ class ChatCompletionMessageContentImageURL(BaseModel):
     detail: Optional[Literal["auto", "low", "high"]] = "auto"
 
 
+class ChatCompletionMessageContentVideoURL(BaseModel):
+    url: str
+
+
 class ChatCompletionMessageContentAudioURL(BaseModel):
     url: str
 
@@ -238,6 +242,11 @@ class ChatCompletionMessageContentImagePart(BaseModel):
     modalities: Optional[Literal["image", "multi-images", "video"]] = "image"
 
 
+class ChatCompletionMessageContentVideoPart(BaseModel):
+    type: Literal["video_url"]
+    video_url: ChatCompletionMessageContentVideoURL
+
+
 class ChatCompletionMessageContentAudioPart(BaseModel):
     type: Literal["audio_url"]
     audio_url: ChatCompletionMessageContentAudioURL
@@ -246,6 +255,7 @@ class ChatCompletionMessageContentAudioPart(BaseModel):
 ChatCompletionMessageContentPart = Union[
     ChatCompletionMessageContentTextPart,
     ChatCompletionMessageContentImagePart,
+    ChatCompletionMessageContentVideoPart,
     ChatCompletionMessageContentAudioPart,
 ]
 

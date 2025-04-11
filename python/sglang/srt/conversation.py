@@ -74,9 +74,11 @@ class Conversation:
     stop_str: Union[str, List[str]] = None
     # The string that represents an image token in the prompt
     image_token: str = "<image>"
+    video_token: str = "<video>"
     audio_token: str = "<audio>"
 
     image_data: Optional[List[str]] = None
+    video_data: Optional[List[str]] = None
     modalities: Optional[List[str]] = None
     stop_token_ids: Optional[int] = None
 
@@ -342,6 +344,10 @@ class Conversation:
         """Append a new message."""
         self.image_data.append(image)
 
+    def append_video(self, video: str):
+        """Append a new message."""
+        self.video_data.append(video)
+
     def append_audio(self, audio: str):
         """Append a new message."""
         self.audio_data.append(audio)
@@ -392,6 +398,7 @@ class Conversation:
             sep2=self.sep2,
             stop_str=self.stop_str,
             image_token=self.image_token,
+            video_token=self.video_token,
             audio_token=self.audio_token,
         )
 
@@ -441,8 +448,12 @@ def generate_embedding_convs(
             sep2=conv_template.sep2,
             stop_str=conv_template.stop_str,
             image_data=[],
+            video_data=[],
+            audio_data=[],
             modalities=[],
             image_token=conv_template.image_token,
+            video_token=conv_template.video_token,
+            audio_token=conv_template.audio_token,
         )
         real_content = ""
 
@@ -479,10 +490,12 @@ def generate_chat_conv(
         sep2=conv.sep2,
         stop_str=conv.stop_str,
         image_data=[],
+        video_data=[],
         audio_data=[],
         modalities=[],
         image_token=conv.image_token,
         audio_token=conv.audio_token,
+        video_token=conv.video_token,
     )
 
     if isinstance(request.messages, str):
@@ -521,6 +534,7 @@ def generate_chat_conv(
                         else conv.image_token
                     )
                 audio_token = conv.audio_token
+                video_token = conv.video_token
                 for content in message.content:
                     if content.type == "text":
                         if num_image_url > 16:
@@ -530,6 +544,9 @@ def generate_chat_conv(
                         # NOTE: Only works for llava
                         real_content += image_token
                         conv.append_image(content.image_url.url)
+                    elif content.type == "video_url":
+                        real_content += video_token
+                        conv.append_video(content.video_url.url)
                     elif content.type == "audio_url":
                         real_content += audio_token
                         conv.append_audio(content.audio_url.url)
@@ -668,6 +685,7 @@ register_conv_template(
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
         stop_str=["<|im_end|>"],
         image_token="<|vision_start|><|image_pad|><|vision_end|>",
+        video_token="<|vision_start|><|video_pad|><|vision_end|>",
     )
 )
 
@@ -727,6 +745,7 @@ register_conv_template(
         sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
         stop_str=("<|im_end|>", "<|endoftext|>"),
         image_token="(<image>./</image>)",
+        video_token="(<video>./</video>)",
     )
 )
 
