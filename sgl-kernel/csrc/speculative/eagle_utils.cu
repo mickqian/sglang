@@ -284,3 +284,56 @@ void verify_tree_greedy(
       num_spec_step,
       num_draft_tokens);
 }
+
+template <typename scalar_t>
+__global__ void Fnv1aHashKernel(
+    const scalar_t* __restrict__ tensor_data, const size_t tensor_size_bytes, unsigned int* __restrict__ hash_output) {
+  const unsigned int FNV_prime = 16777619u;
+  unsigned int hash = 2166136261u;
+
+  // 将数据视为字节进行哈希
+  const unsigned char* data_bytes = reinterpret_cast<const unsigned char*>(tensor_data);
+
+  // 每个线程处理多个字节
+  for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < tensor_size_bytes; i += blockDim.x * gridDim.x) {
+    hash ^= static_cast<unsigned int>(data_bytes[i]);
+    hash *= FNV_prime;
+  }
+
+  // 使用 atomicXor 合并各线程结果
+  atomicXor(hash_output, hash);
+}
+
+// input_tensor: 任意维度的tensor (dtype=torch.float32或其他)
+// hash_output: [1] 存放hash结果的tensor (dtype=torch.int32)
+void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream = 0) {
+  // 检查输入tensor
+  CHECK_INPUT(input_tensor);
+  CHECK_INPUT(hash_output);
+
+  // 检查hash_output尺寸
+  CHECK_EQ(hash_output.numel(), 1);
+  CHECK_EQ(hash_output.scalar_type(), at::kInt);
+
+  // 获取tensor设备信息
+  auto device = input_tensor.device();
+  CHECK_EQ(hash_output.device(), device);
+
+  // 计算tensor字节大小
+  size_t tensor_size_bytes = input_tensor.numel() * input_tensor.element_size();
+
+  // 初始化hash_output为0
+  cudaMemsetAsync(hash_output.data_ptr(), 0, sizeof(int), reinterpret_cast<cudaStream_t>(cuda_stream));
+
+  // 配置kernel launch参数
+  const int threads = 256;
+  const int blocks = (tensor_size_bytes + threads - 1) / threads;
+
+  AT_DISPATCH_ALL_TYPES(input_tensor.scalar_type(), "Fnv1aHashKernel", ([&] {
+                          Fnv1aHashKernel<scalar_t>
+                              <<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
+                                  input_tensor.data_ptr<scalar_t>(),
+                                  tensor_size_bytes,
+                                  reinterpret_cast<unsigned int*>(hash_output.data_ptr()));
+                        }));
+}

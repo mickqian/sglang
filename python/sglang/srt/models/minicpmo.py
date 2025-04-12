@@ -1551,9 +1551,7 @@ class MiniCPMO(MiniCPMBaseModel):
         Returns:
             List[List[torch.Tensor]]: audio embeddings
         """
-        wavforms = flatten_nested_list(
-            [item.audio_features for item in items if item.audio_features]
-        )
+        wavforms = flatten_nested_list([item.feature for item in items if item.feature])
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
             [item.audio_feature_lens for item in items if item.audio_feature_lens]
@@ -1658,9 +1656,7 @@ class MiniCPMO(MiniCPMBaseModel):
             List[List[torch.Tensor]]: audio embeddings
         """
         # (bs, 80, frames) or [], multi audios need filled in advance
-        wavforms = flatten_nested_list(
-            [item.audio_features for item in items if item.audio_features]
-        )
+        wavforms = flatten_nested_list([item.feature for item in items if item.feature])
         # list, [[x1, x2], [y1], [z1]]
         audio_feature_lens_raw = flatten_nested_list(
             [item.audio_feature_lens for item in items if item.audio_feature_lens]
@@ -1777,7 +1773,7 @@ class MiniCPMO(MiniCPMBaseModel):
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         # list of tensors
-        pixel_values = flatten_nested_list([item.pixel_values for item in items])
+        pixel_values = flatten_nested_list([item.feature for item in items])
         tgt_sizes = torch.stack(
             flatten_nested_list([item.tgt_size for item in items]), dim=0
         )

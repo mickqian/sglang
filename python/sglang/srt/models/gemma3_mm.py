@@ -279,7 +279,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
         pixel_values = torch.stack(
-            flatten_nested_list([item.pixel_values for item in items]), dim=0
+            flatten_nested_list([item.feature for item in items]), dim=0
         )
         pixel_values = pixel_values.to("cuda")
         pixel_values = pixel_values.to(dtype=self.language_model.dtype())

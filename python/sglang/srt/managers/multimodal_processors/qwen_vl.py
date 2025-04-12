@@ -129,10 +129,9 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             "input_ids": ret["input_ids"].flatten().tolist(),
             "mm_items": [
                 MultimodalDataItem(
-                    pixel_values=ret["pixel_values"],
+                    feature=ret["pixel_values"],
                     image_grid_thws=image_grid_thws,
                     # TODO
-                    video_grid_thws=None,
                     second_per_grid_ts=ret.get("second_per_grid_ts", None),
                     modality=Modality.IMAGE,
                 )
