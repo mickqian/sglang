@@ -288,3 +288,5 @@ void top_p_sampling_from_probs(
     double top_p_val,
     bool deterministic,
     int64_t cuda_stream);
+
+void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream);
