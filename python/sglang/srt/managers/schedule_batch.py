@@ -175,7 +175,8 @@ class MultimodalDataItem:
     # the real data, pixel_values or audio_features
     # data: Union[List[torch.Tensor], List[np.array]]
     feature: Union[torch.Tensor, np.array] = None
-    grid_thws: Union[torch.Tensor, np.array] = None
+    image_grid_thws: Union[torch.Tensor, np.array] = None
+    video_grid_thws: Union[torch.Tensor, np.array] = None
 
     emb_mask: Optional[torch.Tensor] = None
     image_spatial_crop: Optional[torch.Tensor] = None

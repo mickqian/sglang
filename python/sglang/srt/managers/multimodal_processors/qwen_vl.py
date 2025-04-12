@@ -132,10 +132,9 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if "pixel_values" in ret:
             items += [
                 MultimodalDataItem(
-                    pixel_values=ret["pixel_values"],
+                    feature=ret["pixel_values"],
                     image_grid_thws=torch.concat([ret["image_grid_thw"]]),
                     # TODO
-                    video_grid_thws=None,
                     second_per_grid_ts=ret.get("second_per_grid_ts", None),
                     modality=Modality.IMAGE,
                 )
