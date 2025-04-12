@@ -58,6 +58,17 @@ def verify_tree_greedy(
     )
 
 
+def fnv1a_hash(
+    input_tensor: torch.Tensor,
+    output_hash: int,  # mutable
+) -> None:
+    torch.ops.sgl_kernel.fnv1a_hash.default(
+        input_tensor,
+        output_hash,
+        get_cuda_stream(),
+    )
+
+
 def build_tree_kernel_efficient(
     parent_list: torch.Tensor,
     selected_index: torch.Tensor,

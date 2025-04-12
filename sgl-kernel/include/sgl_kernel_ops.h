@@ -357,3 +357,5 @@ std::vector<at::Tensor> mha_varlen_fwd_sparse(
  * From XGrammar
  */
 void ApplyTokenBitmaskInplace(at::Tensor logits, at::Tensor bitmask, at::optional<at::Tensor> indices = at::nullopt);
+
+void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream);
