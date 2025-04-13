@@ -306,7 +306,7 @@ __global__ void Fnv1aHashKernel(
 
 // input_tensor: 任意维度的tensor (dtype=torch.float32或其他)
 // hash_output: [1] 存放hash结果的tensor (dtype=torch.int32)
-void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream = 0) {
+void fnv1a_hashaa(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream = 0) {
   // 检查输入tensor
   CHECK_INPUT(input_tensor);
   CHECK_INPUT(hash_output);
@@ -336,4 +336,80 @@ void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_st
                                   tensor_size_bytes,
                                   reinterpret_cast<unsigned int*>(hash_output.data_ptr()));
                         }));
+}
+
+#include <ATen/ATen.h>
+#include <cuda_runtime.h>
+
+template <typename scalar_t>
+__global__ void FastHashKernel(
+    const scalar_t* __restrict__ tensor_data, const size_t tensor_size_bytes, unsigned int* __restrict__ hash_output) {
+  extern __shared__ unsigned int s_hash[];
+
+  // FNV-1a 参数
+  const unsigned int FNV_prime = 16777619u;
+  unsigned int hash = 2166136261u;
+
+  const unsigned char* data = reinterpret_cast<const unsigned char*>(tensor_data);
+  const size_t num_bytes = tensor_size_bytes;
+
+  // 每个线程处理连续数据块以优化内存访问
+  const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t threads_total = gridDim.x * blockDim.x;
+  const size_t bytes_per_thread = (num_bytes + threads_total - 1) / threads_total;
+  const size_t start = tid * bytes_per_thread;
+  const size_t end = min(start + bytes_per_thread, num_bytes);
+
+  // 处理当前线程的数据块
+  for (size_t i = start; i < end; ++i) {
+    hash ^= static_cast<unsigned int>(data[i]);
+    hash *= FNV_prime;
+  }
+
+  // 共享内存归约
+  unsigned int* s_data = s_hash;
+  s_data[threadIdx.x] = hash;
+  __syncthreads();
+
+  // 树形归约 (异或操作)
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) {
+      s_data[threadIdx.x] ^= s_data[threadIdx.x + s];
+    }
+    __syncthreads();
+  }
+
+  // 原子操作更新全局哈希
+  if (threadIdx.x == 0) {
+    atomicXor(hash_output, s_data[0]);
+  }
+}
+
+void fnv1a_hash(at::Tensor input_tensor, at::Tensor hash_output, int64_t cuda_stream = 0) {
+  // 输入检查
+  CHECK_INPUT(input_tensor);
+  CHECK_INPUT(hash_output);
+  TORCH_CHECK(
+      hash_output.numel() == 1 && hash_output.scalar_type() == at::kInt,
+      "hash_output must be a int32 tensor with 1 element");
+  TORCH_CHECK(input_tensor.device() == hash_output.device(), "input and output must be on the same device");
+
+  // 计算字节大小
+  size_t tensor_size_bytes = input_tensor.numel() * input_tensor.element_size();
+
+  // 初始化哈希输出为0
+  cudaMemsetAsync(hash_output.data_ptr(), 0, sizeof(unsigned int), reinterpret_cast<cudaStream_t>(cuda_stream));
+
+  // 配置执行参数
+  const int threads = 256;
+  const int blocks = std::min((tensor_size_bytes + threads - 1) / threads, 1024);
+
+  // 计算共享内存大小
+  const size_t shared_mem_size = threads * sizeof(unsigned int);
+
+  // 启动核函数
+  AT_DISPATCH_ALL_TYPES(input_tensor.scalar_type(), "FastHashKernel", [&] {
+    FastHashKernel<scalar_t><<<blocks, threads, shared_mem_size, reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
+        input_tensor.data_ptr<scalar_t>(), tensor_size_bytes, reinterpret_cast<unsigned int*>(hash_output.data_ptr()));
+  });
 }
