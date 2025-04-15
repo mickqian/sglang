@@ -314,7 +314,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 num_windows_h * num_windows_w,
                 vit_merger_window_size,
                 vit_merger_window_size,
-                )
+            )
             seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
             index_padded = index_padded.reshape(-1)
             index_new = index_padded[index_padded != -100]
@@ -346,7 +346,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 self.spatial_merge_size,
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
-                )
+            )
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
@@ -356,7 +356,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 self.spatial_merge_size,
                 w // self.spatial_merge_size,
                 self.spatial_merge_size,
-                )
+            )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
             wpos_ids = wpos_ids.flatten()
 
