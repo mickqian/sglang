@@ -437,7 +437,7 @@ class TestQwen2_5_VLServer(TestOpenAIVisionServer):
             api_key=cls.api_key,
             other_args=[
                 "--mem-fraction-static",
-                "0.4",
+                "0.6",
             ],
         )
         cls.base_url += "/v1"
@@ -718,7 +718,7 @@ class TestKimiVLServer(TestOpenAIVisionServer):
         pass
 
 
-## Omni Models
+# Omni Models
 class TestOpenAIOmniServer(TestOpenAIVisionServer):
     @classmethod
     def setUpClass(cls):
@@ -734,8 +734,9 @@ class TestOpenAIOmniServer(TestOpenAIVisionServer):
                 "--chat-template",
                 "qwen2-5-o",
                 "--mem-fraction-static",
-                "0.5",
+                "0.6",
                 "--tp=2",
+                "--disable-cuda-graph",
             ],
         )
         cls.base_url += "/v1"
