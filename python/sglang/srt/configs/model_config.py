@@ -174,6 +174,11 @@ class ModelConfig:
             self.kv_lora_rank = self.hf_text_config.kv_lora_rank
             self.qk_rope_head_dim = self.hf_text_config.qk_rope_head_dim
         else:
+            if "MistralModel" in self.hf_config.architectures:
+                if getattr(self, "head_dim", None) is None:
+                    self.head_dim = (
+                        self.hf_config.hidden_size // self.hf_config.num_attention_heads
+                    )
             self.attention_arch = AttentionArch.MHA
 
         self.num_attention_heads = self.hf_text_config.num_attention_heads
