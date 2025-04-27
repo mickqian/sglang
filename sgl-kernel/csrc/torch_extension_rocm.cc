@@ -79,6 +79,9 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   m.def("fnv1a_hash(Tensor! input_tensor, Tensor! hash_output, int cuda_stream) -> ()");
   m.impl("fnv1a_hash", torch::kCUDA, &fnv1a_hash);
 
+  m.def("tensor_hash(Tensor! tensor) -> ()");
+  m.impl("tensor_hash", torch::kCUDA, &tensor_hash);
+
   m.def(
       "build_tree_kernel_efficient(Tensor parent_list, Tensor selected_index, Tensor verified_seq_len, "
       "Tensor! tree_mask, Tensor! positions, Tensor! retrive_index, Tensor! retrive_next_token, "

@@ -69,6 +69,15 @@ def fnv1a_hash(
     )
 
 
+def tensor_hash(
+    input_tensor: torch.Tensor,
+) -> int:
+    return torch.ops.sgl_kernel.tensor_hash.default(
+        input_tensor,
+        # get_cuda_stream(),
+    )
+
+
 def build_tree_kernel_efficient(
     parent_list: torch.Tensor,
     selected_index: torch.Tensor,

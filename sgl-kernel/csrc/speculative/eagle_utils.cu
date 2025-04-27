@@ -22,6 +22,10 @@
 #else
 #include "pytorch_extension_utils_rocm.h"
 #endif
+#include <cuda_runtime.h>
+#include <torch/extension.h>
+
+#include <algorithm>  // For std::max, std::min
 
 // parent_list [bs, topk * (depth - 1) + 1)]
 // selected_index [bs, draft_token_num - 1]

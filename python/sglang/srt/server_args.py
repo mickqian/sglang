@@ -186,6 +186,8 @@ class ServerArgs:
     disable_chunked_prefix_cache: bool = False
     disable_fast_image_processor: bool = False
 
+    mm_gpu_id: Optional[int] = 0
+
     # Debug tensor dumps
     debug_tensor_dump_output_folder: Optional[str] = None
     debug_tensor_dump_input_file: Optional[str] = None
@@ -1289,6 +1291,7 @@ class PortArgs:
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
 
+    mm_proc_ipc_name: str
     # The port for nccl initialization (torch.dist)
     nccl_port: int
 
