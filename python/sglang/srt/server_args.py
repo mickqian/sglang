@@ -1162,6 +1162,12 @@ class ServerArgs:
             action="store_true",
             help="Adopt base image processor instead of fast image processor.",
         )
+        parser.add_argument(
+            "--mm-gpu-id",
+            type=int,
+            default=0,
+            help="Specify gpu id where mm_processing_service is on",
+        )
 
         # Server warmups
         parser.add_argument(
@@ -1317,6 +1323,7 @@ class PortArgs:
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 nccl_port=port,
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                mm_proc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
             )
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
@@ -1347,6 +1354,7 @@ class PortArgs:
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 1}",
                 nccl_port=port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{port_base + 2}",
+                mm_proc_ipc_name=f"tcp://{dist_init_host}:{port_base + 3}",
             )
 
 

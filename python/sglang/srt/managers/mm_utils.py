@@ -10,11 +10,11 @@ import torch
 from torch import nn
 
 from sglang.srt.managers.schedule_batch import (
-    Modality,
     MultimodalDataItem,
     MultimodalInputs,
     global_server_args_dict,
 )
+from sglang.srt.mm_utils import Modality
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import flatten_nested_list, print_warning_once
 

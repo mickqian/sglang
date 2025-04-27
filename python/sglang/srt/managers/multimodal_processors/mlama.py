@@ -3,7 +3,8 @@ from typing import List, Union
 from sglang.srt.managers.multimodal_processors.base_processor import (
     BaseMultimodalProcessor,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.mm_utils import Modality
 from sglang.srt.models.mllama import MllamaForConditionalGeneration
 from sglang.srt.utils import load_image
 

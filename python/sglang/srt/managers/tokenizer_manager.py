@@ -97,7 +97,6 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.multimodal_processor import (
     get_dummy_processor,
-    get_mm_processor,
     import_processors,
 )
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
@@ -158,9 +157,6 @@ class TokenizerManager:
             context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
         )
 
-        # Read model args
-        self.model_path = server_args.model_path
-        self.served_model_name = server_args.served_model_name
         self.model_config = ModelConfig(
             server_args.model_path,
             trust_remote_code=server_args.trust_remote_code,
@@ -173,36 +169,70 @@ class TokenizerManager:
             quantization=server_args.quantization,
         )
 
+        print(f"{server_args.enable_multimodal=}")
+        print(f"{self.model_config.is_multimodal=}")
+        if self.model_config.is_multimodal:
+            if (
+                not hasattr(port_args, "mm_proc_ipc_name")
+                or not port_args.mm_proc_ipc_name
+            ):
+                raise AttributeError(
+                    "PortArgs is missing the required 'mm_proc_ipc_name' for multimodal service."
+                )
+            print(f"{port_args=}")
+            self.mm_proc_requester = get_zmq_socket(
+                context,
+                zmq.REQ,
+                port_args.mm_proc_ipc_name,
+                bind=False,  # 连接，不是绑定
+            )
+            logger.info(
+                f"ZMQ REQ socket connecting to MM Processor Service at {port_args.mm_proc_ipc_name}"
+            )
+        else:
+            self.mm_proc_requester = None
+
+        # Read model args
+        self.model_path = server_args.model_path
+        self.served_model_name = server_args.served_model_name
+
         self.is_generation = self.model_config.is_generation
         self.is_image_gen = self.model_config.is_image_gen
         self.context_len = self.model_config.context_len
         self.image_token_id = self.model_config.image_token_id
 
         if self.model_config.is_multimodal:
-            import_processors()
-            _processor = get_processor(
-                server_args.tokenizer_path,
-                tokenizer_mode=server_args.tokenizer_mode,
-                trust_remote_code=server_args.trust_remote_code,
-                revision=server_args.revision,
-                use_fast=not server_args.disable_fast_image_processor,
-            )
+            print(f"import_processors")
+            # import_processors()
+            # _processor = get_processor(
+            #     server_args.tokenizer_path,
+            #     tokenizer_mode=server_args.tokenizer_mode,
+            #     trust_remote_code=server_args.trust_remote_code,
+            #     revision=server_args.revision,
+            #     use_fast=not server_args.disable_fast_image_processor,
+            # )
 
             # We want to parallelize the image pre-processing so we create an executor for it
             # We create mm_processor for any skip_tokenizer_init to make sure we still encode
             # images even with skip_tokenizer_init=False.
-            self.mm_processor = get_mm_processor(
-                self.model_config.hf_config, server_args, _processor
-            )
+            # self.mm_processor = get_mm_processor(
+            #     self.model_config.hf_config, server_args, _processor
+            # )
 
             if server_args.skip_tokenizer_init:
                 self.tokenizer = self.processor = None
             else:
-                self.processor = _processor
+                self.processor = get_processor(
+                    server_args.tokenizer_path,
+                    tokenizer_mode=server_args.tokenizer_mode,
+                    trust_remote_code=server_args.trust_remote_code,
+                    revision=server_args.revision,
+                    use_fast=not server_args.disable_fast_image_processor,
+                )
                 self.tokenizer = self.processor.tokenizer
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
         else:
-            self.mm_processor = get_dummy_processor()
+            # self.mm_processor = get_dummy_processor()
 
             if server_args.skip_tokenizer_init:
                 self.tokenizer = self.processor = None
@@ -418,14 +448,107 @@ class TokenizerManager:
                 )
             input_ids = self.tokenizer.encode(input_text)
 
-        image_inputs: Dict = await self.mm_processor.process_mm_data_async(
-            image_data=obj.image_data,
-            input_text=input_text or input_ids,
-            request_obj=obj,
-            max_req_input_len=self.max_req_input_len,
-        )
-        if image_inputs and "input_ids" in image_inputs:
-            input_ids = image_inputs["input_ids"]
+        # image_inputs: Dict = await self.mm_processor.process_mm_data_async(
+        #     image_data=obj.image_data,
+        #     input_text=input_text or input_ids,
+        #     request_obj=obj,
+        #     max_req_input_len=self.max_req_input_len,
+        # )
+
+        image_inputs: Optional[Dict] = None
+
+        # --- 多模态处理 (通过 ZMQ 调用新服务) ---
+        if self.model_config.is_multimodal and obj.image_data:
+            print(f"451")
+            if self.mm_proc_requester is None:
+                logger.error(
+                    "Multimodal request received, but multimodal processor service client is not initialized."
+                )
+                # 可以选择抛出异常或返回错误状态
+                raise RuntimeError(
+                    "Multimodal processor service client is not configured."
+                )
+
+            # 1. 准备 Payload
+            # 需要将原始请求对象的部分信息序列化发送过去
+            # 注意：只发送必要的信息，避免发送整个复杂对象
+            obj_dict_to_send = {}
+            # 筛选可以安全 pickle 的字段，或者显式转换为字典
+            # 例如，sampling_params 可能是字典或 dataclass
+            if isinstance(obj.sampling_params, dict):
+                obj_dict_to_send["sampling_params"] = obj.sampling_params
+            elif dataclasses.is_dataclass(obj.sampling_params):
+                # SamplingParams 可能需要自定义转换逻辑，如果它包含复杂类型
+                # 简单示例：
+                try:
+                    obj_dict_to_send["sampling_params"] = dataclasses.asdict(
+                        obj.sampling_params
+                    )
+                except TypeError as e:
+                    logger.warning(
+                        f"Could not convert sampling_params to dict: {e}. Sending empty dict."
+                    )
+                    obj_dict_to_send["sampling_params"] = {}
+            else:
+                obj_dict_to_send["sampling_params"] = {}  # 或者记录警告/错误
+
+            # 其他可能需要的字段，例如 obj.stream 等，根据 processor 的需要添加
+            # obj_dict_to_send['stream'] = obj.stream # 示例
+
+            request_payload = {
+                "rid": obj.rid,
+                "image_data": obj.image_data,
+                "input_text_or_ids": input_text or input_ids,  # 传递文本或 token_ids
+                "obj_dict": obj_dict_to_send,  # 传递部分原始对象信息
+                "max_input_len": self.max_req_input_len,  # 传递最大长度限制
+            }
+
+            try:
+                # 2. 发送请求并等待响应
+                logger.debug(f"Sending request rid={obj.rid} to multimodal service.")
+                await self.mm_proc_requester.send_pyobj(request_payload)
+                response_payload = await self.mm_proc_requester.recv_pyobj()
+                logger.debug(
+                    f"Received response for rid={obj.rid} from multimodal service."
+                )
+
+                # 3. 处理响应
+                if isinstance(response_payload, dict) and response_payload.get(
+                    "success"
+                ):
+                    image_inputs = response_payload.get("result")
+                    # 服务端返回的 result 已经是处理好的字典
+                else:
+                    error_msg = response_payload.get(
+                        "error", "Unknown error from multimodal service"
+                    )
+                    logger.error(
+                        f"Multimodal processing failed for rid={obj.rid}: {error_msg}"
+                    )
+                    # 可以选择:
+                    # 1. 抛出异常终止请求
+                    # raise RuntimeError(f"Multimodal processing failed: {error_msg}")
+                    # 2. 让请求继续，但没有图像信息 (可能导致错误或非预期结果)
+                    image_inputs = None  # 或 {}
+                    # 3. 设置请求的完成状态为错误
+                    # (这个需要在返回 Tokenized*Input 后由 Scheduler 处理)
+
+            except zmq.ZMQError as e:
+                logger.error(
+                    f"ZMQ error communicating with multimodal service for rid={obj.rid}: {e}"
+                )
+                # 处理 ZMQ 错误，例如连接失败
+                raise RuntimeError("Communication error with multimodal service") from e
+            except Exception as e:
+                logger.error(
+                    f"Error during multimodal service communication for rid={obj.rid}: {e}\n{get_exception_traceback()}"
+                )
+                raise RuntimeError(
+                    "Unexpected error during multimodal service communication"
+                ) from e
+
+            if image_inputs and "input_ids" in image_inputs:
+                input_ids = image_inputs["input_ids"]
 
         self._validate_token_len(obj, input_ids)
         return self._create_tokenized_object(

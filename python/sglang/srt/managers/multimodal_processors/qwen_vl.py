@@ -12,7 +12,8 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
 from sglang.srt.managers.multimodal_processors.base_processor import (
     MultimodalSpecialTokens,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.mm_utils import Modality
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 
@@ -114,12 +115,11 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
             return math.floor(number / factor) * factor
 
-        async def resize_image_async(image):
+        def resize_image(image):
             return resize_image(image)
 
         if base_output.images:
-            resize_tasks = [resize_image_async(image) for image in base_output.images]
-            base_output.images = await asyncio.gather(*resize_tasks)
+            base_output.images = [resize_image(image) for image in base_output.images]
 
         ret = self.process_mm_data(
             input_text=base_output.input_text,

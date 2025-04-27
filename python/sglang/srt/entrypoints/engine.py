@@ -31,6 +31,11 @@ import zmq
 import zmq.asyncio
 from PIL.Image import Image
 
+from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.managers.multimodal_processing_service import (
+    run_multimodal_processor_service,
+)
+
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
@@ -578,6 +583,22 @@ def _launch_subprocesses(
 
     if server_args.completion_template:
         load_completion_template_for_openai_api(server_args.completion_template)
+
+    # Launch mm data process
+    print(f"start launching mm data process")
+    if ModelConfig(
+        model_path=server_args.model_path,
+        model_override_args=server_args.json_model_override_args,
+    ).is_multimodal:
+        mm_proc = mp.Process(
+            target=run_multimodal_processor_service, args=(server_args, port_args)
+        )
+        mm_proc.start()
+        # process_list.append(mm_proc)
+        logger.info(
+            f"Started Multimodal Processor Service process (PID: {mm_proc.pid}) on GPU {server_args.mm_gpu_id}"
+        )
+    print(f"done launching mm data process")
 
     # Wait for the model to finish loading
     scheduler_infos = []

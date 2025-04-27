@@ -11,7 +11,7 @@ import PIL
 from PIL import Image
 from transformers import BaseImageProcessorFast
 
-from sglang.srt.managers.schedule_batch import Modality
+from sglang.srt.mm_utils import Modality
 from sglang.srt.utils import encode_video, load_audio, load_image
 
 

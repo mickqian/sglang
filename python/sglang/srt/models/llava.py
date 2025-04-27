@@ -31,8 +31,9 @@ from transformers import (
 from transformers.models.llava.modeling_llava import LlavaMultiModalProjector
 
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.managers.schedule_batch import Modality, MultimodalInputs
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.mm_utils import (
+    Modality,
     get_anyres_image_grid_shape,
     unpad_image,
     unpad_image_shape,

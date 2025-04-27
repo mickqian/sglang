@@ -89,6 +89,11 @@ class ModelConfig:
         self.is_generation = is_generation_model(
             self.hf_config.architectures, is_embedding
         )
+
+        # Multimodal is enabled if and only if all of the following conditions hold true:
+        # 1. the model being served is a multimodal model
+        # 2. the model's multimodal functionality is not disabled by default
+        # 3. the multimodal functionality is not disabled explicitly with `--enable-multimodal=False`
         self.is_multimodal = enable_multimodal and is_multimodal_model(
             self.hf_config.architectures
         )

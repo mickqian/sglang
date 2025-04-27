@@ -31,10 +31,18 @@ import ast
 import base64
 import math
 import re
+from enum import Enum, auto
 from io import BytesIO
 
 import numpy as np
 from PIL import Image
+
+
+class Modality(Enum):
+    IMAGE = auto()
+    MULTI_IMAGES = auto()
+    VIDEO = auto()
+    AUDIO = auto()
 
 
 def select_best_resolution(original_size, possible_resolutions):

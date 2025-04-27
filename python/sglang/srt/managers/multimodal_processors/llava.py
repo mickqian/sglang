@@ -6,8 +6,8 @@ import numpy as np
 from sglang.srt.managers.multimodal_processors.base_processor import (
     BaseMultimodalProcessor,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.mm_utils import expand2square, process_anyres_image
+from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.mm_utils import Modality, expand2square, process_anyres_image
 from sglang.srt.models.llava import (
     LlavaLlamaForCausalLM,
     LlavaMistralForCausalLM,

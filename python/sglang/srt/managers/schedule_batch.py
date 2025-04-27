@@ -4,6 +4,8 @@ import hashlib
 import time
 from enum import Enum, auto
 
+from sglang.srt.mm_utils import Modality
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -146,13 +148,6 @@ class FINISH_ABORT(BaseFinishReason):
             "status_code": self.status_code,
             "err_type": self.err_type,
         }
-
-
-class Modality(Enum):
-    IMAGE = auto()
-    MULTI_IMAGES = auto()
-    VIDEO = auto()
-    AUDIO = auto()
 
 
 @dataclasses.dataclass

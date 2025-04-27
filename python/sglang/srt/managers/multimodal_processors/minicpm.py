@@ -7,7 +7,8 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
 )
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.mm_utils import Modality
 from sglang.srt.models.minicpmo import MiniCPMO
 from sglang.srt.models.minicpmv import MiniCPMV
 

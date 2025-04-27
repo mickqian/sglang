@@ -32,6 +32,7 @@ def import_processors():
     package_name = "sglang.srt.managers.multimodal_processors"
     package = importlib.import_module(package_name)
     for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        print(f"{name=}")
         if not ispkg:
             try:
                 module = importlib.import_module(name)
