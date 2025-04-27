@@ -155,10 +155,8 @@ class Qwen2VisionBlock(nn.Module):
             use_qkv_parallel=True,
             qkv_backend=qkv_backend,
             softmax_in_single_precision=softmax_in_single_precision,
-            rotary_embed="normal",
             flatten_batch=True,
             quant_config=quant_config,
-            proj_bias=True,
             prefix=add_prefix("attn", prefix),
         )
         self.mlp = Qwen2VisionMLP(
