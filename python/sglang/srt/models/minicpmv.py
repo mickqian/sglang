@@ -194,7 +194,6 @@ class Idefics2EncoderLayer(nn.Module):
             embed_dim=config.hidden_size,
             num_heads=self.num_heads,
             projection_size=config.intermediate_size,
-            qkv_backend="sdpa",
             use_qkv_parallel=True,
             quant_config=quant_config,
             dropout=config.attention_dropout,
