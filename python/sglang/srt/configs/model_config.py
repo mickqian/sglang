@@ -224,18 +224,9 @@ class ModelConfig:
 
         config = self.hf_config
 
-        if config.model_type == "qwen2_5_omni":
-            config = config.thinker_config
-
         # multimodal
         self.image_token_id = getattr(config, "image_token_id", None) or getattr(
             config, "image_token_index", None
-        )
-        self.video_token_id = getattr(config, "video_token_id", None) or getattr(
-            config, "video_token_index", None
-        )
-        self.audio_token_id = getattr(config, "audio_token_id", None) or getattr(
-            config, "audio_token_index", None
         )
 
     @staticmethod
@@ -420,10 +411,7 @@ class ModelConfig:
                 )
 
     def get_hf_eos_token_id(self) -> Optional[Set[int]]:
-        eos_ids = None
-        if self.hf_config.model_type == "qwen2_5_omni":
-            eos_ids = getattr(self.hf_config.thinker_config, "eos_token_id", None)
-        eos_ids = eos_ids or getattr(self.hf_config, "eos_token_id", None)
+        eos_ids = getattr(self.hf_config, "eos_token_id", None)
         if eos_ids:
             # it can be either int or list of int
             eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
