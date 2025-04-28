@@ -230,8 +230,11 @@ class MultimodalDataItem:
             else:
                 tensor_cpu = tensor
 
-            mv = memoryview(tensor_cpu.numpy())
-            return data_hash(mv.tobytes())
+            np_array = tensor_cpu.numpy()
+            mv = memoryview(
+                np_array.data if np_array.flags["OWNDATA"] else np_array.tobytes()
+            )
+            return data_hash(mv)
 
         def hash_feature(f):
             if isinstance(f, list):
