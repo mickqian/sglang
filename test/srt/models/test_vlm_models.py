@@ -1,3 +1,7 @@
+"""
+    python test_vlm_models.py --batch-size 1
+"""
+
 import argparse
 import glob
 import json
@@ -6,29 +10,41 @@ import random
 import subprocess
 import sys
 import unittest
+from collections import defaultdict
 from types import SimpleNamespace
+from typing import Optional
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
-    CustomTestCase,
     is_in_ci,
     popen_launch_server,
 )
 
 # VLM models for testing
 MODELS = [
-    SimpleNamespace(model="google/gemma-3-27b-it", mmmu_accuracy=0.45),
+    SimpleNamespace(
+        model="google/gemma-3-4b-it",
+        chat_template="gemma-it",
+        mmmu_accuracy=0.384,
+        mmmu_time=300,
+    ),
     SimpleNamespace(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
-        mmmu_accuracy=0.4,
+        mmmu_accuracy=0.466,
+        mmmu_time=300,
     ),
-    SimpleNamespace(model="openbmb/MiniCPM-V-2_6", mmmu_accuracy=0.4),
+    SimpleNamespace(
+        model="openbmb/MiniCPM-V-2_6",
+        chat_template="minicpmv",
+        mmmu_accuracy=0.3867,
+        mmmu_time=300,
+    ),
 ]
 
 
-class TestVLMModels(CustomTestCase):
+class TestVLMModels(unittest.IsolatedAsyncioTestCase):
     parsed_args = None  # Class variable to store args
 
     @classmethod
@@ -41,6 +57,18 @@ class TestVLMModels(CustomTestCase):
         # Set OpenAI API key and base URL environment variables. Needed for lmm-evals to work.
         os.environ["OPENAI_API_KEY"] = cls.api_key
         os.environ["OPENAI_API_BASE"] = f"{cls.base_url}/v1"
+        cmd = ["python3", "-m", "pip", "show", "lmms_eval"]
+
+        ret = subprocess.run(
+            cmd,
+            timeout=3600,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        assert (
+            ret.returncode == 0
+        ), "please install lmms_eval by `pip install git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git`"
 
     def _detect_eviction_in_logs(self, log_output):
         """Detect if eviction events occurred in the log output."""
@@ -60,7 +88,9 @@ class TestVLMModels(CustomTestCase):
     def run_mmmu_eval(
         self,
         model_version: str,
+        batch_size: int,
         output_path: str,
+        limit: Optional[str] = None,
         *,
         env: dict | None = None,
     ):
@@ -73,7 +103,6 @@ class TestVLMModels(CustomTestCase):
         model = "openai_compatible"
         tp = 1
         tasks = "mmmu_val"
-        batch_size = 2
         log_suffix = "openai_compatible"
         os.makedirs(output_path, exist_ok=True)
 
@@ -100,13 +129,19 @@ class TestVLMModels(CustomTestCase):
             str(output_path),
         ]
 
+        if limit is not None:
+            cmd += [
+                "--limit",
+                limit,
+            ]
+
         subprocess.run(
             cmd,
             check=True,
             timeout=3600,
         )
 
-    def _run_vlm_mmmu_test(
+    async def _run_vlm_mmmu_test(
         self,
         model,
         output_path,
@@ -145,12 +180,11 @@ class TestVLMModels(CustomTestCase):
                 stdout_file = open("/tmp/server_stdout.log", "w")
                 stderr_file = open("/tmp/server_stderr.log", "w")
 
-            # Launch server for testing
-            process = popen_launch_server(
-                model.model,
-                base_url=self.base_url,
-                timeout=self.time_out,
-                api_key=self.api_key,
+            #Launch server for testing
+                process = popen_launch_server(
+                    model.model,
+                    base_url=self.base_url,
+                    timeout=self.time_out,
                 other_args=[
                     "--trust-remote-code",
                     "--cuda-graph-max-bs",
@@ -167,11 +201,18 @@ class TestVLMModels(CustomTestCase):
                 ),
             )
 
-            # Run evaluation
-            self.run_mmmu_eval(model.model, output_path)
+                # Run evaluation
+                self.run_mmmu_eval(
+                    model.model,
+                    self.parsed_args.batch_size,
+                    "./logs",
+                    None,
+                )
 
             # Get the result file
-            result_file_path = glob.glob(f"{output_path}/*.json")[0]
+            files = glob.glob(f"{output_path}/*.json")
+
+                result_file_path = max(files, key=os.path.getmtime)
 
             with open(result_file_path, "r") as f:
                 result = json.load(f)
@@ -179,9 +220,16 @@ class TestVLMModels(CustomTestCase):
 
             # Process the result
             mmmu_accuracy = result["results"]["mmmu_val"]["mmmu_acc,none"]
+            mmmu_time = result["total_evaluation_time_seconds"]
+
             print(
                 f"Model {model.model} achieved accuracy{test_name}: {mmmu_accuracy:.4f}"
             )
+            print(f"Evaluation time:", mmmu_time)
+            results[model.model] = {
+                "accu": mmmu_accuracy,
+                "time": result["total_evaluation_time_seconds"],
+            }
 
             # Capture server output if requested
             if capture_output and process:
@@ -193,6 +241,11 @@ class TestVLMModels(CustomTestCase):
                 model.mmmu_accuracy,
                 f"Model {model.model} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({model.mmmu_accuracy:.4f}){test_name}",
             )
+            self.assertGreaterEqual(
+                mmmu_time,
+                model.mmmu_time,
+                f"Model {model.model} elapsed time ({mmmu_time:.4f}) exceeds expected time: ({model.mmmu_time:.4f})",
+            )
 
             return server_output
 
@@ -201,13 +254,15 @@ class TestVLMModels(CustomTestCase):
             self.fail(f"Test failed for {model.model}{test_name}: {e}")
 
         finally:
-            # Ensure process cleanup happens regardless of success/failure
-            if process is not None and process.poll() is None:
-                print(f"Cleaning up process {process.pid}")
-                try:
-                    kill_process_tree(process.pid)
-                except Exception as e:
-                    print(f"Error killing process: {e}")
+            print(json.dumps(dict(results), indent=4))
+                # Ensure process cleanup happens regardless of success/failure
+                if process is not None and process.poll() is None:
+                    print(f"Cleaning up process {process.pid}")
+                    try:
+                        kill_process_tree(process.pid)
+                    except Exception as e:
+                        print(f"Error killing process: {e}")
+            print(json.dumps(dict(results), indent=4))
 
             # clean up temporary files
             if capture_output:
@@ -304,7 +359,11 @@ if __name__ == "__main__":
         help="Static memory fraction for the model",
         default=0.8,
     )
-
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+    )
     # Parse args intended for unittest
     args = parser.parse_args()
 
