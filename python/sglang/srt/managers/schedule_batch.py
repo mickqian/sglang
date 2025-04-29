@@ -385,6 +385,7 @@ class MultimodalInputs:
             "im_token_id",
             "im_start_id",
             "im_end_id",
+            "video_token_id",
             "slice_start_id",
             "slice_end_id",
             "audio_start_id",

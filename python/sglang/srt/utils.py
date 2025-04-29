@@ -713,7 +713,7 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True) -> VideoRead
                 tmp_file.close()
                 vr = VideoReader(tmp_file.name, ctx=ctx)
             elif video_file.startswith("data:"):
-                header, encoded = video_file.split(",", 1)
+                _, encoded = video_file.split(",", 1)
                 video_bytes = base64.b64decode(encoded)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)

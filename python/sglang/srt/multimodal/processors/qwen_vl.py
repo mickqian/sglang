@@ -5,8 +5,8 @@ from typing import Dict, List, Union
 
 import torch
 import torchvision
-from PIL import Image
 from decord import VideoReader
+from PIL import Image
 from torchvision.transforms import InterpolationMode
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
@@ -196,7 +196,7 @@ def smart_nframes(
 
 
 # process video
-def preprocess_video(
+async def preprocess_video(
     vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
     ele = {}
@@ -240,13 +240,13 @@ def preprocess_video(
     ).float()
     return video
 
+
 # Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
     models = [Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration]
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
-        self.IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
         self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
         self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
         self.image_token_id = hf_config.image_token_id
@@ -271,11 +271,14 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if isinstance(image_data, str):
             image_data = [image_data]
 
-        image_token = self.IMAGE_TOKEN
+        print(f"{request_obj.video_data}")
         base_output = self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
-            multimodal_tokens=MultimodalSpecialTokens(image_token=image_token),
+            video_data=request_obj.video_data,
+            multimodal_tokens=MultimodalSpecialTokens(
+                image_token=self.image_token_id, video_token=self.video_token_id
+            ),
             max_req_input_len=max_req_input_len,
         )
 
@@ -286,13 +289,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
 
         if base_output.videos:
             base_output.videos = [
-                preprocess_video(video) for video in base_output.videos
+                await preprocess_video(video) for video in base_output.videos
             ]
-            ret = self.process_mm_data(
-                input_text=base_output.input_text,
-                images=base_output.images,
-                videos=base_output.videos,
-            )
+
+        print(f"{base_output=}")
+
+        ret = self.process_mm_data(
+            input_text=base_output.input_text,
+            images=base_output.images,
+            videos=base_output.videos,
+        )
 
         combined_mm_item, input_ids = self.process_and_combine_mm_data(base_output)
 
@@ -313,6 +319,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
                 )
             ]
 
+        input_ids = ret["input_ids"].flatten().tolist()
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
             spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
             image_token_id=self.IM_TOKEN_ID,

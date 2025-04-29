@@ -480,9 +480,9 @@ class Qwen2VLForConditionalGeneration(nn.Module):
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
         # Get all special token IDs
-        im_token_id: int = mm_inputs.im_token_id
-
-        pattern = MultiModalityDataPaddingPatternMultimodalTokens([im_token_id])
+        pattern = MultiModalityDataPaddingPatternMultimodalTokens(
+            [mm_inputs.im_token_id, mm_inputs.video_token_id]
+        )
         return pattern.pad_input_tokens(input_ids, mm_inputs)
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
@@ -552,8 +552,7 @@ class Qwen2VLForConditionalGeneration(nn.Module):
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.model,
-            image_data_embedding_func=self.get_image_feature,
-            video_data_embedding_func=self.get_image_feature,
+            multimodal_model=self,
             positions=positions,
         )
 

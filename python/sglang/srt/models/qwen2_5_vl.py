@@ -52,11 +52,7 @@ from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternMultimodalTokens,
     general_mm_embed_routine,
 )
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -497,8 +493,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
         # Get all special token IDs
-        im_token_id: int = mm_inputs.im_token_id
-        pattern = MultiModalityDataPaddingPatternMultimodalTokens([im_token_id])
+        pattern = MultiModalityDataPaddingPatternMultimodalTokens(
+            [mm_inputs.im_token_id, mm_inputs.video_token_id]
+        )
         return pattern.pad_input_tokens(input_ids, mm_inputs)
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
@@ -562,10 +559,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             input_ids=input_ids,
             forward_batch=forward_batch,
             language_model=self.model,
-            data_embedding_mapping={
-                Modality.IMAGE: self.get_image_feature,
-                Modality.VIDEO: self.get_video_feature,
-            },
+            multimodal_model=self,
             positions=positions,
         )
 
