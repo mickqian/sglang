@@ -331,7 +331,6 @@ def _adjust_embedding_length(
     logger,
 ) -> torch.Tensor:
     num_mm_tokens_in_embedding = embedding.shape[0]
-    print(f"{placeholder_tensor=}")
     num_mm_tokens_in_input_ids = mask.sum().item()
     if num_mm_tokens_in_input_ids != num_mm_tokens_in_embedding:
         logger.warning(

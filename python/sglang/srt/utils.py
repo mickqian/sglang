@@ -692,10 +692,8 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True) -> VideoRead
     except Exception:
         ctx = cpu(0)
 
-    print(f"{ctx=}")
     tmp_file = None
     vr = None
-    print(f"{video_file=}")
     try:
         if isinstance(video_file, bytes):
             tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")

@@ -271,7 +271,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if isinstance(image_data, str):
             image_data = [image_data]
 
-        print(f"{request_obj.video_data}")
         base_output = self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
@@ -287,17 +286,14 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             resize_tasks = [resize_image_async(image) for image in base_output.images]
             base_output.images = await asyncio.gather(*resize_tasks)
 
+        videos = None
         if base_output.videos:
-            base_output.videos = [
-                await preprocess_video(video) for video in base_output.videos
-            ]
-
-        print(f"{base_output=}")
+            videos = [await preprocess_video(video) for video in base_output.videos]
 
         ret = self.process_mm_data(
             input_text=base_output.input_text,
             images=base_output.images,
-            videos=base_output.videos,
+            videos=videos,
         )
 
         combined_mm_item, input_ids = self.process_and_combine_mm_data(base_output)
@@ -310,7 +306,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         second_per_grid_ts = getattr(combined_mm_item, "second_per_grid_ts", None)
 
         if "pixel_values_videos" in ret:
-            print(ret["pixel_values_videos"].shape)
             items += [
                 MultimodalDataItem(
                     pixel_values=ret["pixel_values_videos"],
