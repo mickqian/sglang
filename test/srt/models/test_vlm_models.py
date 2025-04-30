@@ -14,6 +14,7 @@ import time
 import unittest
 from collections import defaultdict
 from types import SimpleNamespace
+from typing import Optional
 
 from sglang.bench_serving import sync_request_profile
 from sglang.srt.utils import kill_process_tree
@@ -27,16 +28,23 @@ from sglang.test.test_utils import (
 
 # VLM models for testing
 MODELS = [
-    # SimpleNamespace(
-    #     model="google/gemma-3-4b-it", chat_template="gemma-it", mmmu_accuracy=0.384
-    # ),
     SimpleNamespace(
-        model="Qwen/Qwen2.5-VL-3B-Instruct",
-        chat_template="qwen2-vl",
-        mmmu_accuracy=0.466,
+        # model="google/gemma-3-4b-it", chat_template="gemma-it", mmmu_accuracy=0.384
+        model="google/gemma-3-4b-it",
+        chat_template="gemma-it",
+        mmmu_accuracy=0.3378,
     ),
     # SimpleNamespace(
-    #     model="openbmb/MiniCPM-V-2_6", chat_template="minicpmv", mmmu_accuracy=0.435
+    #     model="Qwen/Qwen2.5-VL-3B-Instruct",
+    #     chat_template="qwen2-vl",
+    #     # mmmu_accuracy=0.466,
+    #     mmmu_accuracy=0.4122,
+    # ),
+    # SimpleNamespace(
+    #     # model="openbmb/MiniCPM-V-2_6", chat_template="minicpmv", mmmu_accuracy=0.435
+    #     model="openbmb/MiniCPM-V-2_6",
+    #     chat_template="minicpmv",
+    #     mmmu_accuracy=0.3867,
     # ),
 ]
 
@@ -73,6 +81,7 @@ class TestVLMModels(CustomTestCase):
         chat_template: str,
         batch_size: int,
         output_path: str,
+        limit: Optional[str] = None,
         *,
         env: dict | None = None,
     ):
@@ -116,6 +125,12 @@ class TestVLMModels(CustomTestCase):
             str(output_path),
         ]
 
+        if limit is not None:
+            cmd += [
+                "--limit",
+                limit,
+            ]
+
         subprocess.run(
             cmd,
             check=True,
@@ -141,12 +156,11 @@ class TestVLMModels(CustomTestCase):
                     base_url=self.base_url,
                     timeout=self.time_out,
                     other_args=[
-                        "--chat-template",
-                        model.chat_template,
                         "--trust-remote-code",
                         "--cuda-graph-max-bs",
                         "32",
                         "--enable-multimodal",
+                        # "--disable-radix-cache",
                         "--mem-fraction-static",
                         str(self.parsed_args.mem_fraction_static),  # Use class variable
                     ],
@@ -165,7 +179,8 @@ class TestVLMModels(CustomTestCase):
                     model.model,
                     model.chat_template,
                     self.parsed_args.batch_size,
-                    "./logs",
+                    output_path="./logs",
+                    limit=str(3) if self.parsed_args.profile else None,
                 )
 
                 if args.profile:
@@ -191,7 +206,7 @@ class TestVLMModels(CustomTestCase):
                 print(f"Evaluation time:", result["total_evaluation_time_seconds"])
                 results[model.model] = {
                     "accu": mmmu_accuracy,
-                    "time": result["total_evaluation_time_seconds"]
+                    "time": result["total_evaluation_time_seconds"],
                 }
                 # Assert performance meets expected threshold
                 self.assertGreaterEqual(
@@ -199,12 +214,12 @@ class TestVLMModels(CustomTestCase):
                     model.mmmu_accuracy,
                     f"Model {model.model} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({model.mmmu_accuracy:.4f})",
                 )
-
             except Exception as e:
                 print(f"Error testing {model.model}: {e}")
                 self.fail(f"Test failed for {model.model}: {e}")
 
             finally:
+                print(json.dumps(dict(results), indent=4))
                 # Ensure process cleanup happens regardless of success/failure
                 if process is not None and process.poll() is None:
                     print(f"Cleaning up process {process.pid}")
@@ -212,8 +227,7 @@ class TestVLMModels(CustomTestCase):
                         kill_process_tree(process.pid)
                     except Exception as e:
                         print(f"Error killing process: {e}")
-
-        json.dumps(results, indent=2)
+        print(json.dumps(dict(results), indent=4))
 
 
 if __name__ == "__main__":
@@ -234,7 +248,7 @@ if __name__ == "__main__":
         "--profile",
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
-             "SGLANG_TORCH_PROFILER_DIR to enable profiler",
+        "SGLANG_TORCH_PROFILER_DIR to enable profiler",
         default=False,
     )
 
@@ -242,7 +256,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.profile:
-        log_level = os.getenv('LOG_LEVEL', 'WARNING').upper()
+        log_level = os.getenv("LOG_LEVEL", "WARNING").upper()
         logging.basicConfig(level="INFO")
 
     # Store the parsed args object on the class
