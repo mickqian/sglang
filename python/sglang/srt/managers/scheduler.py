@@ -2092,6 +2092,7 @@ class Scheduler(
         if self.profiler_activities is None:
             return
 
+        print(f"{self.profiler_activities=}")
         logger.info("Stop profiling...")
         if self.torch_profiler is not None:
             self.torch_profiler.stop()
