@@ -27,6 +27,12 @@ from sglang.test.test_utils import (
 
 # VLM models for testing
 MODELS = [
+    SimpleNamespace(
+        # model="google/gemma-3-4b-it", chat_template="gemma-it", mmmu_accuracy=0.384
+        model="google/gemma-3-4b-it",
+        chat_template="gemma-it",
+        mmmu_accuracy=0.3378,
+    ),
     # SimpleNamespace(
     #     model="google/gemma-3-4b-it",
     #     chat_template="gemma-it",
@@ -159,6 +165,7 @@ class TestVLMModels(unittest.IsolatedAsyncioTestCase):
                         "--enable-multimodal",
                         "--mem-fraction-static",
                         str(self.parsed_args.mem_fraction_static),  # Use class variable
+                        # "--tp=4"
                     ],
                 )
 
