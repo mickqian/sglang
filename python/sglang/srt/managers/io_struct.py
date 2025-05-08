@@ -591,6 +591,16 @@ class EmbeddingReqInput:
         self.rid = uuid.uuid4().hex
         return self.rid
 
+    def contains_mm_input(self) -> bool:
+        def has_valid_data(data) -> bool:
+            if data is None:
+                return False
+            if isinstance(data, list):
+                return any(has_valid_data(item) for item in flatten_nested_list(data))
+            return True
+
+        return has_valid_data(self.image_data) or has_valid_data(self.audio_data)
+
     def __getitem__(self, i):
         if self.is_cross_encoder_request:
             return EmbeddingReqInput(

@@ -411,10 +411,10 @@ def embed_mm_inputs(
     extend_seq_lens: List[int],
     input_ids: torch.Tensor,
     input_embedding: nn.Embedding,
-    data_embedding_mapping: Dict[
-        Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
-    ],
     multimodal_model: nn.Module,
+    data_embedding_func_mapping: Dict[
+        Modality, Callable[[List[MultimodalDataItem]], torch.Tensor]
+    ] = None,
     placeholder_tokens: dict[Modality, List[int]] = None,
 ) -> Optional[torch.Tensor]:
     """
@@ -601,7 +601,7 @@ def general_mm_embed_routine(
             input_ids=input_ids,
             input_embedding=embed_tokens,
             multimodal_model=multimodal_model,
-            data_embedding_mapping=data_embedding_funcs,
+            data_embedding_func_mapping=data_embedding_funcs,
             placeholder_tokens=placeholder_tokens,
         )
         # once used, mm_inputs is useless, considering chunked-prefill is disabled for multimodal models
