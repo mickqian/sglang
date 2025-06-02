@@ -77,10 +77,7 @@ from sglang.srt.model_executor import expert_location_updater
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader import get_model
-from sglang.srt.model_loader.loader import (
-    DefaultModelLoader,
-    get_model_loader,
-)
+from sglang.srt.model_loader.loader import DefaultModelLoader, get_model_loader
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.patch_torch import monkey_patch_torch_reductions
@@ -102,8 +99,9 @@ from sglang.srt.utils import (
     is_no_spec_infer_or_topk_one,
     monkey_patch_p2p_access_check,
     monkey_patch_vllm_gguf_config,
+    print_warning_once,
     set_cpu_offload_max_bytes,
-    set_cuda_arch, print_warning_once,
+    set_cuda_arch,
 )
 
 _is_hip = is_hip()
@@ -219,7 +217,7 @@ class ModelRunner:
         )
 
         # CPU offload
-        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024 ** 3))
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
 
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
@@ -417,8 +415,11 @@ class ModelRunner:
             if self.model_config.context_len > 8192:
                 self.mem_fraction_static *= 0.85
 
-        if self.model_config.hf_config.architectures[0] == "MiniCPMForCausalLM" and hasattr(self.model_config.hf_config,
-                                                                                            "sparse_config"):
+        if self.model_config.hf_config.architectures[
+            0
+        ] == "MiniCPMForCausalLM" and hasattr(
+            self.model_config.hf_config, "sparse_config"
+        ):
             if server_args.attention_backend != "fa3":
                 print_warning_once(
                     f"{server_args.attention_backend} is not available for MiniCPM-4, defaults to fa3"
@@ -1061,8 +1062,8 @@ class ModelRunner:
             return FlashMLABackend(self)
         elif self.server_args.attention_backend == "fa3":
             assert (
-                       torch.cuda.get_device_capability()[0] == 8 and not self.use_mla_backend
-                   ) or torch.cuda.get_device_capability()[0] == 9, (
+                torch.cuda.get_device_capability()[0] == 8 and not self.use_mla_backend
+            ) or torch.cuda.get_device_capability()[0] == 9, (
                 "FlashAttention v3 Backend requires SM>=80 and SM<=90. "
                 "Please use `--attention-backend flashinfer`."
             )
@@ -1093,7 +1094,7 @@ class ModelRunner:
             key = "model.layers." + str(i) + ".self_attn" + selected_channel
             self.sorted_channels.append(
                 torch.tensor(channel_config[key])[
-                :, : self.server_args.ds_heavy_channel_num
+                    :, : self.server_args.ds_heavy_channel_num
                 ]
                 .contiguous()
                 .cuda()
