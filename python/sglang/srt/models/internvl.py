@@ -32,9 +32,9 @@ from sglang.srt.managers.mm_utils import (
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.deepseek_janus_pro import DropPath
 from sglang.srt.models.internlm2 import InternLM2ForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
+from sglang.srt.utils import add_prefix
 from sglang.utils import logger
 
 
@@ -163,22 +163,40 @@ class InternRMSNorm(nn.Module):
 
 
 class InternMLP(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix="",
+    ):
         super().__init__()
         self.config = config
         self.act = ACT2FN[config.hidden_act]
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=add_prefix("fc1", prefix),
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=add_prefix("fc2", prefix),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
 NORM2FN = {
-    "rms_norm": InternRMSNorm,
+    # "rms_norm": InternRMSNorm,
+    "rms_norm": RMSNorm,
     "layer_norm": nn.LayerNorm,
 }
 
@@ -188,7 +206,6 @@ class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        drop_path_rate: float,
         quant_config: QuantizationConfig = None,
     ):
         super().__init__()
@@ -202,12 +219,6 @@ class InternVisionEncoderLayer(nn.Module):
 
         self.ls1 = nn.Parameter(config.initializer_factor * torch.ones(self.embed_dim))
         self.ls2 = nn.Parameter(config.initializer_factor * torch.ones(self.embed_dim))
-        self.drop_path1 = (
-            DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-        )
-        self.drop_path2 = (
-            DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-        )
 
     def forward(
         self,
@@ -223,15 +234,17 @@ class InternVisionEncoderLayer(nn.Module):
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
 
-        hidden_states = hidden_states + self.drop_path1(
-            self.attn(
+        hidden_states = (
+            hidden_states
+            + self.attn(
                 self.norm1(hidden_states).to(hidden_states.dtype), cu_seqlens=cu_seqlens
             )
             * self.ls1
         )
 
-        hidden_states = hidden_states + self.drop_path2(
-            self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
+        hidden_states = (
+            hidden_states
+            + self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
         )
 
         return hidden_states
@@ -254,14 +267,9 @@ class InternVisionEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        # stochastic depth decay rule
-        dpr = [
-            x.item()
-            for x in torch.linspace(0, config.drop_path_rate, config.num_hidden_layers)
-        ]
         self.layers = nn.ModuleList(
             [
-                InternVisionEncoderLayer(config, dpr[idx], quant_config)
+                InternVisionEncoderLayer(config, quant_config)
                 for idx in range(config.num_hidden_layers)
             ]
         )
