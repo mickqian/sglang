@@ -14,16 +14,16 @@
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
-
 # Adapted from https://raw.githubusercontent.com/vllm-project/vllm/7f62077af5159c625fe3ad1c812e6c1a2b93ba3b/vllm/model_executor/models/internlm2.py
 # Adapted from https://raw.githubusercontent.com/hehesangsj/sglang/refs/heads/internvl/python/sglang/srt/models/internvl.py
 import torch.nn.functional as F
 from torch import nn
-from transformers import PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from sglang.srt.layers.attention.vision import SingletonCache, VisionAttention
+from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
@@ -35,7 +35,9 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_janus_pro import DropPath
 from sglang.srt.models.internlm2 import InternLM2ForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
+from sglang.srt.utils import add_prefix
 from sglang.utils import logger
+from transformers import PretrainedConfig, PreTrainedModel
 
 
 class InternAttention(nn.Module):
@@ -50,7 +52,7 @@ class InternAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
 
-        self.scale = self.head_dim**-0.5
+        self.scale = self.head_dim ** -0.5
 
         self.attn = VisionAttention(
             qkv_backend="fa3",
@@ -163,22 +165,38 @@ class InternRMSNorm(nn.Module):
 
 
 class InternMLP(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix="",
+                 ):
         super().__init__()
         self.config = config
         self.act = ACT2FN[config.hidden_act]
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=add_prefix("fc1", prefix),
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=add_prefix("fc2", prefix),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
 NORM2FN = {
-    "rms_norm": InternRMSNorm,
+    # "rms_norm": InternRMSNorm,
+    "rms_norm": RMSNorm,
     "layer_norm": nn.LayerNorm,
 }
 
@@ -420,7 +438,7 @@ class InternVLChatModel(nn.Module):
         self.select_layer = config.select_layer
         self.template = config.template
         self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
+            (image_size // patch_size) ** 2 * (config.downsample_ratio ** 2)
         )
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version

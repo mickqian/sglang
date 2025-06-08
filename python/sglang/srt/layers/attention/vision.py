@@ -302,7 +302,10 @@ class VisionFlash3Attention(nn.Module):
 
         cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
         seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = seq_lens.max().item()
+        if seq_lens.numel() == 1:
+            max_seqlen = seq_lens.item()
+        else:
+            max_seqlen = seq_lens.max().item()
         output = flash_attn_varlen_func(
             q,
             k,

@@ -267,7 +267,7 @@ class MultimodalDataItem:
                 arr_bytes = arr.tobytes()
                 return data_hash(arr_bytes)
             elif isinstance(f, torch.Tensor):
-                return tensor_hash([f])
+                return tensor_hash(f)
             return data_hash(f)
 
         if self.precomputed_features is not None:
@@ -354,7 +354,6 @@ class MultimodalInputs:
 
         assert isinstance(ret.mm_items, list)
         ret.mm_items = [item for item in ret.mm_items if item.is_valid()]
-
         for item in ret.mm_items:
             item.set_pad_value()
 
