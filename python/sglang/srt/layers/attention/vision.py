@@ -9,7 +9,6 @@ from typing import Any, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 
 from sglang.srt.utils import is_cuda, print_info_once
 
@@ -185,10 +184,13 @@ class VisionSdpaAttention(nn.Module):
         else:
             attention_mask = attention_mask.to(device=q.device)
 
-        q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
+        q, k, v = [
+            x.view(bsz, s, x.shape[1], x.shape[2]).permute(0, 2, 1, 3)
+            for x in [q, k, v]
+        ]
 
         if self.softmax_in_single_precision:
-            k = rearrange(k, "b h s d -> b h d s")
+            k = k.transpose(-1, -2)
             attn_weights = torch.matmul(q, k) * self.scale
             del k
             # masking
@@ -217,7 +219,9 @@ class VisionSdpaAttention(nn.Module):
             )
 
         # [b, h, s, head_size] --> [b * s, h, head_size]
-        output = rearrange(output, "b h s d -> (b s) h d")
+        output = output.permute(0, 2, 1, 3).reshape(
+            bsz * s, output.shape[1], output.shape[3]
+        )
 
         return output
 
@@ -447,7 +451,7 @@ class VisionAttention(nn.Module):
             v = v.reshape(bsz * s, kv_head, -1).contiguous()
         else:
             # [b, s, embed_dim] --> [s, b, embed_dim]
-            x = rearrange(x, "b s ... -> s b ...")
+            x = x.transpose(0, 1)
             # [s, b, embed_dim] --> [s, b, head * 3 * head_size]
             qkv, _ = self.qkv_proj(x)
 
@@ -462,9 +466,7 @@ class VisionAttention(nn.Module):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             # [s, b, head, head_size] --> [b, s, head, head_size]
-            q, k, v = [
-                rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-            ]
+            q, k, v = [x.transpose(0, 1).contiguous() for x in (q, k, v)]
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
@@ -480,13 +482,13 @@ class VisionAttention(nn.Module):
 
         if q.dim() == 4:
             # [b, s, head, head_size] --> [b * s, head, head_size]
-            q = rearrange(q, "b s ... -> (b s) ...")
+            q = q.reshape(bsz * s, q.shape[2], q.shape[3])
         if k.dim() == 4:
             # [b, s, head, head_size] --> [b * s, head, head_size]
-            k = rearrange(k, "b s ... -> (b s) ...")
+            k = k.reshape(bsz * s, k.shape[2], k.shape[3])
         if v.dim() == 4:
             # [b, s, head, head_size] --> [b * s, head, head_size]
-            v = rearrange(v, "b s ... -> (b s) ...")
+            v = v.reshape(bsz * s, v.shape[2], v.shape[3])
 
         assert q.dim() == 3, q.dim()
         assert k.dim() == 3, k.dim()
@@ -506,20 +508,22 @@ class VisionAttention(nn.Module):
 
         if self.use_qkv_parallel:
             # [b * s, h, head_size] --> [b, s, h * head_size]
-            output = rearrange(output, "(b s) ... h d -> b s ... (h d)", b=bsz)
+            output = output.view(bsz, s, -1)
 
             # [b, s, h * head_size] --> [b, s, h * head_size]
             output, _ = self.proj(output)
         else:
             # [b * s, h, head_size] --> [s, b, h * head_size]
-            context_layer = rearrange(
-                output, "(b s) h d -> s b (h d)", b=bsz, s=s
-            ).contiguous()
+            context_layer = (
+                output.view(bsz, s, output.shape[1], output.shape[2])
+                .permute(1, 0, 2, 3)
+                .reshape(s, bsz, -1)
+            )
 
             # [s, b, h * head_size] --> [s, b, h * head_size]
             output, _ = self.proj(context_layer)
 
             # [s, b, h * head_size] --> [b, s, h * head_size]
-            output = output.view(bsz, s, -1)
+            output = output.transpose(0, 1)
 
         return output

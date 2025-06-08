@@ -252,7 +252,7 @@ if __name__ == "__main__":
         "--profile",
         action="store_true",
         help="Use Torch Profiler. The endpoint must be launched with "
-             "SGLANG_TORCH_PROFILER_DIR to enable profiler",
+        "SGLANG_TORCH_PROFILER_DIR to enable profiler",
         default=False,
     )
     # Parse args intended for unittest

@@ -14,10 +14,12 @@
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
+
 # Adapted from https://raw.githubusercontent.com/vllm-project/vllm/7f62077af5159c625fe3ad1c812e6c1a2b93ba3b/vllm/model_executor/models/internlm2.py
 # Adapted from https://raw.githubusercontent.com/hehesangsj/sglang/refs/heads/internvl/python/sglang/srt/models/internvl.py
 import torch.nn.functional as F
 from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
@@ -32,12 +34,10 @@ from sglang.srt.managers.mm_utils import (
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.deepseek_janus_pro import DropPath
 from sglang.srt.models.internlm2 import InternLM2ForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 from sglang.srt.utils import add_prefix
 from sglang.utils import logger
-from transformers import PretrainedConfig, PreTrainedModel
 
 
 class InternAttention(nn.Module):
@@ -52,7 +52,7 @@ class InternAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
 
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
         self.attn = VisionAttention(
             qkv_backend="fa3",
@@ -165,10 +165,12 @@ class InternRMSNorm(nn.Module):
 
 
 class InternMLP(nn.Module):
-    def __init__(self, config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix="",
-                 ):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix="",
+    ):
         super().__init__()
         self.config = config
         self.act = ACT2FN[config.hidden_act]
@@ -206,7 +208,6 @@ class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        drop_path_rate: float,
         quant_config: QuantizationConfig = None,
     ):
         super().__init__()
@@ -220,12 +221,6 @@ class InternVisionEncoderLayer(nn.Module):
 
         self.ls1 = nn.Parameter(config.initializer_factor * torch.ones(self.embed_dim))
         self.ls2 = nn.Parameter(config.initializer_factor * torch.ones(self.embed_dim))
-        self.drop_path1 = (
-            DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-        )
-        self.drop_path2 = (
-            DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-        )
 
     def forward(
         self,
@@ -241,15 +236,17 @@ class InternVisionEncoderLayer(nn.Module):
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
 
-        hidden_states = hidden_states + self.drop_path1(
-            self.attn(
+        hidden_states = (
+            hidden_states
+            + self.attn(
                 self.norm1(hidden_states).to(hidden_states.dtype), cu_seqlens=cu_seqlens
             )
             * self.ls1
         )
 
-        hidden_states = hidden_states + self.drop_path2(
-            self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
+        hidden_states = (
+            hidden_states
+            + self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
         )
 
         return hidden_states
@@ -272,14 +269,9 @@ class InternVisionEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        # stochastic depth decay rule
-        dpr = [
-            x.item()
-            for x in torch.linspace(0, config.drop_path_rate, config.num_hidden_layers)
-        ]
         self.layers = nn.ModuleList(
             [
-                InternVisionEncoderLayer(config, dpr[idx], quant_config)
+                InternVisionEncoderLayer(config, quant_config)
                 for idx in range(config.num_hidden_layers)
             ]
         )
@@ -438,7 +430,7 @@ class InternVLChatModel(nn.Module):
         self.select_layer = config.select_layer
         self.template = config.template
         self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (config.downsample_ratio ** 2)
+            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
         )
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version

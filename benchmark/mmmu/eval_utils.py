@@ -12,9 +12,6 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
-from datasets import concatenate_datasets, load_dataset
-from tqdm import tqdm
-
 from data_utils import (
     CAT_SHORT2LONG,
     DOMAIN_CAT2SUB_CAT,
@@ -22,6 +19,8 @@ from data_utils import (
     load_yaml,
     process_single_sample,
 )
+from datasets import concatenate_datasets, load_dataset
+from tqdm import tqdm
 
 
 @dataclasses.dataclass
@@ -67,7 +66,7 @@ class EvalArgs:
             type=str,
             default=EvalArgs.extra_request_body,
             help="Append given JSON object to the request payload. You can use this to specify"
-                 "additional generate params like sampling params.",
+            "additional generate params like sampling params.",
         )
         parser.add_argument(
             "--profile", action="store_true", help="enable mmmu profile"
