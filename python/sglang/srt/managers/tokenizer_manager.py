@@ -57,11 +57,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     get_kv_class,
 )
-from sglang.srt.hf_transformers_utils import (
-    get_processor,
-    get_tokenizer,
-    get_tokenizer_from_processor,
-)
+from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer_from_processor
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOut,
@@ -106,11 +102,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
     UpdateWeightsFromTensorReqOutput,
 )
-from sglang.srt.managers.multimodal_processor import (
-    get_dummy_processor,
-    get_mm_processor,
-    import_processors,
-)
+from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -217,24 +209,16 @@ class TokenizerManager:
                 self.model_config.hf_config, server_args, _processor
             )
 
-            if server_args.skip_tokenizer_init:
-                self.tokenizer = self.processor = None
-            else:
-                self.processor = _processor
-                self.tokenizer = get_tokenizer_from_processor(self.processor)
+            if not server_args.skip_tokenizer_init:
                 os.environ["TOKENIZERS_PARALLELISM"] = "false"
         else:
             self.mm_processor = None
 
-            if server_args.skip_tokenizer_init:
-                self.tokenizer = self.processor = None
-            else:
-                self.tokenizer = get_tokenizer(
-                    server_args.tokenizer_path,
-                    tokenizer_mode=server_args.tokenizer_mode,
-                    trust_remote_code=server_args.trust_remote_code,
-                    revision=server_args.revision,
-                )
+        if server_args.skip_tokenizer_init:
+            self.tokenizer = self.processor = None
+        else:
+            self.processor = _processor
+            self.tokenizer = get_tokenizer_from_processor(self.processor)
 
         # Store states
         self.no_create_loop = False
