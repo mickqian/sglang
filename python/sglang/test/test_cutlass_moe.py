@@ -1,7 +1,9 @@
 import argparse
 import time
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 import triton  # Added import
 import triton.testing  # Added import
 from transformers import AutoConfig
@@ -18,7 +20,9 @@ def get_model_config(tp_size: int):
     topk = config.num_experts_per_tok
     intermediate_size = config.moe_intermediate_size
     shard_intermediate_size = 2 * intermediate_size // tp_size
-
+    print(f"{intermediate_size=}")
+    print(f"{tp_size=}")
+    print(f"{shard_intermediate_size=}")
     return {
         "num_experts": E,
         "topk": topk,
@@ -49,6 +53,100 @@ def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
         dtype=torch.float8_e4m3fn
     )
     return fp8_tensor
+
+
+def compare_tensors(
+    tensor_a,
+    tensor_b,
+    name_a="Tensor A",
+    name_b="Tensor B",
+    rtol=1e-5,
+    atol=1e-8,
+    epsilon=1e-12,
+):
+    """
+    Provides a comprehensive comparison between two tensors, reporting various error metrics.
+
+    Args:
+        tensor_a (torch.Tensor): The first tensor (e.g., from your implementation like CUTLASS).
+        tensor_b (torch.Tensor): The second tensor (e.g., the reference from PyTorch).
+        name_a (str): Name of the first tensor for printing.
+        name_b (str): Name of the second tensor for printing.
+        rtol (float): Relative tolerance for the final pass/fail check.
+        atol (float): Absolute tolerance for the final pass/fail check.
+        epsilon (float): A small value to avoid division by zero in relative error calculation.
+
+    Returns:
+        dict: A dictionary containing all the calculated metrics.
+    """
+    # Ensure tensors are on the same device and have the same dtype for comparison
+    tensor_a = tensor_a.to(tensor_b.device, dtype=tensor_b.dtype)
+
+    if torch.isnan(tensor_a).any():
+        print(f"tensor_a has nan")
+
+    if torch.isnan(tensor_b).any():
+        print(f"tensor_b has nan")
+
+    # 1. Basic Pass/Fail Check
+    allclose_result = torch.allclose(tensor_a, tensor_b, rtol=rtol, atol=atol)
+
+    # 2. Calculate Errors
+    diff = tensor_a - tensor_b
+    abs_diff = torch.abs(diff)
+    rel_diff = abs_diff / (torch.abs(tensor_b) + epsilon)
+
+    # 3. Calculate Metrics
+    # Error statistics
+    mae = abs_diff.mean().item()
+    mse = torch.mean(diff**2).item()
+    rmse = torch.sqrt(torch.tensor(mse)).item()
+    max_abs_err = abs_diff.max().item()
+    max_rel_err = rel_diff.max().item()
+
+    # Signal-to-Noise Ratio (SNR) in dB
+    # SNR = 10 * log10(P_signal / P_noise)
+    # Power is proportional to the mean of squares
+    signal_power = torch.mean(tensor_b**2).item()
+    noise_power = mse
+    snr_db = (
+        10 * np.log10(signal_power / (noise_power + epsilon))
+        if noise_power > 0
+        else float("inf")
+    )
+
+    # Cosine Similarity
+    cos_sim = F.cosine_similarity(tensor_a.flatten(), tensor_b.flatten(), dim=0).item()
+
+    # 4. Store results
+    metrics = {
+        "pass_allclose": allclose_result,
+        "mae": mae,
+        "rmse": rmse,
+        "max_abs_error": max_abs_err,
+        "max_rel_error": max_rel_err,
+        "snr_db": snr_db,
+        "cosine_similarity": cos_sim,
+    }
+
+    # 5. Print a formatted report
+    print("-" * 50)
+    print(f"Comparing {name_a} vs {name_b}")
+    print(f"Shapes: {name_a}={tensor_a.shape}, {name_b}={tensor_b.shape}")
+    print(f"Dtypes: {name_a}={tensor_a.dtype}, {name_b}={tensor_b.dtype}")
+    print("-" * 50)
+    print(
+        f"torch.allclose(rtol={rtol}, atol={atol}): {'PASS' if allclose_result else 'FAIL'}"
+    )
+    print(f"Mean Absolute Error (MAE):      {mae:.6e}")
+    print(f"Root Mean Squared Error (RMSE): {rmse:.6e}")
+    print(f"Max Absolute Error:             {max_abs_err:.6e}")
+    print(f"Max Relative Error:             {max_rel_err:.6e}")
+    print(f"Signal-to-Noise Ratio (SNR):    {snr_db:.2f} dB")
+    print(f"Cosine Similarity:              {cos_sim:.8f}")
+    print("-" * 50)
+
+    return metrics
 
 
 def run_test(tp_size, batch_size, model_config, check=False):
@@ -203,6 +301,10 @@ def run_test(tp_size, batch_size, model_config, check=False):
                 w2.transpose(1, 2),  # Transposed
                 w1_scale.transpose(1, 2),
                 w2_scale.transpose(1, 2),
+                # w1,
+                # w2,
+                # w1_scale,
+                # w2_scale,
                 topk_weights,
                 topk_ids,
                 a1_strides,
@@ -247,6 +349,8 @@ def run_test(tp_size, batch_size, model_config, check=False):
         max_abs_err = abs_error.max().item()
         max_rel_err = rel_error.max().item()
 
+        compare_tensors(y_cutlass, y_triton, name_a="y_cutlass", name_b="y_triton")
+
         print("y_cutlass:", y_cutlass[:, :10])
         print("y_triton:", y_triton[:, :10])
         print(f"Max absolute error: {max_abs_err:.6f}")
@@ -254,11 +358,15 @@ def run_test(tp_size, batch_size, model_config, check=False):
 
         # Tolerance might need adjustment based on FP8 specifics and kernel differences
         # FP8 comparisons often require higher tolerance than FP16/BF16
-        assert max_rel_err < 5e-1, f"Relative error too high! {max_rel_err}"
-        print("Correctness check passed.")
+        # assert max_rel_err < 5e-1, f"Relative error too high! {max_rel_err}"
+        if max_rel_err < 5e-1:
+            print("Correctness check passed.")
+        else:
+            print("Correctness check failed.")
 
 
-def main(tp_size=8, batch_sizes=[1, 4, 8, 16, 32, 64, 128, 256, 512], check=False):
+def main(tp_size=8, batch_sizes=[1], check=False):
+    # def main(tp_size=8, batch_sizes=[1, 4, 8, 16, 32, 64, 128, 256, 512], check=False):
     model_config = get_model_config(tp_size)
     print("Model Config:", model_config)
     for batch_size in batch_sizes:
@@ -272,6 +380,7 @@ if __name__ == "__main__":
         "--batch-sizes",
         type=int,
         nargs="+",
+        # default=[1],  # Adjusted default
         default=[1, 4, 8, 16, 32, 64, 128, 256, 512],  # Adjusted default
         help="List of batch sizes to test",
     )

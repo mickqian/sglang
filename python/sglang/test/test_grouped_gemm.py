@@ -1,26 +1,17 @@
 import math
 import os
 
-import torch
 import pytest
+import torch
 from torch import load
+
 torch.ops.load_library("/sgl-workspace/sglang/sgl-kernel/dev/build/dev_ops.so")
-
-print(dir(torch.ops))
-
-
-print(f"{torch.ops.abs.__dict__=}")
-print(f"{torch.ops.dev_ops=}")
-# dev_ops = load(
-#     name="dev_ops",
-#     sources=["fp8_blockwise_moe_kernel.cu", "cutlass_moe_helper.cu"],
-#     verbose=True,
-# )
 
 from sglang.srt.utils import is_cuda
 
 if is_cuda():
     import sgl_kernel
+
     from sglang.srt.layers.quantization.fp8_kernel import (
         sglang_per_token_group_quant_fp8,
     )
@@ -129,8 +120,8 @@ def torch_grouped_gemm(
 
         b_q_expert = b_q[expert, :k_i, :n_i]
         b_scales_expert = b_scales[
-                          expert, : (n_i + block_size_n - 1) // block_size_n, :
-                          ]
+            expert, : (n_i + block_size_n - 1) // block_size_n, :
+        ]
 
         print(f"{a_q_expert.shape=}, {a_scales_expert.shape=}")
         print(f"{b_q_expert.shape=}, {b_scales_expert.shape=}")
@@ -206,9 +197,6 @@ def sglang_blockwise_quant_fp8(weight, block_size_n, block_size_k):
     return q_final, scales_final
 
 
-
-
-
 @pytest.mark.skipif(not is_cuda(), reason="CUDA required for this test")
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 # @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -243,7 +231,6 @@ def test_fp8_grouped_gemm_accuracy(dtype, m_total, k, n, e):
     expert_offsets[1:] = torch.cumsum(problem_sizes[:, 0], dim=0)
     print(f"{expert_offsets=}")
 
-
     # --- Create Tensors ---
     a = torch.randn((m_total, k), dtype=dtype, device="cuda")
     b = torch.randn((e, k, n), dtype=dtype, device="cuda")
@@ -255,7 +242,14 @@ def test_fp8_grouped_gemm_accuracy(dtype, m_total, k, n, e):
 
     # Block-wise quantization for weight
     b_q = torch.empty_like(b, dtype=torch.float8_e4m3fn)
-    b_scales = torch.empty((e, (n + block_size_n - 1) // block_size_n, (k + block_size_k - 1) // block_size_k), device="cuda")
+    b_scales = torch.empty(
+        (
+            e,
+            (n + block_size_n - 1) // block_size_n,
+            (k + block_size_k - 1) // block_size_k,
+        ),
+        device="cuda",
+    )
 
     # The test dimensions are perfectly divisible, so no padding is needed.
     assert n % block_size_n == 0
@@ -287,7 +281,7 @@ def test_fp8_grouped_gemm_accuracy(dtype, m_total, k, n, e):
     c_strides = torch.full((e,), n, dtype=torch.int64, device="cuda")
 
     torch.ops.dev_ops.fp8_blockwise_scaled_grouped_mm(
-    # sgl_kernel.fp8_blockwise_scaled_grouped_mm(
+        # sgl_kernel.fp8_blockwise_scaled_grouped_mm(
         c_cutlass,
         a_ptrs,
         b_ptrs,
@@ -310,11 +304,20 @@ def test_fp8_grouped_gemm_accuracy(dtype, m_total, k, n, e):
 
     # --- Naive PyTorch Path ---
     c_torch = torch_grouped_gemm(
-        a_q, b_q, a_scales, b_scales, problem_sizes, expert_offsets, block_size_k, block_size_n, dtype
+        a_q,
+        b_q,
+        a_scales,
+        b_scales,
+        problem_sizes,
+        expert_offsets,
+        block_size_k,
+        block_size_n,
+        dtype,
     )
 
     # --- Compare ---
     assert torch.allclose(c_cutlass, c_torch, atol=1e-2, rtol=1e-2)
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
