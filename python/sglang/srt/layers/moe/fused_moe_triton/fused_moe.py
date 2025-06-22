@@ -32,7 +32,6 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_hip,
-    log_info_on_rank0,
     next_power_of_2,
 )
 
@@ -51,7 +50,6 @@ else:
 
 if _is_cuda or _is_hip:
     from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
-
 
 logger = logging.getLogger(__name__)
 padding_size = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
@@ -1344,7 +1342,6 @@ def fused_experts(
     no_combine: bool = False,
     routed_scaling_factor: Optional[float] = None,
 ):
-
     if inplace:
         assert not no_combine, "no combine + inplace makes no sense"
         torch.ops.sglang.inplace_fused_experts(
@@ -1486,6 +1483,9 @@ def moe_sum_reduce_triton(
 def moe_sum_reduce_torch_compile(x, out, routed_scaling_factor):
     torch.sum(x, dim=1, out=out)
     out.mul_(routed_scaling_factor)
+
+
+first = True
 
 
 def fused_experts_impl(

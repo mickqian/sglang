@@ -123,6 +123,8 @@ def run_test(tp_size, batch_size, model_config, check=False):
     expert_offsets = torch.empty((E + 1,), dtype=torch.int32, device="cuda")
     problem_sizes1 = torch.empty((E, 3), dtype=torch.int32, device="cuda")
     problem_sizes2 = torch.empty((E, 3), dtype=torch.int32, device="cuda")
+    a_sf_layout = torch.empty((E, 5), dtype=torch.int32, device="cuda")
+    w_sf_layout = torch.empty((E, 5), dtype=torch.int32, device="cuda")
 
     # --- Lambdas for Benchmarking ---
     cutlass_lambda = lambda: cutlass_fused_experts_fp8(
@@ -146,6 +148,8 @@ def run_test(tp_size, batch_size, model_config, check=False):
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
+        a_sf_layout,
+        w_sf_layout,
     )
 
     # Note: Triton expects non-transposed weights
@@ -165,28 +169,28 @@ def run_test(tp_size, batch_size, model_config, check=False):
 
     # --- Warmup ---
     print("Warming up...")
-    for _ in range(10):
-        _ = cutlass_lambda()
-        _ = triton_lambda()
+    # for _ in range(10):
+    #     _ = cutlass_lambda()
+    #     _ = triton_lambda()
     torch.cuda.synchronize()
 
     # --- Benchmarking ---
     quantiles = [0.5, 0.2, 0.8]
     print(f"Benchmarking Cutlass fused_experts...")
-    cutlass_ms, cutlass_min, cutlass_max = triton.testing.do_bench_cudagraph(
-        cutlass_lambda, rep=1000, quantiles=quantiles
-    )
+    # cutlass_ms, cutlass_min, cutlass_max = triton.testing.do_bench_cudagraph(
+    #     cutlass_lambda, rep=1000, quantiles=quantiles
+    # )
 
-    print(f"Benchmarking Triton fused_experts...")
-    triton_ms, triton_min, triton_max = triton.testing.do_bench_cudagraph(
-        triton_lambda, rep=1000, quantiles=quantiles
-    )
-    print(
-        f"Cutlass fused_experts time: {cutlass_ms:.3f} ms (median) [{cutlass_min:.3f} - {cutlass_max:.3f}]"
-    )
-    print(
-        f"Triton  fused_experts time: {triton_ms:.3f} ms (median) [{triton_min:.3f} - {triton_max:.3f}]"
-    )
+    # print(f"Benchmarking Triton fused_experts...")
+    # triton_ms, triton_min, triton_max = triton.testing.do_bench_cudagraph(
+    #     triton_lambda, rep=1000, quantiles=quantiles
+    # )
+    # print(
+    #     f"Cutlass fused_experts time: {cutlass_ms:.3f} ms (median) [{cutlass_min:.3f} - {cutlass_max:.3f}]"
+    # )
+    # print(
+    #     f"Triton  fused_experts time: {triton_ms:.3f} ms (median) [{triton_min:.3f} - {triton_max:.3f}]"
+    # )
 
     # --- Correctness Check ---
     if check:
@@ -214,6 +218,8 @@ def run_test(tp_size, batch_size, model_config, check=False):
                 expert_offsets,
                 problem_sizes1,
                 problem_sizes2,
+                a_sf_layout,
+                w_sf_layout,
             )
 
             # Run Triton version (requires original shape weights, use inplace=False)

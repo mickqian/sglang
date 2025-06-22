@@ -209,10 +209,14 @@ void sm100_fp8_blockwise_group_mm_dispatch_shape(
   torch::TensorOptions options_int = torch::TensorOptions().dtype(torch::kInt64).device(a.device());
   torch::Tensor problem_sizes_transpose = torch::empty(num_experts * 3, options_int);
   torch::Tensor output_t = output.t();
+
   torch::Tensor a_t = a.t();
   torch::Tensor b_t = b.transpose(1, 2);
   torch::Tensor scales_a_t = scales_a.t();
   torch::Tensor scales_b_t = scales_b.transpose(1, 2);
+
+  // if (a.size(0) <= 2048 && a.size(1) >= 2048) {
+  //  if (false) {
 
   if (a.size(0) <= 2048 && a.size(1) >= 2048) {
     run_get_group_gemm_starts<MmaConfig1::LayoutSFA, MmaConfig1::LayoutSFB, MmaConfig1::ScaleConfig>(
