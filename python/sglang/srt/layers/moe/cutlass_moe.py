@@ -114,14 +114,14 @@ def cutlass_fused_experts_fp8(
 
     out_dtype = a.dtype
     num_experts = w1_q.size(0)
-    m = a.size(0)
+    m, k = a.shape
     # k = w2_q.size(2)
     # n = w2_q.size(1)
 
-    k = w2_q.size(1)
+
     n = w2_q.size(2)
 
-    print(f"{n=}, {k=}")
+    # print(f"{n=}, {k=}")
 
     # if (n * 2) % 128 != 0:
     #     import warnings
@@ -162,7 +162,7 @@ def cutlass_fused_experts_fp8(
     c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
     intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
 
-    print(f"{c1.shape=}, {c2.shape=}, {intermediate.shape=}")
+    # print(f"{c1.shape=}, {c2.shape=}, {intermediate.shape=}")
     fp8_blockwise_scaled_grouped_mm(
         c1,
         a_ptrs,
@@ -193,7 +193,7 @@ def cutlass_fused_experts_fp8(
 
     # print(f"{intemediate_q[:, :10]=}")
 
-    print(f"{c2.shape=}, {w2_q.shape=}")
+    # print(f"{c2.shape=}, {w2_q.shape=}")
     fp8_blockwise_scaled_grouped_mm(
         c2,
         a_ptrs,
@@ -214,12 +214,18 @@ def cutlass_fused_experts_fp8(
         expert_offsets[:-1],
         workspace,
     )
-    # result = torch.empty((m, k), device=device, dtype=out_dtype)
-    # apply_shuffle_mul_sum(c2, result, c_map, topk_weights.to(out_dtype))
 
+    # result = torch.empty((m, k), device=device, dtype=out_dtype)
+    #
+    # apply_shuffle_mul_sum(c2, result, c_map, topk_weights.to(out_dtype))
+    #
+    #
+    # return result
     # print(f"{c2[:, :10]=}")
 
     # k: hidden_size
+    print(f"{a_map=}")
+    print(f"{c_map=}")
 
     c2 = shuffle_rows(c2, c_map, (m * topk, k))
     c2 = c2.view(m, topk, k)
