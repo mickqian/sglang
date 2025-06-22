@@ -118,7 +118,6 @@ def cutlass_fused_experts_fp8(
     # k = w2_q.size(2)
     # n = w2_q.size(1)
 
-
     n = w2_q.size(2)
 
     # print(f"{n=}, {k=}")

@@ -196,14 +196,24 @@ def prepare_moe_input(
     )
 
 
+try:
+    torch.ops.load_library("/sgl-workspace/sglang/sgl-kernel/dev/build/dev_ops.so")
+except Exception as e:
+    pass
+
+
 def apply_shuffle_mul_sum(
     input,
     output,
     permutation,
     factors,
 ):
-    torch.ops.sgl_kernel.apply_shuffle_mul_sum.default(
-        input, output, permutation, factors
+    torch.ops.dev_ops.apply_shuffle_mul_sum.default(
+        # torch.ops.sgl_kernel.apply_shuffle_mul_sum.default(
+        input,
+        output,
+        permutation,
+        factors,
     )
 
 

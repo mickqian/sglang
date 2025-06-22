@@ -263,28 +263,40 @@ __global__ void apply_shuffle_mul_sum_kernel(
     int row_stride,
     const scalar_t* __restrict__ factors)  // [m * topk] or nullptr
 {
-  int i = blockIdx.x;   // [0, m * topk)
+  int i = blockIdx.x;   // [0, m)
   int d = threadIdx.x;  // [0, row_stride)
 
   if (i >= m || d >= row_stride) return;
 
   scalar_t sum_val = 0.0;
 
+  // a block is responsible for top-k tokens of expert output
   for (int j = 0; j < topk; ++j) {
+    // each iteration for a final token
+    // final token index, ordered
+    //    第 i 个 原始 token 的 第 j 个专家的输出位置
     int index_2d = i * topk + j;
-    int src_row = permutation[index_2d];
-    if (src_row >= m) continue;
+    // original token index, fixed for each thread in a round
+    // 第 i 个 原始 token 的 第 j 个专家的输出，位置在重排后（input) 的第几行，这个行应该也为全局index?
 
+    int src_row = permutation[index_2d];
+    //    if (src_row  >= m * topk) continue;
+    // src_row
+
+    // moving
+    // 假设仅为原始 token_idx, 这里的信息不够，我们需要原始 global index，不然最多只取了 m * row_stride 个数据
     scalar_t val = input_tensor[src_row * row_stride + d];
+    //  scalar_t val = input_tensor[index_2d * row_stride + d];
 
     scalar_t factor = 1.0;
     if (factors != nullptr) {
       factor = factors[index_2d];
     }
-
+    // 当前线程是找原始 token i 的 topk 个专家输出的某一维度
     sum_val += factor * val;
   }
 
+  // calculating original token i's dim d, from d's scattered results in all-expert output
   output_tensor[i * row_stride + d] = sum_val;
 }
 
@@ -364,5 +376,6 @@ void apply_shuffle_mul_sum(
     torch::Tensor& output,
     const torch::Tensor& permutation,
     const std::optional<torch::Tensor>& factors) {
+  std::cout << "using cutomized apply_shuffle_mul_sum" << std::endl;
   get_apply_shuffle_mul_sum_caller(input, output, permutation, factors);
 }
