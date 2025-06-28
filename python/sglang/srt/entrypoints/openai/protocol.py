@@ -637,6 +637,7 @@ class MessageProcessingResult:
     prompt_ids: Union[str, List[int]]
     image_data: Optional[Any]
     audio_data: Optional[Any]
+    video_data: Optional[Any]
     modalities: List[str]
     stop: List[str]
     tool_call_constraint: Optional[Any] = None

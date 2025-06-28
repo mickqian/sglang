@@ -74,7 +74,7 @@ class VILAMultimodalProcessor(BaseMultimodalProcessor):
         mm_items: List[MultimodalDataItem] = [
             MultimodalDataItem(
                 modality=Modality.IMAGE,
-                image_offsets=image_offsets,
+                offsets=image_offsets,
                 pixel_values=inputs.pixel_values,
             )
         ]

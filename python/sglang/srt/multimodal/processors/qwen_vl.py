@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import re
 from typing import Dict, List, Union
 
@@ -33,6 +34,7 @@ FRAME_FACTOR = 2
 FPS = 2.0
 FPS_MIN_FRAMES = 4
 FPS_MAX_FRAMES = 768
+
 
 # Compatible with Qwen2VL and Qwen2_5VL
 class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
@@ -79,6 +81,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             ),
             max_req_input_len=max_req_input_len,
         )
+
 
 def smart_resize(
     height: int,
@@ -306,7 +309,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         second_per_grid_ts = getattr(combined_mm_item, "second_per_grid_ts", None)
 
         if "pixel_values_videos" in ret:
-            items += [
+            combined_mm_item += [
+                MultimodalDataItem(
+                    pixel_values=ret["pixel_values_videos"],
+                    video_grid_thws=torch.concat([ret["video_grid_thw"]]),
+                    modality=Modality.VIDEO,
+                )
+            ]
+
+        if "pixel_values_videos" in ret:
+            combined_mm_item += [
                 MultimodalDataItem(
                     pixel_values=ret["pixel_values_videos"],
                     video_grid_thws=torch.concat([ret["video_grid_thw"]]),
@@ -317,8 +329,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         input_ids = ret["input_ids"].flatten().tolist()
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
             spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,
-            image_token_id=self.IM_TOKEN_ID,
-            video_token_id=self.VIDEO_TOKEN_ID,
+            image_token_id=self.image_token_id,
+            video_token_id=self.video_token_id,
             vision_start_token_id=self.vision_start_token_id,
             model_type=self.hf_config.model_type,
             tokens_per_second=getattr(
@@ -336,8 +348,8 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             "mm_items": [combined_mm_item],
             "im_start_id": self.IM_START_TOKEN_ID,
             "im_end_id": self.IM_END_TOKEN_ID,
-            "im_token_id": self.IM_TOKEN_ID,
-            "video_token_id": self.VIDEO_TOKEN_ID,
+            "im_token_id": self.image_token_id,
+            "video_token_id": self.video_token_id,
             "mrope_positions": mrope_positions,
             "mrope_position_delta": mrope_position_delta,
         }

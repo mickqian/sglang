@@ -176,6 +176,10 @@ class Modality(Enum):
     VIDEO = auto()
     AUDIO = auto()
 
+    @staticmethod
+    def all():
+        return [Modality.IMAGE, Modality.VIDEO, Modality.AUDIO]
+
 
 @dataclasses.dataclass
 class MultimodalDataItem:
@@ -192,7 +196,7 @@ class MultimodalDataItem:
     aspect_ratio_mask: Optional[List[torch.Tensor]] = None
 
     image_sizes: Tuple[int, int] = None
-    image_offsets: Optional[list] = None
+    offsets: Optional[list] = None
 
     # the real data, pixel_values or audio_features
     # data: Union[List[torch.Tensor], List[np.ndarray]]
@@ -293,7 +297,6 @@ class MultimodalDataItem:
 
     def is_modality(self, modality: Modality) -> bool:
         return self.modality == modality
-
 
     def is_audio(self):
         return (self.modality == Modality.AUDIO) and (

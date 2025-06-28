@@ -122,7 +122,7 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
         if len(pixel_values) != 0:
             item = MultimodalDataItem(
                 pixel_values=pixel_values,
-                image_offsets=image_offsets,
+                offsets=image_offsets,
                 tgt_size=tgt_sizes_flat,
                 modality=Modality.IMAGE,
             )

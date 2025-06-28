@@ -23,7 +23,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 from sglang.srt.multimodal.mm_utils import has_valid_data
-
 from sglang.srt.utils import flatten_nested_list
 
 # handle serialization of Image for pydantic
@@ -69,6 +68,8 @@ class GenerateReqInput:
     video_data: Optional[Union[List[List[str]], List[str], str]] = None
     # The audio input. Like image data, it can be a file name, a url, or base64 encoded string.
     audio_data: Optional[Union[List[AudioDataItem], AudioDataItem]] = None
+    # The video input. Like image data, it can be a file name, a url, or base64 encoded string.
+    video_data: Optional[Union[List[List[str]], List[str], str]] = None
     # The sampling_params. See descriptions below.
     sampling_params: Optional[Union[List[Dict], Dict]] = None
     # The request id.

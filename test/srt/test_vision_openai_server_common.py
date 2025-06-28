@@ -344,7 +344,9 @@ class TestOpenAIVisionServer(CustomTestCase):
 
         # Add assertions to validate the video response
         assert (
-            "iPod" in video_response or "device" in video_response  or "microphone" in video_response
+            "iPod" in video_response
+            or "device" in video_response
+            or "microphone" in video_response
         ), f"video_response: {video_response}, should contain 'iPod' or 'device'"
         assert (
             "man" in video_response

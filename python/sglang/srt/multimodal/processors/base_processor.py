@@ -14,7 +14,7 @@ from PIL import Image
 from transformers import BaseImageProcessorFast
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.utils import encode_video, load_audio, load_image
+from sglang.srt.utils import encode_video, load_audio, load_image, logger
 
 
 class MultimodalInputFormat(Enum):
@@ -34,11 +34,13 @@ class BaseMultiModalProcessorOutput:
     # frames loaded from image and video, in given order
     images: Optional[list[Union[Image.Image, dict]]] = None
 
+    videos: Optional[list[torch.Tensor]] = None
+
     # audios
     audios: Optional[list[Union[np.ndarray, dict]]] = None
 
     def normalize(self):
-        for field_name in ["images", "audios"]:
+        for field_name in ["images", "audios", "videos"]:
             field = getattr(self, field_name, None)
             if field is not None and isinstance(field, list) and len(field) == 0:
                 setattr(self, field_name, None)
@@ -197,75 +199,88 @@ class BaseMultimodalProcessor(ABC):
         self,
         text_parts: List[str],
         multimodal_tokens: MultimodalSpecialTokens,
-        image_data: Optional[list] = None,
-        audio_data: Optional[list] = None,
+        data_iterators: dict,
         discard_alpha_channel: bool = True,
+        image_estimated_frames_iter: Optional[iter] = None,
+        image_scaling_factor: float = 1.0,
+        max_image_frames: int = 30,
     ):
         """
-        load multimodal data parallelly
+        load multimodal data parallelly using iterators.
         """
-
-        # TODO(mick): load from server_args, env, or sampling_params
-        MAX_NUM_FRAMES = 30
-        estimated_frames_list = self.get_estimated_frames_list(image_data=image_data)
-        total_frame_count = sum(estimated_frames_list)
-        # a heuristic value, suggesting the maximum fraction of frames to embed from all visual inputs.
-        # e.g., 0.1 suggests that 1 frame out of 10 input frames should be used
-        scaling_factor = min(1.0, MAX_NUM_FRAMES / max(1, total_frame_count))
-
-        assert len(image_data) == len(estimated_frames_list)
-        # Submit all tasks
         futures = []
         task_info = []
-        image_index, audio_index = 0, 0
+        # Map token strings to Modality enum for cleaner logic
+        token_to_modality = {
+            multimodal_tokens.image_token: Modality.IMAGE,
+            multimodal_tokens.video_token: Modality.VIDEO,
+            multimodal_tokens.audio_token: Modality.AUDIO,
+        }
 
         for text_part in text_parts:
-            if (
-                multimodal_tokens.image_token_regex
-                and multimodal_tokens.image_token_regex.match(text_part)
-            ):
-                data = image_data[image_index]
-                is_video = isinstance(data, str) and data.startswith("video:")
-                estimated_frames = estimated_frames_list[image_index]
-                frame_count_limit = max(1, int(estimated_frames * scaling_factor))
+            modality = token_to_modality.get(text_part)
+            if modality is not None:
+                data_iterator = data_iterators.get(modality)
+                if data_iterator is None:
+                    raise ValueError(f"No data iterator found for token: {text_part}")
+
+                try:
+                    data = next(data_iterator)
+                except StopIteration:
+                    raise ValueError(
+                        f"Mismatch: More '{text_part}' tokens found than corresponding data items provided."
+                    )
+
+                frame_count_limit = None
+                if modality == Modality.IMAGE and image_estimated_frames_iter:
+                    try:
+                        estimated_frames = next(image_estimated_frames_iter)
+                        # Use the pre-calculated scaling factor and max frames
+                        frame_count_limit = max(
+                            1, int(estimated_frames * image_scaling_factor)
+                        )
+                        # Ensure we don't exceed the absolute max (redundant if scaling_factor handles it)
+                        # frame_count_limit = min(frame_count_limit, max_image_frames)
+                    except StopIteration:
+                        raise ValueError(
+                            "Mismatch between image tokens and estimated frame counts."
+                        )
+
                 futures.append(
                     self.io_executor.submit(
                         BaseMultimodalProcessor._load_single_item,
                         data,
-                        is_video,
-                        False,
+                        modality,
                         frame_count_limit,
                         discard_alpha_channel,
                     )
                 )
-                task_info.append((Modality.IMAGE, data, frame_count_limit))
-                image_index += 1
-            elif (
-                multimodal_tokens.audio_token_regex
-                and multimodal_tokens.audio_token_regex.match(text_part)
-            ):
-                data = audio_data[audio_index]
-                futures.append(
-                    self.io_executor.submit(
-                        BaseMultimodalProcessor._load_single_item,
-                        data,
-                        False,
-                        True,
-                        None,
-                        discard_alpha_channel,
-                    )
+                task_info.append((modality, data, frame_count_limit))
+
+        # Check if any iterators still have data left (indicates fewer tokens than data)
+        for modality, iterator in data_iterators.items():
+            try:
+                next(iterator)
+                logger.warning(
+                    f"Warning: More {modality.name.lower()} data items provided than corresponding tokens found in the prompt."
                 )
-                task_info.append((Modality.AUDIO, data, None))
-                audio_index += 1
+            except StopIteration:
+                # This is expected, the iterator is correctly exhausted
+                pass
+            except (
+                Exception
+            ):  # Catch other potential errors from next() if iterators are complex
+                pass
 
         return futures, task_info
 
     def load_mm_data(
         self,
-        prompt: str | List[int],
+        prompt: str,
         multimodal_tokens: MultimodalSpecialTokens,
         max_req_input_len: int,
         image_data: Optional[list] = None,
+        video_data: Optional[list] = None,
         audio_data: Optional[list] = None,
         return_text: Optional[bool] = True,
         discard_alpha_channel: bool = True,
@@ -279,13 +294,7 @@ class BaseMultimodalProcessor(ABC):
             discard_alpha_channel: if True, discards the alpha channel in the returned images
 
         """
-        if not return_text:
-            raise NotImplementedError()
-        if image_data is None:
-            image_data = []
-
         multimodal_tokens.convert_to_strs(self._processor)
-        multimodal_tokens_pattern = multimodal_tokens.collect()
 
         if isinstance(prompt, list) and return_text:
             assert len(prompt) and isinstance(prompt[0], int)
@@ -294,59 +303,78 @@ class BaseMultimodalProcessor(ABC):
             prompt = prompt
 
         assert isinstance(prompt, str)
-        # split text into list of normal text and special tokens
-        text_parts = re.split(multimodal_tokens_pattern, prompt)
+
+        if return_text:
+            import re
+
+            pattern = (
+                "("
+                + "|".join(re.escape(sep) for sep in multimodal_tokens.collect())
+                + ")"
+            )
+            # split text into list of normal text and special tokens
+            text_parts = re.split(pattern, prompt)
+
+        # collect all data
+        data_iterators = {}
+        if multimodal_tokens.image_token and image_data:
+            data_iterators[Modality.IMAGE] = iter(image_data)
+        if multimodal_tokens.video_token and video_data:
+            data_iterators[Modality.VIDEO] = iter(video_data)
+        if multimodal_tokens.audio_token and audio_data:
+            data_iterators[Modality.AUDIO] = iter(audio_data)
 
         futures, task_info = self.submit_data_loading_tasks(
             text_parts=text_parts,
             multimodal_tokens=multimodal_tokens,
-            image_data=image_data,
-            audio_data=audio_data,
+            data_iterators=data_iterators,
             discard_alpha_channel=discard_alpha_channel,
         )
+
         # Process results
-        images, audios = [], []
-        new_text = ""
+        images, videos, audios = [], [], []
+        new_text_parts = []
         task_ptr = 0
-
+        multimodal_token_list = multimodal_tokens.collect()
         for text_part in text_parts:
-            if multimodal_tokens_pattern.match(text_part):
-                task_type, data, frame_limit = task_info[task_ptr]
-                result = futures[task_ptr].result()
-                task_ptr += 1
+            try:
+                if text_part in multimodal_token_list:
+                    modality, data, frame_limit = task_info[task_ptr]
+                    result = futures[task_ptr].result()
+                    task_ptr += 1
 
-                if task_type == Modality.IMAGE:
-                    # If data is already processed it will be a
-                    # dictionary. In this case we want to keep the
-                    # expanded tokens in text_part. Otherwise, we will
-                    # call the processor code, so keep only a single image
-                    # token.
-                    mm_tokens = (
-                        text_part
-                        if isinstance(data, dict)
-                        else multimodal_tokens.image_token
-                    )
-                    frames = [result] if not isinstance(result, list) else result
-                    if frames:
-                        images += frames
-                        new_text += mm_tokens * len(frames)
-                elif task_type == Modality.AUDIO:
-                    # audio
-                    mm_tokens = (
-                        text_part
-                        if isinstance(data, dict)
-                        else multimodal_tokens.audio_token
-                    )
-                    audios.append(result)
-                    new_text += mm_tokens
-                # TODO: handle video
-            else:
-                new_text += text_part
+                    if modality == Modality.IMAGE:
+                        frames = [result] if not isinstance(result, list) else result
+                        if frames:
+                            # only for minicpmv
+                            images += frames
+                            new_text_parts += [
+                                multimodal_tokens.image_token * len(frames)
+                            ]
+                    elif modality == Modality.VIDEO:
+                        # load as video
+                        videos += [result]
+                        new_text_parts += [text_part]
+                    elif modality == Modality.AUDIO:
+                        # audio
+                        audios += [result]
+                        new_text_parts += [text_part]
+                else:
+                    # normal text
+                    new_text_parts += [text_part]
 
+            except Exception as e:
+                logger.error(
+                    f"An exception occurred while loading multimodal data: {e}"
+                )
+                raise RuntimeError(
+                    f"An exception occurred while loading multimodal data: {e}"
+                )
         out = BaseMultiModalProcessorOutput(
-            input_text=new_text,
             images=images,
             audios=audios,
+            videos=videos,
+            input_text="".join(new_text_parts),
         )
         out.normalize()
         return out
@@ -547,7 +575,7 @@ class BaseMultimodalProcessor(ABC):
         ) -> MultimodalDataItem:
             """Apply common post-processing to the multimodal item."""
             if combined_mm_item.modality in [Modality.IMAGE, Modality.MULTI_IMAGES]:
-                combined_mm_item.image_offsets = self.get_mm_items_offset(
+                combined_mm_item.offsets = self.get_mm_items_offset(
                     input_ids=input_ids,
                     mm_token_id=self.IM_TOKEN_ID,
                 )

@@ -75,7 +75,7 @@ class Phi4MMImageProcessor(BaseMultimodalProcessor):
                 pixel_values=res["input_image_embeds"],
                 image_sizes=res["image_sizes"],
                 image_emb_mask=res["image_attention_mask"],
-                image_offsets=image_offsets,
+                offsets=image_offsets,
                 modality=Modality.IMAGE,
             )
         ]

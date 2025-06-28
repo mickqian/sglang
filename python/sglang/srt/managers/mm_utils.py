@@ -192,7 +192,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
         return output_ids_tensor.tolist()
 
 
-embedding_cache = None
+embedding_cache: Optional[MultiModalCache] = None
 
 
 def init_embedding_cache(max_size: int):
@@ -426,8 +426,6 @@ def embed_mm_inputs(
         extend_seq_lens: Sequence lengths for each request
         input_ids: Input token IDs tensor
         input_embedding: Embedding layer for text tokens
-        image_data_embedding_func: Function to embed image data
-        audio_data_embedding_func: Function to embed audio data
         placeholder_tokens: Token IDs for multimodal placeholders (uses pad_values if None)
 
     Returns:
@@ -447,14 +445,20 @@ def embed_mm_inputs(
 
     # 2. Get multimodal embedding separately
     # Try get mm embedding if any
-    for modality in modalities:
+    for modality in Modality.all():
         items = [
-            item for item in appearing_items if item.is_modality(modality=modality)
+            item for item in mm_inputs.mm_items if item.is_modality(modality=modality)
         ]
-        if (
-            len(items) != 0
-            and modality in data_embedding_mapping
-        ):
+        embedder = (
+            None
+            if data_embedding_func_mapping is None
+            else data_embedding_func_mapping.get(modality, None)
+        )
+        if embedder is None:
+            # "image", "video", etc
+            modality_id = modality.name.lower()
+            embedder = getattr(multimodal_model, f"get_{modality_id}_feature", None)
+        if len(items) != 0 and embedder is not None:
             placeholder_tensor = torch.tensor(
                 [item.pad_value for item in items],
                 device=input_ids.device,
@@ -463,20 +467,19 @@ def embed_mm_inputs(
             items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
             items_offsets = []
             for i, mm_inputs in enumerate(mm_inputs_list):
-                mm_items = [item for item in mm_inputs.mm_items if item.is_modality(modality=modality)]
+                mm_items = [
+                    item
+                    for item in mm_inputs.mm_items
+                    if item.is_modality(modality=modality)
+                ]
                 items_size[i + 1] = len(mm_items)
                 items_offsets.append(
-                    flatten_nested_list(
-                        [
-                            item.image_offsets
-                            for item in mm_inputs.mm_items
-                        ]
-                    )
+                    flatten_nested_list([item.offsets for item in mm_inputs.mm_items])
                 )
             items_size = torch.cumsum(items_size, dim=0).tolist()
 
             embedding, mask = get_embedding_and_mask(
-                data_embedding_func=data_embedding_func,
+                data_embedding_func=embedder,
                 embedding_items=items,
                 placeholder_tensor=placeholder_tensor,
                 input_ids=input_ids,
@@ -487,46 +490,6 @@ def embed_mm_inputs(
             )
             embeddings += [embedding]
             masks += [mask]
-
-    # Try get audio embedding if any
-    if (
-        any(True for item in item_flatten_list if item.is_audio())
-        and audio_data_embedding_func
-    ):
-        items = [item for item in item_flatten_list if item.is_audio()]
-        placeholder_tensor = torch.tensor(
-            [item.pad_value for item in items],
-            device=input_ids.device,
-        )
-        items_offsets = []
-        # calculate per request items length offset
-        items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
-        for i, mm_inputs in enumerate(mm_inputs_list):
-            audio_items = [item for item in mm_inputs.mm_items if item.is_audio()]
-            items_size[i + 1] = len(audio_items)
-            items_offsets.append(
-                flatten_nested_list(
-                    [
-                        item.audio_offsets
-                        for item in mm_inputs.mm_items
-                        if item.is_audio()
-                    ]
-                )
-            )
-        items_size = torch.cumsum(items_size, dim=0)
-
-        embedding, mask = get_embedding_and_mask(
-            data_embedding_func=audio_data_embedding_func,
-            embedding_items=items,
-            placeholder_tensor=placeholder_tensor,
-            input_ids=input_ids,
-            items_size=items_size,
-            prefix_length=extend_prefix_lens,
-            extend_length=extend_seq_lens,
-            items_offset_list=items_offsets,
-        )
-        embeddings += [embedding]
-        masks += [mask]
 
     # 3. Get input embeddings
     vocab_size = input_embedding.num_embeddings
