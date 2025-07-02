@@ -317,6 +317,59 @@ class ServerArgs:
             else:
                 self.mem_fraction_static = 0.88
 
+            hf_config = get_config(
+                self.model_path,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+                model_override_args=json.loads(self.json_model_override_args),
+            )
+
+            # is_multimodal is better, but model_config is not available
+            vision_config = getattr(hf_config, "vision_config", None)
+            if vision_config is not None:
+                # roughly reduce the mem_fraction_static base on params of Vit
+                original_server_arg_mem_fraction = self.mem_fraction_static
+                # a base mem_fraction_static factor for regular Vit
+                base_mem_fraction_reduction_ratio = 0.95
+
+                vit_num_layers = getattr(vision_config, "num_hidden_layers", 24)
+                vit_hidden_size = getattr(vision_config, "hidden_size", 1024)
+
+                # baseline ViT params (ViT-L/14)
+                baseline_vit_layers = 24
+                baseline_vit_hidden_size = 1024
+
+                # weight params count
+                current_complexity_score = vit_num_layers * (vit_hidden_size**2)
+                baseline_complexity_score = baseline_vit_layers * (
+                    baseline_vit_hidden_size**2
+                )
+                complexity_ratio = (
+                    current_complexity_score / baseline_complexity_score
+                    if baseline_complexity_score > 0
+                    else 1.0
+                )
+
+                # every time the complexity grows 100%, adjust final factor for 10%
+                sensitivity_scale = 0.1
+                dynamic_adjustment_factor = 1.0 - sensitivity_scale * (
+                    complexity_ratio - 1.0
+                )
+                dynamic_adjustment_factor = max(
+                    0.8, min(1.05, dynamic_adjustment_factor)
+                )
+
+                final_overall_factor = (
+                    base_mem_fraction_reduction_ratio * dynamic_adjustment_factor
+                )
+                self.mem_fraction_static = (
+                    original_server_arg_mem_fraction * final_overall_factor
+                )
+                logger.warning(
+                    f"Multimodal model: Dynamically adjusted --mem-fraction-static "
+                    f"from: {original_server_arg_mem_fraction:.3f} to: {self.mem_fraction_static:.3f}."
+                )
+
         # Set chunked prefill size, which depends on the gpu memory capacity
         if self.chunked_prefill_size is None:
             if gpu_mem is not None:
