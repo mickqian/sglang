@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from sglang.srt.managers.schedule_batch import BaseFinishReason
+from sglang.srt.managers.schedule_batch import BaseFinishReason, MultimodalInputs
 from sglang.srt.multimodal.mm_utils import has_valid_data
 from sglang.srt.sampling.sampling_params import SamplingParams
 
@@ -486,7 +486,7 @@ class TokenizedGenerateReqInput:
     # The input token ids
     input_ids: List[int]
     # The multimodal inputs
-    mm_inputs: dict
+    mm_inputs: MultimodalInputs
     # The sampling parameters
     sampling_params: SamplingParams
     # Whether to return the logprobs
@@ -644,7 +644,7 @@ class TokenizedEmbeddingReqInput:
     # The input token ids
     input_ids: List[int]
     # The image inputs
-    image_inputs: dict
+    image_inputs: MultimodalInputs
     # The token type ids
     token_type_ids: List[int]
     # Dummy sampling params for compatibility

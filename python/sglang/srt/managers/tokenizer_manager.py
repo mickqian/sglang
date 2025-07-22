@@ -112,6 +112,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqOutput,
 )
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -520,6 +521,7 @@ class TokenizerManager:
             )
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
+                mm_inputs = MultimodalInputs.from_dict(mm_inputs)
                 input_ids = self.mm_processor.pad_input_ids(input_ids, mm_inputs)
 
         else:
@@ -593,7 +595,7 @@ class TokenizerManager:
         input_text: str,
         input_ids: List[int],
         input_embeds: Optional[Union[List[float], None]] = None,
-        mm_inputs: Optional[Dict] = None,
+        mm_inputs: Optional[MultimodalInputs] = None,
         token_type_ids: Optional[List[int]] = None,
     ) -> Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]:
         """Create a tokenized request object from common parameters."""

@@ -240,7 +240,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
     def pad_input_tokens(
         self,
         input_ids: List[int],
-        mm_inputs: Dict,
+        mm_inputs: MultimodalInputs,
         mm_special_tokens: MultimodalSpecialTokens,
     ) -> List[int]:
         """
@@ -255,7 +255,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
         # Create mapping of token_ids to pad_values for each modality
         token_to_pad_mapping = {}
 
-        for item in mm_inputs["mm_items"]:
+        for item in mm_inputs.mm_items:
             if item.is_image() and mm_special_tokens.image_token_id is not None:
                 token_to_pad_mapping[mm_special_tokens.image_token_id] = item.pad_value
             elif item.is_audio() and mm_special_tokens.audio_token_id is not None:
