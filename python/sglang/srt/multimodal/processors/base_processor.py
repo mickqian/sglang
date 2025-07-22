@@ -17,6 +17,7 @@ from sglang.srt.managers.mm_utils import (
     MMDataPaddingStrategy,
     MultiModalityDataPaddingPatternMultimodalTokens,
     MultiModalityDataPaddingPatternTokenPairs,
+    MultimodalSpecialTokens,
 )
 from sglang.srt.managers.schedule_batch import (
     Modality,
@@ -50,111 +51,6 @@ class BaseMultiModalProcessorOutput:
             + [(Modality.VIDEO, data) for data in self.videos]
             + [(Modality.AUDIO, data) for data in self.audios]
         )
-
-
-@dataclasses.dataclass
-class MultimodalSpecialTokens:
-    image_token: Optional[Union[str, List[str]]] = None
-    video_token: Optional[Union[str, List[str]]] = None
-    audio_token: Optional[Union[str, List[str]]] = None
-
-    image_token_id: Optional[int] = None
-    video_token_id: Optional[int] = None
-    audio_token_id: Optional[int] = None
-
-    image_token_regex: Optional[re.Pattern] = None
-    video_token_regex: Optional[re.Pattern] = None
-    audio_token_regex: Optional[re.Pattern] = None
-
-    combined_regex: Optional[re.Pattern] = None
-
-    def build(self, processor):
-        self.convert_to_strs(processor)
-        self.parse_regex()
-        self.get_combined_regex()
-        return self
-
-    def convert_to_str(self, token: Union[str, int], processor) -> str:
-        if token is None:
-            return token
-        if isinstance(token, str):
-            return token
-        return processor.tokenizer.convert_ids_to_tokens([token])[0]
-
-    def convert_to_strs(self, processor):
-        if not self.image_token:
-            self.image_token = self.convert_to_str(self.image_token_id, processor)
-        if not self.video_token:
-            self.video_token = self.convert_to_str(self.video_token_id, processor)
-        if not self.audio_token:
-            self.audio_token = self.convert_to_str(self.audio_token_id, processor)
-
-    def get_modality_of_token(self, token: str) -> Optional[Modality]:
-        """
-        :return: the modality associated with the given token, if the token is a special_token or matches with the multimodal token regex
-        """
-        modality = {
-            self.image_token: Modality.IMAGE,
-            self.video_token: Modality.VIDEO,
-            self.audio_token: Modality.AUDIO,
-        }.get(token)
-        if modality:
-            return modality
-
-        for regex, modality in [
-            (self.image_token_regex, Modality.IMAGE),
-            (self.video_token_regex, Modality.VIDEO),
-            (self.audio_token_regex, Modality.AUDIO),
-        ]:
-            if regex and regex.match(token):
-                return modality
-
-        return None
-
-    def get_token_id_by_modality(self, modality: Modality) -> Optional[int]:
-        return {
-            Modality.IMAGE: self.image_token_id,
-            Modality.MULTI_IMAGES: self.image_token_id,
-            Modality.VIDEO: self.video_token_id,
-            Modality.AUDIO: self.audio_token_id,
-        }.get(modality)
-
-    def parse_regex(self):
-        if self.image_token_regex is None and self.image_token is not None:
-            self.image_token_regex = re.compile(re.escape(self.image_token))
-        if self.video_token_regex is None and self.video_token is not None:
-            self.video_token_regex = re.compile(re.escape(self.video_token))
-        if self.audio_token_regex is None and self.audio_token is not None:
-            self.audio_token_regex = re.compile(re.escape(self.audio_token))
-
-    def get_combined_regex(self) -> re.Pattern:
-        """
-        Builds and returns a regex, used to split input str into tokens (with mm special tokens)
-        """
-        if self.combined_regex:
-            return self.combined_regex
-        tokens = [
-            self.image_token_regex,
-            self.video_token_regex,
-            self.audio_token_regex,
-        ]
-        patterns = []
-        flags = 0
-        for t in tokens:
-            if t is not None:
-                patterns.append(t.pattern)
-                flags |= t.flags
-        combined = "(" + "|".join(f"(?:{p})" for p in patterns) + ")"
-        self.combined_regex = re.compile(combined, flags)
-        return self.combined_regex
-
-    def build_mm_padding_strategy(self, strategy: MMDataPaddingStrategy):
-        if strategy == MMDataPaddingStrategy.Tokens:
-            return MultiModalityDataPaddingPatternMultimodalTokens()
-        elif strategy == MMDataPaddingStrategy.TokenPairs:
-            return MultiModalityDataPaddingPatternTokenPairs()
-        else:
-            raise Unsupported()
 
 
 class BaseMultimodalProcessor(ABC):
@@ -207,6 +103,15 @@ class BaseMultimodalProcessor(ABC):
         # name of the feature filed
         # TODO: pass from processors
         self.FEATURE_NAMES = ["pixel_values", "pixel_values_videos", "audio_features"]
+
+    @staticmethod
+    def build_mm_padding_strategy(strategy: MMDataPaddingStrategy):
+        if strategy == MMDataPaddingStrategy.Tokens:
+            return MultiModalityDataPaddingPatternMultimodalTokens()
+        elif strategy == MMDataPaddingStrategy.TokenPairs:
+            return MultiModalityDataPaddingPatternTokenPairs()
+        else:
+            raise Unsupported()
 
     @abstractmethod
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):

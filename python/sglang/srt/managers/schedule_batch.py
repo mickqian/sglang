@@ -614,11 +614,11 @@ class Req:
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
 
-    def extend_image_inputs(self, image_inputs):
+    def extend_mm_inputs(self, mm_inputs):
         if self.multimodal_inputs is None:
-            self.multimodal_inputs = image_inputs
+            self.multimodal_inputs = mm_inputs
         else:
-            self.multimodal_inputs.merge(image_inputs)
+            self.multimodal_inputs.merge(mm_inputs)
 
     def finished(self) -> bool:
         # Whether request reached finished condition

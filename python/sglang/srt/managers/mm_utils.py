@@ -2,13 +2,16 @@
 Multi-modality utils
 """
 
+import dataclasses
 import hashlib
+import re
 from abc import abstractmethod
 from enum import Enum, auto
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from interegular import Unsupported
 from torch import nn
 
 from sglang.srt.layers.multimodal import gpu_tensor_hash
@@ -20,7 +23,6 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.multimodal_cache import MultiModalCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 from sglang.srt.utils import flatten_nested_list, print_warning_once
 from sglang.utils import logger
 
@@ -33,6 +35,103 @@ from sglang.utils import logger
 class MMDataPaddingStrategy(Enum):
     TokenPairs = auto()
     Tokens = auto()
+
+
+@dataclasses.dataclass
+class MultimodalSpecialTokens:
+    image_token: Optional[Union[str, List[str]]] = None
+    video_token: Optional[Union[str, List[str]]] = None
+    audio_token: Optional[Union[str, List[str]]] = None
+
+    image_token_id: Optional[int] = None
+    video_token_id: Optional[int] = None
+    audio_token_id: Optional[int] = None
+
+    image_token_regex: Optional[re.Pattern] = None
+    video_token_regex: Optional[re.Pattern] = None
+    audio_token_regex: Optional[re.Pattern] = None
+
+    combined_regex: Optional[re.Pattern] = None
+
+    def build(self, processor):
+        self.convert_to_strs(processor)
+        self.parse_regex()
+        self.get_combined_regex()
+        return self
+
+    def convert_to_str(self, token: Union[str, int], processor) -> str:
+        if token is None:
+            return token
+        if isinstance(token, str):
+            return token
+        return processor.tokenizer.convert_ids_to_tokens([token])[0]
+
+    def convert_to_strs(self, processor):
+        if not self.image_token:
+            self.image_token = self.convert_to_str(self.image_token_id, processor)
+        if not self.video_token:
+            self.video_token = self.convert_to_str(self.video_token_id, processor)
+        if not self.audio_token:
+            self.audio_token = self.convert_to_str(self.audio_token_id, processor)
+
+    def get_modality_of_token(self, token: str) -> Optional[Modality]:
+        """
+        :return: the modality associated with the given token, if the token is a special_token or matches with the multimodal token regex
+        """
+        modality = {
+            self.image_token: Modality.IMAGE,
+            self.video_token: Modality.VIDEO,
+            self.audio_token: Modality.AUDIO,
+        }.get(token)
+        if modality:
+            return modality
+
+        for regex, modality in [
+            (self.image_token_regex, Modality.IMAGE),
+            (self.video_token_regex, Modality.VIDEO),
+            (self.audio_token_regex, Modality.AUDIO),
+        ]:
+            if regex and regex.match(token):
+                return modality
+
+        return None
+
+    def get_token_id_by_modality(self, modality: Modality) -> Optional[int]:
+        return {
+            Modality.IMAGE: self.image_token_id,
+            Modality.MULTI_IMAGES: self.image_token_id,
+            Modality.VIDEO: self.video_token_id,
+            Modality.AUDIO: self.audio_token_id,
+        }.get(modality)
+
+    def parse_regex(self):
+        if self.image_token_regex is None and self.image_token is not None:
+            self.image_token_regex = re.compile(re.escape(self.image_token))
+        if self.video_token_regex is None and self.video_token is not None:
+            self.video_token_regex = re.compile(re.escape(self.video_token))
+        if self.audio_token_regex is None and self.audio_token is not None:
+            self.audio_token_regex = re.compile(re.escape(self.audio_token))
+
+    def get_combined_regex(self) -> re.Pattern:
+        """
+        Builds and returns a regex, used to split input str into tokens (with mm special tokens)
+        """
+        if self.combined_regex:
+            return self.combined_regex
+        tokens = [
+            self.image_token_regex,
+            self.video_token_regex,
+            self.audio_token_regex,
+        ]
+        patterns = []
+        flags = 0
+        for t in tokens:
+            if t is not None:
+                patterns.append(t.pattern)
+                flags |= t.flags
+        combined = "(" + "|".join(f"(?:{p})" for p in patterns) + ")"
+        self.combined_regex = re.compile(combined, flags)
+        return self.combined_regex
 
 
 class MultiModalityDataPaddingPattern:
@@ -141,7 +240,7 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
     def pad_input_tokens(
         self,
         input_ids: List[int],
-        mm_inputs: MultimodalInputs,
+        mm_inputs: Dict,
         mm_special_tokens: MultimodalSpecialTokens,
     ) -> List[int]:
         """
@@ -156,13 +255,13 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
         # Create mapping of token_ids to pad_values for each modality
         token_to_pad_mapping = {}
 
-        for item in mm_inputs.mm_items:
+        for item in mm_inputs["mm_items"]:
             if item.is_image() and mm_special_tokens.image_token_id is not None:
-                token_to_pad_mapping[mm_inputs.im_token_id] = item.pad_value
+                token_to_pad_mapping[mm_special_tokens.image_token_id] = item.pad_value
             elif item.is_audio() and mm_special_tokens.audio_token_id is not None:
-                token_to_pad_mapping[mm_inputs.audio_token_id] = item.pad_value
+                token_to_pad_mapping[mm_special_tokens.audio_token_id] = item.pad_value
             elif item.is_video() and mm_special_tokens.video_token_id is not None:
-                token_to_pad_mapping[mm_inputs.video_token_id] = item.pad_value
+                token_to_pad_mapping[mm_special_tokens.video_token_id] = item.pad_value
             else:
                 raise ValueError(f"No multimodal token id provided for {item.modality}")
 

@@ -225,10 +225,10 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         ).build(_processor)
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
-        strategy = self.mm_tokens.build_mm_padding_strategy(
+        strategy = SGLangBaseProcessor.build_mm_padding_strategy(
             MMDataPaddingStrategy.Tokens
         )
-        return strategy.pad_input_tokens(input_ids, mm_inputs)
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,
