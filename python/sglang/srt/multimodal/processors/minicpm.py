@@ -2,7 +2,12 @@ from typing import List, Union
 
 import torch
 
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 from sglang.srt.models.minicpmo import MiniCPMO
 from sglang.srt.models.minicpmv import MiniCPMV
 from sglang.srt.multimodal.processors.base_processor import (
@@ -32,7 +37,19 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
             audio_token="(<audio>./</audio>)",
             video_token="(<video>./</video>)",
             image_token_id=self.im_token_id,
+            image_start_token_id=self.im_start_id,
+            image_end_token_id=self.im_end_id,
+            audio_start_token_id=self.audio_start_id,
+            audio_end_token_id=self.audio_end_id,
         ).build(_processor)
+        print(f"{self.mm_tokens=}")
+        self.strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.TokenPairs
+        )
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        print(f"{self.strategy.data_token_id_pairs=}")
+        return self.strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,

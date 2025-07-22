@@ -1,11 +1,17 @@
 # Adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_intern_vit.py
+from typing import List
 
 import numpy as np
 import torch
 from decord import VideoReader, cpu
 from PIL import Image
 
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 from sglang.srt.models.internvl import InternVLChatModel
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
@@ -168,6 +174,12 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
             pixel_values_list.append(pixel_values)
         pixel_values = torch.cat(pixel_values_list)
         return pixel_values, num_patches_list
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self, image_data, input_text, request_obj, **kwargs

@@ -1,7 +1,10 @@
 import re
 from typing import Dict, List, Union
 
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.kimi_vl import KimiVLForConditionalGeneration
+from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
@@ -20,6 +23,12 @@ class KimiVLImageProcessor(SGLangBaseProcessor):
             image_token_id=hf_config.media_placeholder_token_id,
             image_token_regex=re.compile(r"(?:<\|media_pad\|>)+"),
         ).build(_processor)
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,

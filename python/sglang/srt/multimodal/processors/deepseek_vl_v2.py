@@ -18,9 +18,8 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 from typing import List, Union
 
-import torch
-
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.deepseek_vl2 import DeepseekVL2ForCausalLM
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
@@ -36,6 +35,14 @@ class DeepseekVL2ImageProcessor(BaseMultimodalProcessor):
         self.mm_tokens = MultimodalSpecialTokens(
             image_token="<image>", image_token_id=self._processor.image_token_id
         ).build(_processor)
+        self.pad_input_ids_strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        return self.pad_input_ids_strategy.pad_input_tokens(
+            input_ids, mm_inputs, self.mm_tokens
+        )
 
     async def process_mm_data_async(
         self,

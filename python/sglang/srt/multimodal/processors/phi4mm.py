@@ -3,7 +3,8 @@ from typing import List, Union
 
 from transformers.processing_utils import ProcessorMixin
 
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.phi4mm import Phi4MMForCausalLM
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
@@ -65,6 +66,12 @@ class Phi4MMMultimodalProcessor(BaseMultimodalProcessor):
             audio_token=self.AUDIO_TOKEN,
             audio_token_id=self.AUDIO_TOKEN_ID,
         ).build(self.processor)
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,

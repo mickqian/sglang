@@ -11,7 +11,6 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from interegular import Unsupported
 from torch import nn
 
 from sglang.srt.layers.multimodal import gpu_tensor_hash
@@ -47,11 +46,21 @@ class MultimodalSpecialTokens:
     video_token_id: Optional[int] = None
     audio_token_id: Optional[int] = None
 
+    image_start_token_id: Optional[int] = None
+    image_end_token_id: Optional[int] = None
+    audio_start_token_id: Optional[int] = None
+    audio_end_token_id: Optional[int] = None
+    video_start_token_id: Optional[int] = None
+    video_end_token_id: Optional[int] = None
+
     image_token_regex: Optional[re.Pattern] = None
     video_token_regex: Optional[re.Pattern] = None
     audio_token_regex: Optional[re.Pattern] = None
 
     combined_regex: Optional[re.Pattern] = None
+
+    def clean(self):
+        pass
 
     def build(self, processor):
         self.convert_to_strs(processor)
@@ -164,8 +173,7 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
 
     def __init__(
         self,
-        data_token_pairs: Optional[List[Tuple[int, int]]],
-        data_start_token_ids: Optional[List[int]] = None,
+        data_token_pairs: Optional[List[Tuple[int, int]]] = None,
     ) -> None:
         """
 
@@ -174,9 +182,10 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
             See Minicpmo's slice_start_id for example
         """
         self.data_token_id_pairs = data_token_pairs
-        self.data_start_token_ids = data_start_token_ids or [
-            s for s, _e in data_token_pairs
-        ]
+        if data_token_pairs:
+            self.data_start_token_ids = [s for s, _e in data_token_pairs]
+        else:
+            self.data_start_token_ids = []
 
     def pad_input_tokens(
         self,
@@ -191,7 +200,20 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
         data_token_pairs = self.data_token_id_pairs
         mm_inputs.data_offsets = []
         if data_token_pairs is None:
-            data_token_pairs = [mm_inputs.im_start_id, mm_inputs.im_end_id]
+            data_token_pairs = [
+                (
+                    mm_special_tokens.image_start_token_id,
+                    mm_special_tokens.image_end_token_id,
+                )
+            ]
+            if mm_special_tokens.audio_start_token_id is not None:
+                data_token_pairs += [
+                    (
+                        mm_special_tokens.audio_start_token_id,
+                        mm_special_tokens.audio_end_token_id,
+                    )
+                ]
+            self.data_start_token_ids = [s for s, _e in data_token_pairs]
         if data_token_pairs is None:
             print_warning_once(
                 "No data_token_pairs provided, RadixAttention might be influenced."

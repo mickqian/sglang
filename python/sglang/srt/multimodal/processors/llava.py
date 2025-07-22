@@ -1,4 +1,5 @@
 import asyncio
+import math
 from typing import List, Optional, Union
 
 import numpy as np
@@ -7,7 +8,11 @@ from transformers.models.auto.processing_auto import (
 )
 
 import sglang.srt.managers.multimodal_processor as sgl_mm_processor_utils
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 from sglang.srt.models.llava import (
     LlavaForConditionalGeneration,
     LlavaLlamaForCausalLM,
@@ -18,7 +23,7 @@ from sglang.srt.models.llavavid import LlavaVidForCausalLM
 from sglang.srt.models.mistral import Mistral3ForConditionalGeneration
 from sglang.srt.multimodal.mm_utils import expand2square, process_anyres_image
 from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
-from sglang.srt.utils import load_image, logger
+from sglang.srt.utils import flatten_nested_list, load_image, logger
 from sglang.utils import get_exception_traceback
 
 
@@ -32,6 +37,13 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
 
     def __init__(self, hf_config, server_args, _processor):
         super().__init__(hf_config, server_args, _processor)
+        self.image_size = hf_config.vision_config.image_size
+        self.mm_patch_merge_type = hf_config.mm_patch_merge_type
+        self.image_aspect_ratio = hf_config.vision_config.image_aspect_ratio
+        self.image_grid_pinpoints = hf_config.vision_config.image_grid_pinpoints
+        self.vision_feature_select_strategy = getattr(
+            hf_config, "vision_feature_select_strategy", "full"
+        )
 
     @staticmethod
     def _process_single_image_task(
@@ -101,6 +113,75 @@ class LlavaImageProcessor(BaseMultimodalProcessor):
                 grid_pinpoints,
                 self._processor.image_processor,
             )
+
+    def pad_input_ids(self, input_ids: List[int], image_inputs: MultimodalInputs):
+
+        image_sizes = flatten_nested_list(
+            [item.image_sizes for item in image_inputs.mm_items]
+        )
+
+        pad_values = [item.pad_value for item in image_inputs.mm_items]
+
+        # hardcode for spatial_unpad + anyres
+        if any(
+            item.modality == Modality.MULTI_IMAGES or item.modality == Modality.VIDEO
+            for item in image_inputs.mm_items
+        ):
+            image_aspect_ratio = "pad"
+        else:
+            image_aspect_ratio = "anyres"
+        offset_list = []
+        image_inputs.image_pad_len = []
+        for image_idx, image_s in enumerate(image_sizes):
+            if len(image_sizes) > 16:
+                # 2x2 pooling with stride 2
+                new_image_feature_len = (
+                    math.ceil(self.image_size / self.patch_size / 2) ** 2
+                )
+            else:
+                new_image_feature_len = self.image_feature_len  # multi-image
+
+            height = width = self.num_patches_per_side
+            if "anyres" in image_aspect_ratio:
+                num_patch_width, num_patch_height = get_anyres_image_grid_shape(
+                    image_s,
+                    self.image_grid_pinpoints,
+                    self.vision_tower.config.image_size,
+                )
+                h = num_patch_height * height
+                w = num_patch_width * width
+                new_h, new_w = unpad_image_shape(h, w, image_s)
+
+                if "anyres_max" in self.config.image_aspect_ratio:
+                    matched_anyres_max_num_patches = re.match(
+                        r"anyres_max_(\d+)", self.config.image_aspect_ratio
+                    )
+                    if matched_anyres_max_num_patches:
+                        max_num_patches = int(matched_anyres_max_num_patches.group(1))
+                    # times = math.sqrt(h * w / (max_num_patches * unit**2))
+                    times = math.sqrt(
+                        new_h * new_w / (max_num_patches * self.image_feature_len)
+                    )
+                    if times > 1.1:
+                        new_h = int(new_h // times)
+                        new_w = int(new_w // times)
+                new_image_feature_len += new_h * (new_w + 1)
+
+            try:
+                offset = input_ids.index(self.config.image_token_index)
+            except ValueError:
+                offset = 0
+            # old_len + pad_len - 1, because we need to remove image_token_id
+            input_ids = (
+                input_ids[:offset]
+                + [pad_values[image_idx % len(pad_values)]] * new_image_feature_len
+                + input_ids[offset + 1 :]
+            )
+            offset_list.append(offset)
+            image_inputs.image_pad_len.append(new_image_feature_len)
+
+        image_inputs.image_offsets = offset_list
+        return input_ids
 
     async def process_mm_data_async(
         self,

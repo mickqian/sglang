@@ -1,11 +1,16 @@
 import re
 from typing import Dict, List, Union
 
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
 from sglang.srt.managers.multimodal_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
 )
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.gemma3_mm import Gemma3ForConditionalGeneration
-from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
+from sglang.srt.multimodal.processors.base_processor import (
+    BaseMultimodalProcessor,
+    MultimodalSpecialTokens,
+)
 
 # Copied from: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/image_processing_gemma3_fast.py
 # will be removed in the future
@@ -27,6 +32,12 @@ class Gemma3SGLangImageProcessor(SGLangBaseProcessor):
                 r"<start_of_image>(?:(?:<image_soft_token>)*<end_of_image>)?"
             ),
         ).build(_processor)
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,

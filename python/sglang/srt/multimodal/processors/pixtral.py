@@ -6,6 +6,8 @@ from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
 
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.pixtral import PixtralVisionModel
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
@@ -69,6 +71,12 @@ class PixtralProcessor(BaseMultimodalProcessor):
         )
         new_size = (num_w_tokens * self.patch_size, num_h_tokens * self.patch_size)
         return image.resize(new_size)
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = BaseMultimodalProcessor.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs, self.mm_tokens)
 
     async def process_mm_data_async(
         self,
