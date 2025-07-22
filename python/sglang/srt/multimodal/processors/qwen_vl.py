@@ -10,6 +10,8 @@ from PIL import Image
 from torchvision.transforms import InterpolationMode
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+from sglang.srt.managers.mm_utils import MMDataPaddingStrategy
+from sglang.srt.managers.schedule_batch import MultimodalInputs
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
@@ -221,6 +223,12 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             ),
             video_token_id=hf_config.video_token_id,
         ).build(_processor)
+
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        strategy = self.mm_tokens.build_mm_padding_strategy(
+            MMDataPaddingStrategy.Tokens
+        )
+        return strategy.pad_input_tokens(input_ids, mm_inputs)
 
     async def process_mm_data_async(
         self,

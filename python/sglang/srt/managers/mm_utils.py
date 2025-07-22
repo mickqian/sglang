@@ -4,6 +4,7 @@ Multi-modality utils
 
 import hashlib
 from abc import abstractmethod
+from enum import Enum, auto
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,6 +20,7 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.multimodal_cache import MultiModalCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
 from sglang.srt.utils import flatten_nested_list, print_warning_once
 from sglang.utils import logger
 
@@ -26,6 +28,11 @@ from sglang.utils import logger
 # to ensure consistent logging behavior across the codebase. This prevents issues with log
 # propagation that can cause some log messages (like 'server is fired up') to not appear
 # in the console when multimodal support is enabled.
+
+
+class MMDataPaddingStrategy(Enum):
+    TokenPairs = auto()
+    Tokens = auto()
 
 
 class MultiModalityDataPaddingPattern:
@@ -37,7 +44,10 @@ class MultiModalityDataPaddingPattern:
 
     @abstractmethod
     def pad_input_tokens(
-        self, input_ids: List[int], mm_inputs: MultimodalInputs
+        self,
+        input_ids: List[int],
+        mm_inputs: MultimodalInputs,
+        mm_special_tokens: MultimodalSpecialTokens,
     ) -> List[int]:
         """
         Pad the input ids sequence containing data tokens, and replace them with pad_values
@@ -70,7 +80,10 @@ class MultiModalityDataPaddingPatternTokenPairs(MultiModalityDataPaddingPattern)
         ]
 
     def pad_input_tokens(
-        self, input_ids: List[int], mm_inputs: MultimodalInputs
+        self,
+        input_ids: List[int],
+        mm_inputs: MultimodalInputs,
+        mm_special_tokens: MultimodalSpecialTokens,
     ) -> List[int]:
         """
         This function will replace the data-tokens in between with pad_values accordingly
@@ -126,13 +139,16 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
     """
 
     def pad_input_tokens(
-        self, input_ids: List[int], mm_inputs: MultimodalInputs
+        self,
+        input_ids: List[int],
+        mm_inputs: MultimodalInputs,
+        mm_special_tokens: MultimodalSpecialTokens,
     ) -> List[int]:
         """
         Replaces multimodal tokens in input_ids with corresponding pad_values from mm_items.
         Each modality (image, audio, video) is handled separately based on its token_id.
         """
-        if not input_ids or not mm_inputs.mm_items:
+        if not input_ids:
             return input_ids
 
         input_ids_tensor = torch.tensor(input_ids)
@@ -141,11 +157,11 @@ class MultiModalityDataPaddingPatternMultimodalTokens(MultiModalityDataPaddingPa
         token_to_pad_mapping = {}
 
         for item in mm_inputs.mm_items:
-            if item.is_image() and mm_inputs.im_token_id is not None:
+            if item.is_image() and mm_special_tokens.image_token_id is not None:
                 token_to_pad_mapping[mm_inputs.im_token_id] = item.pad_value
-            elif item.is_audio() and mm_inputs.audio_token_id is not None:
+            elif item.is_audio() and mm_special_tokens.audio_token_id is not None:
                 token_to_pad_mapping[mm_inputs.audio_token_id] = item.pad_value
-            elif item.is_video() and mm_inputs.video_token_id is not None:
+            elif item.is_video() and mm_special_tokens.video_token_id is not None:
                 token_to_pad_mapping[mm_inputs.video_token_id] = item.pad_value
             else:
                 raise ValueError(f"No multimodal token id provided for {item.modality}")

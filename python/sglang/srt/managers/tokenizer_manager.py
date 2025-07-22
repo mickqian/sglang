@@ -520,6 +520,8 @@ class TokenizerManager:
             )
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
+                input_ids = self.mm_processor.pad_input_ids(input_ids, mm_inputs)
+
         else:
             mm_inputs = None
 

@@ -9,10 +9,20 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from interegular import Unsupported
 from PIL import Image
 from transformers import BaseImageProcessorFast
 
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.mm_utils import (
+    MMDataPaddingStrategy,
+    MultiModalityDataPaddingPatternMultimodalTokens,
+    MultiModalityDataPaddingPatternTokenPairs,
+)
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 from sglang.srt.utils import load_audio, load_image, load_video, logger
 
 
@@ -138,6 +148,14 @@ class MultimodalSpecialTokens:
         self.combined_regex = re.compile(combined, flags)
         return self.combined_regex
 
+    def build_mm_padding_strategy(self, strategy: MMDataPaddingStrategy):
+        if strategy == MMDataPaddingStrategy.Tokens:
+            return MultiModalityDataPaddingPatternMultimodalTokens()
+        elif strategy == MMDataPaddingStrategy.TokenPairs:
+            return MultiModalityDataPaddingPatternTokenPairs()
+        else:
+            raise Unsupported()
+
 
 class BaseMultimodalProcessor(ABC):
     models = []
@@ -189,6 +207,10 @@ class BaseMultimodalProcessor(ABC):
         # name of the feature filed
         # TODO: pass from processors
         self.FEATURE_NAMES = ["pixel_values", "pixel_values_videos", "audio_features"]
+
+    @abstractmethod
+    def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
+        pass
 
     def process_mm_data(
         self, input_text, images=None, videos=None, audios=None, **kwargs
