@@ -341,15 +341,18 @@ class TboDPAttentionPreparer:
 
     @staticmethod
     def _compute_global_forward_mode(forward_modes):
-        converted_forward_modes = [
-            ForwardMode.DECODE.value if x == ForwardMode.IDLE.value else x
-            for x in forward_modes
+        forward_modes_excluding_idle = [
+            x for x in forward_modes if x != ForwardMode.IDLE.value
         ]
+
+        if not forward_modes_excluding_idle:
+            return ForwardMode.IDLE, False
+
         forward_mode_agree = TboDPAttentionPreparer._is_all_same(
-            converted_forward_modes
+            forward_modes_excluding_idle
         )
         global_forward_mode = (
-            ForwardMode(converted_forward_modes[0]) if forward_mode_agree else None
+            ForwardMode(forward_modes_excluding_idle[0]) if forward_mode_agree else None
         )
         return global_forward_mode, forward_mode_agree
 
@@ -490,6 +493,7 @@ class TboForwardBatchPreparer:
         output_dict["spec_info"] = output_spec_info
         for key in [
             "forward_mode",
+            "is_extend_in_batch",
             "return_logprob",
             "req_to_token_pool",
             "token_to_kv_pool",
@@ -499,6 +503,7 @@ class TboForwardBatchPreparer:
             "capture_hidden_mode",
             "padded_static_len",
             "mrope_positions",  # only used by qwen2-vl, thus not care
+            "split_index",  # for split prefill
         ]:
             output_dict[key] = getattr(batch, key)
         if not batch.forward_mode.is_target_verify():
@@ -540,6 +545,7 @@ class TboForwardBatchPreparer:
                 tbo_children=None,
                 global_num_tokens_gpu=None,
                 global_num_tokens_cpu=None,
+                dp_padding_mode=None,
                 gathered_buffer=gathered_buffer,
                 global_num_tokens_for_logprob_gpu=None,
                 global_num_tokens_for_logprob_cpu=None,
@@ -550,6 +556,8 @@ class TboForwardBatchPreparer:
                 top_p_normalized_logprobs=False,
                 top_p=None,
                 mm_inputs=None,
+                top_logprobs_nums=None,
+                token_ids_logprobs=None,
             )
         )
 

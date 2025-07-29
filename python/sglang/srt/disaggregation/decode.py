@@ -128,6 +128,14 @@ class DecodeRequest:
     metadata_buffer_index: int = -1
 
 
+@dataclass
+class PrefillRequest:
+    req: Req
+    kv_receiver: BaseKVReceiver
+    waiting_for_input: bool = False
+    metadata_buffer_index: int = -1
+
+
 class DecodePreallocQueue:
     """
     Store the requests that are preallocating.
@@ -171,7 +179,6 @@ class DecodePreallocQueue:
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
         self.max_total_num_tokens = max_total_num_tokens
-        self.prefill_pp_size = prefill_pp_size
         self.num_reserved_decode_tokens = num_reserved_decode_tokens
         self.transfer_backend = transfer_backend
         # Queue for requests pending pre-allocation
@@ -439,7 +446,15 @@ class DecodePreallocQueue:
             else 0
         )
 
-        allocatable_tokens = self.token_to_kv_pool_allocator.available_size() - max(
+        if self.scheduler.model_config.is_hybrid:
+            available_size = min(
+                self.token_to_kv_pool_allocator.full_available_size(),
+                self.token_to_kv_pool_allocator.swa_available_size(),
+            )
+        else:
+            available_size = self.token_to_kv_pool_allocator.available_size()
+
+        allocatable_tokens = available_size - max(
             # preserve some space for future decode
             self.num_reserved_decode_tokens
             * (

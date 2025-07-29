@@ -34,6 +34,8 @@ from sglang.srt.managers.io_struct import (
 )
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import DynamicGradMode, get_compiler_backend
 from sglang.utils import get_exception_traceback
@@ -102,6 +104,17 @@ class TpModelWorkerClient:
     def get_worker_info(self):
         return self.worker.get_worker_info()
 
+    def get_tokens_per_layer_info(self):
+        return self.worker.get_tokens_per_layer_info()
+
+    @property
+    def sliding_window_size(self) -> Optional[int]:
+        return self.worker.sliding_window_size
+
+    @property
+    def is_hybrid(self) -> bool:
+        return self.worker.is_hybrid
+
     def get_pad_input_ids_func(self):
         return self.worker.get_pad_input_ids_func()
 
@@ -120,8 +133,16 @@ class TpModelWorkerClient:
             self.worker.model_runner.token_to_kv_pool_allocator,
         )
 
+    def get_mm_memory_pool(
+        self,
+    ) -> Tuple[PagedMultiModalEmbeddingPool, BaseTokenToKVPoolAllocator]:
+        return (
+            self.worker.model_runner.mm_embedding_pool,
+            self.worker.model_runner.mm_embedding_allocator,
+        )
+
     def get_kv_cache(self):
-        return self.worker.model_runner.token_to_kv_pool
+        return self.worker.model_runner.mm_embedding_pool
 
     def forward_thread_func(self):
         try:
@@ -217,7 +238,9 @@ class TpModelWorkerClient:
         return logits_output, next_token_ids, can_run_cuda_graph
 
     def forward_batch_generation(
-        self, model_worker_batch: ModelWorkerBatch
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        skip_sample: bool = False,
     ) -> Tuple[None, torch.Tensor, bool]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info

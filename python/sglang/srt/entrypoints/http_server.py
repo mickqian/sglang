@@ -107,6 +107,8 @@ from sglang.version import __version__
 logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
+HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
+
 
 # Store global states
 @dataclasses.dataclass
@@ -210,9 +212,6 @@ async def validate_json_request(raw_request: Request):
                 }
             ]
         )
-
-
-HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
 
 
 ##### Native API endpoints #####
@@ -418,6 +417,7 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
 
     await _global_state.tokenizer_manager.start_profile(
         output_dir=obj.output_dir,
+        start_step=obj.start_step,
         num_steps=obj.num_steps,
         activities=obj.activities,
         with_stack=obj.with_stack,
@@ -806,6 +806,24 @@ async def retrieve_model(model: str):
     )
 
 
+@app.post("/v1/score", dependencies=[Depends(validate_json_request)])
+async def v1_score_request(request: ScoringRequest, raw_request: Request):
+    """Endpoint for the decoder-only scoring API. See Engine.score() for detailed documentation."""
+    return await raw_request.app.state.openai_serving_score.handle_request(
+        request, raw_request
+    )
+
+
+@app.api_route(
+    "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
+)
+async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
+    """Endpoint for reranking documents based on query relevance."""
+    return await raw_request.app.state.openai_serving_rerank.handle_request(
+        request, raw_request
+    )
+
+
 ## SageMaker API
 @app.get("/ping")
 async def sagemaker_health() -> Response:
@@ -849,24 +867,6 @@ async def vertex_generate(vertex_req: VertexGenerateReqInput, raw_request: Reque
     if isinstance(ret, Response):
         return ret
     return ORJSONResponse({"predictions": ret})
-
-
-@app.post("/v1/score", dependencies=[Depends(validate_json_request)])
-async def v1_score_request(request: ScoringRequest, raw_request: Request):
-    """Endpoint for the decoder-only scoring API. See Engine.score() for detailed documentation."""
-    return await raw_request.app.state.openai_serving_score.handle_request(
-        request, raw_request
-    )
-
-
-@app.api_route(
-    "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
-)
-async def v1_rerank_request(request: V1RerankReqInput, raw_request: Request):
-    """Endpoint for reranking documents based on query relevance."""
-    return await raw_request.app.state.openai_serving_rerank.handle_request(
-        request, raw_request
-    )
 
 
 def _create_error_response(e):
@@ -915,15 +915,6 @@ def launch_server(
         add_prometheus_middleware(app)
         enable_func_timer()
 
-    image_token_text = None
-    if (
-        tokenizer_manager.image_token_id is not None
-        and not server_args.skip_tokenizer_init
-    ):
-        image_token_text = tokenizer_manager.tokenizer.decode(
-            [tokenizer_manager.image_token_id]
-        )
-
     # Send a warmup request - we will create the thread launch it
     # in the lifespan after all other warmups have fired.
     warmup_thread = threading.Thread(
@@ -931,7 +922,6 @@ def launch_server(
         args=(
             server_args,
             pipe_finish_writer,
-            image_token_text,
             launch_callback,
         ),
     )
@@ -1014,7 +1004,10 @@ def _execute_server_warmup(
         json_data["sampling_params"]["max_new_tokens"] = 0
 
     try:
-        if server_args.disaggregation_mode == "null":
+        if (
+            server_args.disaggregation_mode == "null"
+            or server_args.disaggregation_mode == "text"
+        ):
             res = requests.post(
                 url + request_name,
                 json=json_data,
@@ -1024,30 +1017,35 @@ def _execute_server_warmup(
             assert res.status_code == 200, f"{res}"
         else:
             logger.info(f"Start of prefill warmup ...")
-            json_data = {
-                "sampling_params": {
-                    "temperature": 0.0,
-                    "max_new_tokens": 8,
-                    "ignore_eos": True,
-                },
-                "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
-                # This is a hack to ensure fake transfer is enabled during prefill warmup
-                # ensure each dp rank has a unique bootstrap_room during prefill warmup
-                "bootstrap_room": [
-                    i * (2**63 // server_args.dp_size) + (i % server_args.tp_size)
-                    for i in range(server_args.dp_size)
-                ],
-                "input_ids": [[0, 1, 2, 3]] * server_args.dp_size,
-            }
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=1800,  # because of deep gemm precache is very long if not precache.
-            )
-            logger.info(
-                f"End of prefill warmup with status {res.status_code}, resp: {res.json()}"
-            )
+
+            if server_args.disaggregation_mode == "encode":
+                # TODO
+                pass
+            else:
+                json_data = {
+                    "sampling_params": {
+                        "temperature": 0.0,
+                        "max_new_tokens": 8,
+                        "ignore_eos": True,
+                    },
+                    "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
+                    # This is a hack to ensure fake transfer is enabled during prefill warmup
+                    # ensure each dp rank has a unique bootstrap_room during prefill warmup
+                    "bootstrap_room": [
+                        i * (2**63 // server_args.dp_size) + (i % server_args.tp_size)
+                        for i in range(server_args.dp_size)
+                    ],
+                    "input_ids": [[0, 1, 2, 3]] * server_args.dp_size,
+                }
+                res = requests.post(
+                    url + request_name,
+                    json=json_data,
+                    headers=headers,
+                    timeout=1800,  # because of deep gemm precache is very long if not precache.
+                )
+                logger.info(
+                    f"End of prefill warmup with status {res.status_code}, resp: {res.json()}"
+                )
 
     except Exception:
         last_traceback = get_exception_traceback()
@@ -1065,7 +1063,6 @@ def _execute_server_warmup(
 def _wait_and_warmup(
     server_args: ServerArgs,
     pipe_finish_writer: Optional[multiprocessing.connection.Connection],
-    image_token_text: str,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
     if not server_args.skip_server_warmup:

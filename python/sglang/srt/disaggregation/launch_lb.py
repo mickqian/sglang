@@ -8,8 +8,10 @@ class LBArgs:
     host: str = "0.0.0.0"
     port: int = 8000
     policy: str = "random"
+    encode_infos: list = dataclasses.field(default_factory=list)
     prefill_infos: list = dataclasses.field(default_factory=list)
     decode_infos: list = dataclasses.field(default_factory=list)
+    text_infos: list = dataclasses.field(default_factory=list)
     log_interval: int = 5
     timeout: int = 600
 
@@ -40,6 +42,13 @@ class LBArgs:
             help=f"Policy to use for load balancing (default: {LBArgs.policy})",
         )
         parser.add_argument(
+            "--encode",
+            type=str,
+            default=[],
+            nargs="+",
+            help="URLs for encode servers",
+        )
+        parser.add_argument(
             "--prefill",
             type=str,
             default=[],
@@ -52,6 +61,13 @@ class LBArgs:
             default=[],
             nargs="+",
             help="URLs for decode servers",
+        )
+        parser.add_argument(
+            "--text",
+            type=str,
+            default=[],
+            nargs="+",
+            help="URLs for non-disaggregated text servers. This only makes sense when encoder is disaggregated",
         )
         parser.add_argument(
             "--prefill-bootstrap-ports",
@@ -89,13 +105,26 @@ class LBArgs:
             (url, port) for url, port in zip(args.prefill, bootstrap_ports)
         ]
 
+        if args.encode:
+            assert not args.rust_lb, "encode disaggregation is not supported in rust lb"
+            assert (
+                args.prefill and args.decode
+            ) or args.text, "Both p and d or p-and-d should be specified under encoder disaggregation"
+
+        if args.text is not None:
+            assert (
+                args.encode is not None
+            ), "Non-disaggregated pd must work with encoder disaggregated"
+
         return cls(
             rust_lb=args.rust_lb,
             host=args.host,
             port=args.port,
             policy=args.policy,
+            encode_infos=args.encode,
             prefill_infos=prefill_infos,
             decode_infos=args.decode,
+            text_infos=args.text,
             log_interval=args.log_interval,
             timeout=args.timeout,
         )
@@ -133,7 +162,14 @@ def main():
         prefill_configs = [
             PrefillConfig(url, port) for url, port in lb_args.prefill_infos
         ]
-        run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port)
+        run(
+            prefill_configs,
+            lb_args.decode_infos,
+            lb_args.encode_infos,
+            lb_args.text_infos,
+            lb_args.host,
+            lb_args.port,
+        )
 
 
 if __name__ == "__main__":

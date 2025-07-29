@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
+from sglang.srt.disaggregation.decode import PrefillRequest
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
     DisaggregationMode,
@@ -42,7 +43,14 @@ from sglang.srt.disaggregation.utils import (
     poll_and_all_reduce,
     prepare_abort,
 )
-from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import (
+    FINISH_ABORT,
+    FINISH_LENGTH,
+    Req,
+    ScheduleBatch,
+)
+from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+from sglang.srt.mem_cache.multimodal_cache import PagedMultiModalEmbeddingPool
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.utils import require_mlp_sync
 
@@ -78,6 +86,8 @@ class PrefillBootstrapQueue:
         pp_rank: int,
         pp_size: int,
         transfer_backend: TransferBackend,
+        # disagg encode
+        mm_embedding_pool: Optional[PagedMultiModalEmbeddingPool] = None,
     ):
         self.token_to_kv_pool = token_to_kv_pool
         self.draft_token_to_kv_pool = draft_token_to_kv_pool
@@ -98,6 +108,8 @@ class PrefillBootstrapQueue:
         self.scheduler = scheduler
         self.transfer_backend = transfer_backend
         self.kv_manager = self._init_kv_manager()
+
+        self.mm_embedding_pool = mm_embedding_pool
 
     def _init_kv_manager(self) -> BaseKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
@@ -255,6 +267,420 @@ class PrefillBootstrapQueue:
             return bootstrapped_reqs
         else:
             return bootstrapped_reqs, failed_reqs
+
+
+class PrefillTransferQueue:
+    """
+    Store the requests that is polling mm embedding from encoders
+    """
+
+    def __init__(
+        self,
+        gloo_group: ProcessGroup,
+        req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
+        tp_rank: int,
+        metadata_buffers: MetadataBuffers,
+        scheduler: Scheduler,
+    ):
+        self.queue: List[PrefillRequest] = []
+        self.gloo_group = gloo_group
+        self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
+        self.tp_rank = tp_rank
+        self.metadata_buffers = metadata_buffers
+        self.scheduler = scheduler
+        self.spec_algorithm = scheduler.spec_algorithm
+
+    def add(self, prefill_req: PrefillRequest) -> None:
+        self.queue.append(prefill_req)
+
+    def extend(self, prefill_reqs: List[PrefillRequest]) -> None:
+        self.queue.extend(prefill_reqs)
+
+    def pop_transferred(self) -> List[Req]:
+        if not self.queue:
+            return []
+        polls = poll_and_all_reduce(
+            [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
+        )
+
+        transferred_reqs = []
+        indices_to_remove = set()
+        for i, (prefill_req, poll) in enumerate(zip(self.queue, polls)):
+            if poll == KVPoll.Failed:
+                error_message = f"Decode transfer failed for request rank={self.tp_rank} {prefill_req.req.rid=} {prefill_req.req.bootstrap_room=}"
+                try:
+                    prefill_req.kv_receiver.failure_exception()
+                except Exception as e:
+                    error_message += f" with exception {e}"
+                logger.error(error_message)
+                prepare_abort(
+                    prefill_req.req,
+                    error_message,
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                # self.scheduler.stream_output(
+                #     [prefill_req.req], prefill_req.req.return_logprob
+                # )
+                # unlock the kv cache or it will have memory leak
+                indices_to_remove.add(i)
+                continue
+            elif poll == KVPoll.Success:
+
+                idx = prefill_req.metadata_buffer_index
+                (
+                    output_id,
+                    output_token_logprobs_val,
+                    output_token_logprobs_idx,
+                    output_top_logprobs_val,
+                    output_top_logprobs_idx,
+                    output_hidden_states,
+                ) = self.metadata_buffers.get_buf(idx)
+
+                prefill_req.req.output_ids.append(output_id[0].item())
+                # if prefill_req.req.return_logprob:
+                #     prefill_req.req.output_token_logprobs_val.append(
+                #         output_token_logprobs_val[0].item()
+                #     )
+                #     prefill_req.req.output_token_logprobs_idx.append(
+                #         output_token_logprobs_idx[0].item()
+                #     )
+                #     prefill_req.req.output_top_logprobs_val.append(
+                #         output_top_logprobs_val[
+                #         : prefill_req.req.top_logprobs_num
+                #         ].tolist()
+                #     )
+                #     prefill_req.req.output_top_logprobs_idx.append(
+                #         output_top_logprobs_idx[
+                #         : prefill_req.req.top_logprobs_num
+                #         ].tolist()
+                #     )
+
+                if hasattr(prefill_req.kv_receiver, "clear"):
+                    prefill_req.kv_receiver.clear()
+
+                # special handling for sampling_params.max_new_tokens == 1
+                if prefill_req.req.sampling_params.max_new_tokens == 1:
+                    # finish immediately
+                    prefill_req.req.check_finished()
+                    self.scheduler.stream_output(
+                        [prefill_req.req], prefill_req.req.return_logprob
+                    )
+                else:
+                    transferred_reqs.append(prefill_req.req)
+
+                indices_to_remove.add(i)
+            elif poll in [
+                KVPoll.Bootstrapping,
+                KVPoll.WaitingForInput,
+                KVPoll.Transferring,
+            ]:
+                pass
+            else:
+                raise ValueError(f"Unexpected poll case: {poll}")
+
+        for i in indices_to_remove:
+            idx = self.queue[i].metadata_buffer_index
+            assert idx != -1
+            self.req_to_metadata_buffer_idx_allocator.free(idx)
+
+        self.queue = [
+            entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
+        ]
+
+        return transferred_reqs
+
+
+class PrefillPreallocQueue:
+    """
+    Store the requests that are preallocating, to prealloc mm embeddings from encoder
+    """
+
+    def __init__(
+        self,
+        mm_embedding_pool: PagedMultiModalEmbeddingPool,
+        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
+        req_to_metadata_buffer_idx_allocator: ReqToMetadataIdxAllocator,
+        metadata_buffers: MetadataBuffers,
+        scheduler: Scheduler,
+        transfer_queue: PrefillTransferQueue,
+        gloo_group: ProcessGroup,
+        tp_rank: int,
+        tp_size: int,
+        dp_size: int,
+        gpu_id: int,
+        bootstrap_port: int,
+        max_total_num_tokens: int,
+        prefill_pp_size: int,
+        # num_reserved_decode_tokens: int,
+        transfer_backend: TransferBackend,
+    ):
+        self.mm_embedding_pool = mm_embedding_pool
+        self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
+        self.token_to_kv_pool = token_to_kv_pool_allocator.get_kvcache()
+        self.is_mla_backend = is_mla_backend(self.token_to_kv_pool)
+        self.metadata_buffers = metadata_buffers
+        self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
+        self.scheduler = scheduler
+        self.transfer_queue = transfer_queue
+        self.gloo_group = gloo_group
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.dp_size = dp_size
+        self.gpu_id = gpu_id
+        self.bootstrap_port = bootstrap_port
+        self.max_total_num_tokens = max_total_num_tokens
+        self.prefill_pp_size = prefill_pp_size
+        self.transfer_backend = transfer_backend
+        # Queue for requests pending pre-allocation
+        self.queue: List[PrefillRequest] = []
+        self.retracted_queue: List[Req] = []
+        self.kv_manager = self._init_kv_manager()
+
+    def _init_kv_manager(self) -> BaseKVManager:
+        # TODO
+        kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
+        kv_args = kv_args_class()
+
+        attn_tp_size = self.tp_size // self.dp_size
+        kv_args.engine_rank = self.tp_rank % (attn_tp_size)
+        kv_args.decode_tp_size = attn_tp_size
+        kv_args.prefill_pp_size = self.prefill_pp_size
+        kv_data_ptrs, kv_data_lens, kv_item_lens = (
+            self.token_to_kv_pool.get_contiguous_buf_infos()
+        )
+
+        kv_args.kv_data_ptrs = kv_data_ptrs
+        kv_args.kv_data_lens = kv_data_lens
+        kv_args.kv_item_lens = kv_item_lens
+
+        kv_args.aux_data_ptrs, kv_args.aux_data_lens, kv_args.aux_item_lens = (
+            self.metadata_buffers.get_buf_infos()
+        )
+
+        kv_args.ib_device = self.scheduler.server_args.disaggregation_ib_device
+        kv_args.gpu_id = self.scheduler.gpu_id
+        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
+        kv_manager = kv_manager_class(
+            kv_args,
+            DisaggregationMode.DECODE,
+            self.scheduler.server_args,
+            self.is_mla_backend,
+        )
+        return kv_manager
+
+    def add(self, req: Req, is_retracted: bool = False) -> None:
+        """Add a request to the pending queue."""
+        if self._check_if_req_exceed_mm_pool_capacity(req):
+            return
+
+        if is_retracted:
+            self.retracted_queue.append(req)
+        else:
+            if req.bootstrap_host == FAKE_BOOTSTRAP_HOST:
+                kv_receiver_class = get_kv_class(
+                    TransferBackend.FAKE, KVClassType.RECEIVER
+                )
+            else:
+                kv_receiver_class = get_kv_class(
+                    self.transfer_backend, KVClassType.RECEIVER
+                )
+
+            kv_receiver = kv_receiver_class(
+                mgr=self.kv_manager,
+                bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
+                bootstrap_room=req.bootstrap_room,
+                data_parallel_rank=req.data_parallel_rank,
+            )
+
+            self.queue.append(
+                PrefillRequest(
+                    req=req, kv_receiver=kv_receiver, waiting_for_input=False
+                )
+            )
+
+    def _check_if_req_exceed_mm_pool_capacity(self, req: Req) -> bool:
+        # TODO:
+        # if len(req.origin_input_ids) > self.max_total_num_tokens:
+        #     message = f"Request {req.rid} exceeds the maximum number of tokens: {len(req.origin_input_ids)} > {self.max_total_num_tokens}"
+        #     logger.error(message)
+        #     prepare_abort(req, message)
+        #     self.scheduler.stream_output([req], req.return_logprob)
+        #     return True
+        return False
+
+    def extend(self, reqs: List[Req], is_retracted: bool = False) -> None:
+        """Add a request to the pending queue."""
+        for req in reqs:
+            self.add(req, is_retracted=is_retracted)
+
+    def resume_retracted_reqs(self) -> List[Req]:
+        # TODO refactor the scheduling part, reuse with the unified engine logic as much as possible
+
+        # allocate memory
+        resumed_reqs = []
+        indices_to_remove = set()
+        allocatable_tokens = self._allocatable_tokens(count_retracted=False)
+
+        for i, req in enumerate(self.retracted_queue):
+            if self.mm_embedding_pool.available_size() <= 0:
+                break
+
+            required_tokens_for_request = sum(req.mm_embedding_lens)
+            if required_tokens_for_request > allocatable_tokens:
+                break
+
+            resumed_reqs.append(req)
+            indices_to_remove.add(i)
+            req.is_retracted = False
+            self._pre_alloc(req)
+            allocatable_tokens -= required_tokens_for_request
+
+            # load from cpu, release the cpu copy
+            req.load_kv_cache(self.mm_embedding_pool, self.token_to_kv_pool_allocator)
+
+        self.retracted_queue = [
+            entry
+            for i, entry in enumerate(self.retracted_queue)
+            if i not in indices_to_remove
+        ]
+
+        return resumed_reqs
+
+    def _update_handshake_waiters(self) -> None:
+        if not self.queue:
+            return
+
+        if all(prefill_req.waiting_for_input for prefill_req in self.queue):
+            return
+
+        polls = poll_and_all_reduce(
+            [prefill_req.kv_receiver for prefill_req in self.queue], self.gloo_group
+        )
+
+        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
+            if poll == KVPoll.Bootstrapping:
+                pass
+            elif poll == KVPoll.WaitingForInput:
+                decode_req.waiting_for_input = True
+            elif poll == KVPoll.Failed:
+                error_message = f"Decode handshake failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
+                try:
+                    decode_req.kv_receiver.failure_exception()
+                except Exception as e:
+                    error_message += f" with exception {e}"
+                logger.error(error_message)
+                prepare_abort(
+                    decode_req.req,
+                    error_message,
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            else:
+                raise ValueError(f"Unexpected poll case: {poll}")
+
+    def pop_preallocated(self) -> List[PrefillRequest]:
+        """Pop the preallocated requests from the pending queue (FIFO)."""
+        self._update_handshake_waiters()
+
+        preallocated_reqs = []
+        indices_to_remove = set()
+
+        allocatable_tokens = self._allocatable_tokens(count_retracted=True)
+        # First, remove all failed requests from the queue
+        for i, prefill_req in enumerate(self.queue):
+            if isinstance(prefill_req.req.finished_reason, FINISH_ABORT):
+                self.scheduler.stream_output(
+                    [prefill_req.req], prefill_req.req.return_logprob
+                )
+                indices_to_remove.add(i)
+
+        # Then, preallocate the remaining requests if possible
+        for i, prefill_req in enumerate(self.queue):
+            if i in indices_to_remove:
+                continue
+
+            if not prefill_req.waiting_for_input:
+                continue
+
+            if self.mm_embedding_pool.available_size() <= 0:
+                break
+
+            if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
+                break
+
+            # Memory estimation: don't add if the projected memory cannot be met
+            # TODO: add new_token ratio
+            required_tokens_for_request = sum(prefill_req.req.mm_embedding_lens)
+
+            if required_tokens_for_request > allocatable_tokens:
+                break
+            if required_tokens_for_request > allocatable_tokens:
+                break
+
+            allocatable_tokens -= required_tokens_for_request
+            self._pre_alloc(prefill_req.req)
+
+            mm_embedding_indices = self.mm_embedding_pool.get_embedding_locs_from_hash(
+                prefill_req.req.mm_hashes
+            )
+
+            prefill_req.metadata_buffer_index = (
+                self.req_to_metadata_buffer_idx_allocator.alloc()
+            )
+            assert prefill_req.metadata_buffer_index is not None
+            # page_indices = kv_to_page_indices(
+            #     mm_embedding_indices, self.token_to_kv_pool_allocator.page_size
+            # )
+            # prefill_req.kv_receiver.init(page_indices, prefill_req.metadata_buffer_index)
+            preallocated_reqs.append(prefill_req)
+            indices_to_remove.add(i)
+
+        self.queue = [
+            entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
+        ]
+
+        return preallocated_reqs
+
+    @property
+    def num_tokens_pre_allocated(self):
+        return sum(
+            len(decode_req.req.fill_ids) for decode_req in self.transfer_queue.queue
+        )
+
+    def _allocatable_tokens(self, count_retracted: bool = True) -> int:
+        return self.mm_embedding_pool.allocated()
+
+    def _pre_alloc(self, req: Req) -> torch.Tensor:
+        """Pre-allocate the memory for req_to_token and token_kv_pool"""
+        # req_pool_indices = self.mm_embedding_pool.alloc(1)
+
+        # assert (
+        #     req_pool_indices is not None
+        # ), "req_pool_indices is full! There is a bug in memory estimation."
+        #
+        # req.req_pool_idx = req_pool_indices[0]
+
+        if self.token_to_kv_pool_allocator.page_size == 1:
+            raise NotImplementedError()
+            # kv_loc = self.token_to_kv_pool_allocator.alloc(
+            #     len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+            # )
+        else:
+            embedding_locs = []
+            for num_token in req.mm_embedding_lens:
+                embedding_loc = self.token_to_kv_pool_allocator.alloc(num_token)
+                embedding_locs += [embedding_loc]
+
+        # assert (
+        #     kv_loc is not None
+        # ), "KV cache is full! There is a bug in memory estimation."
+
+        # self.mm_embedding_pool.write((req.req_pool_idx, slice(0, len(kv_loc))), kv_loc)
+
+        # populate metadata
+        # req.fill_ids = req.origin_input_ids + req.output_ids
+        # req.extend_input_len = len(req.origin_input_ids)
+
+        return embedding_locs
 
 
 class SchedulerDisaggregationPrefillMixin:
@@ -425,7 +851,19 @@ class SchedulerDisaggregationPrefillMixin:
                 self.send_kv_chunk(req, last_chunk=True)
 
                 if req.grammar is not None:
-                    req.grammar.accept_token(next_token_id)
+                    # FIXME: this try-except block is for handling unexpected xgrammar issue.
+                    try:
+                        req.grammar.accept_token(next_token_id)
+                    except ValueError as e:
+                        # Grammar accept_token can raise ValueError if the token is not in the grammar.
+                        # This can happen if the grammar is not set correctly or the token is invalid.
+                        error_message = f"Grammar accept_token failed for req {req.rid} with token {next_token_id}: {e}"
+                        self.tree_cache.cache_finished_req(req)
+                        prepare_abort(
+                            req,
+                            error_message,
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
                     req.grammar.finished = req.finished()
             else:
                 # being chunked reqs' prefill is not finished
@@ -525,13 +963,13 @@ class SchedulerDisaggregationPrefillMixin:
         Used by PP, get the transferred rids but **do not pop**
         """
         polls = poll_and_all_reduce(
-            [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
+            [req.disagg_kv_sender for req in self.disagg_encode_inflight_queue],
             self.tp_worker.get_tp_group().cpu_group,
         )
 
         transferred_rids: List[str] = []
 
-        for req, poll in zip(self.disagg_prefill_inflight_queue, polls):
+        for req, poll in zip(self.disagg_encode_inflight_queue, polls):
             if poll == KVPoll.Success or poll == KVPoll.Failed:
                 transferred_rids.append(req.rid)
 
