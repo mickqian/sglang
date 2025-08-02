@@ -129,12 +129,10 @@ class DecodeRequest:
 
 
 @dataclass
-class PrefillRequest:
+class EmbeddingRequest:
     req: Req
-    kv_receiver: BaseKVReceiver
+    embedding_receiver: BaseKVReceiver
     waiting_for_input: bool = False
-    metadata_buffer_index: int = -1
-
 
 class DecodePreallocQueue:
     """

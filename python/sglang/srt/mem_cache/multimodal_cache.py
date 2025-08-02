@@ -228,6 +228,16 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         self.used_size += embedding.size(0)
 
         return True
+    
+    def reserve_mm_embedding(
+        self, mm_hash: int, num_tokens: int, loc: torch.Tensor
+    ) -> bool:
+        if mm_hash in self.mm_hash_to_indices:
+            return True
+        
+        self.mm_hash_to_indices[mm_hash] = loc
+        self.used_size += num_tokens
+        return True
 
     def has(self, mm_hash: int) -> bool:
         return mm_hash in self.mm_hash_to_indices

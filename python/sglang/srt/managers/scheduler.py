@@ -555,6 +555,11 @@ class Scheduler(
         if get_bool_env_var("SGLANG_GC_LOG"):
             configure_gc_logger()
 
+        # vision disaggregation related
+        self.waiting_preallocate_queue: List[Req] = []
+        self.waiting_visual_queue: List[Req] = []
+        self.enable_disagg_vision = False
+
     def current_scheduler_metrics_enabled(self):
         return self.attn_tp_rank == 0 or self.enable_metrics_for_all_schedulers
 
