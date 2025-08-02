@@ -14,11 +14,10 @@
 """Utilities for Huggingface Transformers."""
 
 import contextlib
-import logging
 import os
 import warnings
 from pathlib import Path
-from typing import Dict, Optional, Type, Union
+from typing import List, Optional, Type, Union
 
 import torch
 from huggingface_hub import snapshot_download
@@ -38,6 +37,7 @@ from sglang.srt.configs import (
     ChatGLMConfig,
     DbrxConfig,
     DeepseekVL2Config,
+    DotsVLMConfig,
     ExaoneConfig,
     KimiVLConfig,
     MultiModalityConfig,
@@ -47,18 +47,20 @@ from sglang.srt.configs.internvl import InternVLChatConfig
 from sglang.srt.connector import create_remote_connector
 from sglang.srt.utils import is_remote_url, lru_cache_frozenset
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
-    ChatGLMConfig.model_type: ChatGLMConfig,
-    DbrxConfig.model_type: DbrxConfig,
-    ExaoneConfig.model_type: ExaoneConfig,
-    DeepseekVL2Config.model_type: DeepseekVL2Config,
-    MultiModalityConfig.model_type: MultiModalityConfig,
-    KimiVLConfig.model_type: KimiVLConfig,
-    InternVLChatConfig.model_type: InternVLChatConfig,
-    Step3VLConfig.model_type: Step3VLConfig,
-}
+_CONFIG_REGISTRY: List[Type[PretrainedConfig]] = [
+    ChatGLMConfig,
+    DbrxConfig,
+    ExaoneConfig,
+    DeepseekVL2Config,
+    MultiModalityConfig,
+    KimiVLConfig,
+    InternVLChatConfig,
+    Step3VLConfig,
+    DotsVLMConfig,
+]
 
-for name, cls in _CONFIG_REGISTRY.items():
+for cls in _CONFIG_REGISTRY:
+    name = cls.model_type
     with contextlib.suppress(ValueError):
         AutoConfig.register(name, cls)
 

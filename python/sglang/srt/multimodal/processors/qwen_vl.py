@@ -10,6 +10,7 @@ from PIL import Image
 from torchvision.transforms import InterpolationMode
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
+from sglang.srt.models.dots_vlm import DotsVLMForCausalLM
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
@@ -197,12 +198,16 @@ async def preprocess_video(
     return video
 
 
-# Compatible with Qwen2VL and Qwen2_5VL
+# Compatible with Qwen2VL, Qwen2_5VL and DotsVLM
 class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
-    models = [Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration]
+    models = [
+        Qwen2VLForConditionalGeneration,
+        Qwen2_5_VLForConditionalGeneration,
+        DotsVLMForCausalLM,
+    ]
 
-    def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
-        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
+    def __init__(self, hf_config, server_args, processor, *args, **kwargs):
+        super().__init__(hf_config, server_args, processor, *args, **kwargs)
         # The regex that matches expanded image tokens.
         self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
         self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
@@ -213,14 +218,26 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
-        self.mm_tokens = MultimodalSpecialTokens(
-            image_token="<|vision_start|><|image_pad|><|vision_end|>",
-            image_token_id=hf_config.image_token_id,
-            image_token_regex=re.compile(
-                r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>"
-            ),
-            video_token_id=hf_config.video_token_id,
-        ).build(_processor)
+        tokenizer = processor.tokenizer
+        if hf_config.architectures[0] == "":
+            self.mm_tokens = MultimodalSpecialTokens(
+                image_token=(
+                    "<|imgpad|>"
+                    if not hasattr(tokenizer, "image_token")
+                    else tokenizer.image_token
+                ),
+                image_token_id=hf_config.image_token_id,
+                video_token_id=hf_config.video_token_id,
+            ).build(processor)
+        else:
+            self.mm_tokens = MultimodalSpecialTokens(
+                image_token="<|vision_start|><|image_pad|><|vision_end|>",
+                image_token_id=hf_config.image_token_id,
+                image_token_regex=re.compile(
+                    r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>"
+                ),
+                video_token_id=hf_config.video_token_id,
+            ).build(processor)
 
     async def process_mm_data_async(
         self,
