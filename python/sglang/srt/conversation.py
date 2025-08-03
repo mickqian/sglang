@@ -847,6 +847,19 @@ register_conv_template(
 
 register_conv_template(
     Conversation(
+        name="dots-vlm",
+        system_message="You are a helpful assistant.",
+        system_template="<|im_start|>system\n{system_message}",
+        roles=("<|im_start|>user", "<|im_start|>assistant"),
+        sep="<|im_end|>\n",
+        sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
+        stop_str=["<|im_end|>"],
+        image_token="<|imgpad|>",
+    )
+)
+
+register_conv_template(
+    Conversation(
         name="deepseek-vl2",
         system_template="{system_message}",
         # system_message="You are a helpful assistant. Please answer truthfully and write out your "

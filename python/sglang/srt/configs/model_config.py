@@ -140,6 +140,7 @@ class ModelConfig:
         self.is_multimodal = enable_multimodal and is_multimodal_model(
             self.hf_config.architectures
         )
+        print(f"{self.is_multimodal=}")
         self.is_multimodal_gen = enable_multimodal and is_multimodal_gen_model(
             self.hf_config.architectures
         )

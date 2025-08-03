@@ -209,26 +209,30 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
     def __init__(self, hf_config, server_args, processor, *args, **kwargs):
         super().__init__(hf_config, server_args, processor, *args, **kwargs)
         # The regex that matches expanded image tokens.
-        self.IM_START_TOKEN_ID = hf_config.vision_start_token_id
-        self.IM_END_TOKEN_ID = hf_config.vision_end_token_id
-        self.vision_start_token_id = hf_config.vision_start_token_id
-        self.vision_end_token_id = hf_config.vision_end_token_id
+        self.IM_START_TOKEN_ID = getattr(hf_config, "vision_start_token_id", None)
+        self.IM_END_TOKEN_ID = getattr(hf_config, "vision_end_token_id", None)
+        self.vision_start_token_id = getattr(hf_config, "vision_start_token_id", None)
+        self.vision_end_token_id = getattr(hf_config, "vision_end_token_id", None)
         self.NUM_TOKEN_PER_FRAME = 770
         self.IMAGE_FACTOR = 28
         self.MIN_PIXELS = 4 * 28 * 28
         self.MAX_PIXELS = 16384 * 28 * 28
         self.MAX_RATIO = 200
-        tokenizer = processor.tokenizer
-        if hf_config.architectures[0] == "":
+        print(f"{hf_config.architectures=}")
+        if hf_config.architectures[0] == "DotsVLMForCausalLM":
+            tokenizer = processor.tokenizer
             self.mm_tokens = MultimodalSpecialTokens(
                 image_token=(
                     "<|imgpad|>"
                     if not hasattr(tokenizer, "image_token")
                     else tokenizer.image_token
                 ),
+                # image_token="<|vision_start|><|image_pad|><|vision_end|>",
                 image_token_id=hf_config.image_token_id,
                 video_token_id=hf_config.video_token_id,
             ).build(processor)
+            processor.image_token_id = 151655
+            print(f"{self.mm_tokens=}")
         else:
             self.mm_tokens = MultimodalSpecialTokens(
                 image_token="<|vision_start|><|image_pad|><|vision_end|>",
@@ -247,6 +251,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
+        print("process_mm_data_async")
 
         base_output = self.load_mm_data(
             prompt=input_text,
@@ -285,7 +290,6 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             second_per_grid_ts=getattr(ret, "second_per_grid_ts", None),
         )
         mrope_positions = mrope_positions.squeeze(1)
-
         return {
             "input_ids": input_ids.tolist(),
             "mm_items": mm_items,

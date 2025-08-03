@@ -1,8 +1,6 @@
 from typing import Optional
 
-from transformers import AutoProcessor
 from transformers.configuration_utils import PretrainedConfig
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.deepseek_v3 import DeepseekV3Config
 
 try:
@@ -75,7 +73,4 @@ class DotsVLMConfig(DeepseekV3Config):
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
         self.vision_config = DotsVisionConfig(**(vision_config or {}))
-
-    def save_pretrained(self, save_directory, **kwargs):
-        self._auto_class = None
-        super().save_pretrained(save_directory, **kwargs)
+        self.architectures = ["DotsVLMForCausalLM", "DeepseekV2ForCausalLM"]

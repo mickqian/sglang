@@ -1077,12 +1077,12 @@ def _wait_and_warmup(
     pipe_finish_writer: Optional[multiprocessing.connection.Connection],
     launch_callback: Optional[Callable[[], None]] = None,
 ):
-    if not server_args.skip_server_warmup:
-        if not _execute_server_warmup(
-            server_args,
-            pipe_finish_writer,
-        ):
-            return
+    # if not server_args.skip_server_warmup:
+    #     if not _execute_server_warmup(
+    #         server_args,
+    #         pipe_finish_writer,
+    #     ):
+    #         return
 
     logger.info("The server is fired up and ready to roll!")
 

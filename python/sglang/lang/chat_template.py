@@ -164,6 +164,21 @@ register_chat_template(
     )
 )
 
+register_chat_template(
+    ChatTemplate(
+        name="dots-vlm",
+        default_system_prompt="You are a helpful assistant.",
+        role_prefix_and_suffix={
+            "system": ("<|im_start|>system\n", "<|im_end|>\n"),
+            "user": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "assistant": ("<|im_start|>assistant\n", "<|im_end|>\n"),
+        },
+        style=ChatTemplateStyle.PLAIN,
+        stop_str=("<|im_end|>",),
+        image_token="<|imgpad|>",
+    )
+)
+
 # Reference: https://github.com/lm-sys/FastChat/blob/main/docs/vicuna_weights_version.md#prompt-template
 register_chat_template(
     ChatTemplate(
@@ -562,6 +577,8 @@ def match_chat_ml(model_path: str):
         return "chatml"
     if re.search(r"qwen.*vl", model_path, re.IGNORECASE):
         return "qwen2-vl"
+    if model_path == "yonghenglh6/vlm_test_model_for_sglang_toy":
+        return "dots-vlm"
     if re.search(r"qwen.*(chat|instruct)", model_path, re.IGNORECASE) and not re.search(
         r"llava", model_path, re.IGNORECASE
     ):

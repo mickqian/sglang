@@ -366,9 +366,6 @@ class VisionAttention(nn.Module):
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.dropout = dropout
         self.head_size = embed_dim // num_heads
-        self.hidden_size_per_attention_head = dist_utils.divide(
-            projection_size, num_heads
-        )
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_dummy_heads + num_heads, world_size
         )

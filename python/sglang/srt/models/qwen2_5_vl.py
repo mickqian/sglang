@@ -247,7 +247,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         depth: int = vision_config.depth
         num_heads: int = vision_config.num_heads
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
-        self.window_size = vision_config.window_size
+        self.window_size = getattr(vision_config, "window_size", None)
         self.patch_size = vision_config.patch_size
         mlp_hidden_size: int = vision_config.intermediate_size
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
@@ -379,16 +379,19 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=x.device,
-            dtype=torch.int32,
-        )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
-
         seq_len, _ = x.size()
+
+        if self.window_size:
+            window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+            cu_window_seqlens = torch.tensor(
+                cu_window_seqlens,
+                device=x.device,
+                dtype=torch.int32,
+            )
+            cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        else:
+            # no window
+            window_index = slice(None)
 
         x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         x = x[window_index, :, :]
