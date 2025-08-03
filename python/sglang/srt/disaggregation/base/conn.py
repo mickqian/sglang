@@ -84,10 +84,10 @@ class BaseKVSender(ABC):
         ...
 
     def send_embedding(
-        self, embeddings: torch.Tensor, embedding_start_indices: List[int]
+        self, embeddings: torch.Tensor
     ):
         """
-        Send the concatenated embeddings with each embedding's start token indices
+        Send the concatenated embeddings
         """
         pass
 

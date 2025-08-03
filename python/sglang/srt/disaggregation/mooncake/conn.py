@@ -1153,7 +1153,7 @@ class MooncakeKVSender(BaseKVSender):
             )
         raise KVTransferError(self.bootstrap_room, failure_reason)
 
-    def send_embedding(self, embedding: torch.Tensor, embedding_start_indices=None):
+    def send_embedding(self, embedding: torch.Tensor):
         """
         Send the embedding tensor to the remote server using MooncakeKVManager.
         """

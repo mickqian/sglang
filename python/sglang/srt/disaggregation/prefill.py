@@ -406,9 +406,9 @@ class LanguageModelPreallocQueue:
         scheduler: Scheduler,
         transfer_queue: LanguageModelTransferQueue,
         gloo_group: ProcessGroup,
-        # tp_rank: int,
-        # tp_size: int,
-        # dp_size: int,
+        tp_rank: int,
+        tp_size: int,
+        dp_size: int,
         gpu_id: int,
         bootstrap_port: int,
         max_total_num_tokens: int,
@@ -425,9 +425,9 @@ class LanguageModelPreallocQueue:
         self.scheduler = scheduler
         self.transfer_queue = transfer_queue
         self.gloo_group = gloo_group
-        # self.tp_rank = tp_rank
-        # self.tp_size = tp_size
-        # self.dp_size = dp_size
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.dp_size = dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
         self.max_total_num_tokens = max_total_num_tokens
@@ -444,8 +444,8 @@ class LanguageModelPreallocQueue:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()
         #
-        # attn_tp_size = self.tp_size // self.dp_size
-        # kv_args.engine_rank = self.tp_rank % (attn_tp_size)
+        attn_tp_size = self.tp_size // self.dp_size
+        kv_args.engine_rank = self.tp_rank % (attn_tp_size)
         # kv_args.decode_tp_size = attn_tp_size
         # kv_args.prefill_pp_size = self.prefill_pp_size
         # kv_data_ptrs, kv_data_lens, kv_item_lens = (
@@ -691,15 +691,15 @@ class SchedulerDisaggregationPrefillMixin:
 
     def poll_req_to_waiting_queue(self: Scheduler):
         """
-        Poll the requests in the middle of transfer. If done, return the request.
-        rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
+        Both preallocate and visual_transfer requests with the same room number are done 
+        then put them into waiting queue.
         """
         self.waiting_preallocate_queue.extend(
             self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
         )
-        # TODO:
+
         self.waiting_visual_queue.extend(
-            []
+            self.disagg_embedding_transfer_queue.pop_transferred()
         )
         bootstrapped_room_ids = [
             req.bootstrap_room for req in self.waiting_visual_queue
@@ -728,7 +728,7 @@ class SchedulerDisaggregationPrefillMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            if self.enable_disagg_vision:
+            if self.server_args.encoder_disaggregated:
                 self.poll_req_to_waiting_queue()
             else:
                 self.waiting_queue.extend(

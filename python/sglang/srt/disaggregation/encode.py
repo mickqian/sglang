@@ -75,7 +75,7 @@ class EncodeBootstrapQueue:
         bootstrap_port: int,
         gloo_group: ProcessGroup,
         max_total_num_tokens: int,
-        encode_dp_size: int,
+        # encode_dp_size: int,
         scheduler: Scheduler,
         transfer_backend: TransferBackend,
     ):
@@ -83,7 +83,7 @@ class EncodeBootstrapQueue:
         # self.draft_mm_embedding_pool = draft_mm_embedding_pool
         # self.metadata_buffers = metadata_buffers
         # self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
-        self.encode_dp_size = encode_dp_size
+        # self.encode_dp_size = encode_dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
         self.queue: List[Req] = []
@@ -549,7 +549,7 @@ class SchedulerDisaggregationEncodeMixin:
         # FIXME: manually set finish reason to let req response
 
         print("setting finish reason")
-        for i, req in enumerate(batch.reqs):
+        for req in batch.reqs:
             req.finished_reason = FINISH_LENGTH(length=0)
             self.send_embedding_chunk(req)
 
