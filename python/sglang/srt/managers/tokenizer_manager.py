@@ -553,6 +553,9 @@ class TokenizerManager:
             )
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
+                del mm_inputs["input_ids"]
+                # for item in mm_inputs["mm_items"]:
+                #     del item.model_specific_data["mrope_positions"]
         else:
             mm_inputs = None
 
