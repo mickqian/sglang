@@ -57,6 +57,34 @@ class BaseKVManager(ABC):
     ): ...
 
 
+class BaseMetadataSender(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        args: KVArgs,
+        disaggregation_mode: DisaggregationMode,
+        server_args: ServerArgs,
+    ): ...
+
+
+class ZMQMetadataSender(ABC):
+    def __init__(
+        self,
+        args: KVArgs,
+        disaggregation_mode: DisaggregationMode,
+        server_args: ServerArgs,
+    ): ...
+
+
+class ZMQMetadataReceiver(ABC):
+    def __init__(
+        self,
+        args: KVArgs,
+        disaggregation_mode: DisaggregationMode,
+        server_args: ServerArgs,
+    ): ...
+
+
 class BaseKVSender(ABC):
 
     @abstractmethod

@@ -289,7 +289,7 @@ class PyMscclppCommunicator:
     def all_reduce(self, tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM):
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                self.graph_input_set.add((tensor.dtype, tensor.numel()))
+                self.graph_input_set.append((tensor.dtype, tensor.numel()))
         msg_size = tensor.numel() * tensor.itemsize
         index = bisect.bisect_left(self.msg_size_for_finetune, msg_size)
         msg_size_finetune = self.msg_size_for_finetune[index]

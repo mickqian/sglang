@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 import requests
-import torch
 import zmq
 from aiohttp import web
 
@@ -532,6 +531,11 @@ class MooncakeKVManager(BaseKVManager):
                 break
 
         return status
+
+    def send_mm_metadata(
+        self, session_id: str, image_token_num: int, mm_hashes: List[int]
+    ):
+        status = self.engine.transfer_sync(session_id, src_addr, dst_addr, length)
 
     def sync_status_to_decode_endpoint(
         self, remote: str, dst_port: int, room: int, status: int, prefill_rank: int

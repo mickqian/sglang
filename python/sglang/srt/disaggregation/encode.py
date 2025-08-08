@@ -24,7 +24,7 @@ import threading
 import time
 from collections import deque
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 
@@ -128,7 +128,7 @@ class EncodeBootstrapQueue:
         )
         return kv_manager
 
-    def add(self, req: Req) -> None:
+    def append(self, req: Req) -> None:
         logger.debug(f"adding req to EncodeBootstrapQueue, waiting to be bootstrapped")
         if self._check_if_req_exceed_capacity(req):
             return
@@ -149,7 +149,7 @@ class EncodeBootstrapQueue:
 
     def extend(self, reqs: List[Req]) -> None:
         for req in reqs:
-            self.add(req)
+            self.append(req)
 
     def _check_if_req_exceed_capacity(self, req: Req) -> bool:
         # TODO: not accurate check
@@ -244,6 +244,14 @@ class SchedulerDisaggregationEncodeMixin:
     """
     Mixin for Scheduler to handle disaggregation encode
     """
+
+    def try_polling_from_initial_queue_for_tokenized_req(self: Scheduler):
+        tokenized_reqs = [
+            req
+            for req in self.disagg_encode_inflight_queue
+            if req.mm_hashes is not None
+        ]
+        self.disagg_encode_bootstrap_queue.extend(tokenized_reqs)
 
     def get_new_batch_encode(self: Scheduler) -> Optional[ScheduleBatch]:
         """Get a new batch for encode mode.
@@ -435,6 +443,8 @@ class SchedulerDisaggregationEncodeMixin:
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
+
+            self.try_polling_from_initial_queue_for_tokenized_req()
 
             bootstrapped, _failed = (
                 self.disagg_encode_bootstrap_queue.pop_bootstrapped()

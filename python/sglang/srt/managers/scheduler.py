@@ -870,8 +870,13 @@ class Scheduler(
             self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
                 buffer_size
             )
+            # the queue of reqs waiting for preprocess to be finished, then
+            # send the input_ids and hashes after be polled to disagg_encode_bootstrap_queue
+            self.disagg_encode_initial_queue: List[Req] = []
+
             # The prefill requests that are in the middle of kv sending
             self.disagg_encode_inflight_queue: List[Req] = []
+
             # The encode requests pushing embeddings
             self.disagg_encode_bootstrap_queue = EncodeBootstrapQueue(
                 mm_embedding_pool=self.mm_embedding_pool,
@@ -1389,7 +1394,8 @@ class Scheduler(
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             # TODO: should we skip this req at lb-side?
             if req.contains_mm_input():
-                self.disagg_encode_bootstrap_queue.add(req)
+                # self.disagg_encode_bootstrap_queue.add(req)
+                self.disagg_encode_initial_queue.append(req)
             else:
                 logger.warning("Skipping pure text request")
         else:
