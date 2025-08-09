@@ -227,10 +227,10 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
     def get_embedding_locs_from_hash(self, mm_hash: int) -> torch.Tensor:
         return self.mm_hash_to_indices[mm_hash]
 
-    def get_embedding_locs_from_hashes(
-        self, mm_hashes: List[int]
-    ) -> List[torch.Tensor]:
-        return [self.get_embedding_locs_from_hash(mm_hash) for mm_hash in mm_hashes]
+    # def get_embedding_locs_from_hashes(
+    #     self, mm_hashes: List[int]
+    # ) -> List[torch.Tensor]:
+    #     return [self.get_embedding_locs_from_hash(mm_hash) for mm_hash in mm_hashes]
 
     def try_get_mm_embedding(self, combined_hash: int) -> Optional[torch.Tensor]:
         indices = self.mm_hash_to_indices.get(combined_hash)
@@ -252,6 +252,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         and concatenating them.
         """
         # 1. Try with combined hash
+        print(f"{self.mm_hash_to_indices.keys()=}")
         combined_hash = combined_hash or self.combine_hashes(mm_hashes)
         combined_embedding = self.try_get_mm_embedding(combined_hash)
         if combined_embedding is not None:
@@ -303,21 +304,21 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
 
     def reserve_mm_embedding(
         self,
-        mm_hash: int,
+        mm_pad_value: int,
         num_tokens: int,
         mm_embedding_allocator: BaseTokenToKVPoolAllocator,
     ) -> torch.Tensor:
-        if mm_hash in self.mm_hash_to_indices:
-            self.mm_hash_count[mm_hash] += 1
-            return self.mm_hash_to_indices[mm_hash]
-        self.mm_hash_count[mm_hash] = 1
+        if mm_pad_value in self.mm_hash_to_indices:
+            self.mm_hash_count[mm_pad_value] += 1
+            return self.mm_hash_to_indices[mm_pad_value]
+        self.mm_hash_count[mm_pad_value] = 1
         # Even if mm_hash exists in mm_hash_to_indices, it should still return loc
         # caching should be handled elsewhere
         loc = mm_embedding_allocator.alloc(num_tokens)
         if loc is None:
             raise RuntimeError("Out of memory—needs to be handled.")
 
-        self.mm_hash_to_indices[mm_hash] = loc
+        self.mm_hash_to_indices[mm_pad_value] = loc
         self.used_size += num_tokens
         return loc
 

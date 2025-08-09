@@ -46,6 +46,9 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
     FINISH_LENGTH,
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
     Req,
     ScheduleBatch,
 )
@@ -374,7 +377,6 @@ class MMEmbeddingTransferQueue:
                 # else:
                 #     transferred_reqs.append(embedding_req)
                 transferred_reqs.append(embedding_req.req)
-
                 indices_to_remove.add(i)
             elif poll in [
                 KVPoll.Bootstrapping,
@@ -501,6 +503,7 @@ class MMEmbeddingPreallocQueue:
                 kv_receiver_class = get_kv_class(
                     self.transfer_backend, KVClassType.RECEIVER
                 )
+            print(f"{kv_receiver_class=}")
             kv_receiver = kv_receiver_class(
                 mgr=self.kv_manager,
                 bootstrap_addr=f"{req.bootstrap_host_encode}:{req.bootstrap_port_encode}",
@@ -508,7 +511,10 @@ class MMEmbeddingPreallocQueue:
                 data_parallel_rank=req.data_parallel_rank,
                 disaggregation_mode=DisaggregationMode.PREFILL,
             )
-            logger.debug(f"EmbeddingRequest added")
+            print(f"{kv_receiver=}")
+            print(f"{req.bootstrap_host == FAKE_BOOTSTRAP_HOST=}")
+            # init here earlier, so that encode can send mm metadata with bootstrap infos
+            kv_receiver.init(None, -1)
             self.queue.append(
                 EmbeddingRequest(
                     req=req, embedding_receiver=kv_receiver, waiting_for_input=False
@@ -529,41 +535,6 @@ class MMEmbeddingPreallocQueue:
         """Add a request to the pending queue."""
         for req in reqs:
             self.add(req)
-
-    def resume_retracted_reqs(self) -> List[Req]:
-        # TODO refactor the scheduling part, reuse with the unified engine logic as much as possible
-        # print(f"resume_retracted_reqs...")
-        # allocate memory
-        resumed_reqs = []
-        indices_to_remove = set()
-        allocatable_tokens = self._allocatable_tokens()
-
-        for i, req in enumerate(self.retracted_queue):
-            if self.mm_embedding_pool.available_size() <= 0:
-                break
-
-            # print(f"{req=}")
-
-            required_tokens_for_request = sum(req.mm_embedding_lens)
-            if required_tokens_for_request > allocatable_tokens:
-                break
-
-            resumed_reqs.append(req)
-            indices_to_remove.add(i)
-            req.is_retracted = False
-            self._pre_alloc(req)
-            allocatable_tokens -= required_tokens_for_request
-
-            # load from cpu, release the cpu copy
-            # req.load_kv_cache(self.mm_embedding_pool, self.token_to_kv_pool_allocator)
-
-        self.retracted_queue = [
-            entry
-            for i, entry in enumerate(self.retracted_queue)
-            if i not in indices_to_remove
-        ]
-
-        return resumed_reqs
 
     def _update_handshake_waiters(self) -> None:
         if not self.queue:
@@ -622,15 +593,22 @@ class MMEmbeddingPreallocQueue:
             if not encode_req.waiting_for_input:
                 continue
 
+            # Require encoder-side metadata to be present; otherwise skip this req for now
+            meta = self.kv_manager.get_mm_metadata(encode_req.req.bootstrap_room)
+            if meta is None:
+                continue
+
             if self.mm_embedding_pool.available_size() <= 0:
                 break
 
             # if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
             #     break
 
-            # Memory estimation: don't add if the projected memory cannot be met
+            # Memory estimation strictly from encoder metadata; no local fallback
             # TODO: add new_token ratio
-            required_tokens_for_request = sum(encode_req.req.mm_embedding_lens)
+            required_tokens_for_request = int(
+                sum(int(x) for x in meta.mm_embedding_lens.tolist())
+            )
 
             if required_tokens_for_request > allocatable_tokens:
                 break
@@ -640,7 +618,7 @@ class MMEmbeddingPreallocQueue:
                 self._pre_alloc(encode_req.req).to(torch.int32).cpu().numpy()
             )  # it's type should be int32
 
-            logger.debug(f"{encode_req.req.mm_hashes=}")
+            logger.debug(f"{encode_req.req.mm_pad_values=}")
 
             # mm_embedding_indices = [self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash) for mm_hash in
             #                         encode_req.req.mm_hashes]
@@ -688,18 +666,65 @@ class MMEmbeddingPreallocQueue:
         #     #     len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
         #     # )
         # else:
-        mm_hash = MultimodalCache.combine_hashes(
-            [item.hash for item in req.multimodal_inputs.mm_items]
+
+        # Strictly require metadata; caller guarantees presence (pop_preallocated skips otherwise)
+        meta = self.kv_manager.get_mm_metadata(req.bootstrap_room)
+        assert (
+            meta is not None
+            and meta.mm_embedding_lens is not None
+            and len(meta.mm_embedding_lens) > 0
+        ), "MM metadata must be available before pre-allocation"
+        mm_embedding_lens = int(sum(int(x) for x in meta.mm_embedding_lens.tolist()))
+        print(f"{meta=}")
+        # req.origin_input_ids = list(memoryview(meta.input_ids).cast('i'))
+        # req.mm_pad_values = list(memoryview(meta.mm_pad_values).cast('i'))
+        # req.mm_embedding_lens = list(memoryview(meta.mm_embedding_lens).cast('i'))
+        req.origin_input_ids = meta.input_ids.tolist()
+        req.mm_pad_values = meta.mm_pad_values.tolist()
+
+        mm_items = []
+        for i in range(len(req.mm_pad_values)):
+            mm_items += [
+                MultimodalDataItem(
+                    modality=Modality.IMAGE,
+                    pad_value=req.mm_pad_values[i],
+                    offsets=meta.mm_offsets[i * 2 : i * 2 + 2],
+                )
+            ]
+
+        print(f"{mm_items=}")
+
+        # mock mm_items
+        req.multimodal_inputs = MultimodalInputs(mm_items=mm_items)
+        req.mm_embedding_lens = meta.mm_embedding_lens.tolist()
+        req.origin_input_ids_unpadded = req.origin_input_ids
+        print(f"{len(meta.mrope_positions.tolist())=}")
+
+        req.multimodal_inputs.mrope_positions = torch.as_tensor(meta.mrope_positions)
+        req.multimodal_inputs.mrope_positions = (
+            req.multimodal_inputs.mrope_positions.view(
+                3, int(req.multimodal_inputs.mrope_positions.numel() / 3)
+            )
         )
-        mm_embedding_lens = sum(
-            mm_embedding_len for mm_embedding_len in req.mm_embedding_lens
+        print(f"{req.multimodal_inputs.mrope_positions.shape=}")
+
+        req.multimodal_inputs.mrope_position_delta = torch.as_tensor(
+            meta.mrope_positions_delta
         )
+
+        print(f"{meta.mrope_positions_delta=}")
+
+        # mm_pad_values = [item.pad_value for item in req.multimodal_inputs.mm_items]
+        mm_pad_values = req.mm_pad_values
+
+        combined_mm_pad_value = MultimodalCache.combine_hashes(mm_pad_values)
+        # req = meta.input_ids
 
         # print(f"prefill 699 | {mm_hash=}")
         # print(f"prefill 701 | {mm_embedding_lens=}")
 
         embedding_locs = self.mm_embedding_pool.reserve_mm_embedding(
-            mm_hash, mm_embedding_lens, self.token_to_kv_pool_allocator
+            combined_mm_pad_value, mm_embedding_lens, self.token_to_kv_pool_allocator
         )
 
         # assert (
@@ -768,7 +793,7 @@ class SchedulerDisaggregationPrefillMixin:
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
 
-                self.process_prefill_mm_embedding_transfer_queue()
+                self.process_prefill_or_text_mm_embedding_transfer_queue()
                 self.process_prefill_bootstrapping_queue()
             else:
                 bootstrapped, _failed = (
@@ -804,9 +829,10 @@ class SchedulerDisaggregationPrefillMixin:
         self.result_queue = deque()
         while True:
             recv_reqs = self.recv_requests()
+
             self.process_input_requests(recv_reqs)
             if self.server_args.encoder_disaggregated:
-                self.process_prefill_mm_embedding_transfer_queue()
+                self.process_prefill_or_text_mm_embedding_transfer_queue()
                 self.process_prefill_bootstrapping_queue()
             else:
                 bootstrapped, _failed = (
@@ -906,11 +932,11 @@ class SchedulerDisaggregationPrefillMixin:
                 self.disagg_prefill_inflight_queue.append(req)
 
                 if req.multimodal_inputs:
-                    mm_hash = MultimodalCache.combine_hashes(
-                        [item.hash for item in req.multimodal_inputs.mm_items]
+                    combined_mm_pad_value = MultimodalCache.combine_hashes(
+                        [item.pad_value for item in req.multimodal_inputs.mm_items]
                     )
                     _loc = self.mm_embedding_pool.free(
-                        mm_hash, self.mm_embedding_allocator
+                        combined_mm_pad_value, self.mm_embedding_allocator
                     )
 
                 if logits_output.hidden_states is not None:
@@ -1121,7 +1147,7 @@ class SchedulerDisaggregationPrefillMixin:
             return
         req.disagg_kv_sender.send(page_indices)
 
-    def process_prefill_mm_embedding_transfer_queue(self: Scheduler):
+    def process_prefill_or_text_mm_embedding_transfer_queue(self: Scheduler):
         """
         process text-model prefill queue when encoder if disaggregated, dumping mm_received req to disagg_prefill_bootstrap_queue, waiting to be bootstrapped
         """
@@ -1136,9 +1162,12 @@ class SchedulerDisaggregationPrefillMixin:
         # TODO: this is time-consuming and foreground
         allocated_reqs = self.disagg_prefill_prealloc_queue.pop_preallocated()
         self.disagg_prefill_receiving_queue.extend(allocated_reqs)
+        # if allocated_reqs:
+        #     logger.debug(f"{allocated_reqs=}")
 
         mm_received_reqs = self.disagg_prefill_receiving_queue.pop_transferred()
         if mm_received_reqs:
+            # logger.debug(f"{mm_received_reqs=}")
             if self.server_args.disaggregation_mode == "prefill":
                 # Find requests that are already in the bootstrapped_queue
                 received_rooms = {req.bootstrap_room for req in mm_received_reqs}
@@ -1148,6 +1177,8 @@ class SchedulerDisaggregationPrefillMixin:
                     if req.bootstrap_room in received_rooms
                 ]
 
+                # if ready_reqs:
+                #     logger.debug(f"{ready_reqs=}")
                 # Add ready requests to the waiting_queue
                 self.waiting_queue.extend(ready_reqs)
 

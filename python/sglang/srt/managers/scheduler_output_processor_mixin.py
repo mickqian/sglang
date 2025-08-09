@@ -91,11 +91,11 @@ class SchedulerOutputProcessorMixin:
                         self.mm_embedding_pool is not None
                         and req.multimodal_inputs is not None
                     ):
-                        mm_hash = MultimodalCache.combine_hashes(
-                            [item.hash for item in req.multimodal_inputs.mm_items]
+                        mm_pad_value = MultimodalCache.combine_hashes(
+                            [item.pad_value for item in req.multimodal_inputs.mm_items]
                         )
                         _loc = self.mm_embedding_pool.free(
-                            mm_hash, self.mm_embedding_allocator
+                            mm_pad_value, self.mm_embedding_allocator
                         )
 
                     if req.finished():

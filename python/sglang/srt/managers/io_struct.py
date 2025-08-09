@@ -502,6 +502,7 @@ class TokenizedGenerateReqInput:
     input_ids: List[int]
     # The multimodal inputs
     mm_inputs: dict
+    had_mm_input: bool
     # The sampling parameters
     sampling_params: SamplingParams
     # Whether to return the logprobs

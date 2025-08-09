@@ -620,6 +620,12 @@ class ServerArgs:
         # EPD
         if self.disaggregation_mode == "text":
             self.encoder_disaggregated = True
+        if self.encoder_disaggregated and not (
+            self.disaggregation_mode == "text" or self.disaggregation_mode == "prefill"
+        ):
+            raise ValueError(
+                f"encoder-disaggregated only works with disaggregation mode of 'text' or 'prefill'"
+            )
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):

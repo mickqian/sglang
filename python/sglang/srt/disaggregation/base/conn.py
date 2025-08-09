@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, List, Optional
 
@@ -14,6 +15,89 @@ if TYPE_CHECKING:
 
 class EmbeddingArgs:
     pass
+
+
+@dataclasses.dataclass
+class TransferMMTokenizedData:
+    input_ids: npt.NDArray[np.int32]
+    mm_embedding_lens: npt.NDArray[np.int32]
+    mm_offsets: npt.NDArray[np.int32]
+    mm_pad_values: npt.NDArray[np.int32]
+    mrope_positions: npt.NDArray[np.int32]
+    mrope_positions_delta: npt.NDArray[np.int32]
+
+    @staticmethod
+    def from_req(req):
+        input_ids = np.asarray(getattr(req, "origin_input_ids", []), dtype=np.int32)
+        mm_embedding_lens = np.asarray(
+            getattr(req, "mm_embedding_lens", []), dtype=np.int32
+        )
+        mm_offsets = np.asarray(getattr(req, "mm_offsets", []), dtype=np.int32)
+        print(f"{mm_offsets.tolist()=}")
+        mm_pad_values = np.asarray(
+            getattr(req, "mm_pad_values", []),
+            dtype=np.int32,
+        )
+        print(f"195 {req.multimodal_inputs.mrope_positions.shape=}")
+        mrope_positions = np.asarray(
+            getattr(req.multimodal_inputs, "mrope_positions", []), dtype=np.int32
+        )
+        mrope_positions_delta = np.asarray(
+            getattr(req.multimodal_inputs, "mrope_position_delta", []),
+            dtype=np.int32,
+        )
+        print(f"{mrope_positions_delta=}")
+
+        return TransferMMTokenizedData(
+            input_ids,
+            mm_embedding_lens,
+            mm_offsets,
+            mm_pad_values,
+            mrope_positions,
+            mrope_positions_delta,
+        )
+
+    def get_bytes(self):
+        input_ids_bytes = (
+            self.input_ids.astype(np.int32, copy=False).tobytes()
+            if self.input_ids is not None
+            else b""
+        )
+        mm_lens_bytes = (
+            self.mm_embedding_lens.astype(np.int32, copy=False).tobytes()
+            if self.mm_embedding_lens is not None
+            else b""
+        )
+        mm_offsets_bytes = (
+            self.mm_offsets.astype(np.int32, copy=False).tobytes()
+            if self.mm_offsets is not None
+            else b""
+        )
+
+        mm_hashes_bytes = (
+            self.mm_pad_values.astype(np.int32, copy=False).tobytes()
+            if self.mm_pad_values is not None
+            else b""
+        )
+        mrope_positions_bytes = (
+            self.mrope_positions.astype(np.int32, copy=False).tobytes()
+            if self.mrope_positions is not None
+            else b""
+        )
+        mrope_positions_delta_bytes = (
+            self.mrope_positions_delta.astype(np.int32, copy=False).tobytes()
+            if self.mrope_positions_delta is not None
+            else b""
+        )
+
+        return [
+            input_ids_bytes,
+            mm_lens_bytes,
+            mm_offsets_bytes,
+            mm_hashes_bytes,
+            mrope_positions_bytes,
+            mrope_positions_delta_bytes,
+        ]
 
 
 class KVArgs:
@@ -55,6 +139,12 @@ class BaseKVManager(ABC):
         server_args: ServerArgs,
         is_mla_backend: Optional[bool] = False,
     ): ...
+
+    def get_mm_metadata(self, bootstrap_room: int) -> Optional[TransferMMTokenizedData]:
+        pass
+
+    def clear_mm_metadata(self, bootstrap_room: int) -> None:
+        pass
 
 
 class BaseMetadataSender(ABC):
@@ -130,6 +220,9 @@ class BaseKVSender(ABC):
         Raise an exception if the kv cache transfer fails
         """
         ...
+
+    def send_mm_metadata(self, data: TransferMMTokenizedData):
+        pass
 
 
 class BaseKVReceiver(ABC):

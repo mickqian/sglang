@@ -518,6 +518,21 @@ class ForwardBatch:
         # print(f"{batch_size=}")
         for batch_idx in range(batch_size):
             mm_input = batch.multimodal_inputs[batch_idx]
+
+            # mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
+            #     spatial_merge_size=model_runner.model_config.vision_config.spatial_merge_size,
+            #     image_token_id=model_runner.model_config.hf_config.image_token_id,
+            #     video_token_id=model_runner.model_config.hf_config.video_token_id,
+            #     vision_start_token_id=model_runner.model_config.hf_config.vision_start_token_id,
+            #     model_type=model_runner.model_config.hf_config.model_type,
+            #     tokens_per_second=getattr(
+            #         model_runner.model_config.hf_config.vision_config, "tokens_per_second", None
+            #     ),
+            #     input_ids=self.input_ids.unsqueeze(0),
+            #     image_grid_thw=getattr(ret, "image_grid_thw", None),
+            #     video_grid_thw=getattr(ret, "video_grid_thw", None),
+            #     second_per_grid_ts=getattr(ret, "second_per_grid_ts", None),
+            # )
             # print(f"{self.forward_mode=}")
             if self.forward_mode.is_decode():
                 mrope_position_deltas = (
@@ -561,6 +576,7 @@ class ForwardBatch:
                         * 3
                     )
                 else:
+                    print(f"{mm_input.mrope_positions.shape=}")
                     mrope_positions = mm_input.mrope_positions[
                         :,
                         extend_prefix_len : extend_prefix_len + extend_seq_len,

@@ -533,17 +533,9 @@ class TokenizerManager:
             if not isinstance(obj.audio_data, list):
                 obj.audio_data = [obj.audio_data]
             start = time.time()
-            if (
-                self.server_args.disaggregation_mode == "text"
-                or self.server_args.disaggregation_mode == "null"
-            ):
-                mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
-                    image_data=obj.image_data,
-                    audio_data=obj.audio_data,
-                    input_text=input_text or input_ids,
-                    request_obj=obj,
-                    max_req_input_len=self.max_req_input_len,
-                )
+            if self.server_args.encoder_disaggregated:
+                logger.debug("Skipping mm processor with encoder_disaggregated")
+                mm_inputs: Dict = None
             else:
                 mm_inputs: Dict = await self.mm_processor.process_mm_data_async(
                     image_data=obj.image_data,
@@ -655,6 +647,7 @@ class TokenizerManager:
                 input_text,
                 input_ids,
                 mm_inputs,
+                obj.contains_mm_input(),
                 sampling_params,
                 obj.return_logprob,
                 obj.logprob_start_len,

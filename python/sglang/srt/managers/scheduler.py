@@ -872,7 +872,6 @@ class Scheduler(
             )
             # the queue of reqs waiting for preprocess to be finished, then
             # send the input_ids and hashes after be polled to disagg_encode_bootstrap_queue
-            self.disagg_encode_initial_queue: List[Req] = []
 
             # The prefill requests that are in the middle of kv sending
             self.disagg_encode_inflight_queue: List[Req] = []
@@ -928,6 +927,7 @@ class Scheduler(
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
+        print("event_loop_overlap")
 
         while True:
             recv_reqs = self.recv_requests()
@@ -1203,7 +1203,7 @@ class Scheduler(
         if self.server_args.disaggregation_mode == "text":
             # TEXT mode
             # FIXME: is this place appropriate?
-            self.process_prefill_mm_embedding_transfer_queue()
+            self.process_prefill_or_text_mm_embedding_transfer_queue()
 
     def handle_generate_request(
         self,
@@ -1302,6 +1302,8 @@ class Scheduler(
                 )
                 self._add_request_to_queue(req)
                 return
+        elif recv_req.had_mm_input:
+            req.had_mm_input = True
 
         # Validate prompt length
         error_msg = validate_input_length(
@@ -1374,6 +1376,7 @@ class Scheduler(
 
     def _add_request_to_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
+        # TODO: simplify this
         if (
             self.disaggregation_mode == DisaggregationMode.PREFILL
             or self.disaggregation_mode == DisaggregationMode.TEXT
@@ -1381,12 +1384,16 @@ class Scheduler(
             if self.server_args.encoder_disaggregated:
                 if self.disaggregation_mode == DisaggregationMode.PREFILL:
                     self.disagg_prefill_bootstrap_queue.add(req)
+                print(f"{req.contains_mm_input()=}")
                 if req.contains_mm_input():
                     # requires receiving mm embedding
                     self.disagg_prefill_prealloc_queue.add(req)
                 else:
-                    # no mm presented, directly wait to be bootstrapped
-                    self.embedding_received_queue.append(req)
+                    if self.disaggregation_mode == DisaggregationMode.TEXT:
+                        self.waiting_queue.append(req)
+                    else:
+                        # no mm presented, directly wait to be bootstrapped
+                        self.embedding_received_queue.append(req)
             elif self.disaggregation_mode == DisaggregationMode.PREFILL:
                 self.disagg_prefill_bootstrap_queue.add(req)
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -1394,8 +1401,8 @@ class Scheduler(
         elif self.disaggregation_mode == DisaggregationMode.ENCODE:
             # TODO: should we skip this req at lb-side?
             if req.contains_mm_input():
-                # self.disagg_encode_bootstrap_queue.add(req)
-                self.disagg_encode_initial_queue.append(req)
+                req.bootstrap_host = self.server_args.host
+                self.disagg_encode_bootstrap_queue.append(req)
             else:
                 logger.warning("Skipping pure text request")
         else:
@@ -1937,7 +1944,6 @@ class Scheduler(
             new_batch.hicache_consumer_index = (
                 self.tree_cache.ready_to_load_host_cache()
             )
-        logger.debug(f"get_new_batch_prefill")
         new_batch.prepare_for_extend()
 
         # Mixed-style chunked prefill
@@ -3101,6 +3107,7 @@ def run_scheduler_process(
             else:
                 scheduler.event_loop_normal_disagg_decode()
         elif disaggregation_mode == DisaggregationMode.ENCODE:
+            print(f"{scheduler.enable_overlap=}")
             if scheduler.enable_overlap:
                 scheduler.event_loop_overlap_disagg_encode()
             else:

@@ -1016,7 +1016,8 @@ def _execute_server_warmup(
             )
             assert res.status_code == 200, f"{res}"
         else:
-            logger.info(f"Start of prefill warmup ...")
+            role_str = server_args.disaggregation_mode
+            logger.info(f"Start of {role_str} warmup ...")
 
             if server_args.disaggregation_mode == "encode":
                 # TODO

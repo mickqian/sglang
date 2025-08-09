@@ -441,6 +441,8 @@ class Req:
             else origin_input_ids  # Before image padding
         )
         self.origin_input_ids = origin_input_ids
+
+        self.had_mm_input = False
         # Each decode stage's output ids
         self.output_ids = []
         # fill_ids = origin_input_ids + output_ids. Updated if chunked.
@@ -621,7 +623,7 @@ class Req:
         # for encoder-disaggregation
         self.mm_embedding_lens = []
         # self.mm_embedding_token_sum = []
-        self.mm_hashes = []
+        self.mm_pad_values = []
 
     @property
     def seqlen(self):
@@ -633,9 +635,14 @@ class Req:
         else:
             self.multimodal_inputs.merge(mm_inputs)
 
-        self.mm_hashes = [mm_item.hash for mm_item in self.multimodal_inputs.mm_items]
+        self.mm_pad_values = [
+            mm_item.pad_value for mm_item in self.multimodal_inputs.mm_items
+        ]
         self.mm_embedding_lens = [
             mm_item.token_len for mm_item in self.multimodal_inputs.mm_items
+        ]
+        self.mm_offsets = [
+            mm_item.offsets for mm_item in self.multimodal_inputs.mm_items
         ]
         # print(f"{self.mm_embedding_lens=}")
         self.cu_mm_embedding_len = sum(self.mm_embedding_lens)
@@ -805,7 +812,7 @@ class Req:
         return (
             self.multimodal_inputs is not None
             and self.multimodal_inputs.contains_mm_input()
-        )
+        ) or self.had_mm_input
 
     def __repr__(self):
         return (

@@ -343,7 +343,7 @@ def get_kv_class(transfer_backend: TransferBackend, class_type: KVClassType):
             KVClassType.KVARGS: KVArgs,
             KVClassType.MANAGER: MooncakeKVManager,
             KVClassType.SENDER: MooncakeKVSender,
-            KVClassType.RECEIVER: (MooncakeKVReceiver),
+            KVClassType.RECEIVER: MooncakeKVReceiver,
             KVClassType.BOOTSTRAP_SERVER: MooncakeKVBootstrapServer,
         }
         return class_mapping.get(class_type)
@@ -360,7 +360,7 @@ def get_kv_class(transfer_backend: TransferBackend, class_type: KVClassType):
             KVClassType.KVARGS: KVArgs,
             KVClassType.MANAGER: AscendKVManager,
             KVClassType.SENDER: AscendKVSender,
-            KVClassType.RECEIVER: (AscendKVReceiver),
+            KVClassType.RECEIVER: AscendKVReceiver,
             KVClassType.BOOTSTRAP_SERVER: AscendKVBootstrapServer,
         }
         return class_mapping.get(class_type)
@@ -377,7 +377,7 @@ def get_kv_class(transfer_backend: TransferBackend, class_type: KVClassType):
             KVClassType.KVARGS: KVArgs,
             KVClassType.MANAGER: NixlKVManager,
             KVClassType.SENDER: NixlKVSender,
-            KVClassType.RECEIVER: (NixlKVReceiver),
+            KVClassType.RECEIVER: NixlKVReceiver,
             KVClassType.BOOTSTRAP_SERVER: NixlKVBootstrapServer,
         }
         return class_mapping.get(class_type)
@@ -388,7 +388,7 @@ def get_kv_class(transfer_backend: TransferBackend, class_type: KVClassType):
         class_mapping = {
             KVClassType.KVARGS: KVArgs,
             KVClassType.SENDER: FakeKVSender,
-            KVClassType.RECEIVER: (FakeKVReceiver),
+            KVClassType.RECEIVER: FakeKVReceiver,
         }
         return class_mapping.get(class_type)
 

@@ -376,11 +376,15 @@ def _get_chunked_prefill_embedding(
     """
     :param mm_embedding_pool: If not none, mm embeddings are already presented in this pool
     """
+    print("_get_chunked_prefill_embedding")
 
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
     # FIXME(Xinyuan): temporary workaround for eagle3, which may have len(items_size) > len(prefix_length)
     max_iterations = min(len(cu_items_size) - 1, len(prefix_length))
+    print(f"{max_iterations=}")
+    print(f"{len(item_token_lens)=}")
+    print(f"{items_offset_list=}")
     for i in range(max_iterations):
         token_length = item_token_lens[i]
         if cu_items_size[i] == cu_items_size[i + 1]:
@@ -388,22 +392,25 @@ def _get_chunked_prefill_embedding(
         embedding_items_per_req = embedding_items[
             cu_items_size[i] : cu_items_size[i + 1]
         ]
-        mm_hashes = [item.hash for item in embedding_items_per_req]
-        combined_hash = embedding_cache.combine_hashes(mm_hashes)
+        mm_pad_values = [item.pad_value for item in embedding_items_per_req]
+        combined_pad_value = embedding_cache.combine_hashes(mm_pad_values)
         items_offset = items_offset_list[i]
         assert items_offset is not None, items_offset
         # if all items has been prefixed, we do not need to calculate embedding
         if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
             continue
 
-        embedding_per_req = embedding_cache.get_mm_embedding(mm_hashes)
+        embedding_per_req = embedding_cache.get_mm_embedding(mm_pad_values)
         if embedding_per_req is None:
             if global_server_args_dict["encoder_disaggregated"]:
+                # get the embedding from pre-written pool
                 mm_embedding_pool = mm_embedding_allocator.get_kvcache()
                 assert mm_embedding_pool
                 embedding_per_req = mm_embedding_pool.get_mm_embedding(
-                    mm_hashes, combined_hash
+                    mm_pad_values, combined_pad_value
                 )
+                print(f"{combined_pad_value=}")
+                print(f"{mm_pad_values=}")
                 # print(f"mm_utils 410 | {mm_hashes=} {combined_hash=}")
                 # print(f"{embedding_per_req.shape=}")
             else:
@@ -412,7 +419,7 @@ def _get_chunked_prefill_embedding(
                     raise RuntimeError("Non-Encode should not call data_embedding_func")
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
                 if not embedding_cache.set_mm_embedding(
-                    combined_hash, embedding_per_req, mm_embedding_allocator
+                    combined_pad_value, embedding_per_req, mm_embedding_allocator
                 ):
                     print_info_once(
                         "Multimodal embedding cache is full. Consider increasing the "
@@ -421,11 +428,10 @@ def _get_chunked_prefill_embedding(
 
         assert embedding_per_req is not None
         if disaggregation_mode == "encode":
-            logger.debug(f"mm_utils 419 | {combined_hash}")
             assert isinstance(embedding_per_req, torch.Tensor)
             mm_embedding_pool = mm_embedding_allocator.get_kvcache()
             mm_embedding_pool.set_mm_embedding(
-                combined_hash, embedding_per_req, mm_embedding_allocator
+                combined_pad_value, embedding_per_req, mm_embedding_allocator
             )
             embedding_list.append(
                 embedding_per_req
@@ -445,7 +451,7 @@ def _get_chunked_prefill_embedding(
             else embedding_per_req.shape[0] * embedding_per_req.shape[1]
         )
         if end_index == embedding_per_req_length:
-            embedding_cache.free(combined_hash)
+            embedding_cache.free(combined_pad_value, mm_embedding_allocator)
         embedding_list.append(embedding_per_req_chunk)
     if len(embedding_list) == 0:
         return None
@@ -522,7 +528,7 @@ def get_embedding_and_mask(
         - A boolean mask tensor indicating where these embeddings should be placed
     """
     # for encoder, get embedding only
-
+    print("get_embedding_and_mask")
     # 1. Get embedding
     embedding = _get_precomputed_embedding(embedding_items)
     if embedding is None:
@@ -593,6 +599,7 @@ def embed_mm_inputs(
         items = [
             item for item in item_flatten_list if item.is_modality(modality=modality)
         ]
+
         embedder = (
             None
             if data_embedding_func_mapping is None
@@ -607,6 +614,7 @@ def embed_mm_inputs(
                 [item.pad_value for item in items],
                 device=input_ids.device,
             )
+
             # calculate per request items length offset
             items_size = torch.zeros(len(mm_inputs_list) + 1, dtype=int)
             item_token_lens = [item.token_len for item in items]
@@ -696,9 +704,10 @@ def general_mm_embed_routine(
     else:
         assert hasattr(language_model, "get_input_embeddings")
         embed_tokens = language_model.get_input_embeddings()
-    if (
-        not forward_batch.forward_mode.is_decode()
-        and forward_batch.contains_mm_inputs()
+    print(f"{forward_batch.mm_inputs=}")
+    if not forward_batch.forward_mode.is_decode() and (
+        forward_batch.contains_mm_inputs()
+        or global_server_args_dict["encoder_disaggregated"]
     ):
         mm_inputs_list = [
             mm_input for mm_input in forward_batch.mm_inputs if mm_input is not None

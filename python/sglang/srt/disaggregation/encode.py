@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
+from sglang.srt.disaggregation.base.conn import TransferMMTokenizedData
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
     DisaggregationMode,
@@ -84,6 +85,8 @@ class EncodeBootstrapQueue:
         self.encode_dp_size = encode_dp_size
         self.gpu_id = gpu_id
         self.bootstrap_port = bootstrap_port
+        # reqs waiting for bootstrap info to be registered in manager
+        self.waiting_bootstrap_to_finish_reqs: List[Req] = []
         # reqs waiting to be bootstrapped
         self.waiting_reqs: List[Req] = []
         self.gloo_group = gloo_group
@@ -139,13 +142,21 @@ class EncodeBootstrapQueue:
             kv_sender_class = get_kv_class(self.transfer_backend, KVClassType.SENDER)
 
         # TODO: embedding sender class
+        # Important: send metadata to PREFILL bootstrap server, not ENCODE
         req.disagg_kv_sender = kv_sender_class(
             mgr=self.kv_manager,
             bootstrap_addr=f"{req.bootstrap_host}:{self.bootstrap_port}",
             bootstrap_room=req.bootstrap_room,
         )
+
+        # Register encode side to its bootstrap server after sending metadata
+        try:
+            self.kv_manager._register_to_bootstrap()
+        except Exception as e:
+            logger.error(f"Failed to register encode manager to bootstrap: {e}")
+
         self._process_req(req)
-        self.waiting_reqs.append(req)
+        self.waiting_bootstrap_to_finish_reqs.append(req)
 
     def extend(self, reqs: List[Req]) -> None:
         for req in reqs:
@@ -167,6 +178,27 @@ class EncodeBootstrapQueue:
         """
         req.sampling_params.max_new_tokens = 1
 
+    def try_send_mm_metadata_for_req(self, req: Req):
+        try:
+            # TODO: better judgement of whether the initial boostrap has finished
+            # print(f"{self.kv_manager.transfer_infos}")
+            if (
+                len(self.kv_manager.transfer_infos) != 0
+                and self.kv_manager.transfer_infos.get(req.bootstrap_room, None)
+                is not None
+            ):
+                logger.debug("self.kv_manager.transfer_infos is not empty, sending...")
+
+                req.disagg_kv_sender.send_mm_metadata(
+                    TransferMMTokenizedData.from_req(req)
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send MM metadata: {e}")
+            return False
+
+        return False
+
     def pop_bootstrapped(
         self,
         return_failed_reqs: bool = False,
@@ -178,6 +210,15 @@ class EncodeBootstrapQueue:
         return_failed_reqs: For PP, on rank 0, also return the failed reqs to notify the next rank
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
+        waiting_bootstrap_finished_reqs = []
+        for req in self.waiting_bootstrap_to_finish_reqs:
+            if self.try_send_mm_metadata_for_req(req):
+                self.waiting_reqs.append(req)
+            else:
+                waiting_bootstrap_finished_reqs += [req]
+
+        self.waiting_bootstrap_to_finish_reqs = waiting_bootstrap_finished_reqs
+
         if len(self.waiting_reqs) == 0:
             if not return_failed_reqs:
                 return [], []
@@ -244,14 +285,6 @@ class SchedulerDisaggregationEncodeMixin:
     """
     Mixin for Scheduler to handle disaggregation encode
     """
-
-    def try_polling_from_initial_queue_for_tokenized_req(self: Scheduler):
-        tokenized_reqs = [
-            req
-            for req in self.disagg_encode_inflight_queue
-            if req.mm_hashes is not None
-        ]
-        self.disagg_encode_bootstrap_queue.extend(tokenized_reqs)
 
     def get_new_batch_encode(self: Scheduler) -> Optional[ScheduleBatch]:
         """Get a new batch for encode mode.
@@ -444,8 +477,6 @@ class SchedulerDisaggregationEncodeMixin:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
-            self.try_polling_from_initial_queue_for_tokenized_req()
-
             bootstrapped, _failed = (
                 self.disagg_encode_bootstrap_queue.pop_bootstrapped()
             )
@@ -607,11 +638,11 @@ class SchedulerDisaggregationEncodeMixin:
                 undone_reqs.append(req)
             elif poll == KVPoll.Success:  # transfer done
                 if req.multimodal_inputs is not None:
-                    mm_hash = MultimodalCache.combine_hashes(
-                        [item.hash for item in req.multimodal_inputs.mm_items]
+                    mm_pad_value = MultimodalCache.combine_hashes(
+                        [item.pad_value for item in req.multimodal_inputs.mm_items]
                     )
                     _loc = self.mm_embedding_pool.free(
-                        mm_hash, self.mm_embedding_allocator
+                        mm_pad_value, self.mm_embedding_allocator
                     )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 req.finished_reason = FINISH_LENGTH(length=0)
@@ -627,11 +658,11 @@ class SchedulerDisaggregationEncodeMixin:
                     error_message += f" with exception {e}"
                 logger.warning(error_message)
                 if req.multimodal_inputs is not None:
-                    mm_hash = MultimodalCache.combine_hashes(
-                        [item.hash for item in req.multimodal_inputs.mm_items]
+                    mm_pad_value = MultimodalCache.combine_hashes(
+                        [item.pad_value for item in req.multimodal_inputs.mm_items]
                     )
                     _loc = self.mm_embedding_pool.free(
-                        mm_hash, self.mm_embedding_allocator
+                        mm_pad_value, self.mm_embedding_allocator
                     )
                 # self.tree_cache.cache_finished_req(req)  # unlock the tree
                 prepare_abort(
@@ -679,14 +710,16 @@ class SchedulerDisaggregationEncodeMixin:
         Send a embedding to the prefill server
         """
 
-        mm_hash = MultimodalCache.combine_hashes(
-            [item.hash for item in req.multimodal_inputs.mm_items]
+        mm_pad_values = MultimodalCache.combine_hashes(
+            [item.pad_value for item in req.multimodal_inputs.mm_items]
         )
         # print(f"{mm_hash=}")
         # print(f"{[item.hash for item in req.multimodal_inputs.mm_items]=}")
         # mm_hash = req.multimodal_inputs.mm_items[0].hash
 
         mm_indices = (
-            self.mm_embedding_pool.get_embedding_locs_from_hash(mm_hash).cpu().numpy()
+            self.mm_embedding_pool.get_embedding_locs_from_hash(mm_pad_values)
+            .cpu()
+            .numpy()
         )
         req.disagg_kv_sender.send_embedding(mm_indices)

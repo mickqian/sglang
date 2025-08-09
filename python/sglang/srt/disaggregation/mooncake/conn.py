@@ -11,7 +11,7 @@ import threading
 import time
 from collections import defaultdict
 from functools import cache
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +26,7 @@ from sglang.srt.disaggregation.base.conn import (
     BaseKVSender,
     KVArgs,
     KVPoll,
+    TransferMMTokenizedData,
 )
 from sglang.srt.disaggregation.common.utils import (
     FastQueue,
@@ -45,6 +46,10 @@ from sglang.srt.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Global store for MM metadata so different managers in the same process can access it
+_MM_METADATA_STORE: Dict[int, TransferMMTokenizedData] = {}
+_MM_METADATA_LOCK = threading.Lock()
 
 
 class KVTransferError(Exception):
@@ -144,6 +149,8 @@ class MooncakeKVManager(BaseKVManager):
         is_mla_backend: Optional[bool] = False,
     ):
         self.kv_args = args
+        # TODO: move to parent ?
+        self.server_args = server_args
         self.local_ip = get_local_ip_auto()
         self.is_mla_backend = is_mla_backend
         self.disaggregation_mode = disaggregation_mode
@@ -174,6 +181,7 @@ class MooncakeKVManager(BaseKVManager):
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 self.start_prefill_thread()
             else:
+                # ENCODE delays registering until after sending MM metadata
                 self.start_encode_thread()
             self._register_to_bootstrap()
             self.session_failures = defaultdict(int)
@@ -237,7 +245,11 @@ class MooncakeKVManager(BaseKVManager):
             self.max_failures = max(
                 get_int_env_var("SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE", 2), 1
             )
-            self.start_decode_thread()
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                self.start_decode_thread()
+            else:
+                self.start_text_thread()
+
             self.connection_pool: Dict[str, Dict[str, Union[str, int]]] = {}
             self.prefill_tp_size_table: Dict[str, int] = {}
             self.prefill_dp_size_table: Dict[str, int] = {}
@@ -533,12 +545,105 @@ class MooncakeKVManager(BaseKVManager):
         return status
 
     def send_mm_metadata(
-        self, session_id: str, image_token_num: int, mm_hashes: List[int]
+        self,
+        bootstrap_addr: str,
+        bootstrap_room: int,
+        data: TransferMMTokenizedData,
     ):
-        status = self.engine.transfer_sync(session_id, src_addr, dst_addr, length)
+        """
+        Send dynamic multimodal metadata (non-registered memory) from encoder to prefill.
 
-    def sync_status_to_decode_endpoint(
-        self, remote: str, dst_port: int, room: int, status: int, prefill_rank: int
+        This runs before transfer_embedding and bootstrap. It broadcasts to all TP ranks
+        within the target DP group on the prefill side via the prefill bootstrap server.
+        """
+        try:
+            # 1) fetch prefill parallel info
+            # url = f"http://{bootstrap_addr}/route?engine_rank={-1}&target_dp_group={-1}"
+            # response = requests.get(url, timeout=5)
+            # if response.status_code != 200:
+            #     logger.error(
+            #         f"Failed to fetch prefill parallel info for MM metadata: {response.status_code}, {response.text}"
+            #     )
+            #     return
+
+            # info = response.json()
+            # prefill_tp_size = self.prefill_tp_size_table[bootstrap_addr]
+            # prefill_dp_size = self.prefill_dp_size_table[bootstrap_addr]
+            # if prefill_tp_size is None or prefill_dp_size is None or prefill_dp_size <= 0:
+            #     logger.error("Invalid prefill parallel info for MM metadata")
+            #     return
+
+            reqs_to_be_processed = (
+                self.transfer_infos[bootstrap_room].values()
+                if bootstrap_room in self.transfer_infos
+                else []
+            )
+
+            print(f"{reqs_to_be_processed=}")
+            print(f"{self.transfer_infos=}")
+            print(f"{bootstrap_room=}")
+
+            # 2) compute target dp group and per-dp tp size
+            # target_dp_group = bootstrap_room % prefill_dp_size
+            # tp_size_per_dp = prefill_tp_size // prefill_dp_size
+
+            # 3) broadcast to all tp ranks in the target dp group
+            bytes_list = data.get_bytes()
+            for req in reqs_to_be_processed:
+                print(f"{req=}")
+                self._connect(
+                    format_tcp_address(req.endpoint, req.dst_port),
+                    is_ipv6=is_valid_ipv6_address(req.endpoint),
+                ).send_multipart(
+                    [
+                        b"MM_META",
+                        str(bootstrap_room).encode("ascii"),
+                    ]
+                    + bytes_list
+                )
+                # self._connect(req.endpoint, is_ipv6=is_ipv6).send_multipart(
+                #     [
+                #         b"MM_META",
+                #         str(bootstrap_room).encode("ascii"),
+                #         input_ids_bytes,
+                #         mm_lens_bytes,
+                #         mm_hashes_bytes,
+                #     ]
+                # )
+
+            # for tp_rank_in_group in range(tp_size_per_dp):
+            #     try:
+            #         url = (
+            #             f"http://{bootstrap_addr}/route?engine_rank={tp_rank_in_group}&target_dp_group={target_dp_group}"
+            #         )
+            #         r = requests.get(url, timeout=5)
+            #         if r.status_code != 200:
+            #             logger.error(
+            #                 f"Failed to fetch prefill bootstrap info for DP {target_dp_group} TP {tp_rank_in_group}: {r.status_code}, {r.text}"
+            #             )
+            #             continue
+            #         bootstrap_info = r.json()
+            #         ip_address = bootstrap_info["rank_ip"]
+            #         port = bootstrap_info["rank_port"]
+            #         endpoint = format_tcp_address(ip_address, port)
+            #         is_ipv6 = is_valid_ipv6_address(ip_address)
+            #         # reuse cached socket
+            #         self._connect(endpoint, is_ipv6=is_ipv6).send_multipart(
+            #             [
+            #                 b"MM_META",
+            #                 str(bootstrap_room).encode("ascii"),
+            #                 input_ids_bytes,
+            #                 mm_lens_bytes,
+            #                 mm_hashes_bytes,
+            #             ]
+            #         )
+            #     except Exception as e:
+            #         logger.error(f"Failed to send MM metadata to {target_dp_group=}, {tp_rank_in_group=}: {e}")
+        except Exception as e:
+            logger.error(f"send_mm_metadata failed: {e}")
+
+    def sync_status_to_dst_endpoint(
+        self, remote: str, dst_port: int, room: int, status: int, src_rank: int
     ):
         self._connect(
             format_tcp_address(remote, dst_port), is_ipv6=is_valid_ipv6_address(remote)
@@ -546,7 +651,7 @@ class MooncakeKVManager(BaseKVManager):
             [
                 str(room).encode("ascii"),
                 str(status).encode("ascii"),
-                str(prefill_rank).encode("ascii"),
+                str(src_rank).encode("ascii"),
             ]
         )
 
@@ -572,7 +677,7 @@ class MooncakeKVManager(BaseKVManager):
                                 f"Decode instance could be dead, remote mooncake session {req.mooncake_session_id} is not alive",
                             )
                             self.update_status(embedding_chunk.room, KVPoll.Failed)
-                            self.sync_status_to_decode_endpoint(
+                            self.sync_status_to_dst_endpoint(
                                 req.endpoint,
                                 req.dst_port,
                                 req.room,
@@ -586,7 +691,7 @@ class MooncakeKVManager(BaseKVManager):
                     target_rank_registration_info: KVArgsRegisterInfo = (
                         self.decode_kv_args_table[req.mooncake_session_id]
                     )
-                    # print(target_rank_registration_info)
+                    logger.debug(f"{dst_kv_indice=} {embedding_chunk.mm_indices=}")
 
                     ret = self.send_embedding(
                         session_id=req.mooncake_session_id,
@@ -608,7 +713,7 @@ class MooncakeKVManager(BaseKVManager):
                             f"Failed to send kv chunk of {embedding_chunk.room} to {req.endpoint}:{req.dst_port}",
                         )
                         self.update_status(embedding_chunk.room, KVPoll.Failed)
-                        self.sync_status_to_decode_endpoint(
+                        self.sync_status_to_dst_endpoint(
                             req.endpoint,
                             req.dst_port,
                             req.room,
@@ -624,7 +729,7 @@ class MooncakeKVManager(BaseKVManager):
                         status = KVPoll.Success if all(polls) else KVPoll.Failed
                         self.update_status(req.room, status)
                         for endpoint, dst_port, room in dst_ranks_infos:
-                            self.sync_status_to_decode_endpoint(
+                            self.sync_status_to_dst_endpoint(
                                 endpoint, dst_port, room, status, local_rank
                             )
 
@@ -658,7 +763,7 @@ class MooncakeKVManager(BaseKVManager):
                                     f"Decode instance could be dead, remote mooncake session {req.mooncake_session_id} is not alive",
                                 )
                                 self.update_status(kv_chunk.room, KVPoll.Failed)
-                                self.sync_status_to_decode_endpoint(
+                                self.sync_status_to_dst_endpoint(
                                     req.endpoint,
                                     req.dst_port,
                                     req.room,
@@ -720,7 +825,7 @@ class MooncakeKVManager(BaseKVManager):
                                 f"Failed to send kv chunk of {kv_chunk.room} to {req.endpoint}:{req.dst_port}",
                             )
                             self.update_status(kv_chunk.room, KVPoll.Failed)
-                            self.sync_status_to_decode_endpoint(
+                            self.sync_status_to_dst_endpoint(
                                 req.endpoint,
                                 req.dst_port,
                                 req.room,
@@ -747,7 +852,7 @@ class MooncakeKVManager(BaseKVManager):
                                 status = KVPoll.Success if all(polls) else KVPoll.Failed
                                 self.update_status(req.room, status)
                                 for endpoint, dst_port, room in dst_ranks_infos:
-                                    self.sync_status_to_decode_endpoint(
+                                    self.sync_status_to_dst_endpoint(
                                         endpoint, dst_port, room, status, local_rank
                                     )
                     else:
@@ -773,6 +878,92 @@ class MooncakeKVManager(BaseKVManager):
         print(f"_bind_server_socket {self.local_ip=} {self.rank_port=}")
         self.server_socket.bind(format_tcp_address(self.local_ip, self.rank_port))
 
+    def check_if_mm_metadata(self, waiting_req_bytes) -> bool:
+        logger.debug("check_if_mm_metadata")
+        # Handle encoder->prefill MM metadata
+        if (
+            self.server_args.encoder_disaggregated
+            and waiting_req_bytes
+            and waiting_req_bytes[0] == b"MM_META"
+        ):
+            try:
+                room = int(waiting_req_bytes[1].decode("ascii"))
+                logger.debug(f"receiver received mm_metadata of room {room}")
+                input_ids = np.frombuffer(waiting_req_bytes[2], dtype=np.int32)
+                mm_embedding_lens = np.frombuffer(waiting_req_bytes[3], dtype=np.int32)
+                mm_offsets = np.frombuffer(waiting_req_bytes[4], dtype=np.int32)
+
+                mm_pad_values = np.frombuffer(waiting_req_bytes[5], dtype=np.int32)
+                if len(waiting_req_bytes) > 6:
+                    mrope_positions = np.frombuffer(
+                        waiting_req_bytes[6], dtype=np.int32
+                    )
+                    mrope_positions_delta = np.frombuffer(
+                        waiting_req_bytes[7], dtype=np.int32
+                    )
+                    print(f"911 {mrope_positions}")
+                else:
+                    mrope_positions = None
+                    mrope_positions_delta = None
+                with _MM_METADATA_LOCK:
+                    _MM_METADATA_STORE[room] = TransferMMTokenizedData(
+                        input_ids=input_ids,
+                        mm_embedding_lens=mm_embedding_lens,
+                        mm_offsets=mm_offsets,
+                        mm_pad_values=mm_pad_values,
+                        mrope_positions=mrope_positions,
+                        mrope_positions_delta=mrope_positions_delta,
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to parse MM_META: {e}")
+        return False
+
+    def start_text_thread(self):
+        self.rank_port = get_free_port()
+        self._bind_server_socket()
+
+        def bootstrap_thread():
+            """This thread recvs pre-alloc notification from the prefill/text engine"""
+            # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
+            while True:
+                data = self.server_socket.recv_multipart()
+
+                if self.check_if_mm_metadata(data):
+                    continue
+                assert len(data) == 3, len(data)
+                bootstrap_room = data[0]
+                status = data[1]
+                prefill_rank = data[2]
+                status = int(status.decode("ascii"))
+                bootstrap_room = int(bootstrap_room.decode("ascii"))
+                prefill_rank = int(prefill_rank.decode("ascii"))
+                logger.debug(
+                    f"text thread received waiting_req_bytes {bootstrap_room=}"
+                )
+                if status == KVPoll.Success:
+                    if bootstrap_room in self.request_status:
+                        self.prefill_response_tracker[bootstrap_room].add(prefill_rank)
+                        expected_response_num = (
+                            self.required_prefill_response_num_table[bootstrap_room]
+                        )
+                        arrived_response_num = len(
+                            self.prefill_response_tracker[bootstrap_room]
+                        )
+                        if (
+                            self.is_mla_backend
+                            or arrived_response_num == expected_response_num
+                        ):
+                            self.update_status(bootstrap_room, KVPoll.Success)
+                elif status == KVPoll.Failed:
+                    self.record_failure(
+                        bootstrap_room,
+                        f"Failed to get kvcache from prefill instance, it might be dead",
+                    )
+                    self.update_status(bootstrap_room, status)
+
+        threading.Thread(target=bootstrap_thread).start()
+
     def start_prefill_thread(self):
         self.rank_port = get_free_port()
         self._bind_server_socket()
@@ -782,6 +973,10 @@ class MooncakeKVManager(BaseKVManager):
             # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
             while True:
                 waiting_req_bytes = self.server_socket.recv_multipart()
+
+                if self.check_if_mm_metadata(waiting_req_bytes):
+                    continue
+                logger.debug(f"receiver received bootstrap info")
                 room = waiting_req_bytes[0].decode("ascii")
                 mooncake_session_id = waiting_req_bytes[3].decode("ascii")
                 if room == "None":
@@ -806,6 +1001,11 @@ class MooncakeKVManager(BaseKVManager):
                     self.transfer_infos[room][mooncake_session_id] = (
                         TransferInfo.from_zmq(waiting_req_bytes)
                     )
+                    # print(f"{waiting_req_bytes[4]=}")
+                    # print(f"{waiting_req_bytes[5]=}")
+                    #
+                    # if waiting_req_bytes[4] != b"":
+                    # NOTE: in ep, only if the dst_indices is not none, bootstrapped is finished
                     # NOTE: after bootstrapping we can mark the req as waiting for input
                     if len(self.transfer_infos[room]) == required_dst_info_num:
                         self.update_status(room, KVPoll.WaitingForInput)
@@ -854,20 +1054,29 @@ class MooncakeKVManager(BaseKVManager):
                     #     f"transfer_infos {room=} {mooncake_session_id=} {self.transfer_infos[room][mooncake_session_id]=}"
                     # )
                     # NOTE: after bootstrapping we can mark the req as waiting for input
-                    if len(self.transfer_infos[room]) == required_dst_info_num:
-                        self.update_status(room, KVPoll.WaitingForInput)
+                    # print(f"{waiting_req_bytes[4]=}")
+                    # print(f"{waiting_req_bytes[5]=}")
+                    # check dst ptrs
+                    if waiting_req_bytes[4] != b"":
+                        if len(self.transfer_infos[room]) == required_dst_info_num:
+                            self.update_status(room, KVPoll.WaitingForInput)
 
         threading.Thread(target=bootstrap_thread).start()
 
     def start_decode_thread(self):
+        """
+        Receives embedding from encoder (
+        """
         self.rank_port = get_free_port()
         self._bind_server_socket()
 
         def decode_thread():
             while True:
-                (bootstrap_room, status, prefill_rank) = (
-                    self.server_socket.recv_multipart()
-                )
+                data = self.server_socket.recv_multipart()
+                assert len(data) == 3, len(data)
+                bootstrap_room = data[0]
+                status = data[1]
+                prefill_rank = data[2]
                 status = int(status.decode("ascii"))
                 bootstrap_room = int(bootstrap_room.decode("ascii"))
                 prefill_rank = int(prefill_rank.decode("ascii"))
@@ -1032,7 +1241,7 @@ class MooncakeKVManager(BaseKVManager):
         return self.request_status[bootstrap_room]
 
     def update_status(self, bootstrap_room: int, status: KVPoll):
-        # print(f"update status of {bootstrap_room=} with {status=}")
+        logger.debug(f"update status of {bootstrap_room=} with {status=}")
         if bootstrap_room not in self.request_status:
             self.request_status[bootstrap_room] = status
         else:
@@ -1051,8 +1260,19 @@ class MooncakeKVManager(BaseKVManager):
     def get_session_id(self):
         return self.engine.get_session_id()
 
+    # -------- MM metadata helpers ---------
+    def get_mm_metadata(self, bootstrap_room: int) -> Optional[TransferMMTokenizedData]:
+        with _MM_METADATA_LOCK:
+            return _MM_METADATA_STORE.get(bootstrap_room)
+
+    def clear_mm_metadata(self, bootstrap_room: int) -> None:
+        with _MM_METADATA_LOCK:
+            if bootstrap_room in _MM_METADATA_STORE:
+                del _MM_METADATA_STORE[bootstrap_room]
+
     def _register_to_bootstrap(self):
         """Register KVSender to bootstrap server via HTTP POST."""
+        print(f"_register_to_bootstrap")
         if self.dist_init_addr:
             if self.dist_init_addr.startswith("["):  # [ipv6]:port or [ipv6]
                 if self.dist_init_addr.endswith("]"):
@@ -1153,7 +1373,7 @@ class MooncakeKVSender(BaseKVSender):
         # inner state
         self.curr_idx = 0
 
-    def init(self, num_kv_indices: int, aux_index: Optional[int] = None):
+    def init(self, num_kv_indices: Optional[int], aux_index: Optional[int] = None):
         self.num_kv_indices = num_kv_indices
         self.aux_index = aux_index
 
@@ -1234,6 +1454,16 @@ class MooncakeKVSender(BaseKVSender):
             mm_indices,
         )
 
+    def send_mm_metadata(self, data: TransferMMTokenizedData):
+        """Send multimodal metadata prior to bootstrap and embedding transfer."""
+        logger.debug(f"sending mm metadata, {data=}")
+
+        self.kv_mgr.send_mm_metadata(
+            bootstrap_addr=self.bootstrap_server_url,
+            bootstrap_room=self.bootstrap_room,
+            data=data,
+        )
+
 
 class MooncakeKVReceiver(BaseKVReceiver):
     _ctx = zmq.Context()
@@ -1249,6 +1479,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
         bootstrap_room: Optional[int] = None,
         data_parallel_rank: Optional[int] = None,
     ):
+        print(f"1477")
         self.bootstrap_room = bootstrap_room
         self.bootstrap_addr = bootstrap_addr
         self.kv_mgr = mgr
@@ -1258,26 +1489,32 @@ class MooncakeKVReceiver(BaseKVReceiver):
         self.init_time = None
         self.data_parallel_rank = data_parallel_rank
         self.disaggregation_mode = disaggregation_mode
+        print(f"1486")
 
         # if self.disaggregation_mode == DisaggregationMode.PREFILL:
         #     # FIXME
         #     self.target_dp_group = 0
         #     self.target_tp_rank = -1
         #     self.target_tp_ranks = [0]
-        # elif self.disaggregation_mode == DisaggregationMode.DECODE:
         if self.bootstrap_addr not in self.kv_mgr.prefill_dp_size_table:
+            print(f"1505")
 
             self.prefill_tp_size, self.prefill_dp_size = (
                 self._get_prefill_parallel_info_from_server()
             )
+            print(f"1510")
+
             if self.prefill_tp_size is None or self.prefill_dp_size is None:
                 self.kv_mgr.record_failure(
                     self.bootstrap_room,
                     f"Could not fetch prefill parallel info from bootstrap_addr: {self.bootstrap_addr}",
                 )
                 self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
+                print(f"1518")
                 return
             else:
+                print(f"1521")
+
                 logger.debug(
                     f"Fetch prefill parallel info from [{self.bootstrap_addr}]: DP size:{self.prefill_dp_size}, TP size:{self.prefill_tp_size}"
                 )
@@ -1288,12 +1525,14 @@ class MooncakeKVReceiver(BaseKVReceiver):
                     self.prefill_dp_size
                 )
         else:
+            print(f"1533")
             self.prefill_tp_size = self.kv_mgr.prefill_tp_size_table[
                 self.bootstrap_addr
             ]
             self.prefill_dp_size = self.kv_mgr.prefill_dp_size_table[
                 self.bootstrap_addr
             ]
+        print(f"1520")
 
         # Currently, we don't allow prefill instance and decode instance to
         # have different TP sizes per DP rank, except for models using MLA.
@@ -1358,6 +1597,8 @@ class MooncakeKVReceiver(BaseKVReceiver):
             f"{self.bootstrap_addr}_{self.target_dp_group}_{self.target_tp_rank}"
         )
 
+        print(f"1584")
+
         if bootstrap_key not in self.kv_mgr.connection_pool:
             bootstrap_infos = []
             for target_tp_rank in self.target_tp_ranks:
@@ -1394,7 +1635,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
             self._register_kv_args()
         else:
             self.bootstrap_infos = self.kv_mgr.connection_pool[bootstrap_key]
-
+        print(f"{self.bootstrap_infos=}")
         assert len(self.bootstrap_infos) > 0
         self.kv_mgr.addr_to_rooms_tracker[self.bootstrap_addr].add(self.bootstrap_room)
         self.kv_mgr.update_status(self.bootstrap_room, KVPoll.WaitingForInput)
@@ -1417,12 +1658,15 @@ class MooncakeKVReceiver(BaseKVReceiver):
             logger.error(f"Error fetching prefill info from bootstrap: {e}")
             return None
 
-    def _get_prefill_parallel_info_from_server(self) -> Tuple[int, int]:
+    def _get_prefill_parallel_info_from_server(
+        self,
+    ) -> tuple[int, int] | tuple[None, None]:
         """Fetch the prefill parallel info from the bootstrap server."""
         try:
             url = f"http://{self.bootstrap_addr}/route?engine_rank={-1}&target_dp_group={-1}"
+
             response = requests.get(url)
-            logger.debug(f"{response.json()=}")
+            logger.debug(f"{url=} {response.json()=}")
             if response.status_code == 200:
                 prefill_parallel_info = response.json()
                 return int(prefill_parallel_info["prefill_tp_size"]), int(
@@ -1442,6 +1686,8 @@ class MooncakeKVReceiver(BaseKVReceiver):
         tp_size = self.kv_mgr.tp_size // self.kv_mgr.dp_size
         dst_tp_rank = str(tp_rank).encode("ascii")
         dst_tp_size = str(tp_size).encode("ascii")
+        logger.debug(f"receiver _register_kv_args")
+
         for bootstrap_info in self.bootstrap_infos:
             if self.disaggregation_mode == DisaggregationMode.DECODE:
                 packed_kv_data_ptrs = b"".join(
@@ -1453,6 +1699,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 kv_item_len = self.kv_mgr.kv_args.kv_item_lens[0]
                 dst_kv_item_len = str(kv_item_len).encode("ascii")
                 sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
+
                 with lock:
                     sock.send_multipart(
                         [
@@ -1471,6 +1718,7 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 self.disaggregation_mode == DisaggregationMode.PREFILL
                 or self.disaggregation_mode == DisaggregationMode.TEXT
             ):
+
                 packed_kv_data_ptrs = b"".join(
                     struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.kv_data_ptrs
                 )
@@ -1480,6 +1728,10 @@ class MooncakeKVReceiver(BaseKVReceiver):
                 kv_item_len = self.kv_mgr.kv_args.kv_item_lens[0]
                 # print(f"{self.kv_mgr.kv_args.kv_data_ptrs=}, {kv_item_len=}")
                 dst_kv_item_len = str(kv_item_len).encode("ascii")
+                logger.debug(
+                    f"receiver _register_kv_args, _register_kv_args with {bootstrap_info=} "
+                )
+                logger.debug(f"{self.kv_mgr.local_ip=}")
                 sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
                 sock.send_multipart(
                     [
@@ -1518,17 +1770,27 @@ class MooncakeKVReceiver(BaseKVReceiver):
         return sock, lock
 
     def init(self, kv_indices: npt.NDArray[np.int32], aux_index: Optional[int] = None):
+        logger.debug(f"receiver initializing... ")
+
         for bootstrap_info in self.bootstrap_infos:
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             is_dummy = bootstrap_info["is_dummy"]
             logger.debug(
                 f"kv receiver init sending: {bootstrap_info=} {self.bootstrap_room=} "
             )
-            logger.debug(
-                f"kv receiver init sending: {kv_indices=}"
-                f"{len(kv_indices.tobytes())=}"
-                f"{type(kv_indices)=}"
-            )
+            if kv_indices is None:
+                is_dummy = True
+                # logger.debug(
+                #     f"kv receiver init sending: {kv_indices=}"
+                #     f"{len(kv_indices.tobytes())=}"
+                #     f"{type(kv_indices)=}"
+                # )
+                # logger.debug(f"receiver initializing, registering with {bootstrap_info=} ")
+                # kv_indices = kv_indices.tobytes() if not is_dummy else b"",
+            else:
+                ...
+                # kv_indices = b""
+
             with lock:
                 sock.send_multipart(
                     [
@@ -1635,7 +1897,7 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
     async def _handle_route_put(self, request: web.Request):
         data = await request.json()
         role = data["role"]
-
+        print(f"route put {data=}")
         if role == DisaggregationMode.PREFILL.role_str:
             tp_size = data["tp_size"]
             dp_size = data["dp_size"]
@@ -1717,6 +1979,7 @@ class MooncakeKVBootstrapServer(BaseKVBootstrapServer):
                 "prefill_tp_size": self.tp_size,
                 "prefill_dp_size": self.dp_size,
             }
+            print(f"responding get with: {prefill_parallel_info=}")
             return web.json_response(prefill_parallel_info, status=200)
 
         # Find corresponding prefill info
