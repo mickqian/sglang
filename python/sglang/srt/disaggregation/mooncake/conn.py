@@ -1088,7 +1088,11 @@ class MooncakeKVManager(BaseKVManager):
             self.transfer_infos[room][mooncake_session_id] = TransferInfo.from_zmq(data)
             # NOTE: in ep, only if the dst_indices is not none, bootstrapped is finished
             # NOTE: after bootstrapping we can mark the req as waiting for input
-            if len(self.transfer_infos[room]) == required_dst_info_num:
+            if (
+                not self.transfer_infos[room][mooncake_session_id].is_dummy
+                and len(self.transfer_infos[room]) == required_dst_info_num
+            ):
+                # Here "dummy" refers to metadata dummy, not TP/MLA related dummy
                 self.update_status(room, KVPoll.WaitingForInput)
         logger.debug(f"try_handle_sender_data receiver received bootstrap info handled")
 
