@@ -164,6 +164,7 @@ class TestVLMModels(unittest.IsolatedAsyncioTestCase):
         print(f"\nTesting model: {model.model}{test_name}")
 
         process = None
+        results = defaultdict()
         mmmu_accuracy = 0  # Initialize to handle potential exceptions
         server_output = ""
 
@@ -212,7 +213,7 @@ class TestVLMModels(unittest.IsolatedAsyncioTestCase):
             # Get the result file
             files = glob.glob(f"{output_path}/*.json")
 
-                result_file_path = max(files, key=os.path.getmtime)
+            result_file_path = max(files, key=os.path.getmtime)
 
             with open(result_file_path, "r") as f:
                 result = json.load(f)
@@ -248,20 +249,18 @@ class TestVLMModels(unittest.IsolatedAsyncioTestCase):
             )
 
             return server_output
-
         except Exception as e:
             print(f"Error testing {model.model}{test_name}: {e}")
             self.fail(f"Test failed for {model.model}{test_name}: {e}")
-
         finally:
             print(json.dumps(dict(results), indent=4))
-                # Ensure process cleanup happens regardless of success/failure
-                if process is not None and process.poll() is None:
-                    print(f"Cleaning up process {process.pid}")
-                    try:
-                        kill_process_tree(process.pid)
-                    except Exception as e:
-                        print(f"Error killing process: {e}")
+            # Ensure process cleanup happens regardless of success/failure
+            if process is not None and process.poll() is None:
+                print(f"Cleaning up process {process.pid}")
+                try:
+                    kill_process_tree(process.pid)
+                except Exception as e:
+                    print(f"Error killing process: {e}")
             print(json.dumps(dict(results), indent=4))
 
             # clean up temporary files
