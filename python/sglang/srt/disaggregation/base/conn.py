@@ -33,12 +33,12 @@ class TransferMMTokenizedData:
             getattr(req, "mm_embedding_lens", []), dtype=np.int32
         )
         mm_offsets = np.asarray(getattr(req, "mm_offsets", []), dtype=np.int32)
-        print(f"{mm_offsets.tolist()=}")
+        # print(f"{mm_offsets.tolist()=}")
         mm_pad_values = np.asarray(
             getattr(req, "mm_pad_values", []),
             dtype=np.int32,
         )
-        print(f"195 {req.multimodal_inputs.mrope_positions.shape=}")
+        # print(f"195 {req.multimodal_inputs.mrope_positions.shape=}")
         mrope_positions = np.asarray(
             getattr(req.multimodal_inputs, "mrope_positions", []), dtype=np.int32
         )
@@ -46,7 +46,7 @@ class TransferMMTokenizedData:
             getattr(req.multimodal_inputs, "mrope_position_delta", []),
             dtype=np.int32,
         )
-        print(f"{mrope_positions_delta=}")
+        # print(f"{mrope_positions_delta=}")
 
         return TransferMMTokenizedData(
             input_ids,

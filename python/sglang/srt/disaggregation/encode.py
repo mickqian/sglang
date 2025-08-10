@@ -193,6 +193,11 @@ class EncodeBootstrapQueue:
                     TransferMMTokenizedData.from_req(req)
                 )
                 return True
+            else:
+                logger.debug(
+                    f"try_send_mm_metadata_for_req, but transfer infos not ready {self.kv_manager.transfer_infos=}"
+                )
+
         except Exception as e:
             logger.error(f"Failed to send MM metadata: {e}")
             return False

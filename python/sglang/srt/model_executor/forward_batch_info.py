@@ -576,7 +576,6 @@ class ForwardBatch:
                         * 3
                     )
                 else:
-                    print(f"{mm_input.mrope_positions.shape=}")
                     mrope_positions = mm_input.mrope_positions[
                         :,
                         extend_prefix_len : extend_prefix_len + extend_seq_len,

@@ -291,7 +291,7 @@ class NixlKVManager(CommonKVManager):
             if req.is_dummy():
                 continue
 
-            chunked_dst_kv_indice = req.dst_kv_indices[index_slice]
+            chunked_dst_kv_indice = req.common_info.dst_kv_indices[index_slice]
             assert len(chunked_dst_kv_indice) == len(kv_indices)
             assert req.agent_name in self.decode_kv_args_table
 

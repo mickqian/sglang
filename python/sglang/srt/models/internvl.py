@@ -10,6 +10,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
+from sglang.srt.disaggregation.utils import is_encoder, should_load_vision_model
 from sglang.srt.distributed import parallel_state
 from sglang.srt.layers.attention.vision import SingletonCache, VisionAttention
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
@@ -432,7 +433,12 @@ class InternVLChatModel(nn.Module):
         logger.info(f"num_image_token: {self.num_image_token}")
         logger.info(f"ps_version: {self.ps_version}")
 
-        self.vision_model = InternVisionModel(config.vision_config)
+        self.is_encoder, self.should_load_vision_model = (
+            is_encoder(),
+            should_load_vision_model(),
+        )
+        if self.should_load_vision_model:
+            self.vision_model = InternVisionModel(config.vision_config)
         if config.llm_config.architectures[0] == "Qwen2ForCausalLM":
             self.language_model = Qwen2ForCausalLM(
                 config=config.llm_config, quant_config=quant_config
@@ -628,6 +634,12 @@ class InternVLChatModel(nn.Module):
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+
+            if "vision_model" in name:
+                if not self.should_load_vision_model:
+                    continue
+            elif self.is_encoder:
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

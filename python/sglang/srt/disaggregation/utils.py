@@ -3,12 +3,11 @@ from __future__ import annotations
 import dataclasses
 import os
 import random
-import threading
 import warnings
 from collections import deque
 from contextlib import nullcontext
 from enum import Enum
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import requests
@@ -18,7 +17,7 @@ import torch.distributed as dist
 from sglang.srt.utils import get_ip, is_npu
 
 if TYPE_CHECKING:
-    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.managers.schedule_batch import Req, global_server_args_dict
 
 #########################
 # Constants & Enums
@@ -328,8 +327,6 @@ class KVClassType(Enum):
 
 
 def get_kv_class(transfer_backend: TransferBackend, class_type: KVClassType):
-    from sglang.srt.disaggregation.fake import FakeKVReceiver, FakeKVSender
-
     if transfer_backend == TransferBackend.MOONCAKE:
         from sglang.srt.disaggregation.base import KVArgs
         from sglang.srt.disaggregation.mooncake import (

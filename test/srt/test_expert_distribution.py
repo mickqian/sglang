@@ -85,7 +85,7 @@ class TestExpertDistribution(CustomTestCase):
                 data = torch.load(
                     list(Path(tmp_dir).glob("*.pt"))[0], weights_only=True
                 )
-                print(f"{data=}")
+                # print(f"{data=}")
 
                 if mode in ["per_pass", "per_token"]:
                     self.assertGreater(len(data), 0, "Should contain data rows")

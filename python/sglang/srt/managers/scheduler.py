@@ -828,6 +828,7 @@ class Scheduler(
 
                 # The prefill requests pending for pre-allocation, waiting for encoder embeddings
                 self.disagg_prefill_prealloc_queue = MMEmbeddingPreallocQueue(
+                    disaggregation_mode=self.server_args.disaggregation_mode,
                     mm_embedding_pool=self.mm_embedding_pool,
                     token_to_kv_pool_allocator=self.mm_embedding_allocator,
                     # req_to_metadata_buffer_idx_allocator=self.req_to_metadata_buffer_idx_allocator,
@@ -1383,8 +1384,9 @@ class Scheduler(
         ):
             if self.server_args.encoder_disaggregated:
                 if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                    self.disagg_prefill_bootstrap_queue.add(req)
-                print(f"{req.contains_mm_input()=}")
+                    pass
+                    # self.disagg_prefill_bootstrap_queue.add(req)
+                # print(f"{req.contains_mm_input()=}")
                 if req.contains_mm_input():
                     # requires receiving mm embedding
                     self.disagg_prefill_prealloc_queue.add(req)

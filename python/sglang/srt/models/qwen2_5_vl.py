@@ -51,12 +51,10 @@ from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternMultimodalTokens,
     general_mm_embed_routine,
+    is_encoder,
+    should_load_vision_model,
 )
-from sglang.srt.managers.schedule_batch import (
-    MultimodalDataItem,
-    MultimodalInputs,
-    global_server_args_dict,
-)
+from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -466,9 +464,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
         super().__init__()
 
         self.config = config
-        self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
-        self.should_load_vision_model = (
-            self.is_encoder or not global_server_args_dict["encoder_disaggregated"]
+        self.is_encoder, self.should_load_vision_model = (
+            is_encoder(),
+            should_load_vision_model(),
         )
         if self.should_load_vision_model:
             self.visual = Qwen2_5_VisionTransformer(
@@ -590,7 +588,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if "visual" in name and not self.should_load_vision_model:
+            if "visual" in name:
+                if not self.should_load_vision_model:
+                    continue
+            elif self.is_encoder:
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

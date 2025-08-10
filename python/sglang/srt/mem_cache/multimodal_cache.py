@@ -252,7 +252,7 @@ class PagedMultiModalEmbeddingPool(MultimodalCache):
         and concatenating them.
         """
         # 1. Try with combined hash
-        print(f"{self.mm_hash_to_indices.keys()=}")
+        # print(f"{self.mm_hash_to_indices.keys()=}")
         combined_hash = combined_hash or self.combine_hashes(mm_hashes)
         combined_embedding = self.try_get_mm_embedding(combined_hash)
         if combined_embedding is not None:
