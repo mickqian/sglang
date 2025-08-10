@@ -181,26 +181,26 @@ class TestVLMModels(unittest.IsolatedAsyncioTestCase):
                 stdout_file = open("/tmp/server_stdout.log", "w")
                 stderr_file = open("/tmp/server_stderr.log", "w")
 
-            #Launch server for testing
+                # Launch server for testing
                 process = popen_launch_server(
                     model.model,
                     base_url=self.base_url,
                     timeout=self.time_out,
-                other_args=[
-                    "--trust-remote-code",
-                    "--cuda-graph-max-bs",
-                    "32",
-                    "--enable-multimodal",
-                    "--mem-fraction-static",
-                    str(self.parsed_args.mem_fraction_static),  # Use class variable
-                    "--log-level",
-                    log_level,
-                ],
-                env=process_env,
-                return_stdout_stderr=(
-                    (stdout_file, stderr_file) if capture_output else None
-                ),
-            )
+                    other_args=[
+                        "--trust-remote-code",
+                        "--cuda-graph-max-bs",
+                        "32",
+                        "--enable-multimodal",
+                        "--mem-fraction-static",
+                        str(self.parsed_args.mem_fraction_static),  # Use class variable
+                        "--log-level",
+                        log_level,
+                    ],
+                    env=process_env,
+                    return_stdout_stderr=(
+                        (stdout_file, stderr_file) if capture_output else None
+                    ),
+                )
 
                 # Run evaluation
                 self.run_mmmu_eval(
