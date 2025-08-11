@@ -740,7 +740,6 @@ class MooncakeKVManager(BaseKVManager):
                             break
 
                     dst_mm_indices = req.common_info.dst_kv_indices
-                    print(f"{dst_mm_indices=}")
                     target_rank_registration_info: KVArgsRegisterInfo = (
                         self.decode_kv_args_table[req.common_info.mooncake_session_id]
                     )

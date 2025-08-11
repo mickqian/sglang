@@ -102,7 +102,7 @@ class VisionSdpaAttention(nn.Module):
     @staticmethod
     @lru_cache(maxsize=128)
     def _generate_mask_cache(
-        s: int, flatten_batch: bool, cu_seqlens: tuple
+        s: int, flatten_batch: bool, cu_seqlens: tuple, device
     ) -> torch.BoolTensor:
         """
         Generate a boolean attention mask with caching mechanism.
@@ -114,7 +114,7 @@ class VisionSdpaAttention(nn.Module):
             attention mask tensor of shape [b, 1, s, s] or [1, s, s]
         """
         if flatten_batch:
-            mask = torch.zeros([1, s, s], dtype=torch.bool)
+            mask = torch.zeros([1, s, s], dtype=torch.bool, device=device)
             for i in range(1, len(cu_seqlens)):
                 start = cu_seqlens[i - 1]
                 end = cu_seqlens[i]
@@ -127,6 +127,7 @@ class VisionSdpaAttention(nn.Module):
             # [b, 1, 1, 1]
             seq_lens = torch.tensor(
                 [end - start for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])],
+                device=device,
             ).view(-1, 1, 1, 1)
 
             mask = (row_indices < seq_lens) & (col_indices < seq_lens)
@@ -137,6 +138,7 @@ class VisionSdpaAttention(nn.Module):
         self,
         s: int,
         cu_seqlens: Optional[torch.Tensor],
+        device,
         flatten_batch: bool = False,
     ) -> Optional[torch.Tensor]:
         r"""
@@ -153,7 +155,7 @@ class VisionSdpaAttention(nn.Module):
 
         cu_seqlens_tuple = tuple(cu_seqlens.cpu().tolist())
 
-        return self._generate_mask_cache(s, flatten_batch, cu_seqlens_tuple)
+        return self._generate_mask_cache(s, flatten_batch, cu_seqlens_tuple, device)
 
     def forward(
         self,
@@ -181,7 +183,10 @@ class VisionSdpaAttention(nn.Module):
         # [b, 1, s, s]
         if attention_mask is None:
             attention_mask = self.generate_patch_attention_mask(
-                s, cu_seqlens, flatten_batch=self.flatten_batch
+                s,
+                cu_seqlens,
+                q.device,
+                flatten_batch=self.flatten_batch,
             )
 
         if attention_mask is None:

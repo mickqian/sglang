@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
+from sglang.srt.disaggregation.base.conn import TransferMMTokenizedData
 from sglang.srt.disaggregation.decode import EmbeddingRequest
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
@@ -601,13 +602,13 @@ class MMEmbeddingPreallocQueue:
             if not encode_req.waiting_for_input:
                 continue
 
+            if self.mm_embedding_pool.available_size() <= 0:
+                break
+
             # Require encoder-side metadata to be present; otherwise skip this req for now
             meta = self.kv_manager.get_mm_metadata(encode_req.req.bootstrap_room)
             if meta is None:
                 continue
-
-            if self.mm_embedding_pool.available_size() <= 0:
-                break
 
             # if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
             #     break
@@ -623,7 +624,7 @@ class MMEmbeddingPreallocQueue:
 
             allocatable_tokens -= required_tokens_for_request
             mm_embedding_indices = (
-                self._pre_alloc(encode_req.req).to(torch.int32).cpu().numpy()
+                self._pre_alloc(encode_req.req, meta).to(torch.int32).cpu().numpy()
             )  # it's type should be int32
 
             # logger.debug(f"{encode_req.req.mm_pad_values=}")
@@ -657,7 +658,7 @@ class MMEmbeddingPreallocQueue:
     def _allocatable_tokens(self) -> int:
         return self.mm_embedding_pool.available_size()
 
-    def _pre_alloc(self, req: Req) -> List[torch.Tensor]:
+    def _pre_alloc(self, req: Req, meta: TransferMMTokenizedData) -> List[torch.Tensor]:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
         logger.debug(f"pre_allocating...")
         # req_pool_indices = self.mm_embedding_pool.alloc(1)
@@ -676,7 +677,6 @@ class MMEmbeddingPreallocQueue:
         # else:
 
         # Strictly require metadata; caller guarantees presence (pop_preallocated skips otherwise)
-        meta = self.kv_manager.get_mm_metadata(req.bootstrap_room)
         assert (
             meta is not None
             and meta.mm_embedding_lens is not None
@@ -747,6 +747,7 @@ class MMEmbeddingPreallocQueue:
         # req.fill_ids = req.origin_input_ids + req.output_ids
         # req.extend_input_len = len(req.origin_input_ids)
         logger.debug("preallocated")
+        self.kv_manager.clear_mm_metadata(req.bootstrap_room)
         return embedding_locs
 
 
