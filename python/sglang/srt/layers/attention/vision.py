@@ -242,6 +242,7 @@ class VisionTritonAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor],
+        max_seqlen: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -254,7 +255,8 @@ class VisionTritonAttention(nn.Module):
         # [b * s, head, head_size]
         output = torch.empty_like(q)
         seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = kwargs["max_seqlen"]
+        if max_seqlen is None:
+            max_seqlen = kwargs["max_seqlen"]
         context_attention_fwd(
             q,
             k,
@@ -286,6 +288,7 @@ class VisionFlash3Attention(nn.Module):
         cu_seqlens: Optional[Union[SingletonCache, torch.Tensor]],
         bsz: int,
         seq_len: int,
+        max_seqlen: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -303,8 +306,10 @@ class VisionFlash3Attention(nn.Module):
                 )
             cu_seqlens = cu_seqlens.get_data()
 
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = kwargs["max_seqlen"]
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
+        if max_seqlen is None:
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seq_lens.max().item()
         output = flash_attn_varlen_func(
             q,
             k,
