@@ -176,6 +176,7 @@ class Qwen2VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
+        max_seqlen: int,
     ) -> torch.Tensor:
         hidden_states = self.norm1(x)
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
@@ -183,6 +184,7 @@ class Qwen2VisionBlock(nn.Module):
             hidden_states,
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
         x = x + attn
@@ -408,15 +410,23 @@ class Qwen2VisionTransformer(nn.Module):
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         position_embeddings = (emb.cos(), emb.sin())
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(dim=0, dtype=torch.int32)
+        cu_seqlens = (
+            torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
+            .cumsum(dim=0, dtype=torch.int32)
+            .to(self.device)
+        )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         # transformers
         x = x.unsqueeze(1)
         for blk in self.blocks:
-            x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings)
+            x = blk(
+                x,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=position_embeddings,
+                max_seqlen=max_seqlen,
+            )
 
         # adapter
         x = self.merger(x)
