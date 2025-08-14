@@ -620,7 +620,7 @@ def _get_request_batch_size(request):
 
 @app.get("/v1/models")
 async def get_models():
-    prefill_server = load_balancer.prefill_servers[0]  # Get the first prefill server
+    prefill_server = load_balancer.text_addrs[0]  # Get the first prefill server
     async with aiohttp.ClientSession() as session:
         try:
             response = await session.get(f"{prefill_server}/v1/models")

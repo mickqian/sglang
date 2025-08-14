@@ -58,17 +58,25 @@ class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
             else config.n_shared_experts
         )
 
-        self.model = Glm4MoeModel(
-            config,
-            quant_config,
-            prefix=add_prefix("language_model", prefix),
+        self.is_encoder = global_server_args_dict["disaggregation_mode"] == "encode"
+        self.should_load_vision_model = (
+            self.is_encoder or not global_server_args_dict["encoder_disaggregated"]
         )
-        self.visual = Glm4vVisionModel(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-            quant_config=quant_config,
-            prefix=add_prefix("visual", prefix),
-        )
+        if not self.is_encoder:
+            self.model = Glm4MoeModel(
+                config,
+                quant_config,
+                prefix=add_prefix("language_model", prefix),
+            )
+        else:
+            self.model = None
+        if self.should_load_vision_model:
+            self.visual = Glm4vVisionModel(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-5),
+                quant_config=quant_config,
+                prefix=add_prefix("visual", prefix),
+            )
 
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -287,6 +295,12 @@ class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
                 # For decoder layer weights
                 if is_decoder:
                     name = name.replace(nextn_layer_prefix, "model.decoder")
+
+            if "visual" in name:
+                if not self.should_load_vision_model:
+                    continue
+            elif self.is_encoder:
+                continue
 
             if "language_model." in name:
                 name = name.replace("language_model.", "")

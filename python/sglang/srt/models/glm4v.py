@@ -19,7 +19,11 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
-from sglang.srt.managers.schedule_batch import MultimodalDataItem
+from sglang.srt.managers.schedule_batch import (
+    MultimodalDataItem,
+    MultimodalInputs,
+    global_server_args_dict,
+)
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.glm4 import Glm4Model
 from sglang.srt.models.qwen2_5_vl import (
@@ -435,6 +439,13 @@ class Glm4vVisionModel(nn.Module):
         ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
+        # pre-compute max seqlens for different attention windows
+
+        if cu_seqlens.numel() >= 2:
+            max_seqlen_full = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        else:
+            max_seqlen_full = 0
+        print(f"{cu_seqlens=}\n{max_seqlen_full=}\n")
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         x = self.embeddings(
             x, seqlens, grid_thw, image_type_ids[:, 0], image_type_ids[:, 1]
@@ -447,7 +458,12 @@ class Glm4vVisionModel(nn.Module):
         # transformers
         x = x.unsqueeze(1)
         for blk in self.blocks:
-            x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=rotary_pos_emb_tuple)
+            x = blk(
+                x,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=rotary_pos_emb_tuple,
+                max_seqlen=max_seqlen_full,
+            )
 
         # adapter
         x = self.post_layernorm(x)
