@@ -101,60 +101,41 @@ class VisionSdpaAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(self.head_size)
 
     @staticmethod
-    @lru_cache(maxsize=128)
-    def _generate_mask_cache(
+    def _generate_block_diag_mask(
         s: int,
-        flatten_batch: bool,
-        cu_seqlens: Optional[torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        device: torch.device,
     ) -> torch.BoolTensor:
         """
-        Generate a boolean attention mask with caching mechanism.
-        Args:
-            s: sequence length
-            flatten_batch: whether to flatten batch dimension
-            cu_seqlens: tuple of cumulative sequence lengths
-        Returns:
-            attention mask tensor of shape [b, 1, s, s] or [1, s, s]
+        Generate a block-diagonal boolean mask of shape [1, s, s] on device.
+        Tokens from different sequences cannot attend to each other.
         """
-        if flatten_batch:
-            mask = torch.zeros([1, s, s], dtype=torch.bool, device=cu_seqlens.device)
-            for i in range(1, len(cu_seqlens)):
-                start = cu_seqlens[i - 1]
-                end = cu_seqlens[i]
-                mask[..., start:end, start:end] = True
-        else:
-            # [1, 1, 1, s]
-            row_indices = torch.arange(s).view(1, 1, 1, s)
-            # [1, 1, s, 1]
-            col_indices = torch.arange(s).view(1, 1, s, 1)
-            # [b, 1, 1, 1]
-            seq_lens = torch.tensor(
-                [end - start for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])],
-            ).view(-1, 1, 1, 1)
+        cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
+        token_ids = torch.arange(s, device=device, dtype=torch.int32)
+        # seq_ids[t] = which sequence this token belongs to
+        seq_ids = torch.searchsorted(cu_seqlens[1:], token_ids, right=False)
+        allow_2d = seq_ids[None, :] == seq_ids[:, None]
+        # For SDPA bool mask: True means masked-out. So invert.
+        mask_2d = ~allow_2d
+        return mask_2d.unsqueeze(0).unsqueeze(1)
 
-            mask = (row_indices < seq_lens) & (col_indices < seq_lens)
-
-        return mask
-
-    def generate_patch_attention_mask(
-        self,
-        s: int,
-        cu_seqlens: Optional[torch.Tensor],
-        flatten_batch: bool = False,
-    ) -> Optional[torch.Tensor]:
-        r"""
-        Creates a non-causal 4D mask of shape `(b, 1, s, s)` or `(1, 1, s, s)`.
-        Args:
-            s: sequence length
-            cu_seqlens: cumulative sequence lengths tensor. If not, returns an empty mask
-            flatten_batch: whether to flatten batch dimension
-        Returns:
-            attention mask tensor or None
+    @staticmethod
+    def _generate_key_padding_mask(
+        seq_lens: torch.Tensor,
+        max_seqlen: int,
+        device: torch.device,
+    ) -> torch.BoolTensor:
         """
-        if cu_seqlens is None:
-            return None
-
-        return self._generate_mask_cache(s, flatten_batch, cu_seqlens)
+        Build key-padding mask with shape [b, 1, 1, s]. True means valid.
+        """
+        seq_lens = seq_lens.to(device=device, dtype=torch.int32)
+        s = int(max_seqlen)
+        if s == 0:
+            return torch.zeros((seq_lens.numel(), 1, 1, 0), dtype=torch.bool, device=device)
+        positions = torch.arange(s, device=device, dtype=torch.int32)
+        # True indicates masked (padding) positions
+        masked = positions.unsqueeze(0) >= seq_lens.view(-1, 1)
+        return masked.view(-1, 1, 1, s)
 
     def forward(
         self,
@@ -179,53 +160,100 @@ class VisionSdpaAttention(nn.Module):
 
         s = q.shape[0] // bsz
 
-        # [b, 1, s, s]
-        if attention_mask is None:
-            attention_mask = self.generate_patch_attention_mask(
-                s, cu_seqlens, flatten_batch=self.flatten_batch
-            )
+        # Flattened path: build block-diagonal mask once on GPU
+        if self.flatten_batch:
+            if attention_mask is None:
+                if cu_seqlens is None:
+                    attention_mask = None
+                else:
+                    attention_mask = self._generate_block_diag_mask(
+                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                    )
 
-        if attention_mask is None:
+            if attention_mask is None:
+                if self.softmax_in_single_precision:
+                    raise RuntimeError("Empty attention mask")
+            else:
+                attention_mask = attention_mask.to(device=q.device)
+
+            q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
+
             if self.softmax_in_single_precision:
-                raise RuntimeError("Empty attention mask")
-        else:
-            attention_mask = attention_mask.to(device=q.device)
+                k = rearrange(k, "b h s d -> b h d s")
+                attn_weights = torch.matmul(q, k) * self.scale
+                del k
+                # attention_mask is bool with True=masked, convert to additive
+                add_mask = attention_mask * torch.finfo(q.dtype).min
+                attn_weights = attn_weights + add_mask
+                del add_mask
+                attn_weights = nn.functional.softmax(
+                    attn_weights, dim=-1, dtype=torch.float32
+                ).to(q.dtype)
+                attn_weights = nn.functional.dropout(
+                    attn_weights, p=self.dropout, training=False
+                )
+                output = torch.matmul(attn_weights, v)
+                del attn_weights, v
+            else:
+                output = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=attention_mask,
+                    dropout_p=self.dropout,
+                    is_causal=False,
+                )
 
-        q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
+            output = rearrange(output, "b h s d -> (b s) h d")
+            return output
 
-        if self.softmax_in_single_precision:
-            k = rearrange(k, "b h s d -> b h d s")
-            attn_weights = torch.matmul(q, k) * self.scale
-            del k
-            # masking
-            attention_mask = (~attention_mask) * torch.finfo(q.dtype).min
-            attn_weights = attn_weights + attention_mask
-            del attention_mask
-            # full-precision
-            attn_weights = nn.functional.softmax(
-                attn_weights, dim=-1, dtype=torch.float32
-            ).to(q.dtype)
-            attn_weights = nn.functional.dropout(
-                attn_weights, p=self.dropout, training=False
-            )
-            output = torch.matmul(attn_weights, v)
-            del attn_weights, v
-        else:
-            # SDPA
-            # [b, h, s, head_size]
+        # Non-flattened path: pack variable-length sequences and use key-padding mask
+        if cu_seqlens is None:
+            q, k, v = [rearrange(x, "(b s) h d -> b h s d", b=bsz) for x in [q, k, v]]
             output = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attention_mask,
-                dropout_p=self.dropout,
-                is_causal=False,
+                q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=False
             )
+            output = rearrange(output, "b h s d -> (b s) h d")
+            return output
 
-        # [b, h, s, head_size] --> [b * s, h, head_size]
-        output = rearrange(output, "b h s d -> (b s) h d")
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32, device=q.device)
+        seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+        real_bsz = int(seq_lens.numel())
+        max_seqlen = int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
 
-        return output
+        if max_seqlen == 0:
+            return q.new_zeros(q.shape)
+
+        q_chunks = list(q.split([int(l.item()) for l in seq_lens], dim=0))
+        k_chunks = list(k.split([int(l.item()) for l in seq_lens], dim=0))
+        v_chunks = list(v.split([int(l.item()) for l in seq_lens], dim=0))
+
+        q_padded = torch.nn.utils.rnn.pad_sequence(q_chunks, batch_first=True)
+        k_padded = torch.nn.utils.rnn.pad_sequence(k_chunks, batch_first=True)
+        v_padded = torch.nn.utils.rnn.pad_sequence(v_chunks, batch_first=True)
+
+        q_padded = q_padded.permute(0, 2, 1, 3).contiguous()
+        k_padded = k_padded.permute(0, 2, 1, 3).contiguous()
+        v_padded = v_padded.permute(0, 2, 1, 3).contiguous()
+
+        key_padding_mask = self._generate_key_padding_mask(
+            seq_lens=seq_lens, max_seqlen=max_seqlen, device=q.device
+        )
+
+        output = F.scaled_dot_product_attention(
+            q_padded, k_padded, v_padded,
+            attn_mask=key_padding_mask,
+            dropout_p=self.dropout,
+            is_causal=False,
+        )
+
+        outs = []
+        for i in range(real_bsz):
+            Li = int(seq_lens[i].item())
+            if Li == 0:
+                continue
+            outs.append(output[i, :, :Li, :].permute(1, 0, 2).contiguous())
+        return torch.cat(outs, dim=0) if len(outs) > 0 else q.new_zeros(q.shape)
 
 
 class VisionTritonAttention(nn.Module):
@@ -256,9 +284,15 @@ class VisionTritonAttention(nn.Module):
         """
         # [b * s, head, head_size]
         output = torch.empty_like(q)
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32, device=q.device)
         seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
         if max_seqlen is None:
-            max_seqlen = kwargs["max_seqlen"]
+            max_seqlen = int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
+        else:
+            max_seqlen = int(max_seqlen)
+        if max_seqlen == 0:
+            return q.new_zeros(q.shape)
+
         context_attention_fwd(
             q,
             k,

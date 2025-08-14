@@ -131,7 +131,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         elif attn_implementation == "sdpa":
             softmax_in_single_precision = False
             qkv_backend = "sdpa"
-            flatten_batch = True
+            flatten_batch = False
         elif attn_implementation == "flash_attention_2":
             softmax_in_single_precision = False
             qkv_backend = "triton_attn"
