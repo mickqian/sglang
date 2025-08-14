@@ -35,7 +35,10 @@ from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionCon
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.activation import QuickGELU
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import (
+    VisionAttention,
+    convert_hf_attention_backend_to_sgl_attention_backend,
+)
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
@@ -138,16 +141,9 @@ class Qwen2VisionBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        if attn_implementation == "sdpa":
-            qkv_backend = "sdpa"
-            softmax_in_single_precision = False
-        elif attn_implementation == "flash_attention_2":
-            qkv_backend = "triton_attn"
-            softmax_in_single_precision = False
-        elif attn_implementation == "eager":
-            qkv_backend = "sdpa"
-            softmax_in_single_precision = True
-
+        softmax_in_single_precision, qkv_backend, flatten_batch = (
+            convert_hf_attention_backend_to_sgl_attention_backend(attn_implementation)
+        )
         self.attn = VisionAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -155,7 +151,7 @@ class Qwen2VisionBlock(nn.Module):
             use_qkv_parallel=True,
             qkv_backend=qkv_backend,
             softmax_in_single_precision=softmax_in_single_precision,
-            flatten_batch=False,
+            flatten_batch=flatten_batch,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
         )

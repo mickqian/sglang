@@ -20,7 +20,6 @@ if _is_cuda:
     from sgl_kernel.flash_attn import flash_attn_varlen_func
 
 from sglang.srt.distributed import (
-    parallel_state,
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
 )
@@ -56,6 +55,32 @@ class SingletonCache:
 
     def empty(self) -> bool:
         return self.get_data() is None
+
+
+def convert_hf_attention_backend_to_sgl_attention_backend(
+    attn_implementation: Optional[str] = None,
+):
+    if attn_implementation is None:
+        softmax_in_single_precision = False
+        qkv_backend = None
+        flatten_batch = True
+    elif attn_implementation == "sdpa":
+        softmax_in_single_precision = False
+        qkv_backend = "sdpa"
+        flatten_batch = False
+    elif attn_implementation == "flash_attention_2":
+        softmax_in_single_precision = False
+        qkv_backend = "triton_attn"
+        flatten_batch = True
+    elif attn_implementation == "eager":
+        softmax_in_single_precision = True
+        qkv_backend = "sdpa"
+        flatten_batch = True
+    elif attn_implementation == "flash_attention_3":
+        softmax_in_single_precision = False
+        qkv_backend = "fa3"
+        flatten_batch = True
+    return softmax_in_single_precision, qkv_backend, flatten_batch
 
 
 # TODO: requires real seqlens from images

@@ -9,7 +9,10 @@ import torch.nn as nn
 from transformers import SiglipVisionConfig
 
 from sglang.srt.layers.activation import QuickGELU
-from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.attention.vision import (
+    VisionAttention,
+    convert_hf_attention_backend_to_sgl_attention_backend,
+)
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -106,15 +109,9 @@ class SiglipEncoderLayer(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=config.layer_norm_eps)
         self.layer_norm1 = norm_layer(config.hidden_size)
         self.layer_norm2 = norm_layer(config.hidden_size)
-        if attn_implementation == "sdpa":
-            qkv_backend = "sdpa"
-            softmax_in_single_precision = False
-        elif attn_implementation == "flash_attention_2":
-            qkv_backend = "triton_attn"
-            softmax_in_single_precision = False
-        elif attn_implementation == "eager":
-            qkv_backend = "sdpa"
-            softmax_in_single_precision = True
+        softmax_in_single_precision, qkv_backend, flatten_batch = (
+            convert_hf_attention_backend_to_sgl_attention_backend(attn_implementation)
+        )
         self.self_attn = VisionAttention(
             embed_dim=config.hidden_size,
             num_heads=config.num_attention_heads,
