@@ -131,7 +131,9 @@ class VisionSdpaAttention(nn.Module):
         seq_lens = seq_lens.to(device=device, dtype=torch.int32)
         s = int(max_seqlen)
         if s == 0:
-            return torch.zeros((seq_lens.numel(), 1, 1, 0), dtype=torch.bool, device=device)
+            return torch.zeros(
+                (seq_lens.numel(), 1, 1, 0), dtype=torch.bool, device=device
+            )
         positions = torch.arange(s, device=device, dtype=torch.int32)
         # True indicates masked (padding) positions
         masked = positions.unsqueeze(0) >= seq_lens.view(-1, 1)
@@ -241,7 +243,9 @@ class VisionSdpaAttention(nn.Module):
         )
 
         output = F.scaled_dot_product_attention(
-            q_padded, k_padded, v_padded,
+            q_padded,
+            k_padded,
+            v_padded,
             attn_mask=key_padding_mask,
             dropout_p=self.dropout,
             is_causal=False,
