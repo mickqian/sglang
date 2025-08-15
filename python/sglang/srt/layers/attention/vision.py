@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
+from sglang.srt.managers.mm_utils import tensor_hash
 from sglang.srt.utils import is_cuda, print_info_once
 
 _is_cuda = is_cuda()
@@ -100,21 +101,21 @@ def convert_hf_attention_backend_to_sgl_attention_backend(
     attn_implementation: Optional[str] = None,
 ):
     if attn_implementation is None:
-        softmax_in_single_precision = False
+        # softmax_in_single_precision = False
         qkv_backend = None
     elif attn_implementation == "sdpa":
-        softmax_in_single_precision = False
+        # softmax_in_single_precision = False
         qkv_backend = "sdpa"
     elif attn_implementation == "flash_attention_2":
-        softmax_in_single_precision = False
+        # softmax_in_single_precision = False
         qkv_backend = "triton_attn"
     elif attn_implementation == "eager":
-        softmax_in_single_precision = True
+        # softmax_in_single_precision = True
         qkv_backend = "sdpa"
     elif attn_implementation == "flash_attention_3":
-        softmax_in_single_precision = False
+        # softmax_in_single_precision = False
         qkv_backend = "fa3"
-    return qkv_backend, softmax_in_single_precision
+    return qkv_backend
 
 
 # TODO: requires real seqlens from images
@@ -160,6 +161,23 @@ class VisionSdpaAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(self.head_size)
 
     @staticmethod
+    def _generate_simple_block_diag_mask_key(
+        s: int,
+        cu_seqlens: torch.Tensor,
+        device_index: int,
+        cross_fill_value: bool = True,
+        with_batch_dim: bool = False,
+    ) -> tuple:
+        key = (
+            s,
+            tensor_hash(cu_seqlens),
+            device_index,
+            int(cross_fill_value),
+            int(with_batch_dim),
+        )
+        return key
+
+    @staticmethod
     def _generate_block_diag_mask(
         s: int,
         cu_seqlens: torch.Tensor,
@@ -179,8 +197,20 @@ class VisionSdpaAttention(nn.Module):
           For sample i, valid region [:L_i, :L_i] is set to not cross_fill_value,
           padding/out-of-range is set to cross_fill_value.
         """
-
+        # print("_generate_block_diag_mask")
         if with_batch_dim:
+            row_indices = torch.arange(s).view(1, 1, 1, s)
+            # [1, 1, s, 1]
+            col_indices = torch.arange(s).view(1, 1, s, 1)
+            # [b, 1, 1, 1]
+            seq_lens = torch.tensor(
+                [end - start for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])],
+            ).view(-1, 1, 1, 1)
+
+            mask = (row_indices < seq_lens) & (col_indices < seq_lens)
+
+            return mask
+
             seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
             batch = int(seq_lens.numel())
             S = (
@@ -288,15 +318,13 @@ class VisionSdpaAttention(nn.Module):
                     attention_mask.set_data(mask_data)
                 attention_mask = attention_mask.data
             elif isinstance(attention_mask, MultiCache):
-                # Build a lightweight on-device fingerprint for cu_seqlens to avoid host copies
-                cu_i64 = cu_seqlens.to(dtype=torch.int64, device=q.device)
-                # Two simple reductions plus length and last element provide a robust key
-                sum1 = int(cu_i64.sum().item())
-                sum2 = int((cu_i64 * cu_i64).sum().item())
-                length = int(cu_i64.numel())
-                last = int(cu_i64[-1].item())
-                device_index = torch.cuda.current_device() if q.is_cuda else -1
-                key = (device_index, int(s), length, last, sum1, sum2)
+                key = VisionSdpaAttention._generate_simple_block_diag_mask_key(
+                    s,
+                    cu_seqlens,
+                    torch.cuda.current_device(),
+                    cross_fill_value=True,
+                    with_batch_dim=False,
+                )
                 mask_data = attention_mask.get_data(key)
                 if mask_data is None:
                     mask_data = self._generate_block_diag_mask(

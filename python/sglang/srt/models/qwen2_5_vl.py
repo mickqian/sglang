@@ -44,7 +44,6 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.attention.vision import (
     MultiCache,
-    SingletonCache,
     VisionAttention,
     convert_hf_attention_backend_to_sgl_attention_backend,
 )
@@ -128,9 +127,10 @@ class Qwen2_5_VisionBlock(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = Qwen2RMSNorm(dim, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(dim, eps=1e-6)
-        qkv_backend, softmax_in_single_precision = (
-            convert_hf_attention_backend_to_sgl_attention_backend(attn_implementation)
+        qkv_backend = convert_hf_attention_backend_to_sgl_attention_backend(
+            attn_implementation
         )
+
         self.attn = VisionAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -139,7 +139,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_embed="normal",
             proj_bias=True,
             qkv_backend=qkv_backend,
-            softmax_in_single_precision=softmax_in_single_precision,
+            softmax_in_single_precision=False,
             flattened_batch=True,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
