@@ -101,19 +101,14 @@ def convert_hf_attention_backend_to_sgl_attention_backend(
     attn_implementation: Optional[str] = None,
 ):
     if attn_implementation is None:
-        # softmax_in_single_precision = False
         qkv_backend = None
     elif attn_implementation == "sdpa":
-        # softmax_in_single_precision = False
         qkv_backend = "sdpa"
     elif attn_implementation == "flash_attention_2":
-        # softmax_in_single_precision = False
         qkv_backend = "triton_attn"
     elif attn_implementation == "eager":
-        # softmax_in_single_precision = True
         qkv_backend = "sdpa"
     elif attn_implementation == "flash_attention_3":
-        # softmax_in_single_precision = False
         qkv_backend = "fa3"
     return qkv_backend
 
@@ -223,20 +218,23 @@ class VisionSdpaAttention(nn.Module):
             return mask
 
         # Flattened block-diagonal mask (fully vectorized on device)
-        cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
         if s == 0 or cu_seqlens.numel() <= 1:
+            # (1, 0, 0) empty mask – matches the behaviour of the original code
             return torch.zeros((1, 0, 0), dtype=torch.bool, device=device)
-        positions = torch.arange(s, device=device, dtype=torch.int32)
-        # Positions inside any real interval [cu[i], cu[i+1]) are valid
-        valid_pos = positions < cu_seqlens[-1]
-        # seq_id for each position: number of sequence ends <= position
-        seq_ids = torch.bucketize(positions, cu_seqlens[1:], right=True)
-        # same is True only for pairs that are both valid and in the same sequence
-        same = (seq_ids.view(1, s, 1) == seq_ids.view(1, 1, s)) & (
-            valid_pos.view(1, s, 1) & valid_pos.view(1, 1, s)
-        )
-        # True means masked. To match previous behavior, set inside-block to not fill_value, others to fill_value
-        mask = ~same if same_sequence_fill_value else same
+
+        cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
+
+        positions = torch.arange(s, device=device, dtype=torch.int32)  # (s,)
+
+        seq_ids = torch.searchsorted(cu_seqlens, positions, right=False) - 1  # (s,)
+
+        valid = positions < cu_seqlens[-1]  # (s,)
+
+        same_block = (seq_ids.view(1, s, 1) == seq_ids.view(1, 1, s)) & \
+                     (valid.view(1, s, 1) & valid.view(1, 1, s))
+
+        mask = same_block if same_sequence_fill_value else ~same_block
+
         return mask
 
     @staticmethod
