@@ -43,6 +43,8 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 
 from sglang.srt.hf_transformers_utils import get_processor
 from sglang.srt.layers.attention.vision import (
+    MultiCache,
+    SingletonCache,
     VisionAttention,
     convert_hf_attention_backend_to_sgl_attention_backend,
 )
@@ -126,7 +128,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = Qwen2RMSNorm(dim, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(dim, eps=1e-6)
-        softmax_in_single_precision, qkv_backend, flatten_batch = (
+        qkv_backend, softmax_in_single_precision = (
             convert_hf_attention_backend_to_sgl_attention_backend(attn_implementation)
         )
         self.attn = VisionAttention(
@@ -138,7 +140,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             proj_bias=True,
             qkv_backend=qkv_backend,
             softmax_in_single_precision=softmax_in_single_precision,
-            flatten_batch=flatten_batch,
+            flattened_batch=True,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
         )
@@ -156,6 +158,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
         max_seqlen: int,
+        attention_mask: SingletonCache,
     ) -> torch.Tensor:
         hidden_states = self.norm1(x)
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
@@ -164,6 +167,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
             max_seqlen=max_seqlen,
+            attention_mask=attention_mask,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
         x = x + attn
@@ -414,7 +418,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         else:
             max_seqlen_full = 0
 
-        # transformers
+        mask = MultiCache()
+        # flattened
         x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -428,6 +433,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens=cu_seqlens_now,
                 position_embeddings=position_embeddings,
                 max_seqlen=max_seqlen_now,
+                attention_mask=mask,
             )
 
         # adapter

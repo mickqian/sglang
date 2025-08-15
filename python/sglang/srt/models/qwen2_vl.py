@@ -151,7 +151,7 @@ class Qwen2VisionBlock(nn.Module):
             use_qkv_parallel=True,
             qkv_backend=qkv_backend,
             softmax_in_single_precision=softmax_in_single_precision,
-            flatten_batch=flatten_batch,
+            flattened_batch=flatten_batch,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
         )

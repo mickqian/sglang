@@ -110,7 +110,7 @@ class PixtralHFTransformerBlock(nn.Module):
             dropout=0.0,
             use_context_forward=False,
             softmax_in_single_precision=False,
-            flatten_batch=False,
+            flattened_batch=False,
             prefix=f"{prefix}.attention",
         )
 

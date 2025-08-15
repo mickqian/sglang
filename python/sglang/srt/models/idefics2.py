@@ -84,7 +84,7 @@ class Idefics2EncoderLayer(nn.Module):
             dropout=config.attention_dropout,
             qkv_backend="sdpa",
             softmax_in_single_precision=True,
-            flatten_batch=False,
+            flattened_batch=False,
             prefix=add_prefix("self_attn", prefix),
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)

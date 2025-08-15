@@ -58,7 +58,7 @@ class InternAttention(nn.Module):
             num_dummy_heads=getattr(config, "num_dummy_heads", 0),
             qk_normalization=getattr(config, "qk_normalization", False)
             or getattr(config, "use_qk_norm", False),
-            flatten_batch=False,
+            flattened_batch=False,
         )
 
         self.proj_drop = nn.Dropout(config.dropout)

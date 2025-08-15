@@ -175,7 +175,7 @@ class Llama4VisionEncoderLayer(nn.Module):
             dropout=0.0,
             qkv_backend="sdpa",
             softmax_in_single_precision=False,
-            flatten_batch=False,
+            flattened_batch=False,
             prefix=add_prefix("self_attn", prefix),
             qkv_bias=True,
             customized_position_embedding_applier=apply_position_embedding,

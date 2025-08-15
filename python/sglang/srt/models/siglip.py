@@ -119,7 +119,7 @@ class SiglipEncoderLayer(nn.Module):
             use_qkv_parallel=True,
             qkv_backend=qkv_backend,
             softmax_in_single_precision=softmax_in_single_precision,
-            flatten_batch=True,
+            flattened_batch=True,
             quant_config=quant_config,
             prefix=add_prefix("self_attn", prefix),
         )

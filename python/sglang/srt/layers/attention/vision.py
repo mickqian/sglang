@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import collections
 import dataclasses
 import functools
 import math
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
@@ -57,30 +58,63 @@ class SingletonCache:
         return self.get_data() is None
 
 
+@dataclasses.dataclass
+class MultiCache:
+    """Simple capped LRU cache for storing multiple tensors keyed by a hashable key.
+
+    Notes:
+    - Stores references to tensors. Caller must ensure device/dtype correctness.
+    - Uses a small capacity to avoid memory blowup.
+    """
+
+    max_entries: int = 16
+    _cache: dict = dataclasses.field(default_factory=dict)
+    _order: collections.OrderedDict = dataclasses.field(
+        default_factory=collections.OrderedDict
+    )
+
+    def empty(self) -> bool:
+        return len(self._cache) == 0
+
+    def get_data(self, key: Any) -> Optional[torch.Tensor]:
+        if key in self._cache:
+            # mark as most-recently-used
+            self._order.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def set_data(self, key: Any, value: torch.Tensor) -> None:
+        if key in self._cache:
+            self._cache[key] = value
+            self._order.move_to_end(key)
+            return
+        # evict least-recently-used if over capacity
+        if len(self._cache) >= self.max_entries:
+            old_key, _ = self._order.popitem(last=False)
+            self._cache.pop(old_key, None)
+        self._cache[key] = value
+        self._order[key] = None
+
+
 def convert_hf_attention_backend_to_sgl_attention_backend(
     attn_implementation: Optional[str] = None,
 ):
     if attn_implementation is None:
         softmax_in_single_precision = False
         qkv_backend = None
-        flatten_batch = True
     elif attn_implementation == "sdpa":
         softmax_in_single_precision = False
         qkv_backend = "sdpa"
-        flatten_batch = False
     elif attn_implementation == "flash_attention_2":
         softmax_in_single_precision = False
         qkv_backend = "triton_attn"
-        flatten_batch = True
     elif attn_implementation == "eager":
         softmax_in_single_precision = True
         qkv_backend = "sdpa"
-        flatten_batch = True
     elif attn_implementation == "flash_attention_3":
         softmax_in_single_precision = False
         qkv_backend = "fa3"
-        flatten_batch = True
-    return softmax_in_single_precision, qkv_backend, flatten_batch
+    return qkv_backend, softmax_in_single_precision
 
 
 # TODO: requires real seqlens from images
@@ -120,7 +154,7 @@ class VisionSdpaAttention(nn.Module):
         self.head_size = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
-        self.flatten_batch = flatten_batch
+        self.flattened_batch = flatten_batch
         self.softmax_in_single_precision = softmax_in_single_precision
         self.dropout = dropout
         self.scale = 1.0 / math.sqrt(self.head_size)
@@ -132,9 +166,17 @@ class VisionSdpaAttention(nn.Module):
         device: torch.device,
     ) -> torch.BoolTensor:
         """
-        Generate a block-diagonal boolean mask of shape [1, s, s] on device.
+        Generate a block-diagonal boolean mask of shape [1, 1, s, s] on device.
         Tokens from different sequences cannot attend to each other.
         """
+        # print("_generate_block_diag_mask=")
+        mask = torch.zeros([1, s, s], dtype=torch.bool, device=device)
+        for i in range(1, len(cu_seqlens)):
+            start = cu_seqlens[i - 1]
+            end = cu_seqlens[i]
+            mask[..., start:end, start:end] = True
+        return mask
+
         cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
         token_ids = torch.arange(s, device=device, dtype=torch.int32)
         # seq_ids[t] = which sequence this token belongs to
@@ -172,6 +214,7 @@ class VisionSdpaAttention(nn.Module):
         bsz: int,
         cu_seqlens: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -180,15 +223,15 @@ class VisionSdpaAttention(nn.Module):
         Returns:
              [b * s, h, head_size]
         """
-        if self.flatten_batch:
-            assert bsz == 1, "flatten_batch is True, bsz must be 1"
+        if self.flattened_batch:
+            assert bsz == 1, "flatten_batch is True, bsz is expected to be 1"
 
         assert q.dim() == 3, q.shape
 
         s = q.shape[0] // bsz
 
         # Flattened path: build block-diagonal mask once on GPU
-        if self.flatten_batch:
+        if self.flattened_batch:
             if attention_mask is None:
                 if cu_seqlens is None:
                     attention_mask = None
@@ -200,6 +243,31 @@ class VisionSdpaAttention(nn.Module):
             if attention_mask is None:
                 if self.softmax_in_single_precision:
                     raise RuntimeError("Empty attention mask")
+            elif isinstance(attention_mask, SingletonCache):
+                # Singleton cache just stores last mask
+                if attention_mask.empty():
+                    mask_data = self._generate_block_diag_mask(
+                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                    )
+                    attention_mask.set_data(mask_data)
+                attention_mask = attention_mask.data
+            elif isinstance(attention_mask, MultiCache):
+                # Build a lightweight on-device fingerprint for cu_seqlens to avoid host copies
+                cu_i64 = cu_seqlens.to(dtype=torch.int64, device=q.device)
+                # Two simple reductions plus length and last element provide a robust key
+                sum1 = int(cu_i64.sum().item())
+                sum2 = int((cu_i64 * cu_i64).sum().item())
+                length = int(cu_i64.numel())
+                last = int(cu_i64[-1].item())
+                device_index = torch.cuda.current_device() if q.is_cuda else -1
+                key = (device_index, int(s), length, last, sum1, sum2)
+                mask_data = attention_mask.get_data(key)
+                if mask_data is None:
+                    mask_data = self._generate_block_diag_mask(
+                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                    )
+                    attention_mask.set_data(key, mask_data)
+                attention_mask = mask_data
             else:
                 attention_mask = attention_mask.to(device=q.device)
 
@@ -246,7 +314,9 @@ class VisionSdpaAttention(nn.Module):
         cu_seqlens = cu_seqlens.to(dtype=torch.int32, device=q.device)
         seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
         real_bsz = int(seq_lens.numel())
-        max_seqlen = int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
+        max_seqlen = (
+            max_seqlen or int(seq_lens.max().item()) if seq_lens.numel() > 0 else 0
+        )
 
         if max_seqlen == 0:
             return q.new_zeros(q.shape)
@@ -262,7 +332,7 @@ class VisionSdpaAttention(nn.Module):
         q_padded = q_padded.permute(0, 2, 1, 3).contiguous()
         k_padded = k_padded.permute(0, 2, 1, 3).contiguous()
         v_padded = v_padded.permute(0, 2, 1, 3).contiguous()
-
+        # Build key-padding mask (bool: True=masked)
         key_padding_mask = self._generate_key_padding_mask(
             seq_lens=seq_lens, max_seqlen=max_seqlen, device=q.device
         )
@@ -405,6 +475,9 @@ class VisionAttention(nn.Module):
         softmax_in_single_precision (bool, default to False):
             if ``True``, the softmax will be performed in single-precision
             Otherwise, it will be performed in half-precision
+        flattened_batch: (bool, default to False):
+            if ``True``, the input tokens should already be flattened in batch dim, and a block_diag mask denoting each batch's tokens will be generated and used for attention.
+            Otherwise, a key-padding mask will be used
 
     """
 
@@ -418,7 +491,7 @@ class VisionAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         dropout: float = 0.0,
         softmax_in_single_precision: bool = False,
-        flatten_batch: bool = False,
+        flattened_batch: bool = False,
         prefix: str = "",
         proj_bias: bool = True,
         num_dummy_heads: int = 0,
@@ -485,7 +558,7 @@ class VisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_kv_heads_per_partition,
             dropout=dropout,
-            flatten_batch=flatten_batch,
+            flatten_batch=flattened_batch,
             softmax_in_single_precision=softmax_in_single_precision,
         )
 
