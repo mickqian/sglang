@@ -834,7 +834,10 @@ def sample_mmmu_requests(
         raise ValueError(f"Failed to load MMMU dataset: {e}")
 
     # Sample from the dataset
-    if len(mmmu_dataset) > num_requests:
+    if len(mmmu_dataset) <= num_requests or num_requests == -1:
+        print(f"Dataset has less than {num_requests} examples, using all examples")
+        sample_dataset = mmmu_dataset
+    else:
         if random_sample:
             # Random sample
             indices = random.sample(range(len(mmmu_dataset)), num_requests)
@@ -844,9 +847,6 @@ def sample_mmmu_requests(
             sample_dataset = mmmu_dataset.select(
                 range(min(num_requests, len(mmmu_dataset)))
             )
-    else:
-        print(f"Dataset has less than {num_requests} examples, using all examples")
-        sample_dataset = mmmu_dataset
 
     print(f"Selected {len(sample_dataset)} examples for benchmarking")
 

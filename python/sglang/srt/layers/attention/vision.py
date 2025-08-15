@@ -363,7 +363,7 @@ class VisionFlash3Attention(nn.Module):
         return output
 
 
-QKV_BACKEND_IMPL = {
+MM_ATTENTION_BACKEND_IMPL = {
     "triton_attn": VisionTritonAttention,
     "sdpa": VisionSdpaAttention,
     "fa3": VisionFlash3Attention,
@@ -455,7 +455,7 @@ class VisionAttention(nn.Module):
         self.customized_position_embedding_applier = (
             customized_position_embedding_applier
         )
-        self.qkv_backend = QKV_BACKEND_IMPL[qkv_backend](
+        self.qkv_backend = MM_ATTENTION_BACKEND_IMPL[qkv_backend](
             head_dim=self.head_size,
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_kv_heads_per_partition,
