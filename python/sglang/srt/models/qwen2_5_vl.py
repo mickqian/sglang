@@ -158,7 +158,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
         max_seqlen: int,
-        attention_mask: SingletonCache,
+        attention_mask: MultiCache,
     ) -> torch.Tensor:
         hidden_states = self.norm1(x)
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")

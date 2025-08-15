@@ -164,27 +164,55 @@ class VisionSdpaAttention(nn.Module):
         s: int,
         cu_seqlens: torch.Tensor,
         device: torch.device,
+        cross_fill_value: bool = True,
+        with_batch_dim: bool = False,
     ) -> torch.BoolTensor:
         """
-        Generate a block-diagonal boolean mask of shape [1, 1, s, s] on device.
-        Tokens from different sequences cannot attend to each other.
+        Build a boolean attention mask on device.
+
+        - Flattened case (with_batch_dim=False):
+          Returns [1, s, s]. Each diagonal block (tokens from same sequence) is set to
+          not cross_fill_value, while cross-sequence positions are set to cross_fill_value.
+
+        - Non-flattened case (with_batch_dim=True):
+          Returns [b, 1, S, S] where S = max_seqlen or max(seq_lens).
+          For sample i, valid region [:L_i, :L_i] is set to not cross_fill_value,
+          padding/out-of-range is set to cross_fill_value.
         """
-        # print("_generate_block_diag_mask=")
-        mask = torch.zeros([1, s, s], dtype=torch.bool, device=device)
-        for i in range(1, len(cu_seqlens)):
-            start = cu_seqlens[i - 1]
-            end = cu_seqlens[i]
-            mask[..., start:end, start:end] = True
-        return mask
+
+        if with_batch_dim:
+            seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+            batch = int(seq_lens.numel())
+            S = (
+                int(s)
+                if (s is not None)
+                else (int(seq_lens.max().item()) if batch > 0 else 0)
+            )
+            mask = torch.full(
+                (batch, S, S),
+                fill_value=cross_fill_value,
+                dtype=torch.bool,
+                device=device,
+            )
+            for i in range(batch):
+                Li = int(seq_lens[i].item())
+                if Li > 0:
+                    mask[i, :Li, :Li] = not cross_fill_value
+            return mask.unsqueeze(1)
 
         cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
-        token_ids = torch.arange(s, device=device, dtype=torch.int32)
-        # seq_ids[t] = which sequence this token belongs to
-        seq_ids = torch.searchsorted(cu_seqlens[1:], token_ids, right=False)
-        allow_2d = seq_ids[None, :] == seq_ids[:, None]
-        # For SDPA bool mask: True means masked-out. So invert.
-        mask_2d = ~allow_2d
-        return mask_2d.unsqueeze(0).unsqueeze(1)
+
+        # Flattened block-diagonal mask
+        mask = torch.full(
+            (1, s, s), fill_value=not cross_fill_value, dtype=torch.bool, device=device
+        )
+        for i in range(1, cu_seqlens.numel()):
+            start = int(cu_seqlens[i - 1].item())
+            end = int(cu_seqlens[i].item())
+            if end > start:
+                mask[..., start:end, start:end] = cross_fill_value
+
+        return mask
 
     @staticmethod
     def _generate_key_padding_mask(
@@ -237,7 +265,11 @@ class VisionSdpaAttention(nn.Module):
                     attention_mask = None
                 else:
                     attention_mask = self._generate_block_diag_mask(
-                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                        s=s,
+                        cu_seqlens=cu_seqlens,
+                        device=q.device,
+                        cross_fill_value=True,
+                        with_batch_dim=False,
                     )
 
             if attention_mask is None:
@@ -247,7 +279,11 @@ class VisionSdpaAttention(nn.Module):
                 # Singleton cache just stores last mask
                 if attention_mask.empty():
                     mask_data = self._generate_block_diag_mask(
-                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                        s=s,
+                        cu_seqlens=cu_seqlens,
+                        device=q.device,
+                        cross_fill_value=True,
+                        with_batch_dim=False,
                     )
                     attention_mask.set_data(mask_data)
                 attention_mask = attention_mask.data
@@ -264,7 +300,11 @@ class VisionSdpaAttention(nn.Module):
                 mask_data = attention_mask.get_data(key)
                 if mask_data is None:
                     mask_data = self._generate_block_diag_mask(
-                        s=s, cu_seqlens=cu_seqlens, device=q.device
+                        s=s,
+                        cu_seqlens=cu_seqlens,
+                        device=q.device,
+                        cross_fill_value=True,
+                        with_batch_dim=False,
                     )
                     attention_mask.set_data(key, mask_data)
                 attention_mask = mask_data
