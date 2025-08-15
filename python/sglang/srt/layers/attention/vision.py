@@ -182,7 +182,7 @@ class VisionSdpaAttention(nn.Module):
         s: int,
         cu_seqlens: torch.Tensor,
         device: torch.device,
-        cross_fill_value: bool = True,
+        same_sequence_fill_value: bool = True,
         with_batch_dim: bool = False,
     ) -> torch.BoolTensor:
         """
@@ -190,58 +190,53 @@ class VisionSdpaAttention(nn.Module):
 
         - Flattened case (with_batch_dim=False):
           Returns [1, s, s]. Each diagonal block (tokens from same sequence) is set to
-          not cross_fill_value, while cross-sequence positions are set to cross_fill_value.
+          not same_sequence_fill_value, while cross-sequence positions are set to same_sequence_fill_value.
 
         - Non-flattened case (with_batch_dim=True):
           Returns [b, 1, S, S] where S = max_seqlen or max(seq_lens).
-          For sample i, valid region [:L_i, :L_i] is set to not cross_fill_value,
-          padding/out-of-range is set to cross_fill_value.
+          For sample i, valid region [:L_i, :L_i] is set to not same_sequence_fill_value,
+          padding/out-of-range is set to same_sequence_fill_value.
         """
         # print("_generate_block_diag_mask")
         if with_batch_dim:
-            row_indices = torch.arange(s).view(1, 1, 1, s)
-            # [1, 1, s, 1]
-            col_indices = torch.arange(s).view(1, 1, s, 1)
-            # [b, 1, 1, 1]
-            seq_lens = torch.tensor(
-                [end - start for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])],
-            ).view(-1, 1, 1, 1)
-
-            mask = (row_indices < seq_lens) & (col_indices < seq_lens)
-
-            return mask
-
-            seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+            # Efficient, fully vectorized GPU implementation.
+            # True means masked; valid [:L_i, :L_i] region is False when cross_fill_value=True.
+            seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(
+                dtype=torch.int32, device=device
+            )
             batch = int(seq_lens.numel())
             S = (
                 int(s)
                 if (s is not None)
                 else (int(seq_lens.max().item()) if batch > 0 else 0)
             )
-            mask = torch.full(
-                (batch, S, S),
-                fill_value=cross_fill_value,
-                dtype=torch.bool,
-                device=device,
-            )
-            for i in range(batch):
-                Li = int(seq_lens[i].item())
-                if Li > 0:
-                    mask[i, :Li, :Li] = not cross_fill_value
-            return mask.unsqueeze(1)
+            if S == 0 or batch == 0:
+                return torch.zeros((batch, 1, S, S), dtype=torch.bool, device=device)
 
+            positions = torch.arange(S, device=device, dtype=torch.int32)
+            row_valid = positions.view(1, 1, 1, S) < seq_lens.view(-1, 1, 1, 1)
+            col_valid = positions.view(1, 1, S, 1) < seq_lens.view(-1, 1, 1, 1)
+            valid_square = row_valid & col_valid  # [b, 1, S, S]
+            # True means masked. To match previous behavior, when
+            # same_sequence_fill_value=True, valid square should be False.
+            mask = ~valid_square if same_sequence_fill_value else valid_square
+            return mask
+
+        # Flattened block-diagonal mask (fully vectorized on device)
         cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
-
-        # Flattened block-diagonal mask
-        mask = torch.full(
-            (1, s, s), fill_value=not cross_fill_value, dtype=torch.bool, device=device
+        if s == 0 or cu_seqlens.numel() <= 1:
+            return torch.zeros((1, 0, 0), dtype=torch.bool, device=device)
+        positions = torch.arange(s, device=device, dtype=torch.int32)
+        # Positions inside any real interval [cu[i], cu[i+1]) are valid
+        valid_pos = positions < cu_seqlens[-1]
+        # seq_id for each position: number of sequence ends <= position
+        seq_ids = torch.bucketize(positions, cu_seqlens[1:], right=True)
+        # same is True only for pairs that are both valid and in the same sequence
+        same = (seq_ids.view(1, s, 1) == seq_ids.view(1, 1, s)) & (
+            valid_pos.view(1, s, 1) & valid_pos.view(1, 1, s)
         )
-        for i in range(1, cu_seqlens.numel()):
-            start = int(cu_seqlens[i - 1].item())
-            end = int(cu_seqlens[i].item())
-            if end > start:
-                mask[..., start:end, start:end] = cross_fill_value
-
+        # True means masked. To match previous behavior, set inside-block to not fill_value, others to fill_value
+        mask = ~same if same_sequence_fill_value else same
         return mask
 
     @staticmethod
@@ -298,7 +293,7 @@ class VisionSdpaAttention(nn.Module):
                         s=s,
                         cu_seqlens=cu_seqlens,
                         device=q.device,
-                        cross_fill_value=True,
+                        same_sequence_fill_value=True,
                         with_batch_dim=False,
                     )
 
@@ -312,7 +307,7 @@ class VisionSdpaAttention(nn.Module):
                         s=s,
                         cu_seqlens=cu_seqlens,
                         device=q.device,
-                        cross_fill_value=True,
+                        same_sequence_fill_value=True,
                         with_batch_dim=False,
                     )
                     attention_mask.set_data(mask_data)
@@ -331,7 +326,7 @@ class VisionSdpaAttention(nn.Module):
                         s=s,
                         cu_seqlens=cu_seqlens,
                         device=q.device,
-                        cross_fill_value=True,
+                        same_sequence_fill_value=True,
                         with_batch_dim=False,
                     )
                     attention_mask.set_data(key, mask_data)
