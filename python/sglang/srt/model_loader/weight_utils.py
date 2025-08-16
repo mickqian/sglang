@@ -280,6 +280,7 @@ def download_weights_from_hf(
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,
             cache_dir=cache_dir,
+            max_workers=32,
             tqdm_class=DisabledTqdm,
             revision=revision,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,

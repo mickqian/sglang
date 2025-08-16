@@ -14,7 +14,7 @@ from einops import rearrange
 
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.managers.mm_utils import tensor_hash
-from sglang.srt.utils import is_cuda, is_blackwell, print_info_once
+from sglang.srt.utils import is_blackwell, is_cuda, print_info_once
 
 _is_cuda = is_cuda()
 
@@ -601,7 +601,10 @@ class VisionAttention(nn.Module):
         # Select attention backend via a unified method
         _passed_backend = qkv_backend
         qkv_backend = self._determine_attention_backend(_passed_backend)
-        if global_server_args_dict["mm_attention_backend"] is None and _passed_backend is None:
+        if (
+            global_server_args_dict["mm_attention_backend"] is None
+            and _passed_backend is None
+        ):
             print_info_once(f"Multimodal attention backend not set. Use {qkv_backend}.")
         print_info_once(f"Using {qkv_backend} as multimodal attention backend.")
 

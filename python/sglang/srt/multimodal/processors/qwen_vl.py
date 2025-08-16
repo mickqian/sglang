@@ -230,7 +230,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-
+        print(f"{image_data=}")
         base_output = self.load_mm_data(
             prompt=input_text,
             image_data=image_data,

@@ -538,7 +538,8 @@ class TokenizerManager:
             if is_cross_encoder_request:
                 input_ids = encoded["input_ids"][0]
                 token_type_ids = encoded.get("token_type_ids", [None])[0]
-
+        print(f"{obj=}")
+        print(f"{obj.contains_mm_input()=}")
         if self.mm_processor and obj.contains_mm_input():
             if not isinstance(obj.image_data, list):
                 obj.image_data = [obj.image_data]

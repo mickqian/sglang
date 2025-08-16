@@ -360,8 +360,13 @@ class ServerArgs:
             from sglang.srt.configs.model_config import ModelConfig
 
             model_config = ModelConfig.from_server_args(self)
+
             if model_config.is_multimodal:
                 self.adjust_mem_fraction_for_vlm(model_config)
+                if self.if_has_image_understanding_capability(model_config):
+                    self.has_image_understanding_cap = True
+            else:
+                self.has_image_understanding_cap = False
 
         # Set chunked prefill size, which depends on the gpu memory capacity
         if self.chunked_prefill_size is None:
@@ -2177,6 +2182,9 @@ class ServerArgs:
                 f"Disable hybrid SWA memory for {model_arch} as it is not yet supported."
             )
             self.disable_hybrid_swa_memory = True
+
+    def if_has_image_understanding_capability(self, model_config):
+        return getattr(model_config.hf_config, "vision_config", None) is not None
 
     def adjust_mem_fraction_for_vlm(self, model_config):
         vision_config = getattr(model_config.hf_config, "vision_config", None)
