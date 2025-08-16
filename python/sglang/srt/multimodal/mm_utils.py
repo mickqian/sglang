@@ -324,26 +324,3 @@ def unpad_image_shape(current_height, current_width, original_size):
         new_shape = (current_height, current_width - 2 * padding)
 
     return new_shape
-
-
-def process_images(images, image_processor, model_cfg):
-    image_aspect_ratio = getattr(model_cfg, "image_aspect_ratio", None)
-    new_images = []
-    if image_aspect_ratio == "pad":
-        for image in images:
-            image = expand2square(
-                image, tuple(int(x * 255) for x in image_processor.image_mean)
-            )
-            image = image_processor.preprocess(image)["pixel_values"][0]
-            new_images.append(image)
-    elif "anyres" in image_aspect_ratio:
-        for image in images:
-            image = process_anyres_image(
-                image, image_processor, model_cfg.image_grid_pinpoints
-            )
-            new_images.append(image)
-    else:
-        return image_processor(images)["pixel_values"]
-    if all(x.shape == new_images[0].shape for x in new_images):
-        new_images = np.stack(new_images, axis=0)
-    return new_images
