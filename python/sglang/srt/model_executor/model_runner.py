@@ -101,7 +101,6 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils import (
-    DeepEPMode,
     MultiprocessingSerializer,
     cpu_has_amx_support,
     dynamic_import,
@@ -217,10 +216,6 @@ class ModelRunner:
                 # TODO it is indeed not a "server args"
                 "use_mla_backend": self.use_mla_backend,
                 "speculative_algorithm": self.spec_algorithm,
-            }
-            | {
-                # "moe_a2a_backend": MoeA2ABackend(server_args.moe_a2a_backend),
-                # "deepep_mode": DeepEPMode(server_args.deepep_mode),
             }
         )
 

@@ -13,7 +13,7 @@ from sglang.srt.layers.communicator import (
     CommunicateSummableTensorPairFn,
     ScatterMode,
 )
-from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
+from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPDispatcher
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.managers.schedule_batch import ScheduleBatch, global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
