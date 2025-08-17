@@ -173,10 +173,12 @@ class ServerArgs:
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Optional[Literal["deepep"]] = None
+    enable_ep_moe: bool = False
+    enable_deepep_moe: bool = False
     enable_flashinfer_cutlass_moe: bool = False
     enable_flashinfer_trtllm_moe: bool = False
     enable_flashinfer_allreduce_fusion: bool = False
-    deepep_mode: Literal["auto", "normal", "low_latency"] = "auto"
+    deepep_mode: Optional[Literal["auto", "normal", "low_latency"]] = "auto"
     ep_num_redundant_experts: int = 0
     ep_dispatch_algorithm: Optional[Literal["static", "dynamic", "fake"]] = None
     init_expert_location: str = "trivial"
@@ -474,13 +476,18 @@ class ServerArgs:
                 self.quantization == "modelopt_fp4"
             ), "modelopt_fp4 quantization is required for Flashinfer MOE"
             os.environ["TRTLLM_ENABLE_PDL"] = "1"
+            if self.enable_ep_moe:
+                self.ep_size = self.tp_size
+                logger.warning(
+                    f"Flashinfer cutlass MoE and EP MoE are enabled. The expert parallel size is adjusted to be the same as the tensor parallel size[{self.tp_size}]."
+                )
             assert self.ep_size in [
                 1,
                 self.tp_size,
             ], "The expert parallel size must be 1 or the same as the tensor parallel size"
 
         # DeepEP MoE
-        if self.moe_a2a_backend == "deepep":
+        if self.moe_a2a_backend == "deepep" or self.enable_deepep_moe:
             if self.deepep_mode == "normal":
                 logger.warning("Cuda graph is disabled because deepep_mode=`normal`")
                 self.disable_cuda_graph = True
@@ -504,7 +511,9 @@ class ServerArgs:
             )
 
         if self.enable_eplb:
-            assert self.ep_size > 1 or self.moe_a2a_backend is not None
+            assert (self.ep_size > 1 or self.moe_a2a_backend is not None) or (
+                self.enable_ep_moe or self.enable_deepep_moe
+            )
 
         if self.enable_expert_distribution_metrics and (
             self.expert_distribution_recorder_mode is None

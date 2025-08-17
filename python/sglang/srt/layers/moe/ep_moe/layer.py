@@ -20,7 +20,6 @@ from sglang.srt.layers.moe.fused_moe_triton.layer import (
     should_use_flashinfer_trtllm_moe,
 )
 from sglang.srt.layers.moe.topk import TopKOutput
-from sglang.srt.layers.moe.utils import DeepEPMode
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8 import (
@@ -34,7 +33,14 @@ from sglang.srt.layers.quantization.fp8_kernel import (
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.utils import ceil_div, dispose_tensor, get_bool_env_var, is_hip, is_npu
+from sglang.srt.utils import (
+    DeepEPMode,
+    ceil_div,
+    dispose_tensor,
+    get_bool_env_var,
+    is_hip,
+    is_npu,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -96,6 +102,7 @@ class EPMoE(FusedMoE):
             activation=activation,
             # apply_router_weight_on_input=apply_router_weight_on_input,
             routed_scaling_factor=routed_scaling_factor,
+            enable_ep_moe=True,
         )
 
         self.start_expert_id = self.moe_ep_rank * self.num_local_experts
@@ -304,7 +311,7 @@ class DeepEPMoE(EPMoE):
         prefix: str = "",
         activation: str = "silu",
         routed_scaling_factor: Optional[float] = None,
-        deepep_mode: DeepEPMode = DeepEPMode.AUTO,
+        deepep_mode: DeepEPMode = DeepEPMode.auto,
     ):
         super().__init__(
             num_experts=num_experts,
@@ -324,6 +331,7 @@ class DeepEPMoE(EPMoE):
 
         # TODO: move to the beginning of the file
         from sglang.srt.distributed.parallel_state import get_tp_group
+        from sglang.srt.managers.schedule_batch import global_server_args_dict
         from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
 
         self.deepep_dispatcher = MaybeTboDeepEPDispatcher(
@@ -737,10 +745,11 @@ class FlashInferEPMoE(EPMoE):
 
 
 def get_moe_impl_class():
-    if global_server_args_dict["moe_a2a_backend"].is_deepep():
+    if global_server_args_dict["enable_deepep_moe"]:
         return DeepEPMoE
     if global_server_args_dict["enable_flashinfer_cutlass_moe"]:
+        # Must come before EPMoE because FusedMoE also supports enable_ep_moe
         return FusedMoE
-    if get_moe_expert_parallel_world_size() > 1:
+    if global_server_args_dict["enable_ep_moe"]:
         return FlashInferEPMoE if should_use_flashinfer_trtllm_moe() else EPMoE
     return FlashInferFusedMoE if should_use_flashinfer_trtllm_moe() else FusedMoE

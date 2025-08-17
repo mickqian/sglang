@@ -51,7 +51,6 @@ from sglang.srt.disaggregation.decode_schedule_batch_mixin import (
     ScheduleBatchDisaggregationDecodeMixin,
 )
 from sglang.srt.distributed.parallel_state import get_tensor_model_parallel_rank
-from sglang.srt.layers.moe.utils import DeepEPMode, MoeA2ABackend
 from sglang.srt.mem_cache.allocator import (
     BaseTokenToKVPoolAllocator,
     SWATokenToKVPoolAllocator,
@@ -86,6 +85,8 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "enable_dp_attention",
     "enable_two_batch_overlap",
     "enable_dp_lm_head",
+    "enable_deepep_moe",
+    "enable_ep_moe",
     "moe_a2a_backend",
     "deepep_mode",
     "enable_flashinfer_cutlass_moe",

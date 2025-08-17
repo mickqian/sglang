@@ -38,8 +38,9 @@ spec:
           - --dp-size
           - "16"
           - --disable-radix-cache
-          - --moe-a2a-backend
-          - deepep
+          - --enable-deepep-moe
+          - --deepep-mode
+          - normal
           - --disaggregation-mode
           - prefill
           - --mem-fraction-static
@@ -183,8 +184,9 @@ spec:
           - --dp-size
           - "16"
           - --disable-radix-cache
-          - --moe-a2a-backend
-          - deepep
+          - --enable-deepep-moe
+          - --deepep-mode
+          - normal
           - --disaggregation-mode
           - prefill
           - --mem-fraction-static

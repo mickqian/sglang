@@ -2205,6 +2205,27 @@ def flatten_nested_list(nested_list):
         return [nested_list]
 
 
+class DeepEPMode(Enum):
+    normal = "normal"
+    low_latency = "low_latency"
+    auto = "auto"
+
+    def enable_normal(self):
+        return self in [DeepEPMode.normal, DeepEPMode.auto]
+
+    def enable_low_latency(self):
+        return self in [DeepEPMode.low_latency, DeepEPMode.auto]
+
+    def resolve(self, is_extend_in_batch: bool):
+        if self != DeepEPMode.auto:
+            return self
+
+        if is_extend_in_batch:
+            return DeepEPMode.normal
+        else:
+            return DeepEPMode.low_latency
+
+
 def is_non_idle_and_non_empty(forward_mode, hidden_states):
     return (
         (forward_mode is not None)
@@ -2393,7 +2414,7 @@ def require_mlp_tp_gather(server_args):
             return True
         elif not server_args.enable_dp_lm_head:
             return True
-        elif server_args.moe_a2a_backend is None:
+        elif not server_args.enable_deepep_moe:
             return True
         else:
             return (

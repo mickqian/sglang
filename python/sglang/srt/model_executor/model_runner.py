@@ -60,7 +60,6 @@ from sglang.srt.layers.dp_attention import (
     initialize_dp_attention,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.layers.moe.utils import DeepEPMode, MoeA2ABackend
 from sglang.srt.layers.quantization import (
     deep_gemm_wrapper,
     monkey_patch_isinstance_for_vllm_base_layer,
@@ -102,6 +101,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils import (
+    DeepEPMode,
     MultiprocessingSerializer,
     cpu_has_amx_support,
     dynamic_import,
@@ -219,8 +219,8 @@ class ModelRunner:
                 "speculative_algorithm": self.spec_algorithm,
             }
             | {
-                "moe_a2a_backend": MoeA2ABackend(server_args.moe_a2a_backend),
-                "deepep_mode": DeepEPMode(server_args.deepep_mode),
+                # "moe_a2a_backend": MoeA2ABackend(server_args.moe_a2a_backend),
+                # "deepep_mode": DeepEPMode(server_args.deepep_mode),
             }
         )
 

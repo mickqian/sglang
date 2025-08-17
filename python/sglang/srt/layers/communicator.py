@@ -108,7 +108,7 @@ class LayerScatterModes:
         if context.is_layer_sparse:
             return (
                 ScatterMode.SCATTERED
-                if not global_server_args_dict["moe_a2a_backend"].is_standard()
+                if global_server_args_dict["enable_deepep_moe"]
                 else ScatterMode.FULL
             )
         else:

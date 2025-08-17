@@ -38,7 +38,6 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.distributed.parallel_state import get_moe_expert_parallel_world_size
 from sglang.srt.layers.dp_attention import (
     DPPaddingMode,
     get_attention_dp_rank,
@@ -840,7 +839,7 @@ class ForwardBatch:
 
 
 def enable_num_token_non_padded(server_args):
-    return get_moe_expert_parallel_world_size() > 1
+    return server_args.enable_ep_moe or server_args.enable_deepep_moe
 
 
 class PPProxyTensors:

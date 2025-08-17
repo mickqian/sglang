@@ -33,8 +33,7 @@ class TestTwoBatchOverlap(unittest.TestCase):
                 "--dp",
                 "2",
                 "--enable-dp-attention",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
                 "--deepep-mode",
                 "normal",
                 "--disable-cuda-graph",  # DeepEP normal does not support CUDA Graph
@@ -123,8 +122,7 @@ class TestQwen3TwoBatchOverlap(TestTwoBatchOverlap):
                 "--dp",
                 "2",
                 "--enable-dp-attention",
-                "--moe-a2a-backend",
-                "deepep",
+                "--enable-deepep-moe",
                 "--deepep-mode",
                 "normal",
                 "--disable-cuda-graph",  # DeepEP normal does not support CUDA Graph
