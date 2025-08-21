@@ -13,7 +13,7 @@ from einops import rearrange
 
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.utils import is_cuda, print_info_once
-
+from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 _is_cuda = is_cuda()
 
 if _is_cuda:
@@ -569,7 +569,7 @@ class VisionAttention(nn.Module):
         # internvl
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
-
+        # print(f"{cu_seqlens.cpu().tolist()=}")
         output = self.qkv_backend.forward(
             q=q,
             k=k,

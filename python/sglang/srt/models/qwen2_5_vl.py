@@ -414,6 +414,20 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).cumsum(dim=0),
             ]
         )
+
+        cu_seqlens_new = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0,
+            # Select dtype based on the following factors:
+            #  - FA2 requires that cu_seqlens_q must have dtype int32
+            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+
+        print(f"{self.fullatt_block_indexes=}")
+        print(f"{cu_seqlens.tolist()=}")
+        print(f"{cu_seqlens_new.tolist()=}")
+        print(f"{cu_window_seqlens.tolist()=}")
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
