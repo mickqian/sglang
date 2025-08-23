@@ -1107,6 +1107,10 @@ def launch_server(
         warmup_thread.join()
 
 
+# Minimal 1x1 black PNG (base64)
+MINIMUM_PNG_PICTURE_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+
+
 def _execute_server_warmup(
     server_args: ServerArgs,
     pipe_finish_writer: Optional[multiprocessing.connection.Connection],
@@ -1138,10 +1142,11 @@ def _execute_server_warmup(
 
     model_info = res.json()
 
-    is_vlm = bool(model_info.get("has_vision_understanding"))
+    is_vlm = bool(model_info.get("has_vision_understanding", False))
+
     # Send a warmup request
     if model_info["is_generation"]:
-        if is_vlm and not server_args.skip_tokenizer_init:
+        if is_vlm:
             request_name = "/v1/chat/completions"
         else:
             request_name = "/generate"
@@ -1160,9 +1165,8 @@ def _execute_server_warmup(
         # TODO Workaround the bug that embedding errors for list of size 1
         if server_args.dp_size == 1:
             json_data["input_ids"] = json_data["input_ids"][0]
-    elif is_vlm and request_name == "/v1/chat/completions":
-        # Minimal 1x1 PNG (base64)
-        tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+    elif is_vlm and server_args.disaggregation_mode == "null":
+        # TODO: ChatCompletionRequest does not have bootstrap info required by disaggregation mode, disable image-warmup for now
         json_data = {
             "model": _global_state.tokenizer_manager.served_model_name,
             "messages": [
@@ -1172,7 +1176,7 @@ def _execute_server_warmup(
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{tiny_png_b64}"
+                                "url": f"data:image/png;base64,{MINIMUM_PNG_PICTURE_BASE64}"
                             },
                         },
                         {
@@ -1214,7 +1218,6 @@ def _execute_server_warmup(
                 headers=headers,
                 timeout=600,
             )
-            print(f"{res=}")
             assert res.status_code == 200, f"{res}"
             _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
