@@ -114,7 +114,11 @@ class ComposedPipelineBase(ABC):
         self.model_path: str = model_path
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
-        self.executor = executor or self.build_executor(server_args=server_args)
+
+        # NOTE: holding an executor inside Pipeline is unnatural. Consider let the gpu worker hold it
+        self.executor: PipelineExecutor = executor or self.build_executor(
+            server_args=server_args
+        )
 
         if required_config_modules is not None:
             self._required_config_modules = required_config_modules
