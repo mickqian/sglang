@@ -237,7 +237,7 @@ class ServerArgs:
     pin_cpu_memory: bool = True
 
     # Disaggregation config
-    enable_disagg: bool = False
+    enable_disagg: bool | None = None
     num_non_dit_ranks: int = 1  # Number of ranks dedicated to Non-DiT (Encoder/VAE)
 
     # STA (Sliding Tile Attention) parameters
@@ -311,15 +311,12 @@ class ServerArgs:
         # Auto-enable disaggregation if num_gpus > 1 and (num_gpus - 1) % 2 == 0
         # (This preserves your existing logic logic: 1 rank for Non-DiT, N-1 for DiT, N-1 is even)
         if (
-            self.num_gpus > 1
+            not self.is_local_mode
+            and self.num_gpus > 1
             and (self.num_gpus - 1) % 2 == 0
-            and not self.enable_disagg
+            and self.enable_disagg is None
         ):
-            self.enable_disagg = True  # Optional: Auto-enable?
-            # Let's keep it explicit for now or strictly follow the user's intent?
-            # Given your previous code had `do_disaggregation = ...` hardcoded,
-            # we should probably default it to True if it matches the pattern to maintain behavior.
-            pass
+            self.enable_disagg = True
 
         if self.enable_disagg:
             logger.info("Disabling all offload behaviors when disagg mode in on")

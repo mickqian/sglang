@@ -1,6 +1,6 @@
 """
 Pipeline executor for disaggregated execution.
-Note: The actual scheduling and communication logic has been moved to 
+Note: The actual scheduling and communication logic has been moved to
 sglang.multimodal_gen.runtime.managers.scheduler_pp.SchedulerPPMixin.
 This executor now only handles stage execution based on the assigned phase.
 """
@@ -13,7 +13,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.executors.pipeline_executor im
     PipelineExecutor,
     Timer,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req, PPPhase
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
+    OutputBatch,
+    PPPhase,
+    Req,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     DenoisingStage,
     TimestepPreparationStage,
@@ -75,8 +79,8 @@ class DisaggregatedExecutor(PipelineExecutor):
             return self._run_local(stages, batch)
 
         pre_denoise_stages = stages[:denoise_start_idx]
-        denoise_stages = stages[denoise_start_idx: denoise_end_idx + 1]
-        post_denoise_stages = stages[denoise_end_idx + 1:]
+        denoise_stages = stages[denoise_start_idx : denoise_end_idx + 1]
+        post_denoise_stages = stages[denoise_end_idx + 1 :]
 
         # Determine which stages to run based on Phase
         # The Scheduler sets `batch.pp_phase`.
@@ -103,7 +107,9 @@ class DisaggregatedExecutor(PipelineExecutor):
                 logger.warning(f"Received POST_DENOISING phase on DiT rank. Skipping.")
 
         else:
-            raise RuntimeError(f"Unexpected Req with empty PPPhase {self.comm.is_dit_rank()=}")
+            raise RuntimeError(
+                f"Unexpected Req with empty PPPhase {self.comm.is_dit_rank()=}"
+            )
 
         # Execute selected stages
         for stage in stages_to_run:

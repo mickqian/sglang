@@ -299,13 +299,9 @@ def init_distributed_environment(
         ), "world group already initialized with a different world size"
 
 
-
-
 def get_sp_group() -> SequenceParallelGroupCoordinator:
     assert _SP is not None, "pipeline model parallel group is not initialized"
     return _SP
-
-
 
 
 def get_dp_group() -> GroupCoordinator:

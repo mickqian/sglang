@@ -9,8 +9,6 @@ from typing import Any, List
 
 import zmq
 
-from sglang.multimodal_gen.runtime.distributed.dist_utils import get_disagg_communicator
-from sglang.multimodal_gen.runtime.distributed.parallel_state import get_world_group
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     MergeLoraWeightsReq,
     SetLoraReq,
@@ -27,10 +25,13 @@ from sglang.multimodal_gen.runtime.server_args import (
 )
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket, set_cuda_arch
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger, configure_logger, globally_suppress_loggers
+from sglang.multimodal_gen.runtime.utils.logging_utils import (
+    configure_logger,
+    globally_suppress_loggers,
+    init_logger,
+)
 
 logger = init_logger(__name__)
-
 
 
 class Scheduler(SchedulerPPMixin):
@@ -124,55 +125,23 @@ class Scheduler(SchedulerPPMixin):
 
         return [item]
 
-    def recv_reqs(self) -> List[tuple[bytes, Any]]:
+    def recv_reqs(self) -> List[Any]:
         """
         For non-main schedulers, reqs are broadcasted from main using broadcast_pyobj
         """
-        # Check if this is a non-dit rank in disagg mode
-        is_non_dit_rank = False
-        if self.server_args.enable_disagg:
-            comm = get_disagg_communicator()
-            if comm is not None:
-                is_non_dit_rank = comm.is_non_dit_rank()
-
         if self.receiver is not None:
             try:
-                identity, _, payload = self.receiver.recv_multipart()
-                recv_reqs = pickle.loads(payload)
-            except zmq.error.Again:
-                # no request received
-                recv_reqs = []
+                recv_reqs = self.receiver.recv_pyobj()
             except zmq.ZMQError:
                 # re-raise or handle appropriately to let the outer loop continue
                 raise
 
-            if recv_reqs:
-                # ensure recv_reqs is a list
-                if not isinstance(recv_reqs, list):
-                    recv_reqs = [recv_reqs]
-
-                # Pack with identity for rank 0
-                recv_reqs = [(identity, req) for req in recv_reqs]
+            # Ensure recv_reqs is a list
+            if not isinstance(recv_reqs, list):
+                recv_reqs = [recv_reqs]
         else:
             recv_reqs = None
 
-        # In disagg mode, first broadcast to ALL ranks (dit + non-dit) using world group
-        # This ensures non-dit ranks receive the requests
-        if self.server_args.enable_disagg:
-            world_group = get_world_group()
-            recv_reqs = broadcast_pyobj(
-                recv_reqs,
-                world_group.rank_in_group,
-                world_group.cpu_group,
-                src=0,  # rank 0 is the source (dit master with ZMQ receiver)
-            )
-
-            # Non-dit ranks receive requests via world broadcast and return immediately
-            # They don't participate in dit's sp/cfg/tp parallel groups
-            if is_non_dit_rank:
-                return recv_reqs
-
-        # Dit ranks continue with their internal parallel group broadcasts
         # TODO: fix this condition
         if self.server_args.sp_degree != 1:
             recv_reqs = broadcast_pyobj(
@@ -295,8 +264,6 @@ class Scheduler(SchedulerPPMixin):
         for pipe in self.result_pipes_from_slaves:
             results.append(pipe.recv())
         return results
-
-
 
 
 def run_scheduler_event_loop(scheduler: Scheduler, server_args: ServerArgs):

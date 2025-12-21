@@ -81,7 +81,6 @@ class VideoRemixRequest(BaseModel):
     prompt: str
 
 
-
 # For vertex
 @dataclass
 class BaseReq(ABC):
