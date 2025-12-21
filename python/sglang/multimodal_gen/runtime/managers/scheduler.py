@@ -135,16 +135,20 @@ class Scheduler:
             try:
                 identity, _, payload = self.receiver.recv_multipart()
                 recv_reqs = pickle.loads(payload)
+            except zmq.error.Again:
+                # no request received
+                recv_reqs = []
             except zmq.ZMQError:
                 # re-raise or handle appropriately to let the outer loop continue
                 raise
 
-            # ensure recv_reqs is a list
-            if not isinstance(recv_reqs, list):
-                recv_reqs = [recv_reqs]
+            if recv_reqs:
+                # ensure recv_reqs is a list
+                if not isinstance(recv_reqs, list):
+                    recv_reqs = [recv_reqs]
 
-            # Pack with identity for rank 0
-            recv_reqs = [(identity, req) for req in recv_reqs]
+                # Pack with identity for rank 0
+                recv_reqs = [(identity, req) for req in recv_reqs]
         else:
             recv_reqs = None
 
@@ -208,6 +212,8 @@ class Scheduler:
             # 1: receive requests
             try:
                 new_reqs = self.recv_reqs()
+                if not new_reqs:
+                    continue
                 # after processing input reqs
                 self.waiting_queue.extend(new_reqs)
             except Exception as e:

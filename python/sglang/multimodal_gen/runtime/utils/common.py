@@ -173,6 +173,8 @@ def get_zmq_socket(
     elif socket_type in [zmq.DEALER, zmq.REQ, zmq.REP, zmq.ROUTER]:
         set_send_opt()
         set_recv_opt()
+        # Set receive timeout to 1000ms (1s) to allow periodic checking of control signals
+        socket.setsockopt(zmq.RCVTIMEO, 1000)
     else:
         raise ValueError(f"Unsupported socket type: {socket_type}")
 
