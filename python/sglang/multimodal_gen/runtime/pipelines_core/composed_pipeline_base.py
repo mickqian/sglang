@@ -156,7 +156,7 @@ class ComposedPipelineBase(ABC):
 
         self.initialize_pipeline(self.server_args)
 
-        logger.info("Creating pipeline stages...")
+        logger.info("Creating pipeline stages...", main_process_only=True)
         self.create_pipeline_stages(self.server_args)
 
     @classmethod
@@ -357,7 +357,9 @@ class ComposedPipelineBase(ABC):
 
         # all the component models used by the pipeline
         required_modules = self.required_config_modules
-        logger.info("Loading modules: %s", model_index, main_process_only=False)
+        curr_global_rank = torch.distributed.get_rank()
+
+        logger.info(f"[Rank {curr_global_rank}] Loading modules: %s", model_index)
 
         # CRITICAL: Disable runai_model_streamer in disagg mode to avoid deadlock
         # In disagg mode, ranks load different modules at different times.

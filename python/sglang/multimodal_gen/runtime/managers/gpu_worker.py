@@ -1,7 +1,7 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
-import multiprocessing as mp
+
 import os
 import time
 from typing import List
@@ -19,11 +19,8 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core import Req, build_pipeline
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
-from sglang.multimodal_gen.runtime.server_args import PortArgs, ServerArgs
-from sglang.multimodal_gen.runtime.utils.common import set_cuda_arch
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import (
-    configure_logger,
-    globally_suppress_loggers,
     init_logger,
 )
 from sglang.multimodal_gen.runtime.utils.perf_logger import (
@@ -157,51 +154,3 @@ class GPUWorker:
         """
         assert self.pipeline is not None
         self.pipeline.unmerge_lora_weights(target)
-
-
-def run_scheduler_process(
-    local_rank: int,
-    rank: int,
-    master_port: int,
-    server_args: ServerArgs,
-    pipe_writer: mp.connection.Connection,
-    # For all workers: pipe to receive tasks from rank 0
-    task_pipe_r: mp.connection.Connection,
-    # For slave workers: pipe to send results back to rank 0
-    result_pipe_w: mp.connection.Connection | None,
-    # For rank 0 worker only: pipes to send tasks to slaves
-    task_pipes_to_slaves: list[mp.connection.Connection] | None = None,
-    # For rank 0 worker only: pipes to receive results from slaves
-    result_pipes_from_slaves: list[mp.connection.Connection] | None = None,
-) -> None:
-    """
-    The entry point for the worker process.
-    Rank 0 acts as the master, handling ZMQ requests and coordinating slaves.
-    Ranks > 0 act as slaves, waiting for tasks from the master.
-    """
-    configure_logger(server_args)
-    globally_suppress_loggers()
-    set_cuda_arch()
-
-    port_args = PortArgs.from_server_args(server_args)
-
-    # start the scheduler event loop
-    assert task_pipes_to_slaves is not None
-    assert result_pipes_from_slaves is not None
-    from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
-
-    scheduler = Scheduler(
-        server_args,
-        gpu_id=rank,
-        port_args=port_args,
-        task_pipes_to_slaves=task_pipes_to_slaves,
-        result_pipes_from_slaves=result_pipes_from_slaves,
-    )
-    logger.info(f"Worker {rank}: Scheduler loop started.")
-    pipe_writer.send(
-        {
-            "status": "ready",
-        }
-    )
-    scheduler.event_loop()
-    logger.info(f"Worker {rank}: Shutdown complete.")

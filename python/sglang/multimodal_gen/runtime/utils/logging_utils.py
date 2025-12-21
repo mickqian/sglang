@@ -178,7 +178,7 @@ def _log_process_aware(
     *args: Any,
     main_process_only: bool,
     local_main_process_only: bool,
-    group_master_only: bool = False,
+    group_master_only: bool = True,
     **kwargs: Any,
 ) -> None:
     """Helper function to log a message if the process rank matches the criteria.
@@ -239,7 +239,7 @@ class _SGLDiffusionLogger(Logger):
         *args: Any,
         main_process_only: bool = True,
         local_main_process_only: bool = True,
-        group_master_only: bool = False,
+        group_master_only: bool = True,
         **kwargs: Any,
     ) -> None: ...
 
@@ -249,7 +249,7 @@ class _SGLDiffusionLogger(Logger):
         *args: Any,
         main_process_only: bool = True,
         local_main_process_only: bool = True,
-        group_master_only: bool = False,
+        group_master_only: bool = True,
         **kwargs: Any,
     ) -> None: ...
 
@@ -259,7 +259,7 @@ class _SGLDiffusionLogger(Logger):
         *args: Any,
         main_process_only: bool = False,
         local_main_process_only: bool = True,
-        group_master_only: bool = False,
+        group_master_only: bool = True,
         **kwargs: Any,
     ) -> None: ...
 
@@ -269,7 +269,7 @@ class _SGLDiffusionLogger(Logger):
         *args: Any,
         main_process_only: bool = False,
         local_main_process_only: bool = True,
-        group_master_only: bool = False,
+        group_master_only: bool = True,
         **kwargs: Any,
     ) -> None: ...
 
@@ -289,7 +289,7 @@ def init_logger(name: str) -> _SGLDiffusionLogger:
         level: int,
         main_process_only_default: bool,
         local_main_process_only_default: bool,
-        group_master_only_default: bool = False,
+        group_master_only_default: bool = True,
     ):
         def _method(
             self: Logger,
@@ -316,22 +316,22 @@ def init_logger(name: str) -> _SGLDiffusionLogger:
     setattr(
         logger,
         "info",
-        MethodType(_create_patched_method(logging.INFO, True, True, False), logger),
+        MethodType(_create_patched_method(logging.INFO, True, True, True), logger),
     )
     setattr(
         logger,
         "debug",
-        MethodType(_create_patched_method(logging.DEBUG, True, True, False), logger),
+        MethodType(_create_patched_method(logging.DEBUG, True, True, True), logger),
     )
     setattr(
         logger,
         "warning",
-        MethodType(_create_patched_method(logging.WARNING, False, True, False), logger),
+        MethodType(_create_patched_method(logging.WARNING, False, True, True), logger),
     )
     setattr(
         logger,
         "error",
-        MethodType(_create_patched_method(logging.ERROR, False, True, False), logger),
+        MethodType(_create_patched_method(logging.ERROR, False, True, True), logger),
     )
 
     return cast(_SGLDiffusionLogger, logger)

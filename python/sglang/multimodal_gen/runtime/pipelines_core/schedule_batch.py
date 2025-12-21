@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import pprint
 from dataclasses import asdict, dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Optional
 
 import PIL.Image
@@ -29,11 +30,16 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import align_to
 
 if TYPE_CHECKING:
-
     from sglang.multimodal_gen.runtime.utils.perf_logger import RequestTimings
 
-
 logger = init_logger(__name__)
+
+
+# TODO: move to somewhere appropriate
+class PPPhase(Enum):
+    PRE_DENOISING = auto()
+    DENOISING = auto()
+    POST_DENOISING = auto()
 
 
 @dataclass
@@ -143,7 +149,6 @@ class Req:
     guidance_rescale: float = 0.0
     eta: float = 0.0
     sigmas: list[float] | None = None
-
     n_tokens: int | None = None
 
     # Other parameters that may be needed by specific schedulers
@@ -159,10 +164,6 @@ class Req:
 
     # Extra parameters that might be needed by specific pipeline implementations
     extra: dict[str, Any] = field(default_factory=dict)
-
-    # Misc
-    save_output: bool = True
-    return_frames: bool = False
 
     # TeaCache parameters
     enable_teacache: bool = False
@@ -192,6 +193,13 @@ class Req:
 
     # results
     output: torch.Tensor | None = None
+
+    # pp
+    pp_phase: PPPhase | None = None
+
+    # Misc
+    save_output: bool = True
+    return_frames: bool = False
 
     @property
     def batch_size(self):

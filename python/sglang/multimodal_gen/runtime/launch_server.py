@@ -7,7 +7,7 @@ import sys
 import uvicorn
 
 from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
-from sglang.multimodal_gen.runtime.managers.gpu_worker import run_scheduler_process
+from sglang.multimodal_gen.runtime.managers.scheduler import run_scheduler_process
 from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
     prepare_server_args,

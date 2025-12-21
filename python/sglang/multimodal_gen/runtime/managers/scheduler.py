@@ -1,6 +1,8 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+import multiprocessing as mp
+import multiprocessing.connection
 import pickle
 from collections import deque
 from typing import Any, List
@@ -15,6 +17,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     UnmergeLoraWeightsReq,
 )
 from sglang.multimodal_gen.runtime.managers.gpu_worker import GPUWorker
+from sglang.multimodal_gen.runtime.managers.scheduler_pp import SchedulerPPMixin
 from sglang.multimodal_gen.runtime.pipelines_core import Req
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.server_args import (
@@ -22,14 +25,15 @@ from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
     set_global_server_args,
 )
-from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
+from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket, set_cuda_arch
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger, configure_logger, globally_suppress_loggers
 
 logger = init_logger(__name__)
 
 
-class Scheduler:
+
+class Scheduler(SchedulerPPMixin):
     """
     Runs the main event loop for the rank 0 worker.
     It listens for external requests via ZMQ and coordinates with other workers.
@@ -291,3 +295,59 @@ class Scheduler:
         for pipe in self.result_pipes_from_slaves:
             results.append(pipe.recv())
         return results
+
+
+
+
+def run_scheduler_event_loop(scheduler: Scheduler, server_args: ServerArgs):
+    if server_args.enable_disagg:
+        scheduler.event_loop_pp()
+    else:
+        scheduler.event_loop()
+
+
+def run_scheduler_process(
+    local_rank: int,
+    rank: int,
+    master_port: int,
+    server_args: ServerArgs,
+    pipe_writer: mp.connection.Connection,
+    # For all workers: pipe to receive tasks from rank 0
+    task_pipe_r: mp.connection.Connection,
+    # For slave workers: pipe to send results back to rank 0
+    result_pipe_w: mp.connection.Connection | None,
+    # For rank 0 worker only: pipes to send tasks to slaves
+    task_pipes_to_slaves: list[mp.connection.Connection] | None = None,
+    # For rank 0 worker only: pipes to receive results from slaves
+    result_pipes_from_slaves: list[mp.connection.Connection] | None = None,
+) -> None:
+    """
+    The entry point for the worker process.
+    Rank 0 acts as the master, handling ZMQ requests and coordinating slaves.
+    Ranks > 0 act as slaves, waiting for tasks from the master.
+    """
+    configure_logger(server_args)
+    globally_suppress_loggers()
+    set_cuda_arch()
+
+    port_args = PortArgs.from_server_args(server_args)
+
+    # start the scheduler event loop
+    assert task_pipes_to_slaves is not None
+    assert result_pipes_from_slaves is not None
+
+    scheduler = Scheduler(
+        server_args,
+        gpu_id=rank,
+        port_args=port_args,
+        task_pipes_to_slaves=task_pipes_to_slaves,
+        result_pipes_from_slaves=result_pipes_from_slaves,
+    )
+    logger.info(f"Worker {rank}: Scheduler loop started.")
+    pipe_writer.send(
+        {
+            "status": "ready",
+        }
+    )
+    run_scheduler_event_loop(scheduler, server_args)
+    logger.info(f"Worker {rank}: Shutdown complete.")

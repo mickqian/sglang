@@ -299,7 +299,6 @@ def init_distributed_environment(
         ), "world group already initialized with a different world size"
 
 
-_SP: GroupCoordinator | None = None
 
 
 def get_sp_group() -> SequenceParallelGroupCoordinator:
@@ -307,7 +306,6 @@ def get_sp_group() -> SequenceParallelGroupCoordinator:
     return _SP
 
 
-_DP: GroupCoordinator | None = None
 
 
 def get_dp_group() -> GroupCoordinator:
@@ -552,7 +550,6 @@ def initialize_model_parallel(
     )
 
     # Setup sequence parallel groups (requires special handling for disagg)
-    from yunchang import set_seq_parallel_pg
 
     with suppress_stdout():
         from yunchang.globals import PROCESS_GROUP
@@ -562,8 +559,6 @@ def initialize_model_parallel(
             world_size, num_non_dit_ranks, orig_params[0], orig_params[1]
         )
     else:
-        global _SP
-        assert _SP is None, "sequence parallel group is already initialized"
 
         try:
             from .yunchang import PROCESS_GROUP as _YC_PROCESS_GROUP
@@ -597,8 +592,6 @@ def initialize_model_parallel(
     if ulysses_degree > 1:
         _warmup_ulysses_communication()
 
-    global _TP
-    assert _TP is None, "Tensor parallel group is already initialized"
     _TP = init_parallel_group_coordinator(
         group_ranks=tp_groups,
         local_rank=get_world_group().local_rank,
@@ -1243,40 +1236,6 @@ def destroy_model_parallel() -> None:
     if _DP:
         _DP.destroy()
     _DP = None
-
-
-# xDit
-# def destroy_model_parallel():
-#     """Set the groups to none and destroy them."""
-#     global _DP
-#     if _DP:
-#         _DP.destroy()
-#     _DP = None
-#
-#     global _CFG
-#     if _CFG:
-#         _CFG.destroy()
-#     _CFG = None
-#
-#     global _SP
-#     if _SP:
-#         _SP.destroy()
-#     _SP = None
-#
-#     global _TP
-#     if _TP:
-#         _TP.destroy()
-#     _TP = None
-#
-#     global _PP
-#     if _PP:
-#         _PP.destroy()
-#     _PP = None
-#
-#     global _VAE
-#     if _VAE:
-#         _VAE.destroy()
-#     _VAE = None
 
 
 def destroy_distributed_environment():

@@ -617,7 +617,6 @@ class VAELoader(ComponentLoader):
         hf_config = super().load_config(component_model_path, server_args)
         config = server_args.pipeline_config.vae_config
         config.update_model_arch(hf_config)
-        print(f"updating VAELoader config with: {hf_config=}")
         server_args.model_paths["vae"] = component_model_path
 
         # NOTE: some post init logics are only available after updated with config
