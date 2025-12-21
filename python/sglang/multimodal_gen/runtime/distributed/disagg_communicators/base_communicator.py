@@ -191,3 +191,15 @@ class DisaggCommunicator(ABC):
         Returns (list of tensors, list of Work handles).
         """
         pass
+
+    @abstractmethod
+    def broadcast_object_from_non_dit(self, obj: Optional[Any] = None) -> Any:
+        """
+        Broadcast a complex object (e.g. Req) with tensors from Non-DiT Master to all DiT ranks.
+
+        Optimized for NVLink: separates metadata and tensors.
+        - Sender (Non-DiT Master): Pass 'obj'.
+        - Receiver (DiT Ranks): Pass None. Returns the received object.
+        - Other Ranks: Returns None.
+        """
+        pass

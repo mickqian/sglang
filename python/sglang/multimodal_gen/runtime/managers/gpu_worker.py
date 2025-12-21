@@ -99,10 +99,10 @@ class GPUWorker:
             timings = RequestTimings(request_id=req.request_id)
             req.timings = timings
 
-            output_batch = self.pipeline.forward(req, self.server_args)
-            duration_ms = (time.monotonic() - start_time) * 1000
+            output_batch: OutputBatch = self.pipeline.forward(req, self.server_args)
 
-            if output_batch.timings:
+            if isinstance(output_batch, OutputBatch) and output_batch.timings:
+                duration_ms = (time.monotonic() - start_time) * 1000
                 output_batch.timings.total_duration_ms = duration_ms
                 PerformanceLogger.log_request_summary(timings=output_batch.timings)
         except Exception as e:
@@ -110,10 +110,6 @@ class GPUWorker:
                 f"Error executing request {req.request_id}: {e}", exc_info=True
             )
             if output_batch is None:
-                from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
-                    OutputBatch,
-                )
-
                 output_batch = OutputBatch()
             output_batch.error = f"Error executing request {req.request_id}: {e}"
         finally:

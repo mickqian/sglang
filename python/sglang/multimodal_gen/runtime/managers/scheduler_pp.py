@@ -12,7 +12,6 @@ from torch.distributed import Work
 
 from sglang.multimodal_gen.runtime.distributed import (
     get_local_torch_device,
-    get_world_group,
 )
 from sglang.multimodal_gen.runtime.distributed.disagg_communicators.base_communicator import (
     DisaggCommunicator,
@@ -23,7 +22,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     OutputBatch,
     PPPhase,
 )
-from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -39,11 +37,11 @@ class SchedulerPPMixin:
     This class does NOT manage worker processes.
 
     # TODO: improve this by let rank 0 to be non-dit master
-    Role-Specific Behavior:
-       * DiT Master (Rank 0): Receives from ZMQ, forwards to Non-DiT Master, and returns an empty list (delegating Phase 1 processing to Non-DiT ranks).
-       * Non-DiT Master: Receives from DiT Master, broadcasts to Non-DiT group, and returns requests for local processing.
-       * Other Non-DiT Ranks: Receive broadcast from Non-DiT Master.
-       * Other DiT Ranks: Do nothing regarding new client requests.
+    Process order:
+       * 1. DiT Master (Rank 0): Receives from ZMQ, forwards to Non-DiT Master, and returns an empty list (delegating Phase 1 processing to Non-DiT ranks).
+       * 2. Non-DiT: Receives from DiT Master, forward requests to DiT group after processing pre-denoising stages
+       * 3. DiT: Receives from Non-DiT Master, forward requests to Non-DiT group after processing denoising stage
+       * 4. Non-DiT: Receives from DiT Master, final process the post-denoising stages (Decoding), then return the result
     """
 
     def get_next_batch_to_run_pp(self: "Scheduler", comm: DisaggCommunicator):
@@ -56,6 +54,7 @@ class SchedulerPPMixin:
             if self.post_denoising_queue:
                 req_to_run = self.post_denoising_queue.popleft()
             elif self.waiting_queue:
+                # encoding reqs
                 item = self.waiting_queue.popleft()
                 if isinstance(item, tuple):
                     req_identity, req_to_run = item
@@ -73,19 +72,16 @@ class SchedulerPPMixin:
     ):
         try:
             # Execute
-            output_batch = self.worker.execute_forward([req_to_run])
+            output = self.worker.execute_forward([req_to_run])
 
-            if output_batch.error:
-                self._handle_error(req_to_run, output_batch.error, req_identity)
-            else:
-                self._handle_success(req_to_run, output_batch, req_identity, comm)
+            # Handle result
+            self.process_result(req_to_run, output, req_identity, comm)
         except Exception as e:
             logger.error(f"Execution error: {e}", exc_info=True)
             self._handle_error(req_to_run, str(e), req_identity)
 
     def filter_reqs(self: "Scheduler", new_reqs: list[Req], comm: DisaggCommunicator):
         """Select from the received reqs that will actually be processed on this rank, then put them in waiting_queue"""
-        # Only Non-DiT ranks process new client requests (Phase 1)
         if new_reqs:
             if comm.is_non_dit_rank():
                 for item in new_reqs:
@@ -94,28 +90,43 @@ class SchedulerPPMixin:
                     if isinstance(item, tuple):
                         identity, req = item
 
-                    req.pp_phase = PPPhase.PRE_DENOISING
-                    req.client_identity = identity
-                    self.waiting_queue.append((identity, req))
+                    if req.pp_phase is None:
+                        req.pp_phase = PPPhase.PRE_DENOISING
+                        req.client_identity = identity
+                        self.waiting_queue.append((identity, req))
+
+                    elif req.pp_phase == PPPhase.DENOISING:
+                        req.pp_phase = PPPhase.POST_DENOISING
+                        self.post_denoising_queue.append(req)
+                    else:
+                        assert False
             else:
-                # ignore the fresh new reqs on dit-ranks
-                pass
+                for item in new_reqs:
+                    req = item
+
+                    assert req.pp_phase == PPPhase.PRE_DENOISING
+                    req.pp_phase = PPPhase.DENOISING
+                    self.denoising_queue.append(req)
 
         for i, req in self.waiting_queue:
             assert req.pp_phase is not None
 
     def recv_reqs_pp(self: "Scheduler") -> List[tuple[bytes, Any]]:
         """
-        For non-main schedulers, reqs are broadcasted from main using broadcast_pyobj
+         Receive requests from ZMQ or another group with DisaggCommunicator
         """
         # Check if this is a non-dit rank in disagg mode
-        is_non_dit_rank = False
         assert self.server_args.enable_disagg
+
         comm = get_disagg_communicator()
+
         if comm is not None:
             is_non_dit_rank = comm.is_non_dit_rank()
+        else:
+            is_non_dit_rank = False
 
         if self.receiver is not None:
+            # receives reqs on non-dit master
             try:
                 identity, _, payload = self.receiver.recv_multipart()
                 recv_reqs = pickle.loads(payload)
@@ -134,48 +145,39 @@ class SchedulerPPMixin:
                 # Pack with identity for rank 0
                 recv_reqs = [(identity, req) for req in recv_reqs]
         else:
-            recv_reqs = None
-
-        # In disagg mode, first broadcast to ALL ranks (dit + non-dit) using world group
-        # This ensures non-dit ranks receive the requests
-        world_group = get_world_group()
-        recv_reqs = broadcast_pyobj(
-            recv_reqs,
-            world_group.rank_in_group,
-            world_group.cpu_group,
-            src=0,  # rank 0 is the source (dit master with ZMQ receiver)
-        )
+            # dit-ranks, try to receive from DisaggCommunicator
+            recv_reqs = self._async_receive_batch_from_non_dit(comm)
 
         # Non-dit ranks receive requests via world broadcast and return immediately
         # They don't participate in dit's sp/cfg/tp parallel groups
         if is_non_dit_rank:
             return recv_reqs
 
-        # Dit ranks continue with their internal parallel group broadcasts
-        # TODO: fix this condition
-        if self.server_args.sp_degree != 1:
-            recv_reqs = broadcast_pyobj(
-                recv_reqs,
-                self.worker.sp_group.rank,
-                self.worker.sp_cpu_group,
-                src=self.worker.sp_group.ranks[0],
-            )
-
-        if self.server_args.enable_cfg_parallel:
-            recv_reqs = broadcast_pyobj(
-                recv_reqs,
-                self.worker.cfg_group.rank,
-                self.worker.cfg_cpu_group,
-                src=self.worker.cfg_group.ranks[0],
-            )
-
-        if self.server_args.tp_size > 1:
-            recv_reqs = broadcast_pyobj(
-                recv_reqs,
-                self.worker.tp_group.rank,
-                self.worker.tp_cpu_group,
-                src=self.worker.tp_group.ranks[0],
-            )
+        # # Dit ranks continue with their internal parallel group broadcasts
+        # # TODO: fix this condition
+        # if self.server_args.sp_degree != 1:
+        #     recv_reqs = broadcast_pyobj(
+        #         recv_reqs,
+        #         self.worker.sp_group.rank,
+        #         self.worker.sp_cpu_group,
+        #         src=self.worker.sp_group.ranks[0],
+        #     )
+        #
+        # if self.server_args.enable_cfg_parallel:
+        #     recv_reqs = broadcast_pyobj(
+        #         recv_reqs,
+        #         self.worker.cfg_group.rank,
+        #         self.worker.cfg_cpu_group,
+        #         src=self.worker.cfg_group.ranks[0],
+        #     )
+        #
+        # if self.server_args.tp_size > 1:
+        #     recv_reqs = broadcast_pyobj(
+        #         recv_reqs,
+        #         self.worker.tp_group.rank,
+        #         self.worker.tp_cpu_group,
+        #         src=self.worker.tp_group.ranks[0],
+        #     )
 
         assert recv_reqs is not None
 
@@ -216,9 +218,6 @@ class SchedulerPPMixin:
             # 1. Clean up completed sends
             self._cleanup_pending_sends(comm)
 
-            # 2. Ingest: From Client (ZMQ)
-            # IMPORTANT: recv_reqs() performs a collective broadcast internally.
-            # All ranks MUST participate to avoid deadlock.
             try:
                 new_reqs = self.recv_reqs_pp()
             except Exception as e:
@@ -228,9 +227,6 @@ class SchedulerPPMixin:
                 new_reqs = []
 
             self.filter_reqs(new_reqs, comm)
-
-            # 3. Ingest: From Pipeline (Network)
-            self._process_pipeline_recv(comm)
 
             # 4. Schedule & Execute
             req, identity = self.get_next_batch_to_run_pp(comm)
@@ -292,139 +288,37 @@ class SchedulerPPMixin:
         except Exception as e:
             logger.error(f"Failed to post recv size: {e}")
 
-    def _process_pipeline_recv(self, comm: DisaggCommunicator):
-        """transfer req between dit-ranks and non-dit-ranks"""
-        if self.recv_size_work is None:
-            self._post_recv_size(comm)
-            return
-
-        if self.recv_size_work.is_completed():
-            # Size received, proceed to receive the rest synchronously (fast following)
-            try:
-                # Sync logic for reliability once header is detected
-                size = self.recv_size_tensor.item()
-                self.recv_size_work = None  # Reset
-
-                # 1. Recv Metadata
-                # Pass SHAPE, not Tensor instance
-                meta_shape = [(torch.Size([size]), torch.uint8)]
-                if comm.is_non_dit_rank():
-                    tensors, w = comm.batch_irecv_from_dit(meta_shape)
-                else:
-                    tensors, w = comm.batch_irecv_from_non_dit(meta_shape)
-
-                comm.wait_all_works(w)
-                meta_tensor = tensors[0]
-
-                meta_bytes = meta_tensor.cpu().numpy().tobytes()
-                metadata, tensor_infos, list_tensor_infos = pickle.loads(meta_bytes)
-
-                # 2. Prep Batch
-                batch = Req(None, None, None)
-                batch._recv_metadata = metadata
-                batch._recv_tensor_infos = tensor_infos
-                batch._recv_list_tensor_infos = list_tensor_infos
-
-                for k, v in metadata.items():
-                    setattr(batch, k, v)
-
-                # 3. Recv Data Tensors
-                all_shapes = []
-                tensor_names = []
-
-                for name, (shape, dtype) in tensor_infos.items():
-                    all_shapes.append((shape, dtype))
-                    tensor_names.append(("single", name))
-
-                for name, list_info in list_tensor_infos.items():
-                    length, indices, shapes = list_info
-                    for idx, (s, d) in enumerate(shapes):
-                        all_shapes.append((s, d))
-                        tensor_names.append(("list", name, idx, length, indices))
-
-                if all_shapes:
-                    if comm.is_non_dit_rank():
-                        tensors, w = comm.batch_irecv_from_dit(all_shapes)
-                    else:
-                        tensors, w = comm.batch_irecv_from_non_dit(all_shapes)
-                    comm.wait_all_works(w)
-
-                    # Reconstruct
-                    idx_t = 0
-                    list_buffers = {}
-                    for info in tensor_names:
-                        t = tensors[idx_t]
-                        if info[0] == "single":
-                            setattr(batch, info[1], t)
-                        else:
-                            name, idx, length, indices = (
-                                info[1],
-                                info[2],
-                                info[3],
-                                info[4],
-                            )
-                            if name not in list_buffers:
-                                list_buffers[name] = {
-                                    "length": length,
-                                    "indices": indices,
-                                    "tensors": [],
-                                }
-                            list_buffers[name]["tensors"].append(t)
-                        idx_t += 1
-
-                    for name, data in list_buffers.items():
-                        res = [None] * data["length"]
-                        for i, t in zip(data["indices"], data["tensors"]):
-                            res[i] = t
-                        setattr(batch, name, res)
-
-                # 4. Enqueue
-                if comm.is_non_dit_rank():
-                    batch.pp_phase = PPPhase.POST_DENOISING
-                    self.post_denoising_queue.append(batch)
-                else:
-                    batch.pp_phase = PPPhase.DENOISING
-                    # Broadcast to other DiT workers
-                    self._broadcast_batch_in_dit_group(batch, comm)
-                    self.denoising_queue.append(batch)
-
-            except Exception as e:
-                logger.error(f"Error processing pipeline recv: {e}", exc_info=True)
-            finally:
-                # Always repost listener
-                self._post_recv_size(comm)
-
-    def _handle_success(
+    def process_result(
         self: "Scheduler",
         req: Req,
-        output_batch: OutputBatch,
+        output_batch: OutputBatch | None,
         identity,
         comm: DisaggCommunicator,
     ):
-        """Handle execution success and transition/send."""
-        current_phase = getattr(req, "pp_phase", None)
+        """
+        Either:
+            1. send to another dit-group if the pipeline hasn't finished, or
+            2. return the result to client via ZMQ
 
-        if comm.is_non_dit_rank():
-            if current_phase == PPPhase.PRE_DENOISING:
-                # Finished Encoding -> Send to DiT
-                works = self._async_send_batch_to_dit(req, comm)
-                self.pending_sends.append((works, req))  # Keep req alive
+        """
+        current_phase = req.pp_phase
 
-            elif current_phase == PPPhase.POST_DENOISING:
-                # Finished Decoding -> Return to Client
-                # If we have an identity (from original ZMQ), send reply
-                # Note: identity might be stored in req if it round-tripped
-                final_ident = identity or getattr(req, "client_identity", None)
-                if final_ident:
-                    self.return_result(output_batch, final_ident)
-
-        elif comm.is_dit_rank():
-            if current_phase == PPPhase.DENOISING:
-                # Finished Denoising -> Send back to Non-DiT
-                # Only Master sends
-                if dist.get_rank() == comm.dit_master_rank:
-                    works = self._async_send_batch_to_non_dit(req, comm)
-                    self.pending_sends.append((works, req))
+        if current_phase == PPPhase.PRE_DENOISING:
+            assert comm.is_non_dit_rank()
+            # finished encoding, non-dit -> dit
+            self._async_send_batch_to_dit(req, comm)
+        elif current_phase == PPPhase.DENOISING:
+            assert comm.is_dit_rank()
+            # finished denoising, dit -> non-dit
+            self._async_send_batch_to_non_dit(req, comm)
+        elif current_phase == PPPhase.POST_DENOISING:
+            assert comm.is_non_dit_rank()
+            # finished decoding, return to client
+            final_ident = identity or getattr(req, "client_identity", None)
+            if output_batch.error:
+                self._handle_error(req, output_batch.error, final_ident)
+            elif final_ident:
+                self.return_result(output_batch, final_ident)
 
     def _handle_error(self: "Scheduler", req, msg, identity):
         final_ident = identity or getattr(req, "client_identity", None)
@@ -433,11 +327,12 @@ class SchedulerPPMixin:
 
     # --- Communication Helpers ---
 
-    def _async_send_batch_to_dit(self, batch: Req, comm) -> List[Optional[Work]]:
-        tensors, t_infos, l_infos = self._extract_tensors(batch)
-        metadata = self._extract_metadata(batch, t_infos, l_infos)
-        all_tensors = self._pack_tensors(metadata, t_infos, l_infos, tensors)
-        return comm.batch_isend_to_dit(all_tensors)
+    def _async_send_batch_to_dit(self, batch: Req, comm: DisaggCommunicator):
+        comm.broadcast_object_from_non_dit(batch)
+
+    def _async_receive_batch_from_non_dit(self, comm: DisaggCommunicator):
+        req = comm.broadcast_object_from_non_dit(None)
+        return req
 
     def _async_send_batch_to_non_dit(self, batch: Req, comm) -> List[Optional[Work]]:
         tensors, t_infos, l_infos = self._extract_tensors(batch)
@@ -445,64 +340,6 @@ class SchedulerPPMixin:
         all_tensors = self._pack_tensors(metadata, t_infos, l_infos, tensors)
         return comm.batch_isend_to_non_dit(all_tensors)
 
-    def _broadcast_batch_in_dit_group(self, batch, comm: DisaggCommunicator):
-        from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
-
-        # Only master has the metadata initially
-        if dist.get_rank() == comm.dit_master_rank:
-            pkg = (
-                batch._recv_metadata,
-                batch._recv_tensor_infos,
-                batch._recv_list_tensor_infos,
-            )
-        else:
-            pkg = None
-
-        group = comm.get_my_group()
-        if not group or dist.get_world_size(group=group) <= 1:
-            return
-
-        # 1. Broadcast Meta
-        pkg = broadcast_pyobj(
-            pkg,
-            dist.get_rank(),
-            group,
-            comm.dit_master_rank,
-            force_cpu_device=(dist.get_backend(group) != "nccl"),
-        )
-
-        if dist.get_rank() != comm.dit_master_rank:
-            meta, t_infos, l_infos = pkg
-            for k, v in meta.items():
-                setattr(batch, k, v)
-
-            dev = get_local_torch_device()
-            for name, (shape, dtype) in t_infos.items():
-                setattr(batch, name, torch.empty(shape, dtype=dtype, device=dev))
-            for name, (length, indices, shapes) in l_infos.items():
-                lst = [None] * length
-                for idx, (shape, dtype) in zip(indices, shapes):
-                    lst[idx] = torch.empty(shape, dtype=dtype, device=dev)
-                setattr(batch, name, lst)
-
-        # 2. Broadcast Tensors
-        # We walk the batch attributes to find what to broadcast
-        for k, v in batch.__dict__.items():
-            if k.startswith("_"):
-                continue
-
-            if isinstance(v, torch.Tensor):
-                if not v.is_cuda:
-                    v = v.cuda()
-                comm.broadcast_in_group(v)
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, torch.Tensor):
-                        if not item.is_cuda:
-                            item = item.cuda()
-                        comm.broadcast_in_group(item)
-
-    # --- Serialization Helpers ---
 
     def _extract_tensors(self, batch):
         tensors, infos, list_infos = {}, {}, {}

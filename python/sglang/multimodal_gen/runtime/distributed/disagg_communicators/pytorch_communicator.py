@@ -2,6 +2,9 @@
 PyTorch Implementation of DisaggCommunicator.
 """
 
+import io
+import pickle
+import time
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -21,6 +24,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         self.non_dit_group = None
         self.dit_group = None
         self.p2p_group = None  # Dedicated P2P group for master-to-master communication
+        self.broadcast_group = None
         self.role = None  # "non_dit" or "dit"
         self.group_rank = -1
         self.world_rank = -1
@@ -67,6 +71,15 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             f"(DiT master={self.dit_master_rank}, Non-DiT master={self.non_dit_master_rank})"
         )
 
+        # Create broadcast group for Non-DiT Master -> All DiT Ranks
+        # This includes Non-DiT Master + All DiT Ranks (Master + Workers)
+        broadcast_ranks = sorted(list(set([self.non_dit_master_rank] + dit_ranks)))
+        self.broadcast_group = dist.new_group(ranks=broadcast_ranks)
+        logger.info(
+            f"Created Broadcast group for ranks {broadcast_ranks} "
+            f"(Source=Non-DiT master {self.non_dit_master_rank})"
+        )
+
         if self.world_rank in non_dit_ranks:
             self.role = "non_dit"
             self.group_rank = non_dit_ranks.index(self.world_rank)
@@ -75,6 +88,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             self.group_rank = dit_ranks.index(self.world_rank)
         else:
             raise ValueError(f"Rank {self.world_rank} not assigned to any group!")
+
+
 
     def get_my_group(self) -> Optional[dist.ProcessGroup]:
         if self.role == "non_dit":
@@ -187,15 +202,11 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             return []  # Only master sends cross-group
 
         # Create P2P operation list
-        p2p_ops = []
+        works = []
         for tensor in tensors:
-            op = dist.P2POp(
-                dist.isend, tensor, self.dit_master_rank, group=self.p2p_group
-            )
-            p2p_ops.append(op)
+            work = dist.isend(tensor, dst=self.dit_master_rank, group=self.p2p_group)
+            works.append(work)
 
-        # Execute all operations in a batch
-        works = dist.batch_isend_irecv(p2p_ops)
         return works
 
     def batch_irecv_from_non_dit(
@@ -218,15 +229,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         works = []
         if self.world_rank == self.dit_master_rank:
             # Create P2P operation list
-            p2p_ops = []
             for tensor in tensors:
-                op = dist.P2POp(
-                    dist.irecv, tensor, self.non_dit_master_rank, group=self.p2p_group
-                )
-                p2p_ops.append(op)
-
-            # Execute all operations in a batch
-            works = dist.batch_isend_irecv(p2p_ops)
+                work = dist.irecv(tensor, src=self.non_dit_master_rank, group=self.p2p_group)
+                works.append(work)
 
         return tensors, works
 
@@ -235,14 +240,11 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         if self.world_rank != self.dit_master_rank:
             return []
 
-        p2p_ops = []
+        works = []
         for tensor in tensors:
-            op = dist.P2POp(
-                dist.isend, tensor, self.non_dit_master_rank, group=self.p2p_group
-            )
-            p2p_ops.append(op)
+            work = dist.isend(tensor, dst=self.non_dit_master_rank, group=self.p2p_group)
+            works.append(work)
 
-        works = dist.batch_isend_irecv(p2p_ops)
         return works
 
     def batch_irecv_from_dit(
@@ -256,14 +258,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         works = []
         if self.world_rank == self.non_dit_master_rank:
-            p2p_ops = []
             for tensor in tensors:
-                op = dist.P2POp(
-                    dist.irecv, tensor, self.dit_master_rank, group=self.p2p_group
-                )
-                p2p_ops.append(op)
-
-            works = dist.batch_isend_irecv(p2p_ops)
+                work = dist.irecv(tensor, src=self.dit_master_rank, group=self.p2p_group)
+                works.append(work)
 
         return tensors, works
 
@@ -304,3 +301,144 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         for work in works:
             if work is not None:
                 work.wait()
+
+    def broadcast_object_from_non_dit(self, obj: Optional[Any] = None) -> Any:
+        """
+        Broadcast a complex object (e.g. Req) with tensors from Non-DiT Master to all DiT ranks.
+        Optimized for NVLink: separates metadata and tensors.
+        """
+        # If I am not part of the broadcast group (e.g. Non-DiT Worker), return None
+        if self.broadcast_group is None:
+            return None
+
+        is_sender = self.world_rank == self.non_dit_master_rank
+
+        # 1. Prepare Metadata and Tensors (Sender)
+        meta_tensor = None
+        size_tensor = None
+        tensor_list = []
+
+        if is_sender:
+            assert obj is not None, "Sender must provide an object to broadcast"
+            meta_dict = {"__class__": obj.__class__}
+            tensor_list = []
+
+            # Extract state
+            # We assume the object has a __dict__
+            if hasattr(obj, "__dict__"):
+                for k, v in obj.__dict__.items():
+                    if isinstance(v, torch.Tensor):
+                        meta_dict[k] = ("tensor", v.shape, v.dtype)
+                        tensor_list.append(v)
+                    elif (
+                        isinstance(v, list)
+                        and len(v) > 0
+                        and isinstance(v[0], torch.Tensor)
+                    ):
+                        shapes = [(t.shape, t.dtype) for t in v]
+                        meta_dict[k] = ("tensor_list", shapes)
+                        tensor_list.extend(v)
+                    else:
+                        meta_dict[k] = ("value", v)
+            
+            # Serialize metadata
+            buffer = io.BytesIO()
+            pickle.dump(meta_dict, buffer)
+            meta_bytes = buffer.getvalue()
+
+            # Create meta tensors on CUDA (to use NCCL)
+            meta_tensor = torch.tensor(
+                list(meta_bytes), dtype=torch.uint8, device="cuda"
+            )
+            size_tensor = torch.tensor(
+                [len(meta_bytes)], dtype=torch.long, device="cuda"
+            )
+        else:
+            # Receiver init
+            size_tensor = torch.tensor([0], dtype=torch.long, device="cuda")
+
+        # 2. Broadcast Size
+        dist.broadcast(
+            size_tensor, src=self.non_dit_master_rank, group=self.broadcast_group
+        )
+
+        # 3. Broadcast Metadata
+        if not is_sender:
+            meta_tensor = torch.empty(
+                size_tensor.item(), dtype=torch.uint8, device="cuda"
+            )
+
+        dist.broadcast(
+            meta_tensor, src=self.non_dit_master_rank, group=self.broadcast_group
+        )
+
+        # 4. Reconstruct and Prepare Tensors (Receiver)
+        if not is_sender:
+            meta_bytes = bytes(meta_tensor.cpu().tolist())
+            meta_dict = pickle.loads(meta_bytes)
+
+            # Reconstruct object
+            cls = meta_dict.pop("__class__", None)
+            if cls:
+                try:
+                    obj = cls.__new__(cls)
+                except Exception:
+                    # Fallback if __new__ fails or not applicable
+                    class ReceivedObject:
+                        pass
+
+                    obj = ReceivedObject()
+            else:
+
+                class ReceivedObject:
+                    pass
+
+                obj = ReceivedObject()
+
+            tensor_list = []
+
+            for k, info in meta_dict.items():
+                tag = info[0]
+                if tag == "value":
+                    setattr(obj, k, info[1])
+                elif tag == "tensor":
+                    shape, dtype = info[1], info[2]
+                    t = torch.empty(shape, dtype=dtype, device="cuda")
+                    setattr(obj, k, t)
+                    tensor_list.append(t)
+                elif tag == "tensor_list":
+                    shapes = info[1]
+                    t_list = []
+                    for s, d in shapes:
+                        t = torch.empty(s, dtype=d, device="cuda")
+                        t_list.append(t)
+                        tensor_list.append(t)
+                    setattr(obj, k, t_list)
+
+        # 5. Broadcast Tensors (Direct NVLink)
+        for t in tensor_list:
+            if is_sender:
+                if not t.is_cuda:
+                    # Warning: NCCL broadcast requires CUDA tensors.
+                    # In high-perf path, we expect CUDA. If CPU, we should move it.
+                    # But modifying in-place might be side-effect.
+                    # For now, assume CUDA or copy.
+                    t_cuda = t.cuda()
+                    if not t_cuda.is_contiguous():
+                        t_cuda = t_cuda.contiguous()
+                    dist.broadcast(
+                        t_cuda, src=self.non_dit_master_rank, group=self.broadcast_group
+                    )
+                else:
+                    if not t.is_contiguous():
+                        t = t.contiguous()
+                    dist.broadcast(
+                        t, src=self.non_dit_master_rank, group=self.broadcast_group
+                    )
+            else:
+                # Receiver tensors are already allocated on CUDA
+                dist.broadcast(
+                    t, src=self.non_dit_master_rank, group=self.broadcast_group
+                )
+
+        return obj

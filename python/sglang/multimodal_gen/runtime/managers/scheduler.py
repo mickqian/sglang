@@ -9,6 +9,7 @@ from typing import Any, List
 
 import zmq
 
+from sglang.multimodal_gen.runtime.distributed.dist_utils import get_disagg_communicator
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     MergeLoraWeightsReq,
     SetLoraReq,
@@ -57,7 +58,11 @@ class Scheduler(SchedulerPPMixin):
         # Inter-process Communication
         self.context = zmq.Context(io_threads=2)
         endpoint = server_args.scheduler_endpoint()
-        if gpu_id == 0:
+
+        comm = get_disagg_communicator()
+        receiver_rank = comm.non_dit_master_rank if comm is not None else 0
+
+        if gpu_id == receiver_rank:
             # router allocates identify (envelope) for each connection
             self.receiver, actual_endpoint = get_zmq_socket(
                 self.context, zmq.ROUTER, endpoint, True
