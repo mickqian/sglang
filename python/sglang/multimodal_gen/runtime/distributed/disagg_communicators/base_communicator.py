@@ -97,7 +97,7 @@ class DisaggCommunicator(ABC):
     @abstractmethod
     def isend_to_dit(
         self, tensor: torch.Tensor, metadata: Optional[Dict] = None
-    ) -> Optional[Work]:
+    ) -> Optional[Work | List[Work]]:
         """
         Non-blocking send from Non-DiT to DiT group.
         Returns a Work handle that can be waited on later.
@@ -213,7 +213,9 @@ class DisaggCommunicator(ABC):
         pass
 
     @abstractmethod
-    def recv_object_from_dit(self, known_size_tensor: Optional[torch.Tensor] = None) -> Any:
+    def recv_object_from_dit(
+        self, known_size_tensor: Optional[torch.Tensor] = None
+    ) -> Any:
         """
         Receive a complex object from DiT Master at Non-DiT Master (P2P).
         If known_size_tensor is provided, skips receiving the size header.

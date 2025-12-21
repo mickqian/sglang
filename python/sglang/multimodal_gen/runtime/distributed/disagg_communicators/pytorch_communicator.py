@@ -24,6 +24,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         self.dit_group = None
         self.p2p_group = None  # Dedicated P2P group for master-to-master communication
         self.broadcast_group = None
+        self.non_dit_ranks = []
+        self.dit_ranks = []
         self.role = None  # "non_dit" or "dit"
         self.group_rank = -1
         self.world_rank = -1
@@ -49,6 +51,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         )
         dit_ranks = [r for r in range(world_size) if r not in non_dit_ranks]
 
+        self.non_dit_ranks = non_dit_ranks
+        self.dit_ranks = dit_ranks
         self.non_dit_master_rank = non_dit_ranks[0]
         self.dit_master_rank = dit_ranks[0]
 
@@ -270,17 +274,27 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
     # Legacy single-tensor methods (kept for backward compatibility, but should use batched versions)
     def isend_to_dit(
         self, tensor: torch.Tensor, metadata: Optional[Dict] = None
-    ) -> Optional[Work]:
-        """Non-blocking send from Non-DiT to DiT group."""
-        works = self.batch_isend_to_dit([tensor])
-        return works[0] if works else None
+    ) -> Optional[Work | List[Work]]:
+        """Send a signal to all DiT ranks from Non-DiT Master."""
+        if self.world_rank != self.non_dit_master_rank:
+            return None
+        
+        # Use P2P isend to each DiT rank instead of broadcast.
+        # This avoids deadlocks when DiT ranks are waiting but Non-DiT is not ready.
+        works = []
+        for rank in self.dit_ranks:
+            works.append(dist.isend(tensor, dst=rank))
+        return works
 
     def irecv_from_non_dit(
         self, shape: torch.Size, dtype: torch.dtype
     ) -> tuple[torch.Tensor, Optional[Work]]:
-        """Non-blocking receive from Non-DiT group at DiT group."""
-        tensors, works = self.batch_irecv_from_non_dit([(shape, dtype)])
-        return tensors[0], works[0] if works else None
+        """Join the asynchronous signal from Non-DiT Master."""
+        tensor = torch.empty(shape, dtype=dtype, device="cuda")
+        
+        # Use P2P irecv from Non-DiT master
+        work = dist.irecv(tensor, src=self.non_dit_master_rank)
+        return tensor, work
 
     def isend_to_non_dit(self, tensor: torch.Tensor) -> Optional[Work]:
         """Non-blocking send from DiT to Non-DiT group."""
@@ -304,6 +318,18 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         for work in works:
             if work is not None:
                 work.wait()
+
+    def irecv_size_from_non_dit(self, tensor: torch.Tensor) -> Optional[Work]:
+        """DiT Master listens for signal from Non-DiT Master (P2P)."""
+        if self.world_rank == self.dit_master_rank:
+            return dist.irecv(tensor, src=self.non_dit_master_rank, group=self.p2p_group)
+        return None
+
+    def isend_signal_to_dit(self, tensor: torch.Tensor) -> Optional[Work]:
+        """Non-DiT Master sends signal to DiT Master (P2P)."""
+        if self.world_rank == self.non_dit_master_rank:
+            return dist.isend(tensor, dst=self.dit_master_rank, group=self.p2p_group)
+        return None
 
     def broadcast_object_from_non_dit(self, obj: Optional[Any] = None) -> Any:
         """
@@ -481,29 +507,33 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         meta_bytes = buffer.getvalue()
 
         # Create meta tensors on CUDA
-        meta_tensor = torch.tensor(
-            list(meta_bytes), dtype=torch.uint8, device="cuda"
-        )
-        size_tensor = torch.tensor(
-            [len(meta_bytes)], dtype=torch.long, device="cuda"
-        )
+        meta_tensor = torch.tensor(list(meta_bytes), dtype=torch.uint8, device="cuda")
+        size_tensor = torch.tensor([len(meta_bytes)], dtype=torch.long, device="cuda")
 
         works = []
         # 1. Send Size
-        works.append(dist.isend(size_tensor, dst=self.non_dit_master_rank, group=self.p2p_group))
+        works.append(
+            dist.isend(size_tensor, dst=self.non_dit_master_rank, group=self.p2p_group)
+        )
         # 2. Send Metadata
-        works.append(dist.isend(meta_tensor, dst=self.non_dit_master_rank, group=self.p2p_group))
+        works.append(
+            dist.isend(meta_tensor, dst=self.non_dit_master_rank, group=self.p2p_group)
+        )
         # 3. Send Tensors
         for t in tensor_list:
             if not t.is_cuda:
                 t = t.cuda()
             if not t.is_contiguous():
                 t = t.contiguous()
-            works.append(dist.isend(t, dst=self.non_dit_master_rank, group=self.p2p_group))
-        
+            works.append(
+                dist.isend(t, dst=self.non_dit_master_rank, group=self.p2p_group)
+            )
+
         return works
 
-    def recv_object_from_dit(self, known_size_tensor: Optional[torch.Tensor] = None) -> Any:
+    def recv_object_from_dit(
+        self, known_size_tensor: Optional[torch.Tensor] = None
+    ) -> Any:
         """
         Receive a complex object from DiT Master at Non-DiT Master (P2P).
         Optimized for NVLink.
@@ -532,10 +562,16 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             try:
                 obj = cls.__new__(cls)
             except Exception:
-                class ReceivedObject: pass
+
+                class ReceivedObject:
+                    pass
+
                 obj = ReceivedObject()
         else:
-            class ReceivedObject: pass
+
+            class ReceivedObject:
+                pass
+
             obj = ReceivedObject()
 
         tensor_list = []
@@ -560,5 +596,5 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         # 4. Receive Tensors
         for t in tensor_list:
             dist.recv(t, src=self.dit_master_rank, group=self.p2p_group)
-        
+
         return obj
