@@ -37,6 +37,13 @@ class SchedulerPPMixin:
     Runs the main event loop for the rank 0 worker.
     It listens for external requests via ZMQ and coordinates with other workers.
     This class does NOT manage worker processes.
+
+    # TODO: improve this by let rank 0 to be non-dit master
+    Role-Specific Behavior:
+       * DiT Master (Rank 0): Receives from ZMQ, forwards to Non-DiT Master, and returns an empty list (delegating Phase 1 processing to Non-DiT ranks).
+       * Non-DiT Master: Receives from DiT Master, broadcasts to Non-DiT group, and returns requests for local processing.
+       * Other Non-DiT Ranks: Receive broadcast from Non-DiT Master.
+       * Other DiT Ranks: Do nothing regarding new client requests.
     """
 
     def get_next_batch_to_run_pp(self: "Scheduler", comm: DisaggCommunicator):

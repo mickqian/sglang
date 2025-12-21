@@ -125,13 +125,14 @@ class Scheduler(SchedulerPPMixin):
 
         return [item]
 
-    def recv_reqs(self) -> List[Any]:
+    def recv_reqs(self) -> List[tuple[bytes, Any]]:
         """
         For non-main schedulers, reqs are broadcasted from main using broadcast_pyobj
         """
         if self.receiver is not None:
             try:
-                recv_reqs = self.receiver.recv_pyobj()
+                identity, _, payload = self.receiver.recv_multipart()
+                recv_reqs = pickle.loads(payload)
             except zmq.ZMQError:
                 # re-raise or handle appropriately to let the outer loop continue
                 raise
@@ -139,6 +140,9 @@ class Scheduler(SchedulerPPMixin):
             # Ensure recv_reqs is a list
             if not isinstance(recv_reqs, list):
                 recv_reqs = [recv_reqs]
+
+            # Pack with identity for rank 0
+            recv_reqs = [(identity, req) for req in recv_reqs]
         else:
             recv_reqs = None
 
