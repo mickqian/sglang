@@ -80,7 +80,10 @@ class InputValidationStage(PipelineStage):
         preprocess condition image
         NOTE: condition image resizing is only allowed in InputValidationStage
         """
-        if server_args.pipeline_config.task_type == ModelTaskType.I2I:
+        if batch.condition_image is not None and (
+            server_args.pipeline_config.task_type == ModelTaskType.I2I
+            or server_args.pipeline_config.task_type == ModelTaskType.TI2I
+        ):
             # calculate new condition image size
             if not isinstance(batch.condition_image, list):
                 batch.condition_image = [batch.condition_image]
@@ -295,18 +298,6 @@ class InputValidationStage(PipelineStage):
         result = VerificationResult()
         result.add_check("height", batch.height, V.positive_int)
         result.add_check("width", batch.width, V.positive_int)
-
-        # Validate height and width
-        sp_world_size = get_sp_world_size()
-
-        def check_size(value: int, name: str):
-            if value % (8 * sp_world_size) != 0:
-                raise ValueError(
-                    f"{name} must be divisible by (8 x sp_world_size) but {value} % (8 * {sp_world_size}) != 0."
-                )
-
-        check_size(batch.height, "Height")
-        check_size(batch.width, "Width")
         result.add_check("seeds", batch.seeds, V.list_not_empty)
         result.add_check("generator", batch.generator, V.generator_or_list_generators)
         return result
