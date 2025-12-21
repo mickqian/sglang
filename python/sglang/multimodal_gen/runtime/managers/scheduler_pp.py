@@ -10,9 +10,6 @@ import torch.distributed as dist
 import zmq
 from torch.distributed import Work
 
-from sglang.multimodal_gen.runtime.distributed import (
-    get_local_torch_device,
-)
 from sglang.multimodal_gen.runtime.distributed.disagg_communicators.base_communicator import (
     DisaggCommunicator,
 )
@@ -113,7 +110,7 @@ class SchedulerPPMixin:
 
     def recv_reqs_pp(self: "Scheduler") -> List[tuple[bytes, Any]]:
         """
-         Receive requests from ZMQ or another group with DisaggCommunicator
+        Receive requests from ZMQ or another group with DisaggCommunicator
         """
         # Check if this is a non-dit rank in disagg mode
         assert self.server_args.enable_disagg
@@ -142,11 +139,14 @@ class SchedulerPPMixin:
                 if not isinstance(recv_reqs, list):
                     recv_reqs = [recv_reqs]
 
+                print(f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from ZMQ")
                 # Pack with identity for rank 0
                 recv_reqs = [(identity, req) for req in recv_reqs]
         else:
-            # dit-ranks, try to receive from DisaggCommunicator
-            recv_reqs = self._async_receive_batch_from_non_dit(comm)
+            # dit-ranks, try to receive from non-dit
+            recv_reqs = self._async_recv_batch_from_non_dit(comm)
+            if recv_reqs:
+                print(f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from Non-DiT")
 
         # Non-dit ranks receive requests via world broadcast and return immediately
         # They don't participate in dit's sp/cfg/tp parallel groups
@@ -212,7 +212,7 @@ class SchedulerPPMixin:
         )
 
         # Initial Setup: Start listening for incoming pipeline data
-        self._post_recv_size(comm)
+        # self._post_recv_size(comm)
 
         while self._running:
             # 1. Clean up completed sends
@@ -266,7 +266,10 @@ class SchedulerPPMixin:
 
     def _post_recv_size(self, comm):
         """Post an asynchronous receive for the size header."""
+        print(f"[Rank {dist.get_rank()}] enter _post_recv_size")
+
         if self.recv_size_work is not None:
+            print(f"[Rank {dist.get_rank()}] left _post_recv_size")
             return
 
         try:
@@ -285,8 +288,10 @@ class SchedulerPPMixin:
                 self.recv_size_tensor = tensors[
                     0
                 ]  # Store the tensor that will be filled
+            print(f"[Rank {dist.get_rank()}] left _post_recv_size")
         except Exception as e:
             logger.error(f"Failed to post recv size: {e}")
+
 
     def process_result(
         self: "Scheduler",
@@ -328,67 +333,52 @@ class SchedulerPPMixin:
     # --- Communication Helpers ---
 
     def _async_send_batch_to_dit(self, batch: Req, comm: DisaggCommunicator):
+        # Send a wake-up signal via P2P
+        # This matches the _post_recv_size logic on the receiver side
+        print(f"[Rank {dist.get_rank()}] Sending Req to DiT: phase={batch.pp_phase}")
+        signal_tensor = torch.tensor([1], dtype=torch.long, device="cuda")
+        work = comm.isend_to_dit(signal_tensor)
+        if work:
+            work.wait()
+
         comm.broadcast_object_from_non_dit(batch)
 
-    def _async_receive_batch_from_non_dit(self, comm: DisaggCommunicator):
-        req = comm.broadcast_object_from_non_dit(None)
-        return req
-
     def _async_send_batch_to_non_dit(self, batch: Req, comm) -> List[Optional[Work]]:
-        tensors, t_infos, l_infos = self._extract_tensors(batch)
-        metadata = self._extract_metadata(batch, t_infos, l_infos)
-        all_tensors = self._pack_tensors(metadata, t_infos, l_infos, tensors)
-        return comm.batch_isend_to_non_dit(all_tensors)
+        """DiT Master -> Non-DiT Master (P2P)"""
+        print(f"[Rank {dist.get_rank()}] Sending Req to Non-DiT: phase={batch.pp_phase}")
+        return comm.isend_object_to_non_dit(batch)
 
+    def _async_recv_batch_from_dit(self, comm: DisaggCommunicator, size_tensor: torch.Tensor):
+        """Non-DiT Master receives from DiT Master (P2P), size_tensor is pre-fetched"""
+        obj = comm.recv_object_from_dit(size_tensor)
+        if obj:
+            print(f"[Rank {dist.get_rank()}] Received Req from DiT: phase={getattr(obj, 'pp_phase', 'N/A')}")
+        return obj
 
-    def _extract_tensors(self, batch):
-        tensors, infos, list_infos = {}, {}, {}
-        if hasattr(batch, "__dict__"):
-            for k, v in batch.__dict__.items():
-                if isinstance(v, torch.Tensor):
-                    tensors[k] = v
-                    infos[k] = (v.shape, v.dtype)
-                elif isinstance(v, list) and v and len(v) > 0:
-                    ind, act, shp = [], [], []
-                    for i, t in enumerate(v):
-                        if isinstance(t, torch.Tensor):
-                            ind.append(i)
-                            act.append(t)
-                            shp.append((t.shape, t.dtype))
-                    if act:
-                        tensors[k] = act
-                        list_infos[k] = (len(v), ind, shp)
-        return tensors, infos, list_infos
+    def _async_recv_batch_from_non_dit(self, comm: DisaggCommunicator):
+        if self.recv_size_work is None:
+            self._post_recv_size(comm)
+            return []
 
-    def _extract_metadata(self, batch, t_infos, l_infos):
-        return {
-            k: v
-            for k, v in batch.__dict__.items()
-            if k not in t_infos and k not in l_infos and not k.startswith("_")
-        }
+        if not self.recv_size_work.is_completed():
+            return []
 
-    def _pack_tensors(self, metadata, t_infos, l_infos, tensors):
-        buf = io.BytesIO()
-        pickle.dump((metadata, t_infos, l_infos), buf)
-        meta_bytes = torch.tensor(
-            bytearray(buf.getvalue()), dtype=torch.uint8, device="cpu"
-        )
-        if dist.get_backend() == "nccl":
-            meta_bytes = meta_bytes.cuda()
+        # Signal received.
+        # We don't care about the content of recv_size_tensor (it's just a signal)
+        print(f"[Rank {dist.get_rank()}] P2P Signal received from Non-DiT, joining broadcast...")
 
-        size_tensor = torch.tensor(
-            [meta_bytes.numel()], dtype=torch.long, device=meta_bytes.device
-        )
-        all_tensors = [size_tensor, meta_bytes]
+        # Now participate in the broadcast to get the actual data
+        reqs = comm.broadcast_object_from_non_dit(None)
+        if reqs:
+             # Check if it's a list or single object
+             sample = reqs[0] if isinstance(reqs, list) else reqs
+             print(f"[Rank {dist.get_rank()}] Broadcast received from Non-DiT: phase={getattr(sample, 'pp_phase', 'N/A')}")
 
-        for name in t_infos:
-            t = tensors[name]
-            if not t.is_cuda:
-                t = t.cuda()
-            all_tensors.append(t)
-        for name in l_infos:
-            for t in tensors[name]:
-                if not t.is_cuda:
-                    t = t.cuda()
-                all_tensors.append(t)
-        return all_tensors
+        # Reset signal wait
+        self.recv_size_work = None
+        self._post_recv_size(comm)
+
+        if not isinstance(reqs, list):
+            reqs = [reqs]
+
+        return reqs

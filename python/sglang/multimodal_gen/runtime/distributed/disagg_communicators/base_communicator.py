@@ -203,3 +203,19 @@ class DisaggCommunicator(ABC):
         - Other Ranks: Returns None.
         """
         pass
+
+    @abstractmethod
+    def isend_object_to_non_dit(self, obj: Any) -> List[Work]:
+        """
+        Non-blocking send of a complex object from DiT Master to Non-DiT Master (P2P).
+        Returns list of Work handles.
+        """
+        pass
+
+    @abstractmethod
+    def recv_object_from_dit(self, known_size_tensor: Optional[torch.Tensor] = None) -> Any:
+        """
+        Receive a complex object from DiT Master at Non-DiT Master (P2P).
+        If known_size_tensor is provided, skips receiving the size header.
+        """
+        pass

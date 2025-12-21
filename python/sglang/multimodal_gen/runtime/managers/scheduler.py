@@ -57,11 +57,20 @@ class Scheduler(SchedulerPPMixin):
 
         # Inter-process Communication
         self.context = zmq.Context(io_threads=2)
-        endpoint = server_args.scheduler_endpoint()
 
+        worker = GPUWorker(
+            local_rank=gpu_id,
+            master_port=port_args.master_port,
+            rank=gpu_id,
+            server_args=server_args,
+        )
+        self.worker = worker
+
+        # determine the receiver_rank after model_parallel is set
+        endpoint = server_args.scheduler_endpoint()
         comm = get_disagg_communicator()
         receiver_rank = comm.non_dit_master_rank if comm is not None else 0
-
+        print(f"{receiver_rank=}")
         if gpu_id == receiver_rank:
             # router allocates identify (envelope) for each connection
             self.receiver, actual_endpoint = get_zmq_socket(
@@ -71,13 +80,6 @@ class Scheduler(SchedulerPPMixin):
         else:
             self.receiver = None
 
-        worker = GPUWorker(
-            local_rank=gpu_id,
-            master_port=port_args.master_port,
-            rank=gpu_id,
-            server_args=server_args,
-        )
-        self.worker = worker
         self.task_pipes_to_slaves = task_pipes_to_slaves
         self.result_pipes_from_slaves = result_pipes_from_slaves
         self.gpu_id = gpu_id
