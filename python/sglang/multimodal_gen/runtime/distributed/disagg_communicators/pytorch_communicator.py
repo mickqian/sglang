@@ -413,11 +413,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         """
         if self.is_dit_rank():
             # Listen directly from Non-DiT master
-            logger.info(f"[Rank {self.world_rank}] Listening for dispatch signal from Non-DiT Master (Rank {self.non_dit_master_rank})")
-            rec =  dist.irecv(tensor, src=self.non_dit_master_rank)
-            logger.info(f"[Rank {self.world_rank}] dispatch signal received from Non-DiT Master (Rank {self.non_dit_master_rank})")
+            logger.info(f"[Rank {self.world_rank}] POSTED irecv: listening for dispatch signal from Non-DiT Master (Rank {self.non_dit_master_rank})")
+            rec = dist.irecv(tensor, src=self.non_dit_master_rank)
             return rec
-
         return None
 
     def isend_signal_to_dit(self, tensor: torch.Tensor) -> List[Work]:
@@ -426,7 +424,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         """
         works = []
         if self.world_rank == self.non_dit_master_rank:
-            logger.info(f"[Rank {self.world_rank}] Sending dispatch signal to ALL DiT Ranks: {self.dit_ranks}")
+            logger.info(f"[Rank {self.world_rank}] POSTED isend: sending dispatch signal to ALL DiT Ranks: {self.dit_ranks}")
             for rank in self.dit_ranks:
                 works.append(dist.isend(tensor, dst=rank))
         return works

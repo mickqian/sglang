@@ -70,7 +70,6 @@ class Scheduler(SchedulerPPMixin):
         endpoint = server_args.scheduler_endpoint()
         comm = get_disagg_communicator()
         receiver_rank = comm.non_dit_master_rank if comm is not None else 0
-        print(f"{receiver_rank=}")
         if gpu_id == receiver_rank:
             # router allocates identify (envelope) for each connection
             self.receiver, actual_endpoint = get_zmq_socket(
