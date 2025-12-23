@@ -14,7 +14,7 @@ from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
-    StageParallelismType,
+    StageParallelismType, StageDisaggregationRole,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
@@ -43,6 +43,7 @@ class TimestepPreparationStage(PipelineStage):
             Callable[[Req, ServerArgs], Tuple[str, Any]]
         ] = [],
     ) -> None:
+        super().__init__(StageDisaggregationRole.DENOISE)
         self.scheduler = scheduler
         self.prepare_extra_set_timesteps_kwargs = prepare_extra_set_timesteps_kwargs
 

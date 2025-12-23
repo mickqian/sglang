@@ -8,7 +8,7 @@ from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -30,7 +30,7 @@ class LatentPreparationStage(PipelineStage):
     """
 
     def __init__(self, scheduler, transformer) -> None:
-        super().__init__()
+        super().__init__(StageDisaggregationRole.DENOISE)
         self.scheduler = scheduler
         self.transformer = transformer
 

@@ -8,7 +8,7 @@ Conditioning stage for diffusion pipelines.
 import torch
 
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -28,6 +28,10 @@ class ConditioningStage(PipelineStage):
     This stage handles the application of conditioning, such as classifier-free guidance,
     to the diffusion process.
     """
+
+
+    def __init__(self):
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
 
     @torch.no_grad()
     def forward(

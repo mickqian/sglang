@@ -13,7 +13,7 @@ from sglang.multimodal_gen.configs.pipeline_configs import WanI2V480PConfig
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
 from sglang.multimodal_gen.runtime.models.vision_utils import load_image, load_video
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators,
     VerificationResult,
@@ -43,7 +43,7 @@ class InputValidationStage(PipelineStage):
     """
 
     def __init__(self, vae_image_processor=None):
-        super().__init__()
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
         self.vae_image_processor = vae_image_processor
 
     def _generate_seeds(self, batch: Req, server_args: ServerArgs):

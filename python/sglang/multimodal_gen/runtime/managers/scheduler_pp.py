@@ -99,10 +99,7 @@ class SchedulerPPMixin:
             assert comm.is_non_dit_rank()
             # finished decoding, return to client
             final_ident = identity or getattr(req, "client_identity", None)
-            if output_batch.error:
-                self._handle_error(output_batch, final_ident)
-            elif final_ident:
-                self.return_result(output_batch, final_ident)
+            self.return_result(output_batch, final_ident)
 
     def run_batch(
         self: "Scheduler", comm: DisaggCommunicator, req_to_run: Req, req_identity

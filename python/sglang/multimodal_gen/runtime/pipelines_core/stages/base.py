@@ -40,6 +40,13 @@ class StageVerificationError(Exception):
     pass
 
 
+class StageDisaggregationRole(Enum):
+    # the role of a stage in a pipeline
+    PRE_DENOISE = auto()
+    DENOISE = auto()
+    POST_DENOISE = auto()
+
+
 class PipelineStage(ABC):
     """
     Abstract base class for all pipeline stages.
@@ -49,8 +56,9 @@ class PipelineStage(ABC):
     for a specific part of the process, such as prompt encoding, latent preparation, etc.
     """
 
-    def __init__(self):
+    def __init__(self, stage_role: StageDisaggregationRole):
         self.server_args = get_global_server_args()
+        self.stage_role = stage_role
 
     def log_info(self, msg, *args):
         """Logs an informational message with the stage name as a prefix."""

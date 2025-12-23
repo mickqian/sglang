@@ -10,7 +10,7 @@ This module defines the base class for pipelines that are composed of multiple s
 import argparse
 import os
 from abc import ABC, abstractmethod
-from enum import IntEnum, auto
+from enum import IntEnum, auto, Enum
 from typing import Any, cast
 
 import torch
@@ -114,6 +114,7 @@ class ComposedPipelineBase(ABC):
         self.model_path: str = model_path
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
+        self.stage_role_mapping: dict[StageDisaggregationRole, list[PipelineStage]] = {}
 
         # NOTE: holding an executor inside Pipeline is unnatural. Consider let the gpu worker hold it
         self.executor: PipelineExecutor = executor or self.build_executor(
@@ -335,8 +336,8 @@ class ComposedPipelineBase(ABC):
 
         # load configs into server_args, in disagg mode
         for module_name, (
-            transformers_or_diffusers,
-            _,
+                transformers_or_diffusers,
+                _,
         ) in model_index.items():
             load_module_name, component_model_path = self.adjust_module_path(
                 module_name, server_args
@@ -374,8 +375,8 @@ class ComposedPipelineBase(ABC):
 
         components = {}
         for module_name, (
-            transformers_or_diffusers,
-            architecture,
+                transformers_or_diffusers,
+                architecture,
         ) in tqdm(iterable=model_index.items(), desc="Loading required modules"):
             if transformers_or_diffusers is None:
                 logger.warning(

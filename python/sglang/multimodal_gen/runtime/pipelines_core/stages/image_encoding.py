@@ -23,7 +23,7 @@ from sglang.multimodal_gen.runtime.models.vision_utils import (
     pil_to_numpy,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -58,7 +58,7 @@ class ImageEncodingStage(PipelineStage):
         Args:
             text_encoder: An encoder to encode input_ids and pixel values
         """
-        super().__init__()
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
         self.image_processor = image_processor
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
@@ -185,7 +185,7 @@ class ImageVAEEncodingStage(PipelineStage):
     """
 
     def __init__(self, vae: ParallelTiledVAE, **kwargs) -> None:
-        super().__init__()
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
         self.vae: ParallelTiledVAE = vae
 
     def forward(

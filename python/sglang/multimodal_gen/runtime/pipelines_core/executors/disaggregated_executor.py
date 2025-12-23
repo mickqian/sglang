@@ -5,7 +5,6 @@ sglang.multimodal_gen.runtime.managers.scheduler_pp.SchedulerPPMixin.
 This executor now only handles stage execution based on the assigned phase.
 """
 
-from enum import Enum, auto
 from typing import List
 
 from sglang.multimodal_gen.runtime.distributed.dist_utils import get_disagg_communicator
@@ -18,30 +17,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     PPPhase,
     Req,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages import (
-    DenoisingStage,
-    TimestepPreparationStage, LatentPreparationStage,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-class StageDisaggregationRole(Enum):
-    # the role of a stage in a pipeline
-    NONE_DENOISE = auto()
-    DENOISE = auto()
-    COMMON = auto()
-
-
-def get_stage_disagg_role(stage: PipelineStage):
-    if isinstance(stage, DenoisingStage) or isinstance(stage, TimestepPreparationStage) or isinstance(stage,
-                                                                                                      LatentPreparationStage):
-        return StageDisaggregationRole.DENOISE
-    else:
-        return StageDisaggregationRole.NONE_DENOISE
 
 
 class DisaggregatedExecutor(PipelineExecutor):
@@ -70,7 +50,7 @@ class DisaggregatedExecutor(PipelineExecutor):
         denoise_end_idx = -1
 
         for i, stage in enumerate(stages):
-            if get_stage_disagg_role(stage) == StageDisaggregationRole.DENOISE:
+            if stage.stage_role == StageDisaggregationRole.DENOISE:
                 if denoise_start_idx == -1:
                     denoise_start_idx = i
                 denoise_end_idx = i
@@ -79,9 +59,9 @@ class DisaggregatedExecutor(PipelineExecutor):
             # Fallback for models without explicit denoise stage structure
             return self._run_local(stages, batch)
 
-        pre_denoise_stages = stages[:denoise_start_idx]
-        denoise_stages = stages[denoise_start_idx: denoise_end_idx + 1]
-        post_denoise_stages = stages[denoise_end_idx + 1:]
+        pre_denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.PRE_DENOISE]
+        denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.DENOISE]
+        post_denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.POST_DENOISE]
 
         # Determine which stages to run based on Phase
         # The Scheduler sets `batch.pp_phase`.

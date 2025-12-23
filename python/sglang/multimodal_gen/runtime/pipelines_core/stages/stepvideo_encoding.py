@@ -6,7 +6,7 @@ import torch
 
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -32,7 +32,7 @@ class StepvideoPromptEncodingStage(PipelineStage):
     """
 
     def __init__(self, stepllm, clip) -> None:
-        super().__init__()
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
         # self.caption_client = caption_client  # This should have a call_caption(prompts: List[str]) method.
         self.stepllm = stepllm
         self.clip = clip

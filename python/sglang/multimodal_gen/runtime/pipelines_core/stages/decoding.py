@@ -15,7 +15,7 @@ from sglang.multimodal_gen.runtime.models.vaes.common import ParallelTiledVAE
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
-    StageParallelismType,
+    StageParallelismType, StageDisaggregationRole,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
@@ -57,6 +57,7 @@ class DecodingStage(PipelineStage):
     """
 
     def __init__(self, vae, pipeline=None) -> None:
+        super().__init__(StageDisaggregationRole.POST_DENOISE)
         self.vae: ParallelTiledVAE = vae
         self.pipeline = weakref.ref(pipeline) if pipeline else None
 

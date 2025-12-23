@@ -15,7 +15,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import Flux2PipelineCon
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -41,7 +41,7 @@ class TextEncodingStage(PipelineStage):
         Initialize the prompt encoding stage.
 
         """
-        super().__init__()
+        super().__init__(StageDisaggregationRole.PRE_DENOISE)
         self.tokenizers = tokenizers
         self.text_encoders = text_encoders
 

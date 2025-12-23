@@ -55,7 +55,7 @@ from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_c
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
-    StageParallelismType,
+    StageParallelismType, StageDisaggregationRole,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
@@ -112,7 +112,7 @@ class DenoisingStage(PipelineStage):
     def __init__(
         self, transformer, scheduler, pipeline=None, transformer_2=None, vae=None
     ) -> None:
-        super().__init__()
+        super().__init__(StageDisaggregationRole.DENOISE)
         self.transformer = transformer
         self.transformer_2 = transformer_2
 

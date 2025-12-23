@@ -521,7 +521,6 @@ def initialize_model_parallel(
 
     print(f"{dp_groups=} {cfg_groups=} {sp_groups=}")
 
-
     # Initialize group coordinators
     global _DP, _CFG, _PP, _SP, _TP
     assert _DP is None, "data parallel group is already initialized"
