@@ -219,12 +219,13 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         dist.barrier()
 
         broadcast_ranks = sorted(list(set([self.non_dit_master_rank] + dit_ranks)))
-        non_broadcast_ranks = [rank for rank in all_ranks if rank not in broadcast_ranks]
+        non_broadcast_ranks = [
+            rank for rank in all_ranks if rank not in broadcast_ranks
+        ]
         if non_broadcast_ranks:
             broadcast_ranks_all = [broadcast_ranks, non_broadcast_ranks]
         else:
             broadcast_ranks_all = [broadcast_ranks]
-        print(f"{broadcast_ranks_all=}")
         self.broadcast_group = GroupCoordinator(
             group_ranks=broadcast_ranks_all,
             local_rank=self.world_rank,

@@ -315,15 +315,10 @@ class SchedulerPPMixin:
                 f"[Rank {dist.get_rank()}] on_dispatch_signal TRIGGERED! "
                 f"signal_tensor value: {signal_tensor.item()}"
             )
-            print(f"on_dispatch_signal start on dit-ranks")
             # Signal received: all DiT ranks join the data broadcast (NCCL)
             reqs = comm.broadcast_object_from_non_dit(None)
-            print(f"reqs received on dit-ranks: {reqs}")
             if reqs:
                 reqs = [reqs] if not isinstance(reqs, list) else reqs
-                for req in reqs:
-                    print(f"{req.latents=}")
-                    # print(f"{req.raw_latent_shape=}")
                 self.filter_reqs(reqs, comm)
             # Restart listener
             self._start_listening_for_non_dit_signals(comm)
@@ -375,9 +370,6 @@ class SchedulerPPMixin:
         """Non-DiT Master sends processed request to ALL DiT ranks."""
         logger.info(
             f"[Rank {dist.get_rank()}] _async_send_batch_to_dit: Dispatching Req to DiT, phase={batch.pp_phase}"
-        )
-        print(
-            f"[Rank {dist.get_rank()}] Dispatching Req to DiT: phase={batch.pp_phase}"
         )
 
         # 1. Send signal to ALL DiT ranks via Gloo (MUST use CPU)

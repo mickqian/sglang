@@ -114,7 +114,6 @@ class ComposedPipelineBase(ABC):
         self.model_path: str = model_path
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
-        self.stage_role_mapping: dict[StageDisaggregationRole, list[PipelineStage]] = {}
 
         # NOTE: holding an executor inside Pipeline is unnatural. Consider let the gpu worker hold it
         self.executor: PipelineExecutor = executor or self.build_executor(
