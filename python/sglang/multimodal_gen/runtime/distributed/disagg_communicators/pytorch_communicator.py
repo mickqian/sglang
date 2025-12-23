@@ -4,7 +4,8 @@ PyTorch Implementation of DisaggCommunicator.
 
 import io
 import pickle
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -18,11 +19,91 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+@dataclass
+class AsyncWork:
+    """
+    Wraps a torch.distributed.Work handle with its associated tensors
+    to prevent them from being garbage collected before the operation completes.
+    """
+
+    works: List[Work]
+    tensors: List[torch.Tensor]
+    callback: Optional[Callable] = None
+    metadata: Optional[Dict] = None
+
+    def is_completed(self) -> bool:
+        """Check if all work handles in this batch are completed."""
+        return all(w.is_completed() for w in self.works)
+
+    def wait(self) -> None:
+        """Wait for all work handles to complete."""
+        for w in self.works:
+            w.wait()
+
+
+class AsyncWorkRegistry:
+    """
+    A registry to track and poll asynchronous distributed operations.
+    Useful for non-blocking event loops to manage keep-alive tensors and callbacks.
+    """
+
+    def __init__(self):
+        self.pending_works: List[AsyncWork] = []
+
+    def add(
+        self,
+        work: Union[Work, List[Work]],
+        tensors: Union[torch.Tensor, List[torch.Tensor]],
+        callback: Optional[Callable] = None,
+        metadata: Optional[Dict] = None,
+    ) -> AsyncWork:
+        """Add a new async work to the registry."""
+        if not isinstance(work, list):
+            work = [work]
+        if not isinstance(tensors, list):
+            tensors = [tensors]
+
+        aw = AsyncWork(
+            works=work, tensors=tensors, callback=callback, metadata=metadata
+        )
+        self.pending_works.append(aw)
+        return aw
+
+    def poll(self) -> List[AsyncWork]:
+        """
+        Poll all pending works and return the ones that have completed.
+        Completed works are removed from the registry and their callbacks (if any) are executed.
+        """
+        completed = []
+        still_pending = []
+        for aw in self.pending_works:
+            if aw.is_completed():
+                if aw.callback:
+                    try:
+                        aw.callback(aw)
+                    except Exception as e:
+                        logger.error(f"Error in AsyncWork callback: {e}")
+                completed.append(aw)
+            else:
+                still_pending.append(aw)
+
+        self.pending_works = still_pending
+        return completed
+
+    def clear(self):
+        """Clear all pending works."""
+        self.pending_works = []
+
+    def __len__(self):
+        return len(self.pending_works)
+
+
 class PyTorchDisaggCommunicator(DisaggCommunicator):
     def __init__(self):
         self.non_dit_group = None
         self.dit_group = None
         self.p2p_group = None  # Dedicated P2P group for master-to-master communication
+        self.signal_group = None  # Dedicated Gloo group for non-blocking signals
         self.broadcast_group = None
         self.non_dit_ranks = []
         self.dit_ranks = []
@@ -73,6 +154,11 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             f"Created P2P group for ranks {p2p_ranks} "
             f"(DiT master={self.dit_master_rank}, Non-DiT master={self.non_dit_master_rank})"
         )
+
+        # Create dedicated Gloo group for truly non-blocking P2P signals
+        self.signal_group = dist.new_group(ranks=p2p_ranks, backend="gloo")
+        self.p2p_ranks = p2p_ranks
+        logger.info(f"Created Gloo signal group for ranks {p2p_ranks}")
 
         # Create broadcast group for Non-DiT Master -> All DiT Ranks
         # This includes Non-DiT Master + All DiT Ranks (Master + Workers)
@@ -278,7 +364,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         """Send a signal to all DiT ranks from Non-DiT Master."""
         if self.world_rank != self.non_dit_master_rank:
             return None
-        
+
         # Use P2P isend to each DiT rank instead of broadcast.
         # This avoids deadlocks when DiT ranks are waiting but Non-DiT is not ready.
         works = []
@@ -291,7 +377,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
     ) -> tuple[torch.Tensor, Optional[Work]]:
         """Join the asynchronous signal from Non-DiT Master."""
         tensor = torch.empty(shape, dtype=dtype, device="cuda")
-        
+
         # Use P2P irecv from Non-DiT master
         work = dist.irecv(tensor, src=self.non_dit_master_rank)
         return tensor, work
@@ -320,16 +406,41 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                 work.wait()
 
     def irecv_size_from_non_dit(self, tensor: torch.Tensor) -> Optional[Work]:
-        """DiT Master listens for signal from Non-DiT Master (P2P)."""
+        """DiT Master listens for signal from Non-DiT Master (P2P via NCCL)."""
         if self.world_rank == self.dit_master_rank:
             return dist.irecv(tensor, src=self.non_dit_master_rank, group=self.p2p_group)
         return None
 
     def isend_signal_to_dit(self, tensor: torch.Tensor) -> Optional[Work]:
-        """Non-DiT Master sends signal to DiT Master (P2P)."""
+        """Non-DiT Master sends signal to DiT Master (P2P via NCCL)."""
         if self.world_rank == self.non_dit_master_rank:
             return dist.isend(tensor, dst=self.dit_master_rank, group=self.p2p_group)
         return None
+
+    def _get_signal_group_rank(self, global_rank: int) -> int:
+        """Helper to get rank within the signal group."""
+        p2p_ranks = [self.dit_master_rank, self.non_dit_master_rank]
+        try:
+            return p2p_ranks.index(global_rank)
+        except ValueError:
+            return -1
+
+    def irecv_signal_from_dit(self, tensor: torch.Tensor) -> Optional[Work]:
+        """Non-DiT Master listens for signal from DiT Master (P2P via Gloo)."""
+        if self.world_rank == self.non_dit_master_rank:
+            assert tensor.device.type == "cpu", "Gloo signal tensor must be on CPU"
+            src_rank = self._get_signal_group_rank(self.dit_master_rank)
+            return dist.irecv(tensor, src=src_rank, group=self.signal_group)
+        return None
+
+    def isend_signal_to_non_dit(self, tensor: torch.Tensor) -> tuple[Optional[Work], Optional[torch.Tensor]]:
+        """DiT Master sends signal to Non-DiT Master (P2P via Gloo)."""
+        if self.world_rank == self.dit_master_rank:
+            cpu_tensor = tensor.to("cpu")
+            dst_rank = self._get_signal_group_rank(self.non_dit_master_rank)
+            work = dist.isend(cpu_tensor, dst=dst_rank, group=self.signal_group)
+            return work, cpu_tensor
+        return None, None
 
     def broadcast_object_from_non_dit(self, obj: Optional[Any] = None) -> Any:
         """
@@ -472,13 +583,13 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         return obj
 
-    def isend_object_to_non_dit(self, obj: Any) -> List[Work]:
+    def isend_object_to_non_dit(self, obj: Any) -> tuple[List[Work], List[torch.Tensor]]:
         """
         Non-blocking send of a complex object from DiT Master to Non-DiT Master (P2P).
-        Separates metadata and tensors for high performance.
+        Uses Gloo backend with CPU tensors for truly non-blocking communication.
         """
         if self.world_rank != self.dit_master_rank:
-            return []
+            return [], []
 
         assert obj is not None
         meta_dict = {"__class__": obj.__class__}
@@ -506,54 +617,65 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         pickle.dump(meta_dict, buffer)
         meta_bytes = buffer.getvalue()
 
-        # Create meta tensors on CUDA
-        meta_tensor = torch.tensor(list(meta_bytes), dtype=torch.uint8, device="cuda")
-        size_tensor = torch.tensor([len(meta_bytes)], dtype=torch.long, device="cuda")
+        # Use CPU tensors for Gloo backend (truly non-blocking)
+        meta_tensor = torch.tensor(list(meta_bytes), dtype=torch.uint8, device="cpu")
+        size_tensor = torch.tensor([len(meta_bytes)], dtype=torch.long, device="cpu")
+
+        keep_alive_tensors = [meta_tensor, size_tensor]
+
+        # Get destination rank in signal_group
+        dst_rank = self._get_signal_group_rank(self.non_dit_master_rank)
 
         works = []
-        # 1. Send Size
+        # 1. Send Size (via Gloo)
         works.append(
-            dist.isend(size_tensor, dst=self.non_dit_master_rank, group=self.p2p_group)
+            dist.isend(size_tensor, dst=dst_rank, group=self.signal_group)
         )
-        # 2. Send Metadata
+        # 2. Send Metadata (via Gloo)
         works.append(
-            dist.isend(meta_tensor, dst=self.non_dit_master_rank, group=self.p2p_group)
+            dist.isend(meta_tensor, dst=dst_rank, group=self.signal_group)
         )
-        # 3. Send Tensors
+        # 3. Send Tensors (via Gloo with CPU tensors)
         for t in tensor_list:
-            if not t.is_cuda:
-                t = t.cuda()
+            # Move to CPU for Gloo backend
+            if t.is_cuda:
+                t = t.cpu()
             if not t.is_contiguous():
                 t = t.contiguous()
+            
+            keep_alive_tensors.append(t)
             works.append(
-                dist.isend(t, dst=self.non_dit_master_rank, group=self.p2p_group)
+                dist.isend(t, dst=dst_rank, group=self.signal_group)
             )
 
-        return works
+        return works, keep_alive_tensors
 
     def recv_object_from_dit(
         self, known_size_tensor: Optional[torch.Tensor] = None
     ) -> Any:
         """
         Receive a complex object from DiT Master at Non-DiT Master (P2P).
-        Optimized for NVLink.
+        Uses Gloo backend with CPU tensors for truly non-blocking communication.
         """
         if self.world_rank != self.non_dit_master_rank:
             return None
 
-        # 1. Receive Size
+        # Get source rank in signal_group
+        src_rank = self._get_signal_group_rank(self.dit_master_rank)
+
+        # 1. Receive Size (via Gloo, CPU tensor)
         if known_size_tensor is not None:
             size_tensor = known_size_tensor
         else:
-            size_tensor = torch.tensor([0], dtype=torch.long, device="cuda")
-            dist.recv(size_tensor, src=self.dit_master_rank, group=self.p2p_group)
+            size_tensor = torch.tensor([0], dtype=torch.long, device="cpu")
+            dist.recv(size_tensor, src=src_rank, group=self.signal_group)
 
-        # 2. Receive Metadata
-        meta_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8, device="cuda")
-        dist.recv(meta_tensor, src=self.dit_master_rank, group=self.p2p_group)
+        # 2. Receive Metadata (via Gloo, CPU tensor)
+        meta_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8, device="cpu")
+        dist.recv(meta_tensor, src=src_rank, group=self.signal_group)
 
         # 3. Parse Metadata & Alloc Tensors
-        meta_bytes = bytes(meta_tensor.cpu().tolist())
+        meta_bytes = bytes(meta_tensor.tolist())
         meta_dict = pickle.loads(meta_bytes)
 
         # Reconstruct object
@@ -575,26 +697,42 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             obj = ReceivedObject()
 
         tensor_list = []
+        tensor_targets = []  # Store (attribute_name, index_in_list) for later CUDA transfer
         for k, info in meta_dict.items():
             tag = info[0]
             if tag == "value":
                 setattr(obj, k, info[1])
             elif tag == "tensor":
                 shape, dtype = info[1], info[2]
-                t = torch.empty(shape, dtype=dtype, device="cuda")
-                setattr(obj, k, t)
+                # Receive on CPU first, then move to CUDA
+                t = torch.empty(shape, dtype=dtype, device="cpu")
                 tensor_list.append(t)
+                tensor_targets.append((k, None, shape, dtype))
             elif tag == "tensor_list":
                 shapes = info[1]
                 t_list = []
-                for s, d in shapes:
-                    t = torch.empty(s, dtype=d, device="cuda")
+                for idx, (s, d) in enumerate(shapes):
+                    t = torch.empty(s, dtype=d, device="cpu")
                     t_list.append(t)
                     tensor_list.append(t)
+                    tensor_targets.append((k, idx, s, d))
                 setattr(obj, k, t_list)
 
-        # 4. Receive Tensors
+        # 4. Receive Tensors (via Gloo, CPU tensors)
         for t in tensor_list:
-            dist.recv(t, src=self.dit_master_rank, group=self.p2p_group)
+            dist.recv(t, src=src_rank, group=self.signal_group)
+
+        # 5. Move tensors to CUDA after receiving
+        tensor_idx = 0
+        for k, list_idx, shape, dtype in tensor_targets:
+            cpu_tensor = tensor_list[tensor_idx]
+            cuda_tensor = cpu_tensor.cuda()
+            if list_idx is None:
+                # Single tensor
+                setattr(obj, k, cuda_tensor)
+            else:
+                # Tensor in list
+                getattr(obj, k)[list_idx] = cuda_tensor
+            tensor_idx += 1
 
         return obj

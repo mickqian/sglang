@@ -205,10 +205,18 @@ class DisaggCommunicator(ABC):
         pass
 
     @abstractmethod
-    def isend_object_to_non_dit(self, obj: Any) -> List[Work]:
+    def isend_object_to_non_dit(self, obj: Any) -> tuple[List[Work], List[torch.Tensor]]:
         """
         Non-blocking send of a complex object from DiT Master to Non-DiT Master (P2P).
-        Returns list of Work handles.
+        Returns (list of Work handles, list of keep-alive tensors).
+        """
+        pass
+
+    @abstractmethod
+    def isend_signal_to_non_dit(self, tensor: torch.Tensor) -> tuple[Optional[Work], Optional[torch.Tensor]]:
+        """
+        Non-blocking send of a signal from DiT Master to Non-DiT Master (P2P).
+        Returns (Work handle, persistent tensor).
         """
         pass
 

@@ -12,6 +12,9 @@ from torch.distributed import Work
 from sglang.multimodal_gen.runtime.distributed.disagg_communicators.base_communicator import (
     DisaggCommunicator,
 )
+from sglang.multimodal_gen.runtime.distributed.disagg_communicators.pytorch_communicator import (
+    AsyncWorkRegistry,
+)
 from sglang.multimodal_gen.runtime.distributed.dist_utils import get_disagg_communicator
 from sglang.multimodal_gen.runtime.pipelines_core import Req
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
@@ -28,14 +31,22 @@ if TYPE_CHECKING:
 
 class SchedulerPPMixin:
     """
-    Runs the main event loop for the rank 0 worker.
-    It listens for external requests via ZMQ and coordinates with other workers.
-    This class does NOT manage worker processes.
 
     Process order:
        * 1. Non-DiT Master(Usually the last rank): Receives from ZMQ, process the request with pre-denoising stages, then broadcast to DiT group.
-       * 2. DiT: Receives from Non-DiT Master, forward requests to Non-DiT group after processing denoising stage
+       * 2. DiT (rank 0+): Receives from Non-DiT Master, forward requests to Non-DiT group after processing denoising stage
        * 3. Non-DiT: Receives from DiT Master, final process the post-denoising stages (Decoding), then return the result to client
+
+    Communication Architecture:
+       * Non-DiT -> DiT: Uses NCCL backend (can be blocking)
+         - Signal: CUDA tensor via p2p_group
+         - Data: CUDA tensors via broadcast_group
+         - High performance for GPU-to-GPU transfer
+       
+       * DiT -> Non-DiT: Uses Gloo backend (truly non-blocking)
+         - Signal: CPU tensor via signal_group
+         - Data: CPU tensors via signal_group, then moved to CUDA
+         - Ensures Non-DiT Master can poll without blocking event loop
     """
 
     def get_next_batch_to_run_pp(self: "Scheduler", comm: DisaggCommunicator):
@@ -93,7 +104,6 @@ class SchedulerPPMixin:
             elif final_ident:
                 self.return_result(output_batch, final_ident)
 
-
     def run_batch(
         self: "Scheduler", comm: DisaggCommunicator, req_to_run: Req, req_identity
     ):
@@ -146,23 +156,40 @@ class SchedulerPPMixin:
         comm = get_disagg_communicator()
 
         if self.receiver is not None:
-            # Non-DiT Master: receive from ZMQ only
+            # Non-DiT Master now listens to two sources, both non-blocking
+            all_reqs = []
+
+            # 1. Try to receive from ZMQ (non-blocking)
             try:
                 identity, _, payload = self.receiver.recv_multipart(zmq.NOBLOCK)
                 recv_reqs = pickle.loads(payload)
                 if not isinstance(recv_reqs, list):
                     recv_reqs = [recv_reqs]
-                print(f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from ZMQ")
+                print(
+                    f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from ZMQ"
+                )
                 # Pack with identity for rank 0
-                recv_reqs = [(identity, req) for req in recv_reqs]
+                all_reqs.extend([(identity, req) for req in recv_reqs])
             except zmq.error.Again:
-                recv_reqs = []
-            return recv_reqs
+                pass
+
+            # 2. Try to receive from DiT group (non-blocking)
+            dit_reqs = self._async_recv_batch_from_dit(comm)
+            if dit_reqs:
+                print(
+                    f"[Rank {dist.get_rank()}] Received {len(dit_reqs)} reqs from DiT"
+                )
+                # Req objects from DiT already have identity if needed, or don't need it
+                all_reqs.extend(dit_reqs)
+
+            return all_reqs
         else:
-            # DiT ranks: receive from Non-DiT group
+            # DiT ranks: receive from Non-DiT group. this could be blocking for now
             recv_reqs = self._async_recv_batch_from_non_dit(comm)
             if recv_reqs:
-                print(f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from Non-DiT")
+                print(
+                    f"[Rank {dist.get_rank()}] Received {len(recv_reqs)} reqs from Non-DiT"
+                )
             return recv_reqs
 
     def event_loop_pp(self: "Scheduler") -> None:
@@ -180,7 +207,8 @@ class SchedulerPPMixin:
         self.denoising_queue: deque[Req] = deque()  # Non-DiT -> DiT (Phase 2)
 
         # Async Communication State
-        self.pending_sends: deque[Tuple[List[Work], Any]] = deque()
+        self.async_registry = AsyncWorkRegistry()
+        self.pending_sends: deque[Tuple[List[Work], Any, List[torch.Tensor]]] = deque()
         self.max_pending_transfers = 2
 
         logger.info(
@@ -188,10 +216,20 @@ class SchedulerPPMixin:
         )
 
         # Initial Setup: Start listening for incoming pipeline data
-        # self._post_recv_size(comm)
+        # Initialize signal listening for Non-DiT Master to receive from DiT
+        if comm.is_non_dit_rank() and self.receiver is not None:
+            # Start listening for signal from DiT immediately
+            self._recv_dit_signal_tensor = torch.tensor(
+                [0], dtype=torch.long, device="cpu"
+            )
+            self._recv_dit_signal_work = comm.irecv_signal_from_dit(
+                self._recv_dit_signal_tensor
+            )
+            logger.info("Non-DiT Master: Started listening for signals from DiT")
 
         while self._running:
-            # 1. Clean up completed sends
+            # 1. Poll and clean up completed async tasks (sends/recvs)
+            self.async_registry.poll()
             self._cleanup_pending_sends(comm)
 
             try:
@@ -215,6 +253,8 @@ class SchedulerPPMixin:
                 not self.waiting_queue
                 and not self.post_denoising_queue
                 and not self.denoising_queue
+                # Check for pending sends too
+                and len(self.async_registry) == 0
                 and not self.pending_sends
             ):
                 time.sleep(0.001)
@@ -227,60 +267,131 @@ class SchedulerPPMixin:
     def _cleanup_pending_sends(self, comm: DisaggCommunicator):
         """Check and clean up completed async sends."""
         while self.pending_sends:
-            # Simple flow control: if queue full, wait for oldest
-            if len(self.pending_sends) >= self.max_pending_transfers:
-                works, _ = self.pending_sends[0]
+            works, _, _ = self.pending_sends[0]
+
+            # Check if all works are completed
+            all_completed = all(
+                work is None or work.is_completed() for work in works
+            )
+
+            if all_completed:
+                # All works completed, remove from queue
+                self.pending_sends.popleft()
+            elif len(self.pending_sends) >= self.max_pending_transfers:
+                # Queue full, wait for oldest to complete
                 comm.wait_all_works(works)
                 self.pending_sends.popleft()
             else:
-                # Poll oldest (best effort)
-                works, _ = self.pending_sends[0]
-                # If all completed, pop. Note: is_completed might not be reliable on all backends.
-                # If not reliable, we just skip until max_pending_transfers forces wait.
-                # Assuming we rely on max limit for backpressure.
+                # Not completed yet and queue not full, keep it
                 break
 
     def _post_recv_size(self, comm):
         """Removed: no longer used after simplification."""
         pass
 
-
     def _handle_error(self: "Scheduler", req, msg, identity):
         final_ident = identity or getattr(req, "client_identity", None)
         if final_ident:
             self.return_result({"status": "error", "message": msg}, final_ident)
 
-
     # --- Communication Helpers ---
 
     def _async_send_batch_to_dit(self, batch: Req, comm: DisaggCommunicator):
-        """Non-DiT Master 发送处理完 pre-denoising 的请求给 DiT group"""
+        """Non-DiT Master 发送处理完 pre-denoising 的请求给 DiT group (使用 NCCL，可以阻塞)"""
         print(f"[Rank {dist.get_rank()}] Sending Req to DiT: phase={batch.pp_phase}")
 
-        # 1. 先发送信号给 DiT Master
+        # 1. 先发送信号给 DiT Master (NCCL)
         signal_tensor = torch.tensor([1], dtype=torch.long, device="cuda")
         work = comm.isend_signal_to_dit(signal_tensor)
+        
+        # We still use broadcast_object_from_non_dit which is blocking for now, 
+        # but we track the signal work in the registry to keep the tensor alive.
         if work:
-            work.wait()
+            self.async_registry.add(work, signal_tensor)
 
-        # 2. 然后广播对象给所有 DiT 节点
+        # 2. 然后广播对象给所有 DiT 节点 (NCCL, 阻塞)
+        # TODO: Consider making this non-blocking by moving to a background thread or using async broadcasts
         comm.broadcast_object_from_non_dit(batch)
 
-    def _async_send_batch_to_non_dit(self, batch: Req, comm) -> List[Optional[Work]]:
-        """DiT Master -> Non-DiT Master (P2P)"""
-        print(f"[Rank {dist.get_rank()}] Sending Req to Non-DiT: phase={batch.pp_phase}")
-        return comm.isend_object_to_non_dit(batch)
+    def _async_send_batch_to_non_dit(self, batch: Req, comm: DisaggCommunicator) -> List[Optional[Work]]:
+        """DiT Master -> Non-DiT Master (P2P via Gloo, non-blocking)"""
+        print(
+            f"[Rank {dist.get_rank()}] Sending Req back to Non-DiT: phase={batch.pp_phase}"
+        )
 
-    def _async_recv_batch_from_dit(self, comm: DisaggCommunicator, size_tensor: torch.Tensor):
-        """Non-DiT Master receives from DiT Master (P2P)"""
-        obj = comm.recv_object_from_dit(size_tensor)
+        # 1. Send signal to Non-DiT Master (Gloo, non-blocking)
+        signal_tensor = torch.tensor([1], dtype=torch.long, device="cpu")
+        work_signal, persistent_signal_tensor = comm.isend_signal_to_non_dit(signal_tensor)
+
+        # 2. Send the actual object (Gloo, non-blocking)
+        works_obj, keep_alive_tensors = comm.isend_object_to_non_dit(batch)
+
+        all_works = []
+        if work_signal:
+            all_works.append(work_signal)
+        all_works.extend(works_obj)
+
+        all_keep_alive = keep_alive_tensors
+        if persistent_signal_tensor is not None:
+            all_keep_alive.append(persistent_signal_tensor)
+
+        # Store works and tensors for later cleanup (don't wait here)
+        if all_works:
+            # Use registry to keep tensors alive and track completion
+            self.async_registry.add(all_works, all_keep_alive, metadata={"req": batch})
+            self.pending_sends.append((all_works, batch, all_keep_alive))
+
+        return all_works
+
+    def _async_recv_batch_from_dit(self, comm: DisaggCommunicator):
+        """Non-DiT Master checks for results from DiT Master (non-blocking via Gloo)"""
+        # 1. Check if we are already listening for a signal
+        if (
+            not hasattr(self, "_recv_dit_signal_work")
+            or self._recv_dit_signal_work is None
+        ):
+            # Signal tensor must be on CPU for truly non-blocking Gloo P2P
+            self._recv_dit_signal_tensor = torch.tensor(
+                [0], dtype=torch.long, device="cpu"
+            )
+            self._recv_dit_signal_work = comm.irecv_signal_from_dit(
+                self._recv_dit_signal_tensor
+            )
+            return []
+
+        # 2. Check if signal has arrived
+        if (
+            self._recv_dit_signal_work is not None
+
+        ):
+            if not self._recv_dit_signal_work.is_completed():
+                return []
+
+        # Signal arrived!
+        print(f"[Rank {dist.get_rank()}] Signal received from DiT, receiving object...")
+
+        # 3. Receive the actual object (via Gloo, CPU tensors)
+        obj = comm.recv_object_from_dit(None)
+
+        # 4. Immediately start listening for the next signal
+        self._recv_dit_signal_tensor = torch.tensor(
+            [0], dtype=torch.long, device="cpu"
+        )
+        self._recv_dit_signal_work = comm.irecv_signal_from_dit(
+            self._recv_dit_signal_tensor
+        )
+
         if obj:
-            print(f"[Rank {dist.get_rank()}] Received Req from DiT: phase={getattr(obj, 'pp_phase', 'N/A')}")
-        return obj
+            print(
+                f"[Rank {dist.get_rank()}] Received back from DiT: phase={getattr(obj, 'pp_phase', 'N/A')}"
+            )
+            return [obj] if not isinstance(obj, list) else obj
+        return []
 
     def _async_recv_batch_from_non_dit(self, comm: DisaggCommunicator):
         """DiT 节点尝试从 Non-DiT 接收已处理完 pre-denoising 的请求"""
         # 1. DiT Master 尝试接收信号（非阻塞）
+        print(f"[Rank {dist.get_rank()}] _async_recv_batch_from_non_dit.")
         if not hasattr(self, '_recv_signal_work') or self._recv_signal_work is None:
             self._recv_signal_tensor = torch.tensor([0], dtype=torch.long, device="cuda")
             self._recv_signal_work = comm.irecv_size_from_non_dit(self._recv_signal_tensor)
