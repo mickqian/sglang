@@ -10,7 +10,10 @@ import torch
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.models.vaes.common import ParallelTiledVAE
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+    StageDisaggregationRole,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     V,  # Import validators
 )

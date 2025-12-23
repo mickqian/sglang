@@ -10,7 +10,7 @@ This module defines the base class for pipelines that are composed of multiple s
 import argparse
 import os
 from abc import ABC, abstractmethod
-from enum import IntEnum, auto, Enum
+from enum import IntEnum, auto
 from typing import Any, cast
 
 import torch
@@ -336,8 +336,8 @@ class ComposedPipelineBase(ABC):
 
         # load configs into server_args, in disagg mode
         for module_name, (
-                transformers_or_diffusers,
-                _,
+            transformers_or_diffusers,
+            _,
         ) in model_index.items():
             load_module_name, component_model_path = self.adjust_module_path(
                 module_name, server_args
@@ -375,8 +375,8 @@ class ComposedPipelineBase(ABC):
 
         components = {}
         for module_name, (
-                transformers_or_diffusers,
-                architecture,
+            transformers_or_diffusers,
+            architecture,
         ) in tqdm(iterable=model_index.items(), desc="Loading required modules"):
             if transformers_or_diffusers is None:
                 logger.warning(

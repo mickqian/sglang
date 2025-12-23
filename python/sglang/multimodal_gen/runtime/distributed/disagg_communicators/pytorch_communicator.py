@@ -45,20 +45,15 @@ class AsyncWork:
         statuses = [w.is_completed() for w in self.works]
         all_works_completed = all(statuses)
 
-        # Workaround: 如果是 Gloo 信号接收，检查 tensor 值
         if not all_works_completed and self.expected_signal_value is not None:
-            # 检查是否是单个标量 tensor 的信号
             if len(self.tensors) == 1 and self.tensors[0].numel() == 1:
                 current_value = self.tensors[0].item()
-                # 如果值已经改变为期望值，认为接收完成
                 if current_value == self.expected_signal_value:
                     logger.info(
                         f"[Rank {dist.get_rank()}] Gloo workaround: tensor value changed to {current_value}, "
                         f"treating as completed even though work.is_completed()={statuses}"
                     )
                     return True
-        # else:
-        #     print(f"{all_works_completed=} {self.expected_signal_value=}")
 
         return all_works_completed
 
@@ -151,16 +146,12 @@ class AsyncWorkRegistry:
 
 class PyTorchDisaggCommunicator(DisaggCommunicator):
     def __init__(self):
-        self.non_dit_group: GroupCoordinator | None = None
         self.dit_group: GroupCoordinator | None = None
         self.p2p_group: GroupCoordinator | None = (
             None  # Dedicated P2P group for master-to-master communication
         )
         self.signal_group: GroupCoordinator | None = (
             None  # Dedicated Gloo group for non-blocking signals
-        )
-        self.dispatch_group: GroupCoordinator | None = (
-            None  # Dedicated Gloo group for Non-DiT Master -> All DiT Ranks signals
         )
         self.broadcast_group: GroupCoordinator | None = None
         self.non_dit_ranks = []
@@ -189,6 +180,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             range(world_size - server_args.num_non_dit_ranks, world_size)
         )
         dit_ranks = [r for r in range(world_size) if r not in non_dit_ranks]
+        all_ranks = [r for r in range(world_size)]
 
         self.non_dit_ranks = non_dit_ranks
         self.dit_ranks = dit_ranks
@@ -201,36 +193,10 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         # # This avoids serialization warnings on the default ProcessGroup
         p2p_ranks = [self.dit_master_rank, self.non_dit_master_rank]
-        # print(f"[Rank {self.world_rank}] Creating P2P group for ranks {p2p_ranks}")
-        # self.p2p_group = dist.new_group(ranks=p2p_ranks)
-        # print(
-        #     f"[Rank {self.world_rank}] Created P2P group for ranks {p2p_ranks} "
-        #     f"(DiT master={self.dit_master_rank}, Non-DiT master={self.non_dit_master_rank})"
-        # )
-
-        # CRITICAL: Add barrier to ensure all ranks are synchronized
-        print(f"[Rank {self.world_rank}] Entering barrier after p2p_group creation")
+        non_p2p_ranks = [rank for rank in all_ranks if rank not in p2p_ranks]
         dist.barrier()
-        print(f"[Rank {self.world_rank}] Passed barrier after p2p_group creation")
 
-        # Create dedicated Gloo group for truly non-blocking P2P signals
-        # CRITICAL: Only ranks in p2p_ranks should call new_group with Gloo backend
-        # to avoid deadlock when some ranks are not in the group
-        print(
-            f"[Rank {self.world_rank}] Creating Gloo signal group for ranks {p2p_ranks}"
-        )
-
-        p2p_ranks_all = [[1], p2p_ranks]
-        # with suppress_stdout():
-        #     if dist.get_rank() in p2p_ranks:
-        # for ranks in p2p_ranks_all:
-        #     self.device_signal_group = dist.new_group(
-        #         ranks=ranks, backend="nccl", timeout=timedelta(minutes=30)
-        #     )
-        #     self.signal_group = dist.new_group(
-        #         ranks=ranks, backend="gloo", timeout=timedelta(minutes=30)
-        #     )
-
+        p2p_ranks_all = [p2p_ranks, non_p2p_ranks]
         self.signal_group = GroupCoordinator(
             group_ranks=p2p_ranks_all,
             local_rank=self.world_rank,
@@ -239,136 +205,35 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             group_name="signal",
         )
 
-        # Create groups
-        # Note: new_group requires all processes to call it in the same order
-        print(
-            f"[Rank {self.world_rank}] Creating non_dit_group for ranks {non_dit_ranks}"
-        )
-        non_dit_ranks_all = [non_dit_ranks, [0, 1]]
-        # for ranks in non_dit_ranks_all:
-        #     self.non_dit_group = dist.new_group(ranks=ranks, backend="nccl")
-        #     self.gloo_non_dit_group = dist.new_group(ranks=ranks, backend="gloo")
-        self.non_dit_group = GroupCoordinator(
-            group_ranks=non_dit_ranks_all,
-            local_rank=self.world_rank,
-            torch_distributed_backend="nccl",
-            use_device_communicator=True,
-            group_name="non-dit",
-        )
+        dit_rank_groups = [dit_ranks, non_dit_ranks]
 
-        print(f"[Rank {self.world_rank}] Creating dit_group for ranks {dit_ranks}")
-
-        dit_ranks_all = [dit_ranks, [2]]
-
-        # for ranks in dit_ranks_all:
-        #     self.dit_group = dist.new_group(ranks=ranks, backend="nccl")
-        #     self.gloo_dit_group = dist.new_group(ranks=ranks, backend="gloo")
         self.dit_group = GroupCoordinator(
-            group_ranks=dit_ranks_all,
+            group_ranks=dit_rank_groups,
             local_rank=self.world_rank,
             torch_distributed_backend="nccl",
             use_device_communicator=True,
             group_name="dit",
         )
-        print(f"[Rank {self.world_rank}] Successfully created role-specific groups")
-
-        # # Create dedicated P2P group for master-to-master communication
-
-        # else:
-        #     self.signal_group = None
 
         self.p2p_ranks = p2p_ranks
-        # if self.signal_group is not None:
-        #     print(f"[Rank {self.world_rank}] Created Gloo signal group for ranks {p2p_ranks}")
-        # else:
-        #     print(f"[Rank {self.world_rank}] Skipped Gloo signal group (not in p2p_ranks {p2p_ranks})")
-
-        # Add barrier after signal_group creation
-        print(f"[Rank {self.world_rank}] Entering barrier after signal_group creation")
         dist.barrier()
-        print(f"[Rank {self.world_rank}] Passed barrier after signal_group creation")
 
-        # CRITICAL: Extra barrier before broadcast_group to ensure all ranks are fully synchronized
-        # This prevents race conditions when some ranks are still in Gloo group initialization
-        print(f"[Rank {self.world_rank}] Extra barrier before broadcast_group creation")
-        dist.barrier()
-        print(
-            f"[Rank {self.world_rank}] Passed extra barrier before broadcast_group creation"
-        )
-
-        # Create broadcast group for Non-DiT Master -> All DiT Ranks
-        # This includes Non-DiT Master + All DiT Ranks (Master + Workers)
         broadcast_ranks = sorted(list(set([self.non_dit_master_rank] + dit_ranks)))
-        print(
-            f"[Rank {self.world_rank}] Creating broadcast_group for ranks {broadcast_ranks}"
-        )
-        # self.broadcast_group = dist.new_group(ranks=broadcast_ranks)
-        # self.broadcast_group = dist.new_group(ranks=broadcast_ranks, backend="gloo")
+        non_broadcast_ranks = [rank for rank in all_ranks if rank not in broadcast_ranks]
+        if non_broadcast_ranks:
+            broadcast_ranks_all = [broadcast_ranks, non_broadcast_ranks]
+        else:
+            broadcast_ranks_all = [broadcast_ranks]
+        print(f"{broadcast_ranks_all=}")
         self.broadcast_group = GroupCoordinator(
-            group_ranks=[broadcast_ranks],
+            group_ranks=broadcast_ranks_all,
             local_rank=self.world_rank,
             torch_distributed_backend="nccl",
             use_device_communicator=True,
             group_name="dit",
         )
-        print(
-            f"[Rank {self.world_rank}] Created Broadcast group for ranks {broadcast_ranks} "
-            f"(Source=Non-DiT master {self.non_dit_master_rank})"
-        )
-
-        # CRITICAL: Add barrier to ensure all ranks finished creating broadcast_group
-        # before creating the next group with same ranks but different backend
-        print(
-            f"[Rank {self.world_rank}] Entering barrier after broadcast_group creation"
-        )
-        dist.barrier()
-        print(f"[Rank {self.world_rank}] Passed barrier after broadcast_group creation")
-
-        # CRITICAL: Extra barrier before dispatch_group to ensure all ranks are fully synchronized
-        # This prevents deadlocks when creating Gloo group with same ranks as broadcast_group
-        print(f"[Rank {self.world_rank}] Extra barrier before dispatch_group creation")
-        dist.barrier()
-        print(
-            f"[Rank {self.world_rank}] Passed extra barrier before dispatch_group creation"
-        )
-
-        # Create dedicated Gloo group for Non-DiT Master -> All DiT Ranks (Truly non-blocking dispatch)
-        # This group is used for control signals ONLY.
-        # CRITICAL: Only ranks in broadcast_ranks should call new_group with Gloo backend
-        print(
-            f"[Rank {self.world_rank}] Creating Gloo dispatch_group for ranks {broadcast_ranks}"
-        )
-        # with suppress_stdout():
-        #     # if dist.get_rank() in broadcast_ranks:
-        #     self.dispatch_group = dist.new_group(
-        #         ranks=broadcast_ranks, backend="gloo", timeout=timedelta(minutes=30)
-        #     )
-        # else:
-        #     self.dispatch_group = None
-
-        self.dispatch_group = GroupCoordinator(
-            group_ranks=[broadcast_ranks],
-            local_rank=self.world_rank,
-            torch_distributed_backend="nccl",
-            use_device_communicator=True,
-            group_name="dispatch",
-        )
         self.dispatch_ranks = broadcast_ranks
-        if self.dispatch_group is not None:
-            print(
-                f"[Rank {self.world_rank}] Created Gloo dispatch group for ranks {broadcast_ranks}"
-            )
-        else:
-            print(
-                f"[Rank {self.world_rank}] Skipped Gloo dispatch group (not in broadcast_ranks {broadcast_ranks})"
-            )
-
-        # Add barrier to ensure all ranks finished creating dispatch_group
-        print(
-            f"[Rank {self.world_rank}] Entering barrier after dispatch_group creation"
-        )
         dist.barrier()
-        print(f"[Rank {self.world_rank}] Passed barrier after dispatch_group creation")
 
         if self.world_rank in non_dit_ranks:
             self.role = "non_dit"
@@ -385,8 +250,6 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         )
 
     def get_my_group(self) -> Optional[dist.ProcessGroup]:
-        if self.role == "non_dit":
-            return self.non_dit_group
         return self.dit_group
 
     def is_dit_rank(self) -> bool:
@@ -656,13 +519,13 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                 f"tensor shape={tensor.shape}, dtype={tensor.dtype}, is_contiguous={tensor.is_contiguous()}"
             )
             # 验证 dispatch_group 是否有效
-            if self.dispatch_group is None:
+            if self.broadcast_group is None:
                 logger.error(f"[Rank {self.world_rank}] dispatch_group is None!")
                 return None
             # 打印 dispatch_group 信息以调试
             logger.info(
-                f"[Rank {self.world_rank}] dispatch_group backend: {dist.get_backend(self.dispatch_group.cpu_group)}, "
-                f"dispatch_ranks: {self.dispatch_ranks}, group_size: {dist.get_world_size(self.dispatch_group.cpu_group)}"
+                f"[Rank {self.world_rank}] dispatch_group backend: {dist.get_backend(self.broadcast_group.cpu_group)}, "
+                f"dispatch_ranks: {self.dispatch_ranks}, group_size: {dist.get_world_size(self.broadcast_group.cpu_group)}"
             )
 
             # CRITICAL: 使用 src 作为全局 rank，不是 group rank！
@@ -670,7 +533,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             work = dist.irecv(
                 tensor,
                 src=self.non_dit_master_rank,
-                group=self.dispatch_group.cpu_group,
+                group=self.broadcast_group.cpu_group,
             )
             logger.info(
                 f"[Rank {self.world_rank}] irecv work created: {work}, type: {type(work)}"
@@ -693,13 +556,13 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                 )
 
             # 验证 dispatch_group 是否有效
-            if self.dispatch_group is None:
+            if self.broadcast_group is None:
                 logger.error(f"[Rank {self.world_rank}] dispatch_group is None!")
                 return works
 
             # 打印 dispatch_group 信息以调试
             logger.info(
-                f"[Rank {self.world_rank} (global)] dispatch_group backend: {dist.get_backend(self.dispatch_group.cpu_group)}, "
+                f"[Rank {self.world_rank} (global)] dispatch_group backend: {dist.get_backend(self.broadcast_group.cpu_group)}, "
                 f"dispatch_ranks: {self.dispatch_ranks}, tensor_value: {tensor.item()}, "
                 f"tensor shape={tensor.shape}, dtype={tensor.dtype}, is_contiguous={tensor.is_contiguous()}"
             )
@@ -712,7 +575,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                     f"(GLOBAL rank {rank}, NOT group rank) in dispatch_group"
                 )
                 works.append(
-                    dist.isend(tensor, dst=rank, group=self.dispatch_group.cpu_group)
+                    dist.isend(tensor, dst=rank, group=self.broadcast_group.cpu_group)
                 )
         return works
 

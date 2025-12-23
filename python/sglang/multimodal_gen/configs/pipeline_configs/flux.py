@@ -446,7 +446,6 @@ class Flux2PipelineConfig(FluxPipelineConfig):
         width = 2 * (batch.width // (self.vae_config.arch_config.vae_scale_factor * 2))
         num_channels_latents = self.dit_config.arch_config.in_channels
         shape = (batch_size, num_channels_latents, height // 2, width // 2)
-        print(f"{num_channels_latents=} {height=} {width=}")
         return shape
 
     def get_pos_prompt_embeds(self, batch):

@@ -8,7 +8,10 @@ from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+    StageDisaggregationRole,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
@@ -95,7 +98,6 @@ class LatentPreparationStage(PipelineStage):
             latents = server_args.pipeline_config.maybe_pack_latents(
                 latents, batch_size, batch
             )
-            print(f"98 {latents.shape=}")
         else:
             latents = latents.to(device)
 

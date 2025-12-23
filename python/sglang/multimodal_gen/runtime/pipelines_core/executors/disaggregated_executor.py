@@ -17,7 +17,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
     PPPhase,
     Req,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage, StageDisaggregationRole
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    PipelineStage,
+    StageDisaggregationRole,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -59,9 +62,21 @@ class DisaggregatedExecutor(PipelineExecutor):
             # Fallback for models without explicit denoise stage structure
             return self._run_local(stages, batch)
 
-        pre_denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.PRE_DENOISE]
-        denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.DENOISE]
-        post_denoise_stages = [stage for stage in stages if stage.stage_role == StageDisaggregationRole.POST_DENOISE]
+        pre_denoise_stages = [
+            stage
+            for stage in stages
+            if stage.stage_role == StageDisaggregationRole.PRE_DENOISE
+        ]
+        denoise_stages = [
+            stage
+            for stage in stages
+            if stage.stage_role == StageDisaggregationRole.DENOISE
+        ]
+        post_denoise_stages = [
+            stage
+            for stage in stages
+            if stage.stage_role == StageDisaggregationRole.POST_DENOISE
+        ]
 
         # Determine which stages to run based on Phase
         # The Scheduler sets `batch.pp_phase`.

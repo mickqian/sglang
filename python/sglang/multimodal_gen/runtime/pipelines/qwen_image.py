@@ -75,8 +75,7 @@ class QwenImagePipeline(LoRAPipeline, ComposedPipelineBase):
         """Set up pipeline stages with proper dependency injection."""
 
         self.add_stage(
-            stage_name="input_validation_stage",
-            stage=InputValidationStage()
+            stage_name="input_validation_stage", stage=InputValidationStage()
         )
 
         self.add_stage(
@@ -91,9 +90,7 @@ class QwenImagePipeline(LoRAPipeline, ComposedPipelineBase):
             ),
         )
 
-        self.add_stage(stage_name="conditioning_stage",
-
-                       stage=ConditioningStage())
+        self.add_stage(stage_name="conditioning_stage", stage=ConditioningStage())
 
         self.add_stage(
             stage_name="latent_preparation_stage",
@@ -144,7 +141,7 @@ class QwenImageEditPipeline(LoRAPipeline, ComposedPipelineBase):
             stage=InputValidationStage(
                 vae_image_processor=VaeImageProcessor(
                     vae_scale_factor=server_args.pipeline_config.vae_config.arch_config.vae_scale_factor
-                                     * 2
+                    * 2
                 )
             ),
         )
