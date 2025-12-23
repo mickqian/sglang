@@ -30,10 +30,36 @@ class AsyncWork:
     tensors: List[torch.Tensor]
     callback: Optional[Callable] = None
     metadata: Optional[Dict] = None
+    # 用于检测信号接收的初始值（workaround for Gloo backend bug）
+    expected_signal_value: Optional[int] = None
 
     def is_completed(self) -> bool:
-        """Check if all work handles in this batch are completed."""
-        return all(w.is_completed() for w in self.works)
+        """
+        Check if all work handles in this batch are completed.
+        
+        WORKAROUND: Gloo backend 有时即使数据已到达，work.is_completed() 也返回 False。
+        对于信号接收，我们额外检查 tensor 的值是否已经改变。
+        """
+        # 首先检查 work 对象的状态
+        statuses = [w.is_completed() for w in self.works]
+        all_works_completed = all(statuses)
+        
+        # Workaround: 如果是 Gloo 信号接收，检查 tensor 值
+        if not all_works_completed and self.expected_signal_value is not None:
+            # 检查是否是单个标量 tensor 的信号
+            if len(self.tensors) == 1 and self.tensors[0].numel() == 1:
+                current_value = self.tensors[0].item()
+                # 如果值已经改变为期望值，认为接收完成
+                if current_value == self.expected_signal_value:
+                    logger.info(
+                        f"[Rank {dist.get_rank()}] Gloo workaround: tensor value changed to {current_value}, "
+                        f"treating as completed even though work.is_completed()={statuses}"
+                    )
+                    return True
+        # else:
+        #     print(f"{all_works_completed=} {self.expected_signal_value=}")
+        
+        return all_works_completed
 
     def wait(self) -> None:
         """Wait for all work handles to complete."""
@@ -56,15 +82,26 @@ class AsyncWorkRegistry:
         tensors: Union[torch.Tensor, List[torch.Tensor]],
         callback: Optional[Callable] = None,
         metadata: Optional[Dict] = None,
+        expected_signal_value: Optional[int] = None,
     ) -> AsyncWork:
-        """Add a new async work to the registry."""
+        """
+        Add a new async work to the registry.
+        
+        Args:
+            expected_signal_value: For signal reception, the expected value after completion.
+                                   This is a workaround for Gloo backend not updating work status.
+        """
         if not isinstance(work, list):
             work = [work]
         if not isinstance(tensors, list):
             tensors = [tensors]
 
         aw = AsyncWork(
-            works=work, tensors=tensors, callback=callback, metadata=metadata
+            works=work,
+            tensors=tensors,
+            callback=callback,
+            metadata=metadata,
+            expected_signal_value=expected_signal_value,
         )
         self.pending_works.append(aw)
         return aw
@@ -78,12 +115,21 @@ class AsyncWorkRegistry:
         still_pending = []
         for aw in self.pending_works:
             if aw.is_completed():
-                logger.info(f"[Rank {dist.get_rank()}] AsyncWork COMPLETED: works={len(aw.works)}, tensors={len(aw.tensors)}, metadata={aw.metadata}")
+                logger.info(
+                    f"[Rank {dist.get_rank()}] AsyncWork COMPLETED: works={len(aw.works)}, tensors={len(aw.tensors)}, "
+                    f"metadata={aw.metadata}, tensor_values={[t.item() if t.numel() == 1 else t.shape for t in aw.tensors]}"
+                )
                 if aw.callback:
                     try:
+                        logger.info(
+                            f"[Rank {dist.get_rank()}] Executing AsyncWork callback..."
+                        )
                         aw.callback(aw)
+                        logger.info(
+                            f"[Rank {dist.get_rank()}] AsyncWork callback completed"
+                        )
                     except Exception as e:
-                        logger.error(f"Error in AsyncWork callback: {e}")
+                        logger.error(f"[Rank {dist.get_rank()}] Error in AsyncWork callback: {e}", exc_info=True)
                 completed.append(aw)
             else:
                 still_pending.append(aw)
@@ -105,6 +151,7 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         self.dit_group = None
         self.p2p_group = None  # Dedicated P2P group for master-to-master communication
         self.signal_group = None  # Dedicated Gloo group for non-blocking signals
+        self.dispatch_group = None  # Dedicated Gloo group for Non-DiT Master -> All DiT Ranks signals
         self.broadcast_group = None
         self.non_dit_ranks = []
         self.dit_ranks = []
@@ -169,6 +216,12 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             f"Created Broadcast group for ranks {broadcast_ranks} "
             f"(Source=Non-DiT master {self.non_dit_master_rank})"
         )
+
+        # Create dedicated Gloo group for Non-DiT Master -> All DiT Ranks (Truly non-blocking dispatch)
+        # This group is used for control signals ONLY.
+        self.dispatch_group = dist.new_group(ranks=broadcast_ranks, backend="gloo")
+        self.dispatch_ranks = broadcast_ranks
+        logger.info(f"Created Gloo dispatch group for ranks {broadcast_ranks}")
 
         if self.world_rank in non_dit_ranks:
             self.role = "non_dit"
@@ -406,31 +459,107 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             if work is not None:
                 work.wait()
 
+    def _get_dispatch_group_rank(self, global_rank: int) -> int:
+        """
+        Helper to get rank within the dispatch group.
+        
+        WARNING: This function is DEPRECATED and should NOT be used with PyTorch distributed primitives.
+        PyTorch dist.send/recv/isend/irecv always use GLOBAL ranks even when a group is specified.
+        This helper is kept only for validation purposes.
+        """
+        try:
+            return self.dispatch_ranks.index(global_rank)
+        except ValueError:
+            return -1
+
     def irecv_size_from_non_dit(self, tensor: torch.Tensor) -> Optional[Work]:
         """
-        All DiT ranks listen for signal from Non-DiT Master.
-        Use P2P isend/irecv to allow ranks to poll independently.
+        All DiT ranks listen for signal from Non-DiT Master via Gloo (CPU).
+        This must be truly non-blocking.
         """
         if self.is_dit_rank():
-            # Listen directly from Non-DiT master
-            logger.info(f"[Rank {self.world_rank}] POSTED irecv: listening for dispatch signal from Non-DiT Master (Rank {self.non_dit_master_rank})")
-            rec = dist.irecv(tensor, src=self.non_dit_master_rank)
-            return rec
+            # 确保 tensor 是 CPU 上的，并且是连续的
+            assert tensor.device.type == "cpu", "Gloo dispatch signal must be on CPU"
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+                logger.warning(
+                    f"[Rank {self.world_rank}] irecv tensor was not contiguous, made it contiguous"
+                )
+            
+            # 获取 Non-DiT Master 在 dispatch_group 中的 rank
+            src_rank = self._get_dispatch_group_rank(self.non_dit_master_rank)
+            logger.info(
+                f"[Rank {self.world_rank} (global)] POSTED irecv: listening for dispatch signal from Non-DiT Master "
+                f"(global rank {self.non_dit_master_rank} -> group rank {src_rank} in dispatch_group), "
+                f"tensor shape={tensor.shape}, dtype={tensor.dtype}, is_contiguous={tensor.is_contiguous()}"
+            )
+            # 验证 dispatch_group 是否有效
+            if self.dispatch_group is None:
+                logger.error(f"[Rank {self.world_rank}] dispatch_group is None!")
+                return None
+            # 打印 dispatch_group 信息以调试
+            logger.info(
+                f"[Rank {self.world_rank}] dispatch_group backend: {dist.get_backend(self.dispatch_group)}, "
+                f"dispatch_ranks: {self.dispatch_ranks}, group_size: {dist.get_world_size(self.dispatch_group)}"
+            )
+            
+            # CRITICAL: 使用 src 作为全局 rank，不是 group rank！
+            # PyTorch 文档说明：即使指定了 group，src/dst 仍然是全局 rank
+            work = dist.irecv(tensor, src=self.non_dit_master_rank, group=self.dispatch_group)
+            logger.info(
+                f"[Rank {self.world_rank}] irecv work created: {work}, type: {type(work)}"
+            )
+            return work
         return None
 
     def isend_signal_to_dit(self, tensor: torch.Tensor) -> List[Work]:
         """
-        Non-DiT Master sends signal to ALL DiT ranks to notify them to join broadcast.
+        Non-DiT Master sends signal to ALL DiT ranks via Gloo (CPU).
         """
         works = []
         if self.world_rank == self.non_dit_master_rank:
-            logger.info(f"[Rank {self.world_rank}] POSTED isend: sending dispatch signal to ALL DiT Ranks: {self.dit_ranks}")
+            # 确保 tensor 是 CPU 上的，并且是连续的
+            assert tensor.device.type == "cpu", "Gloo dispatch signal must be on CPU"
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+                logger.warning(
+                    f"[Rank {self.world_rank}] isend tensor was not contiguous, made it contiguous"
+                )
+            
+            # 验证 dispatch_group 是否有效
+            if self.dispatch_group is None:
+                logger.error(f"[Rank {self.world_rank}] dispatch_group is None!")
+                return works
+            
+            # 打印 dispatch_group 信息以调试
+            logger.info(
+                f"[Rank {self.world_rank} (global)] dispatch_group backend: {dist.get_backend(self.dispatch_group)}, "
+                f"dispatch_ranks: {self.dispatch_ranks}, tensor_value: {tensor.item()}, "
+                f"tensor shape={tensor.shape}, dtype={tensor.dtype}, is_contiguous={tensor.is_contiguous()}"
+            )
+
             for rank in self.dit_ranks:
-                works.append(dist.isend(tensor, dst=rank))
+                # CRITICAL FIX: 使用全局 rank，不是 group rank！
+                # PyTorch 文档说明：即使指定了 group，src/dst 仍然是全局 rank
+                logger.info(
+                    f"[Rank {self.world_rank} (global)] POSTED isend: sending Gloo signal to DiT rank "
+                    f"(GLOBAL rank {rank}, NOT group rank) in dispatch_group"
+                )
+                works.append(
+                    dist.isend(
+                        tensor, dst=rank, group=self.dispatch_group
+                    )
+                )
         return works
 
     def _get_signal_group_rank(self, global_rank: int) -> int:
-        """Helper to get rank within the signal group."""
+        """
+        Helper to get rank within the signal group.
+        
+        WARNING: This function is DEPRECATED and should NOT be used with PyTorch distributed primitives.
+        PyTorch dist.send/recv/isend/irecv always use GLOBAL ranks even when a group is specified.
+        This helper is kept only for validation purposes.
+        """
         p2p_ranks = [self.dit_master_rank, self.non_dit_master_rank]
         try:
             return p2p_ranks.index(global_rank)
@@ -441,8 +570,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         """Non-DiT Master listens for signal from DiT Master (P2P via Gloo)."""
         if self.world_rank == self.non_dit_master_rank:
             assert tensor.device.type == "cpu", "Gloo signal tensor must be on CPU"
-            src_rank = self._get_signal_group_rank(self.dit_master_rank)
-            return dist.irecv(tensor, src=src_rank, group=self.signal_group)
+            # CRITICAL: 使用全局 rank，不是 group rank
+            return dist.irecv(tensor, src=self.dit_master_rank, group=self.signal_group)
         return None
 
     def isend_signal_to_non_dit(
@@ -451,8 +580,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         """DiT Master sends signal to Non-DiT Master (P2P via Gloo)."""
         if self.world_rank == self.dit_master_rank:
             cpu_tensor = tensor.to("cpu")
-            dst_rank = self._get_signal_group_rank(self.non_dit_master_rank)
-            work = dist.isend(cpu_tensor, dst=dst_rank, group=self.signal_group)
+            # CRITICAL: 使用全局 rank，不是 group rank
+            work = dist.isend(cpu_tensor, dst=self.non_dit_master_rank, group=self.signal_group)
             return work, cpu_tensor
         return None, None
 
@@ -639,8 +768,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         keep_alive_tensors = [meta_tensor, size_tensor]
 
-        # Get destination rank in signal_group
-        dst_rank = self._get_signal_group_rank(self.non_dit_master_rank)
+        # CRITICAL: 使用全局 rank，不是 group rank
+        dst_rank = self.non_dit_master_rank
 
         works = []
         # 1. Send Size (via Gloo)
@@ -670,8 +799,8 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
         if self.world_rank != self.non_dit_master_rank:
             return None
 
-        # Get source rank in signal_group
-        src_rank = self._get_signal_group_rank(self.dit_master_rank)
+        # CRITICAL: 使用全局 rank，不是 group rank
+        src_rank = self.dit_master_rank
 
         # 1. Receive Size (via Gloo, CPU tensor)
         if known_size_tensor is not None:
