@@ -100,7 +100,7 @@ class SchedulerPPMixin:
             # finished decoding, return to client
             final_ident = identity or getattr(req, "client_identity", None)
             if output_batch.error:
-                self._handle_error(req, output_batch.error, final_ident)
+                self._handle_error(output_batch, final_ident)
             elif final_ident:
                 self.return_result(output_batch, final_ident)
 
@@ -115,7 +115,7 @@ class SchedulerPPMixin:
             self.process_result(req_to_run, output, req_identity, comm)
         except Exception as e:
             logger.error(f"Execution error: {e}", exc_info=True)
-            self._handle_error(req_to_run, str(e), req_identity)
+            self._handle_error(OutputBatch(error=str(e)), req_identity)
 
     def filter_reqs(self: "Scheduler", new_reqs: list[Req], comm: DisaggCommunicator):
         """Select from the received reqs that will actually be processed on this rank, then put them in waiting_queue"""
@@ -185,10 +185,12 @@ class SchedulerPPMixin:
 
         # Initial Setup: Start persistent async listeners
         self._setup_async_receivers(comm)
-        
+
         # 关键修复：添加全局屏障，确保所有 ranks 都完成了 irecv 注册后再继续
         # 这样可以防止 Non-DiT Master 在 DiT ranks 注册 irecv 之前就发送信号
-        logger.info(f"[Rank {dist.get_rank()}] Waiting at barrier after setup_async_receivers...")
+        logger.info(
+            f"[Rank {dist.get_rank()}] Waiting at barrier after setup_async_receivers..."
+        )
         dist.barrier()
         logger.info(f"[Rank {dist.get_rank()}] Barrier passed, entering main loop...")
 
@@ -210,13 +212,13 @@ class SchedulerPPMixin:
                         f"tensor_values={[t.item() if t.numel() == 1 else t.shape for t in aw.tensors]}"
                     )
                 last_poll_log_time = time.time()
-            
+
             completed = self.async_registry.poll()
             if completed:
                 logger.info(
                     f"[Rank {dist.get_rank()}] Poll completed {len(completed)} async works"
                 )
-            
+
             self._cleanup_pending_sends(comm)
 
             # 2. Receive external requests (ZMQ)
@@ -295,7 +297,10 @@ class SchedulerPPMixin:
         if work:
             # 添加 expected_signal_value=1 作为 Gloo backend workaround
             self.async_registry.add(
-                work, signal_tensor, callback=on_signal_received, expected_signal_value=1
+                work,
+                signal_tensor,
+                callback=on_signal_received,
+                expected_signal_value=1,
             )
 
     def _start_listening_for_non_dit_signals(self, comm: DisaggCommunicator):
@@ -319,6 +324,9 @@ class SchedulerPPMixin:
             print(f"reqs received on dit-ranks: {reqs}")
             if reqs:
                 reqs = [reqs] if not isinstance(reqs, list) else reqs
+                for req in reqs:
+                    print(f"{req.latents=}")
+                    # print(f"{req.raw_latent_shape=}")
                 self.filter_reqs(reqs, comm)
             # Restart listener
             self._start_listening_for_non_dit_signals(comm)
@@ -330,7 +338,10 @@ class SchedulerPPMixin:
             )
             # 添加 expected_signal_value=1 作为 Gloo backend workaround
             self.async_registry.add(
-                work, signal_tensor, callback=on_dispatch_signal, expected_signal_value=1
+                work,
+                signal_tensor,
+                callback=on_dispatch_signal,
+                expected_signal_value=1,
             )
         else:
             logger.warning(
@@ -356,10 +367,10 @@ class SchedulerPPMixin:
                 # Not completed yet and queue not full, keep it
                 break
 
-    def _handle_error(self: "Scheduler", req, msg, identity):
-        final_ident = identity or getattr(req, "client_identity", None)
+    def _handle_error(self: "Scheduler", output_batch: OutputBatch, identity):
+        final_ident = identity or getattr(output_batch, "client_identity", None)
         if final_ident:
-            self.return_result({"status": "error", "message": msg}, final_ident)
+            self.return_result(output_batch, final_ident)
 
     # --- Communication Helpers ---
 
@@ -368,7 +379,9 @@ class SchedulerPPMixin:
         logger.info(
             f"[Rank {dist.get_rank()}] _async_send_batch_to_dit: Dispatching Req to DiT, phase={batch.pp_phase}"
         )
-        print(f"[Rank {dist.get_rank()}] Dispatching Req to DiT: phase={batch.pp_phase}")
+        print(
+            f"[Rank {dist.get_rank()}] Dispatching Req to DiT: phase={batch.pp_phase}"
+        )
 
         # 1. Send signal to ALL DiT ranks via Gloo (MUST use CPU)
         signal_tensor = torch.tensor([1], dtype=torch.long, device="cpu")
@@ -376,20 +389,24 @@ class SchedulerPPMixin:
             f"[Rank {dist.get_rank()}] Created signal_tensor at {signal_tensor.data_ptr()}, value: {signal_tensor.item()}"
         )
         works = comm.isend_signal_to_dit(signal_tensor)
-        
+
         if works:
             logger.info(
                 f"[Rank {dist.get_rank()}] isend_signal_to_dit returned {len(works)} work handles"
             )
             # Registry keeps signal_tensor alive
             self.async_registry.add(works, signal_tensor)
-            
+
             # Wait for dispatch signals to be sent before NCCL broadcast.
-            logger.info(f"[Rank {dist.get_rank()}] Waiting for Gloo signal sends to complete...")
+            logger.info(
+                f"[Rank {dist.get_rank()}] Waiting for Gloo signal sends to complete..."
+            )
             for i, w in enumerate(works):
                 if w is not None:
                     w.wait()
-                    logger.info(f"[Rank {dist.get_rank()}] Gloo signal send {i} completed")
+                    logger.info(
+                        f"[Rank {dist.get_rank()}] Gloo signal send {i} completed"
+                    )
             logger.info(f"[Rank {dist.get_rank()}] All Gloo signal sends completed")
         else:
             logger.warning(
@@ -397,10 +414,14 @@ class SchedulerPPMixin:
             )
 
         # 2. Broadcast the object (NCCL)
-        logger.info(f"[Rank {dist.get_rank()}] Starting NCCL broadcast_object_from_non_dit...")
+        logger.info(
+            f"[Rank {dist.get_rank()}] Starting NCCL broadcast_object_from_non_dit..."
+        )
         print(f"Blocking send reqs to dit on non-dit ranks")
         comm.broadcast_object_from_non_dit(batch)
-        logger.info(f"[Rank {dist.get_rank()}] NCCL broadcast_object_from_non_dit completed")
+        logger.info(
+            f"[Rank {dist.get_rank()}] NCCL broadcast_object_from_non_dit completed"
+        )
         print(f"Sent reqs to dit on non-dit ranks")
 
     def _async_send_batch_to_non_dit(

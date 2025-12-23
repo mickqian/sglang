@@ -87,7 +87,6 @@ class LatentPreparationStage(PipelineStage):
             latents = randn_tensor(
                 shape, generator=generator, device=device, dtype=dtype
             )
-
             latent_ids = server_args.pipeline_config.maybe_prepare_latent_ids(latents)
 
             if latent_ids is not None:
@@ -96,6 +95,7 @@ class LatentPreparationStage(PipelineStage):
             latents = server_args.pipeline_config.maybe_pack_latents(
                 latents, batch_size, batch
             )
+            print(f"98 {latents.shape=}")
         else:
             latents = latents.to(device)
 

@@ -568,6 +568,7 @@ class DenoisingStage(PipelineStage):
 
         # Get latents and embeddings
         latents = batch.latents
+        print(f"{latents.shape=}")
         prompt_embeds = batch.prompt_embeds
         # Removed Tensor truthiness assert to avoid GPU sync
         neg_prompt_embeds = None
@@ -600,6 +601,7 @@ class DenoisingStage(PipelineStage):
         # Handle sequence parallelism after TI2V processing
         self._preprocess_sp_latents(batch, server_args)
         latents = batch.latents
+        print(f"after preprocess: {latents.shape=}")
 
         # Shard z and reserved_frames_mask for TI2V if SP is enabled
         if should_preprocess_for_wan_ti2v:

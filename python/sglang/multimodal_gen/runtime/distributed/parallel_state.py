@@ -440,7 +440,7 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
-
+    print(f"{backend=}")
     # Store original parallelism settings for DiT ranks
     orig_params = (
         ulysses_degree,
@@ -511,12 +511,16 @@ def initialize_model_parallel(
         non_dit_dp, non_dit_cfg, non_dit_pp, non_dit_sp, non_dit_tp = (
             _create_non_dit_groups(world_size, num_non_dit_ranks)
         )
+        print(f"{non_dit_pp=} {non_dit_cfg=}")
 
         dp_groups += non_dit_dp
         cfg_groups += non_dit_cfg
         pp_groups += non_dit_pp
         sp_groups += non_dit_sp
         tp_groups += non_dit_tp
+
+    print(f"{dp_groups=} {cfg_groups=} {sp_groups=}")
+
 
     # Initialize group coordinators
     global _DP, _CFG, _PP, _SP, _TP
@@ -546,7 +550,6 @@ def initialize_model_parallel(
     )
 
     # Setup sequence parallel groups (requires special handling for disagg)
-
     with suppress_stdout():
         from yunchang.globals import PROCESS_GROUP
 

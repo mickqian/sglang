@@ -399,7 +399,6 @@ def flux_2_preprocess_text(prompt: str):
 def flux2_pack_latents(latents):
     batch_size, num_channels, height, width = latents.shape
     latents = latents.reshape(batch_size, num_channels, height * width).permute(0, 2, 1)
-
     return latents
 
 
@@ -447,6 +446,7 @@ class Flux2PipelineConfig(FluxPipelineConfig):
         width = 2 * (batch.width // (self.vae_config.arch_config.vae_scale_factor * 2))
         num_channels_latents = self.dit_config.arch_config.in_channels
         shape = (batch_size, num_channels_latents, height // 2, width // 2)
+        print(f"{num_channels_latents=} {height=} {width=}")
         return shape
 
     def get_pos_prompt_embeds(self, batch):

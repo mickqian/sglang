@@ -20,7 +20,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     DenoisingStage,
-    TimestepPreparationStage,
+    TimestepPreparationStage, LatentPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -37,7 +37,8 @@ class StageDisaggregationRole(Enum):
 
 
 def get_stage_disagg_role(stage: PipelineStage):
-    if isinstance(stage, DenoisingStage) or isinstance(stage, TimestepPreparationStage):
+    if isinstance(stage, DenoisingStage) or isinstance(stage, TimestepPreparationStage) or isinstance(stage,
+                                                                                                      LatentPreparationStage):
         return StageDisaggregationRole.DENOISE
     else:
         return StageDisaggregationRole.NONE_DENOISE
@@ -79,8 +80,8 @@ class DisaggregatedExecutor(PipelineExecutor):
             return self._run_local(stages, batch)
 
         pre_denoise_stages = stages[:denoise_start_idx]
-        denoise_stages = stages[denoise_start_idx : denoise_end_idx + 1]
-        post_denoise_stages = stages[denoise_end_idx + 1 :]
+        denoise_stages = stages[denoise_start_idx: denoise_end_idx + 1]
+        post_denoise_stages = stages[denoise_end_idx + 1:]
 
         # Determine which stages to run based on Phase
         # The Scheduler sets `batch.pp_phase`.
