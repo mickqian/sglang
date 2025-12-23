@@ -78,6 +78,7 @@ class AsyncWorkRegistry:
         still_pending = []
         for aw in self.pending_works:
             if aw.is_completed():
+                logger.info(f"[Rank {dist.get_rank()}] AsyncWork COMPLETED: works={len(aw.works)}, tensors={len(aw.tensors)}, metadata={aw.metadata}")
                 if aw.callback:
                     try:
                         aw.callback(aw)
@@ -406,16 +407,29 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                 work.wait()
 
     def irecv_size_from_non_dit(self, tensor: torch.Tensor) -> Optional[Work]:
-        """DiT Master listens for signal from Non-DiT Master (P2P via NCCL)."""
-        if self.world_rank == self.dit_master_rank:
-            return dist.irecv(tensor, src=self.non_dit_master_rank, group=self.p2p_group)
+        """
+        All DiT ranks listen for signal from Non-DiT Master.
+        Use P2P isend/irecv to allow ranks to poll independently.
+        """
+        if self.is_dit_rank():
+            # Listen directly from Non-DiT master
+            logger.info(f"[Rank {self.world_rank}] Listening for dispatch signal from Non-DiT Master (Rank {self.non_dit_master_rank})")
+            rec =  dist.irecv(tensor, src=self.non_dit_master_rank)
+            logger.info(f"[Rank {self.world_rank}] dispatch signal received from Non-DiT Master (Rank {self.non_dit_master_rank})")
+            return rec
+
         return None
 
-    def isend_signal_to_dit(self, tensor: torch.Tensor) -> Optional[Work]:
-        """Non-DiT Master sends signal to DiT Master (P2P via NCCL)."""
+    def isend_signal_to_dit(self, tensor: torch.Tensor) -> List[Work]:
+        """
+        Non-DiT Master sends signal to ALL DiT ranks to notify them to join broadcast.
+        """
+        works = []
         if self.world_rank == self.non_dit_master_rank:
-            return dist.isend(tensor, dst=self.dit_master_rank, group=self.p2p_group)
-        return None
+            logger.info(f"[Rank {self.world_rank}] Sending dispatch signal to ALL DiT Ranks: {self.dit_ranks}")
+            for rank in self.dit_ranks:
+                works.append(dist.isend(tensor, dst=rank))
+        return works
 
     def _get_signal_group_rank(self, global_rank: int) -> int:
         """Helper to get rank within the signal group."""
@@ -433,7 +447,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             return dist.irecv(tensor, src=src_rank, group=self.signal_group)
         return None
 
-    def isend_signal_to_non_dit(self, tensor: torch.Tensor) -> tuple[Optional[Work], Optional[torch.Tensor]]:
+    def isend_signal_to_non_dit(
+        self, tensor: torch.Tensor
+    ) -> tuple[Optional[Work], Optional[torch.Tensor]]:
         """DiT Master sends signal to Non-DiT Master (P2P via Gloo)."""
         if self.world_rank == self.dit_master_rank:
             cpu_tensor = tensor.to("cpu")
@@ -583,7 +599,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         return obj
 
-    def isend_object_to_non_dit(self, obj: Any) -> tuple[List[Work], List[torch.Tensor]]:
+    def isend_object_to_non_dit(
+        self, obj: Any
+    ) -> tuple[List[Work], List[torch.Tensor]]:
         """
         Non-blocking send of a complex object from DiT Master to Non-DiT Master (P2P).
         Uses Gloo backend with CPU tensors for truly non-blocking communication.
@@ -628,13 +646,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
 
         works = []
         # 1. Send Size (via Gloo)
-        works.append(
-            dist.isend(size_tensor, dst=dst_rank, group=self.signal_group)
-        )
+        works.append(dist.isend(size_tensor, dst=dst_rank, group=self.signal_group))
         # 2. Send Metadata (via Gloo)
-        works.append(
-            dist.isend(meta_tensor, dst=dst_rank, group=self.signal_group)
-        )
+        works.append(dist.isend(meta_tensor, dst=dst_rank, group=self.signal_group))
         # 3. Send Tensors (via Gloo with CPU tensors)
         for t in tensor_list:
             # Move to CPU for Gloo backend
@@ -642,11 +656,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
                 t = t.cpu()
             if not t.is_contiguous():
                 t = t.contiguous()
-            
+
             keep_alive_tensors.append(t)
-            works.append(
-                dist.isend(t, dst=dst_rank, group=self.signal_group)
-            )
+            works.append(dist.isend(t, dst=dst_rank, group=self.signal_group))
 
         return works, keep_alive_tensors
 
@@ -697,7 +709,9 @@ class PyTorchDisaggCommunicator(DisaggCommunicator):
             obj = ReceivedObject()
 
         tensor_list = []
-        tensor_targets = []  # Store (attribute_name, index_in_list) for later CUDA transfer
+        tensor_targets = (
+            []
+        )  # Store (attribute_name, index_in_list) for later CUDA transfer
         for k, info in meta_dict.items():
             tag = info[0]
             if tag == "value":
