@@ -774,7 +774,7 @@ if __name__ == "__main__":
         "--max-concurrency",
         type=int,
         default=1,
-        help="Maximum number of concurrent requests, default to `1`. This can be used "
+        help="Maximum number of concurrent requests, default to `1` for diffusion benchmarking. This can be used "
         "to help simulate an environment where a higher level component "
         "is enforcing a maximum number of concurrent requests. While the "
         "--request-rate argument controls the rate at which requests are "

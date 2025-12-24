@@ -111,10 +111,10 @@ class AsyncWorkRegistry:
         still_pending = []
         for aw in self.pending_works:
             if aw.is_completed():
-                logger.info(
-                    f"[Rank {dist.get_rank()}] AsyncWork COMPLETED: works={len(aw.works)}, tensors={len(aw.tensors)}, "
-                    f"metadata={aw.metadata}, tensor_values={[t.item() if t.numel() == 1 else t.shape for t in aw.tensors]}"
-                )
+                # logger.info(
+                #     f"[Rank {dist.get_rank()}] AsyncWork COMPLETED: works={len(aw.works)}, tensors={len(aw.tensors)}, "
+                #     f"metadata={aw.metadata}, tensor_values={[t.item() if t.numel() == 1 else t.shape for t in aw.tensors]}"
+                # )
                 if aw.callback:
                     try:
                         logger.info(
