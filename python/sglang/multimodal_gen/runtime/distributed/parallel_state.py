@@ -517,7 +517,6 @@ def initialize_model_parallel(
         sp_groups += non_dit_sp
         tp_groups += non_dit_tp
 
-
     # Initialize group coordinators
     global _DP, _CFG, _PP, _SP, _TP
     assert _DP is None, "data parallel group is already initialized"
