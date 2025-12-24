@@ -17,6 +17,7 @@ import torch
 from tqdm import tqdm
 
 from sglang.multimodal_gen.configs.pipeline_configs import PipelineConfig
+from sglang.multimodal_gen.runtime.distributed.dist_utils import get_disagg_communicator
 from sglang.multimodal_gen.runtime.loader.component_loader import (
     PipelineComponentLoader,
 )
@@ -25,6 +26,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.executors.pipeline_executor im
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
+    StageDisaggregationRole,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model,
@@ -422,6 +426,14 @@ class ComposedPipelineBase(ABC):
         return components
 
     def add_stage(self, stage_name: str, stage: PipelineStage):
+        comm = get_disagg_communicator()
+        if comm.is_dit_rank():
+            if stage.stage_role != StageDisaggregationRole.DENOISE:
+                return
+        else:
+            if stage.stage_role == StageDisaggregationRole.DENOISE:
+                return
+
         assert self.modules is not None, "No modules are registered"
         self._stages.append(stage)
         self._stage_name_mapping[stage_name] = stage
@@ -460,4 +472,4 @@ class ComposedPipelineBase(ABC):
             main_process_only=True,
         )
 
-        return self.executor.execute(self.stages, batch, server_args)
+        return self.executor.execute_with_profiling(self.stages, batch, server_args)

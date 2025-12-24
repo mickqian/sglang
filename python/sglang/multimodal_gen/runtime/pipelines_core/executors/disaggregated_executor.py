@@ -48,58 +48,29 @@ class DisaggregatedExecutor(PipelineExecutor):
         """
         Executes stages based on the current PPPhase.
         """
-        # Determine split points
-        denoise_start_idx = -1
-        denoise_end_idx = -1
-
-        for i, stage in enumerate(stages):
-            if stage.stage_role == StageDisaggregationRole.DENOISE:
-                if denoise_start_idx == -1:
-                    denoise_start_idx = i
-                denoise_end_idx = i
-
-        if denoise_start_idx == -1:
-            # Fallback for models without explicit denoise stage structure
-            return self._run_local(stages, batch)
-
-        pre_denoise_stages = [
-            stage
-            for stage in stages
-            if stage.stage_role == StageDisaggregationRole.PRE_DENOISE
-        ]
-        denoise_stages = [
-            stage
-            for stage in stages
-            if stage.stage_role == StageDisaggregationRole.DENOISE
-        ]
-        post_denoise_stages = [
-            stage
-            for stage in stages
-            if stage.stage_role == StageDisaggregationRole.POST_DENOISE
-        ]
-
         # Determine which stages to run based on Phase
         # The Scheduler sets `batch.pp_phase`.
         current_phase = batch.pp_phase
 
-        stages_to_run = []
-
         if current_phase == PPPhase.PRE_DENOISING:
-            if self.comm.is_non_dit_rank():
-                stages_to_run = pre_denoise_stages
-            else:
+            stages_to_run = [
+                stage
+                for stage in stages
+                if stage.stage_role == StageDisaggregationRole.PRE_DENOISE
+            ]
+            if not self.comm.is_non_dit_rank():
                 logger.warning(f"Received PRE_DENOISING phase on DiT rank. Skipping.")
-
         elif current_phase == PPPhase.DENOISING:
-            if self.comm.is_dit_rank():
-                stages_to_run = denoise_stages
-            else:
+            stages_to_run = stages
+            if not self.comm.is_dit_rank():
                 logger.warning(f"Received DENOISING phase on Non-DiT rank. Skipping.")
-
         elif current_phase == PPPhase.POST_DENOISING:
-            if self.comm.is_non_dit_rank():
-                stages_to_run = post_denoise_stages
-            else:
+            stages_to_run = [
+                stage
+                for stage in stages
+                if stage.stage_role == StageDisaggregationRole.POST_DENOISE
+            ]
+            if not self.comm.is_non_dit_rank():
                 logger.warning(f"Received POST_DENOISING phase on DiT rank. Skipping.")
 
         else:

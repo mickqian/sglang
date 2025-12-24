@@ -183,8 +183,6 @@ class SchedulerPPMixin:
         # Initial Setup: Start persistent async listeners
         self._setup_async_receivers(comm)
 
-        # 关键修复：添加全局屏障，确保所有 ranks 都完成了 irecv 注册后再继续
-        # 这样可以防止 Non-DiT Master 在 DiT ranks 注册 irecv 之前就发送信号
         logger.info(
             f"[Rank {dist.get_rank()}] Waiting at barrier after setup_async_receivers..."
         )
@@ -195,7 +193,6 @@ class SchedulerPPMixin:
         last_poll_log_time = time.time()
         while self._running:
             # 1. Poll completed async tasks (signals, data transfers)
-            # 定期打印 poll 状态以便调试
             if time.time() - last_poll_log_time > 10.0:
                 logger.info(
                     f"[Rank {dist.get_rank()}] Polling: async_registry has {len(self.async_registry)} pending works"

@@ -139,6 +139,9 @@ class Scheduler(SchedulerPPMixin):
             try:
                 identity, _, payload = self.receiver.recv_multipart()
                 recv_reqs = pickle.loads(payload)
+            except zmq.error.Again:
+                # no request received
+                recv_reqs = []
             except zmq.ZMQError:
                 # re-raise or handle appropriately to let the outer loop continue
                 raise
