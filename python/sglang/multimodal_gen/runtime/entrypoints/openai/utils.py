@@ -25,11 +25,13 @@ class SetLoraReq:
     lora_nickname: str
     lora_path: Optional[str] = None
     target: str = "all"  # "all", "transformer", "transformer_2", "critic"
+    strength: float = 1.0  # LoRA strength for merge, default 1.0
 
 
 @dataclasses.dataclass
 class MergeLoraWeightsReq:
     target: str = "all"  # "all", "transformer", "transformer_2", "critic"
+    strength: float = 1.0  # LoRA strength for merge, default 1.0
 
 
 @dataclasses.dataclass
@@ -64,7 +66,7 @@ async def _save_upload_to_path(upload: UploadFile, target_path: str) -> str:
     return target_path
 
 
-async def _maybe_url_image(img_url: str, target_path: str) -> str:
+async def _maybe_url_image(img_url: str, target_path: str) -> str | None:
     if not isinstance(img_url, str):
         return None
     print(f"{img_url=}")
@@ -193,7 +195,10 @@ async def process_generation_batch(
     total_time = time.perf_counter() - total_start_time
     log_batch_completion(logger, 1, total_time)
 
-    return save_file_path
+    if result.peak_memory_mb and result.peak_memory_mb > 0:
+        logger.info(f"Peak memory usage: {result.peak_memory_mb:.2f} MB")
+
+    return save_file_path, result
 
 
 def merge_image_input_list(*inputs: Union[List, Any, None]) -> List:
