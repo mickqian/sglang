@@ -24,7 +24,11 @@ from sglang.multimodal_gen.runtime.loader.component_loader import (
 from sglang.multimodal_gen.runtime.pipelines_core.executors.pipeline_executor import (
     PipelineExecutor,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
+    OutputBatch,
+    PPPhase,
+    Req,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages import PipelineStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     StageDisaggregationRole,
@@ -463,13 +467,14 @@ class ComposedPipelineBase(ABC):
                 "LoRA adapter is set, but not effective. Please make sure the LoRA weights are merged"
             )
 
-        batch.log(server_args=server_args)
+        if batch.pp_phase is None or batch.pp_phase == PPPhase.PRE_DENOISING:
+            batch.log(server_args=server_args)
 
         # Execute each stage
         logger.info(
             "Running pipeline stages: %s",
             list(self._stage_name_mapping.keys()),
-            main_process_only=True,
+            main_process_only=False,
         )
 
         return self.executor.execute_with_profiling(self.stages, batch, server_args)
