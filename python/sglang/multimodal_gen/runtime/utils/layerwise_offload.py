@@ -53,9 +53,15 @@ class LayerwiseOffloadManager:
         # layer_idx -> {dtype: consolidated_pinned_cpu_tensor}
         # stores the consolidated weight from a same layer, of same dtype
         self._consolidated_cpu_weights: Dict[int, Dict[torch.dtype, torch.Tensor]] = {}
-        # layer_idx -> {name: {dtype, offset, numel, shape}}
-        # stores the offset and numel of each weight from a same layer, of same dtype
-        self._tensor_metadata: Dict[int, Dict[str, Dict[str, Any]]] = {}
+
+        # --- Optimization: Pre-computed Pointer Map ---
+        # layer_idx -> List[Tuple[torch.Tensor, torch.dtype, int, int, Tuple[int, ...]]]
+        # Each tuple contains: (target_param, dtype, offset, numel, shape)
+        # This allows us to skip dictionary lookups and metadata parsing during inference.
+        self._layer_pointer_map: Dict[
+            int, List[Tuple[torch.Tensor, torch.dtype, int, int, Tuple[int, ...]]]
+        ] = {}
+
         # layer indices that are already in gpu
         self._gpu_layers: Set[int] = set()
 
@@ -114,7 +120,7 @@ class LayerwiseOffloadManager:
         # 2. concat and offload (in pinned memory)
         for layer_idx, dtypes_map in layer_groups.items():
             self._consolidated_cpu_weights[layer_idx] = {}
-            self._tensor_metadata[layer_idx] = {}
+            self._layer_pointer_map[layer_idx] = []
 
             for dtype, tensors in dtypes_map.items():
                 total_numel = sum(t.numel() for _, t in tensors)
@@ -133,17 +139,20 @@ class LayerwiseOffloadManager:
                 current_offset = 0
                 for name, tensor in tensors:
                     numel = tensor.numel()
+                    shape = tensor.shape
+
+                    # Copy data to CPU buffer
                     cpu_buffer[current_offset : current_offset + numel].copy_(
                         tensor.flatten()
                     )
-                    self._tensor_metadata[layer_idx][name] = {
-                        "dtype": dtype,
-                        "offset": current_offset,
-                        "numel": numel,
-                        "shape": tensor.shape,
-                    }
+
+                    # Store pre-computed metadata for fast access during inference
+                    self._layer_pointer_map[layer_idx].append(
+                        (tensor, dtype, current_offset, numel, shape)
+                    )
 
                     if self.device is not None:
+                        # Replace original data with a dummy tensor to save GPU memory
                         tensor.data = torch.empty((1,), device=self.device, dtype=dtype)
 
                     current_offset += numel
@@ -179,9 +188,6 @@ class LayerwiseOffloadManager:
         self.copy_stream.wait_stream(torch.cuda.current_stream())
 
         # Determine which buffer index to use from the pool.
-        # We use a simple round-robin or based on layer_idx to assign a slot.
-        # Since we usually prefetch i+1 while i is active, layer_idx % pool_size works well
-        # to avoid overwriting the currently active layer.
         pool_idx = layer_idx % self._buffer_pool_size
         self._layer_buffer_indices[layer_idx] = {}
 
@@ -200,7 +206,6 @@ class LayerwiseOffloadManager:
                     # Use static buffer
                     static_buffer = self._gpu_buffer_pool[dtype][pool_idx]
                     # Slice the static buffer to match the needed size
-                    # NOTE: We must use a slice to ensure copy_ size matches cpu_buffer
                     target_slice = static_buffer[: cpu_buffer.numel()].view(
                         cpu_buffer.shape
                     )
@@ -208,21 +213,12 @@ class LayerwiseOffloadManager:
                     gpu_buffers[dtype] = target_slice
                     self._layer_buffer_indices[layer_idx][dtype] = pool_idx
 
-        # restore model's parameters by their metadata using gpu buffer
-        for name, meta in self._tensor_metadata[layer_idx].items():
-            dtype = meta["dtype"]
-            gpu_buffer = gpu_buffers[dtype]
-
-            # map the parameter's data to the correct slice of the GPU buffer
-            if name in self._named_parameters:
-                target = self._named_parameters[name]
-            else:
-                target = self._named_buffers[name]
+        # --- OPTIMIZED POINTER ASSIGNMENT ---
+        # Direct iteration over pre-computed tuples, avoiding dict lookups and metadata parsing
+        for target, dtype, offset, numel, shape in self._layer_pointer_map[layer_idx]:
             if target is not None:
-                # Direct pointer assignment into the static buffer slice
-                target.data = gpu_buffer[
-                    meta["offset"] : meta["offset"] + meta["numel"]
-                ].view(meta["shape"])
+                gpu_buffer = gpu_buffers[dtype]
+                target.data = gpu_buffer[offset : offset + numel].view(shape)
 
         self._gpu_layers.add(layer_idx)
 
@@ -292,17 +288,11 @@ class LayerwiseOffloadManager:
         if layer_idx not in self._gpu_layers:
             return
 
+        # --- OPTIMIZED RELEASE ---
         # Release GPU memory by pointing to dummy tensors
-        # Note: We don't "free" the static buffer, we just let it be overwritten by the next layer
-        # that claims this pool_idx.
-        for name, meta in self._tensor_metadata.get(layer_idx, {}).items():
-            target = (
-                self._named_parameters.get(name)
-                if name in self._named_parameters
-                else self._named_buffers.get(name)
-            )
+        for target, dtype, _, _, _ in self._layer_pointer_map[layer_idx]:
             if target is not None:
-                target.data = torch.empty((1,), device=self.device, dtype=meta["dtype"])
+                target.data = torch.empty((1,), device=self.device, dtype=dtype)
 
         # Clean up tracking info
         if layer_idx in self._layer_buffer_indices:
