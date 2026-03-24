@@ -592,8 +592,6 @@ class PipelineConfig:
         kwargs: dictionary of kwargs
         config_cli_prefix: prefix of CLI arguments for this PipelineConfig instance
         """
-        from sglang.multimodal_gen.registry import get_model_info
-
         prefix_with_dot = (
             f"{config_cli_prefix}." if (config_cli_prefix.strip() != "") else ""
         )

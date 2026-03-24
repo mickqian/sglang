@@ -279,7 +279,9 @@ def _materialize_overlay_model(
     overlay_dir: str,
     source_dir: str,
 ) -> str:
-    overlay_manifest_path = os.path.join(overlay_dir, "_overlay", "overlay_manifest.json")
+    overlay_manifest_path = os.path.join(
+        overlay_dir, "_overlay", "overlay_manifest.json"
+    )
     if not os.path.exists(overlay_manifest_path):
         raise ValueError(
             f"Overlay repo for {source_model_id} is missing _overlay/overlay_manifest.json"
@@ -310,7 +312,9 @@ def _materialize_overlay_model(
     if _verify_diffusers_model_complete(final_dir) and os.path.exists(marker_path):
         return final_dir
 
-    lock_name = f"overlay-materialize::{source_model_id}::{overlay_repo_id}::{overlay_revision}"
+    lock_name = (
+        f"overlay-materialize::{source_model_id}::{overlay_repo_id}::{overlay_revision}"
+    )
     with get_lock(lock_name).acquire(poll_interval=2):
         if _verify_diffusers_model_complete(final_dir) and os.path.exists(marker_path):
             return final_dir

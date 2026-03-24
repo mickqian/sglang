@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import torch
 
 from sglang.multimodal_gen.configs.models import DiTConfig, EncoderConfig, VAEConfig
-from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
+from sglang.multimodal_gen.configs.models.dits import WanS2VConfig, WanVideoConfig
 from sglang.multimodal_gen.configs.models.encoders import (
     BaseEncoderOutput,
     CLIPVisionConfig,
@@ -225,6 +225,7 @@ class Wan2_2_I2V_A14B_Config(WanI2V480PConfig):
 
 @dataclass
 class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
+    dit_config: DiTConfig = field(default_factory=WanS2VConfig)
     flow_shift: float | None = 3.0
     task_type: ModelTaskType = ModelTaskType.S2V
     vae_stride = (4, 8, 8)
@@ -241,6 +242,32 @@ class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
             oh // self.vae_stride[1],
             ow // self.vae_stride[2],
         )
+
+    def slice_noise_pred(self, noise, latents):
+        if isinstance(noise, (list, tuple)):
+            if len(noise) != 1:
+                raise ValueError(
+                    f"Wan S2V expected a single noise tensor, got {len(noise)} outputs"
+                )
+            noise = noise[0]
+        return noise
+
+    def prepare_pos_cond_kwargs(self, batch, device, rotary_emb, dtype):
+        del rotary_emb
+        extra = batch.extra.get("wan_s2v", {})
+        return {
+            "ref_latents": extra["ref_latents"].to(device=device, dtype=dtype),
+            "motion_latents": extra["motion_latents"].to(device=device, dtype=dtype),
+            "cond_states": extra["cond_states"].to(device=device, dtype=dtype),
+            "audio_input": extra["audio_input"].to(device=device, dtype=dtype),
+            "motion_frames": extra["motion_frames"],
+            "drop_motion_frames": extra["drop_motion_frames"],
+        }
+
+    def prepare_neg_cond_kwargs(self, batch, device, rotary_emb, dtype):
+        pos_kwargs = self.prepare_pos_cond_kwargs(batch, device, rotary_emb, dtype)
+        pos_kwargs["audio_input"] = torch.zeros_like(pos_kwargs["audio_input"])
+        return pos_kwargs
 
     def __post_init__(self) -> None:
         self.vae_config.load_encoder = True

@@ -384,7 +384,10 @@ class SamplingParams:
                     f"audio_path is not supported for {pipeline_config.task_type.name} models."
                 )
 
-        if self.pose_video_path is not None and not pipeline_config.task_type.accepts_audio_input():
+        if (
+            self.pose_video_path is not None
+            and not pipeline_config.task_type.accepts_audio_input()
+        ):
             raise ValueError(
                 f"pose_video_path is not supported for {pipeline_config.task_type.name} models."
             )
