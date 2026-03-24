@@ -199,11 +199,26 @@ class TextEncoderLoader(ComponentLoader):
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
         """Load the text encoders based on the model path, and inference args."""
-        diffusers_pretrained_config = get_config(
-            component_model_path, trust_remote_code=True
-        )
         model_config = get_diffusers_component_config(
             component_path=component_model_path
+        )
+        cls_name = model_config.get("_class_name")
+        if cls_name is None:
+            raise ValueError(
+                f"Text encoder config at {component_model_path} does not contain _class_name"
+            )
+        model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
+        if hasattr(model_cls, "from_component_path"):
+            engine_config = dict(model_config)
+            engine_config.pop("_class_name", None)
+            return model_cls.from_component_path(
+                component_model_path=component_model_path,
+                server_args=server_args,
+                config=engine_config,
+            )
+
+        diffusers_pretrained_config = get_config(
+            component_model_path, trust_remote_code=True
         )
 
         def is_not_first_encoder(module_name):

@@ -9,7 +9,6 @@ information based on model paths or other identifiers.
 
 import dataclasses
 import importlib
-import os
 import pkgutil
 import sys
 from functools import lru_cache
@@ -124,7 +123,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
 )
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model_index,
-    verify_model_config_and_directory,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -300,10 +298,7 @@ def _get_config_info(
             return _CONFIG_REGISTRY.get(model_id)
 
     # 3. Use detectors
-    if os.path.exists(model_path):
-        config = verify_model_config_and_directory(model_path)
-    else:
-        config = maybe_download_model_index(model_path)
+    config = maybe_download_model_index(model_path)
 
     pipeline_name = config.get("_class_name", "").lower()
 
@@ -469,10 +464,7 @@ def get_model_info(
     else:
         # Try to get from model_index.json
         try:
-            if os.path.exists(model_path):
-                config = verify_model_config_and_directory(model_path)
-            else:
-                config = maybe_download_model_index(model_path)
+            config = maybe_download_model_index(model_path)
         except Exception as e:
             logger.error(f"Could not read model config for '{model_path}': {e}")
             if backend == Backend.AUTO:
@@ -657,7 +649,10 @@ def _register_configs():
         sampling_param_cls=Wan2_2_S2V_14B_SamplingParam,
         pipeline_config_cls=Wan2_2_S2V_14B_Config,
         hf_model_paths=["Wan-AI/Wan2.2-S2V-14B"],
-        model_detectors=[lambda hf_id: "wan2.2-s2v-14b" in hf_id.lower()],
+        model_detectors=[
+            lambda hf_id: "wan2.2-s2v-14b" in hf_id.lower(),
+            lambda name: "wanspeechtovideopipeline" in name.lower(),
+        ],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,

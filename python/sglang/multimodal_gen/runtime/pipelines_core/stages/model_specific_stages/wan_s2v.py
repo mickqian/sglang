@@ -3,14 +3,20 @@ from __future__ import annotations
 
 import os
 
+import PIL.Image
 import torch
+from diffusers.models.modeling_outputs import AutoencoderKLOutput
+from torchvision import transforms
 
 try:
     import soundfile as sf
 except ImportError:  # pragma: no cover
     sf = None
 
-from sglang.multimodal_gen.runtime.platforms import current_platform
+from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.models.vaes.common import (
+    DiagonalGaussianDistribution,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
@@ -20,6 +26,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators,
     VerificationResult,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -106,9 +113,13 @@ class WanS2VExecutionStage(PipelineStage):
 class WanS2VBeforeDenoisingStage(PipelineStage):
     """Prepare Wan S2V conditions for the standard denoising loop."""
 
-    def __init__(self, transformer):
+    def __init__(self, transformer, vae, text_encoder, tokenizer, audio_encoder):
         super().__init__()
         self.transformer = transformer
+        self.vae = vae
+        self.text_encoder = text_encoder
+        self.tokenizer = tokenizer
+        self.audio_encoder = audio_encoder
 
     @property
     def parallelism_type(self) -> StageParallelismType:
@@ -133,6 +144,246 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         )
         batch.generator = torch.Generator(generator_device).manual_seed(seed)
 
+    def _encode_text_prompt(
+        self,
+        prompt: str,
+        *,
+        server_args: ServerArgs,
+    ) -> torch.Tensor:
+        if hasattr(self.text_encoder, "encode_prompt"):
+            prompt_embeds = self.text_encoder.encode_prompt(
+                prompt,
+                get_local_torch_device(),
+            )
+            return prompt_embeds.to(get_local_torch_device())
+        encoder_config = server_args.pipeline_config.text_encoder_configs[0]
+        preprocess_func = server_args.pipeline_config.preprocess_text_funcs[0]
+        postprocess_func = server_args.pipeline_config.postprocess_text_funcs[0]
+        text_encoder_extra_arg = (
+            server_args.pipeline_config.text_encoder_extra_args[0]
+            if server_args.pipeline_config.text_encoder_extra_args
+            else {}
+        )
+        processed_prompt = preprocess_func(prompt)
+        tok_kwargs = dict(encoder_config.tokenizer_kwargs)
+        tok_kwargs.update(text_encoder_extra_arg or {})
+        text_inputs = server_args.pipeline_config.tokenize_prompt(
+            [processed_prompt], self.tokenizer, tok_kwargs
+        )
+        encoder_device = next(self.text_encoder.parameters()).device
+        text_inputs = text_inputs.to(encoder_device)
+        outputs = self.text_encoder(
+            input_ids=text_inputs["input_ids"],
+            attention_mask=text_inputs.get("attention_mask"),
+            output_hidden_states=True,
+        )
+        prompt_embeds = postprocess_func(outputs, text_inputs)
+        attention_mask = text_inputs.get("attention_mask")
+        if (
+            attention_mask is not None
+            and prompt_embeds.ndim == 3
+            and prompt_embeds.shape[0] == attention_mask.shape[0]
+        ):
+            valid_tokens = int(attention_mask[0].sum().item())
+            prompt_embeds = prompt_embeds[:, :valid_tokens]
+        return prompt_embeds.to(get_local_torch_device())
+
+    def _retrieve_latents(
+        self,
+        encoder_output: DiagonalGaussianDistribution | AutoencoderKLOutput,
+    ) -> torch.Tensor:
+        if isinstance(encoder_output, AutoencoderKLOutput):
+            encoder_output = encoder_output.latent_dist
+        if isinstance(encoder_output, DiagonalGaussianDistribution):
+            return encoder_output.mode()
+        raise TypeError(
+            f"Unexpected VAE encoder output type: {type(encoder_output).__name__}"
+        )
+
+    def _encode_video_to_latents(
+        self, video: torch.Tensor, server_args: ServerArgs
+    ) -> torch.Tensor:
+        if hasattr(self.vae, "encode_video"):
+            return self.vae.encode_video(video)
+        vae_dtype = torch.float32
+        if server_args.pipeline_config.vae_precision == "bf16":
+            vae_dtype = torch.bfloat16
+        elif server_args.pipeline_config.vae_precision == "fp16":
+            vae_dtype = torch.float16
+        self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
+        video = video.to(device=get_local_torch_device(), dtype=vae_dtype)
+        latent_dist = self.vae.encode(video)
+        latents = self._retrieve_latents(latent_dist)
+        latents = server_args.pipeline_config.postprocess_vae_encode(latents, self.vae)
+        scaling_factor, shift_factor = (
+            server_args.pipeline_config.get_decode_scale_and_shift(
+                device=latents.device,
+                dtype=latents.dtype,
+                vae=self.vae,
+            )
+        )
+        if shift_factor is not None:
+            if isinstance(shift_factor, torch.Tensor):
+                latents = latents - shift_factor.to(latents.device, latents.dtype)
+            else:
+                latents = latents - shift_factor
+        if scaling_factor is not None:
+            if isinstance(scaling_factor, torch.Tensor):
+                latents = latents * scaling_factor.to(latents.device, latents.dtype)
+            else:
+                latents = latents * scaling_factor
+        return latents
+
+    def _load_pose_cond(
+        self,
+        pose_video: str | None,
+        *,
+        infer_frames: int,
+        size: tuple[int, int],
+        server_args: ServerArgs,
+    ) -> torch.Tensor:
+        from decord import VideoReader
+
+        height, width = size
+        if pose_video is not None:
+            vr = VideoReader(pose_video)
+            original_fps = vr.get_avg_fps()
+            total_frames = len(vr)
+            interval = max(1, round(original_fps / self.transformer.fps))
+            required_span = (infer_frames - 1) * interval
+            start_frame = 0
+            sampled_indices = []
+            for i in range(infer_frames):
+                idx = start_frame + i * interval
+                if idx >= total_frames:
+                    break
+                sampled_indices.append(idx)
+            pose_seq = vr.get_batch(sampled_indices).asnumpy()
+            resize = transforms.Resize(min(height, width))
+            crop = transforms.CenterCrop((height, width))
+            cond_tensor = torch.from_numpy(pose_seq).permute(0, 3, 1, 2) / 255.0
+            cond_tensor = cond_tensor * 2 - 1
+            cond_tensor = crop(resize(cond_tensor)).permute(1, 0, 2, 3).unsqueeze(0)
+            padding_frames = infer_frames - cond_tensor.shape[2]
+            if padding_frames > 0:
+                cond_tensor = torch.cat(
+                    [
+                        cond_tensor,
+                        -torch.ones([1, 3, padding_frames, height, width]),
+                    ],
+                    dim=2,
+                )
+        else:
+            cond_tensor = -torch.ones([1, 3, infer_frames, height, width])
+
+        cond_tensor = torch.cat([cond_tensor[:, :, :1], cond_tensor], dim=2)
+        cond_latents = self._encode_video_to_latents(cond_tensor, server_args)[:, :, 1:]
+        if pose_video is None:
+            cond_latents = cond_latents * 0
+        return cond_latents
+
+    def _decode_source_audio(
+        self, audio_path: str
+    ) -> tuple[torch.Tensor | None, int | None]:
+        if sf is None:
+            return None, None
+        try:
+            audio_np, sample_rate = sf.read(
+                audio_path, dtype="float32", always_2d=False
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to load source audio for output muxing: %s", exc)
+            return None, None
+        if audio_np is None:
+            return None, None
+        return torch.from_numpy(audio_np), int(sample_rate)
+
+    def _maybe_debug_compare_with_official(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        audio_path: str,
+        pose_video_path: str | None,
+        infer_frames: int,
+        ref_pixel_values: torch.Tensor,
+        motion_pixels: torch.Tensor,
+        native_prompt_embeds: torch.Tensor,
+        native_negative_prompt_embeds: torch.Tensor,
+        native_ref_latents: torch.Tensor,
+        native_motion_latents: torch.Tensor,
+        native_cond_states: torch.Tensor,
+        native_audio_input: torch.Tensor,
+    ) -> None:
+        if os.environ.get("WAN_S2V_DEBUG_COMPARE_OFFICIAL") != "1":
+            return
+        engine = getattr(self.transformer, "engine", None)
+        if engine is None or getattr(engine, "text_encoder", None) is None:
+            logger.warning(
+                "WAN_S2V_DEBUG_COMPARE_OFFICIAL is set, but official components are unavailable"
+            )
+            return
+
+        def _report(name: str, native: torch.Tensor, official: torch.Tensor) -> None:
+            native = native.float().cpu()
+            official = official.float().cpu()
+            diff = (native - official).abs()
+            logger.info(
+                "[WanS2VDebug] %s shape=%s max_abs_diff=%.6f mean_abs_diff=%.6f",
+                name,
+                tuple(native.shape),
+                float(diff.max().item()),
+                float(diff.mean().item()),
+            )
+
+        offload_model = bool(self.transformer.config.get("offload_model", True))
+        official_prompt_embeds, official_negative_prompt_embeds = (
+            self.transformer._encode_prompts(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                offload_model=offload_model,
+            )
+        )
+        official_ref_latents = torch.stack(
+            engine.vae.encode(
+                ref_pixel_values.to(dtype=engine.vae.dtype, device=engine.vae.device)
+            )
+        )
+        official_motion_latents = torch.stack(
+            engine.vae.encode(
+                motion_pixels.to(dtype=engine.param_dtype, device=engine.device)
+            )
+        )
+        official_cond_states = engine.load_pose_cond(
+            pose_video=pose_video_path,
+            num_repeat=1,
+            infer_frames=infer_frames,
+            size=(
+                int(native_cond_states.shape[-2]) * 8,
+                int(native_cond_states.shape[-1]) * 8,
+            ),
+        )[0].to(dtype=engine.param_dtype, device=native_cond_states.device)
+        if pose_video_path is None:
+            official_cond_states = official_cond_states * 0
+        official_audio_input, _ = engine.encode_audio(
+            audio_path, infer_frames=infer_frames
+        )
+
+        _report("prompt_embeds", native_prompt_embeds, official_prompt_embeds[0])
+        _report(
+            "negative_prompt_embeds",
+            native_negative_prompt_embeds,
+            official_negative_prompt_embeds[0],
+        )
+        _report("ref_latents", native_ref_latents, official_ref_latents)
+        _report("motion_latents", native_motion_latents, official_motion_latents)
+        _report("cond_states", native_cond_states, official_cond_states)
+        _report(
+            "audio_input",
+            native_audio_input[..., :infer_frames],
+            official_audio_input[..., :infer_frames],
+        )
+
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         result = VerificationResult()
         result.add_check("image_path", batch.image_path, V.not_none)
@@ -153,48 +404,195 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             pose_video_path = self._get_single_path(pose_video_path, "pose_video_path")
 
         self._generate_seed_and_generator(batch)
+        if batch.num_clip not in (None, 1):
+            raise NotImplementedError(
+                "Native Wan S2V standard denoising currently supports only a single clip"
+            )
 
-        prepared = self.transformer.prepare_standard_s2v_inputs(
+        if not getattr(self.transformer, "uses_native_components", True):
+            negative_prompt = batch.negative_prompt
+            if not negative_prompt:
+                negative_prompt = self.transformer.get_default_negative_prompt()
+            prepared = self.transformer.prepare_reference_s2v_inputs(
+                prompt=batch.prompt or "",
+                negative_prompt=negative_prompt,
+                image_path=image_path,
+                audio_path=audio_path,
+                pose_video_path=pose_video_path,
+                num_frames=batch.num_frames,
+            )
+            latents = self.transformer.prepare_standard_s2v_latents(
+                latent_shape=prepared["latent_shape"],
+                generator=batch.generator,
+            )
+            prompt_embeds = prepared["prompt_embeds"]
+            negative_prompt_embeds = prepared["negative_prompt_embeds"]
+            if isinstance(prompt_embeds, list):
+                prompt_embeds = prompt_embeds[0]
+            if isinstance(negative_prompt_embeds, list):
+                negative_prompt_embeds = negative_prompt_embeds[0]
+            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+                prompt_embeds = prompt_embeds[0]
+            if (
+                negative_prompt_embeds.ndim == 3
+                and negative_prompt_embeds.shape[0] == 1
+            ):
+                negative_prompt_embeds = negative_prompt_embeds[0]
+            batch.prompt_embeds = [prompt_embeds]
+            if batch.do_classifier_free_guidance:
+                batch.negative_prompt_embeds = [negative_prompt_embeds]
+            batch.latents = latents
+            batch.raw_latent_shape = latents.shape
+            batch.height = prepared["height"]
+            batch.width = prepared["width"]
+            batch.audio, batch.audio_sample_rate = self._decode_source_audio(audio_path)
+            batch.extra["wan_s2v"] = {
+                "ref_latents": prepared["ref_latents"],
+                "motion_latents": prepared["motion_latents"],
+                "cond_states": prepared["cond_states"],
+                "audio_input": prepared["audio_input"],
+                "motion_frames": prepared["motion_frames"],
+                "drop_motion_frames": prepared["drop_motion_frames"],
+                "infer_frames": prepared["infer_frames"],
+            }
+            return batch
+
+        infer_frames = self.transformer._normalize_infer_frames(batch.num_frames)
+        height, width = self.transformer.get_generation_size(image_path=image_path)
+
+        resize = transforms.Resize(min(height, width))
+        crop = transforms.CenterCrop((height, width))
+        to_tensor = transforms.ToTensor()
+        model_pic = crop(resize(PIL.Image.open(image_path).convert("RGB")))
+        ref_pixel_values = to_tensor(model_pic).unsqueeze(1).unsqueeze(0) * 2 - 1.0
+        ref_latents = self._encode_video_to_latents(ref_pixel_values, server_args)
+
+        motion_frames = self.transformer.motion_frames
+        motion_pixels = torch.zeros([1, 3, motion_frames, height, width])
+        motion_latents = self._encode_video_to_latents(motion_pixels, server_args)
+        lat_motion_frames = (motion_frames + 3) // 4
+
+        if getattr(self.transformer, "uses_native_components", True):
+            audio_input, max_num_repeat = self.audio_encoder.encode_audio(
+                audio_path,
+                infer_frames=infer_frames,
+                fps=self.transformer.fps,
+                dtype=self.transformer.param_dtype,
+                m=self.transformer.audio_sample_m,
+            )
+        else:
+            audio_input, max_num_repeat = self.transformer.encode_audio_reference(
+                audio_path=audio_path,
+                infer_frames=infer_frames,
+            )
+        if max_num_repeat < 1:
+            raise ValueError(f"Audio path produced no valid clips: {audio_path}")
+
+        cond_states = self._load_pose_cond(
+            pose_video_path,
+            infer_frames=infer_frames,
+            size=(height, width),
+            server_args=server_args,
+        ).to(dtype=self.transformer.param_dtype, device=get_local_torch_device())
+
+        negative_prompt = batch.negative_prompt
+        if not negative_prompt:
+            negative_prompt = self.transformer.get_default_negative_prompt()
+
+        if getattr(self.transformer, "uses_native_components", True):
+            prompt_embeds = self._encode_text_prompt(
+                batch.prompt or "", server_args=server_args
+            )
+            negative_prompt_embeds = self._encode_text_prompt(
+                negative_prompt, server_args=server_args
+            )
+        else:
+            prompt_embeds, negative_prompt_embeds = (
+                self.transformer.encode_prompts_reference(
+                    prompt=batch.prompt or "",
+                    negative_prompt=negative_prompt,
+                    offload_model=bool(
+                        self.transformer.config.get("offload_model", True)
+                    ),
+                )
+            )
+
+        debug_prompt_embeds = prompt_embeds
+        debug_negative_prompt_embeds = negative_prompt_embeds
+        if isinstance(debug_prompt_embeds, list):
+            debug_prompt_embeds = debug_prompt_embeds[0]
+        if isinstance(debug_negative_prompt_embeds, list):
+            debug_negative_prompt_embeds = debug_negative_prompt_embeds[0]
+        if debug_prompt_embeds.ndim == 3 and debug_prompt_embeds.shape[0] == 1:
+            debug_prompt_embeds = debug_prompt_embeds[0]
+        if (
+            debug_negative_prompt_embeds.ndim == 3
+            and debug_negative_prompt_embeds.shape[0] == 1
+        ):
+            debug_negative_prompt_embeds = debug_negative_prompt_embeds[0]
+
+        self._maybe_debug_compare_with_official(
             prompt=batch.prompt or "",
-            negative_prompt=batch.negative_prompt,
-            image_path=image_path,
+            negative_prompt=negative_prompt,
             audio_path=audio_path,
             pose_video_path=pose_video_path,
-            num_clip=batch.num_clip,
-            num_frames=batch.num_frames,
-            seed=batch.seeds[0],
+            infer_frames=infer_frames,
+            ref_pixel_values=ref_pixel_values,
+            motion_pixels=motion_pixels,
+            native_prompt_embeds=debug_prompt_embeds,
+            native_negative_prompt_embeds=debug_negative_prompt_embeds,
+            native_ref_latents=ref_latents,
+            native_motion_latents=motion_latents,
+            native_cond_states=cond_states,
+            native_audio_input=audio_input,
         )
+
+        lat_target_frames = (infer_frames + 3 + motion_frames) // 4 - lat_motion_frames
+        latent_shape = (1, 16, lat_target_frames, height // 8, width // 8)
         latents = self.transformer.prepare_standard_s2v_latents(
-            latent_shape=prepared["latent_shape"],
+            latent_shape=latent_shape,
             generator=batch.generator,
         )
 
-        batch.prompt_embeds = prepared["prompt_embeds"]
+        if isinstance(prompt_embeds, list):
+            prompt_embeds = prompt_embeds[0]
+        if isinstance(negative_prompt_embeds, list):
+            negative_prompt_embeds = negative_prompt_embeds[0]
+        if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
+            prompt_embeds = prompt_embeds[0]
+        if negative_prompt_embeds.ndim == 3 and negative_prompt_embeds.shape[0] == 1:
+            negative_prompt_embeds = negative_prompt_embeds[0]
+
+        batch.prompt_embeds = [prompt_embeds]
         if batch.do_classifier_free_guidance:
-            batch.negative_prompt_embeds = prepared["negative_prompt_embeds"]
+            batch.negative_prompt_embeds = [negative_prompt_embeds]
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
-        batch.height = prepared["height"]
-        batch.width = prepared["width"]
-        batch.audio = prepared["audio"]
-        batch.audio_sample_rate = prepared["audio_sample_rate"]
+        batch.height = int(height)
+        batch.width = int(width)
+        batch.audio, batch.audio_sample_rate = self._decode_source_audio(audio_path)
         batch.extra["wan_s2v"] = {
-            "ref_latents": prepared["ref_latents"],
-            "motion_latents": prepared["motion_latents"],
-            "cond_states": prepared["cond_states"],
-            "audio_input": prepared["audio_input"],
-            "motion_frames": prepared["motion_frames"],
-            "drop_motion_frames": prepared["drop_motion_frames"],
-            "infer_frames": prepared["infer_frames"],
+            "ref_latents": ref_latents,
+            "motion_latents": motion_latents,
+            "cond_states": cond_states,
+            "audio_input": audio_input[..., :infer_frames],
+            "motion_frames": [motion_frames, lat_motion_frames],
+            "drop_motion_frames": bool(self.transformer.drop_first_motion),
+            "infer_frames": int(infer_frames),
         }
+        if server_args.vae_cpu_offload:
+            self.vae = self.vae.to("cpu")
+        if getattr(server_args, "audio_encoder_cpu_offload", False):
+            self.audio_encoder = self.audio_encoder.to("cpu")
         return batch
 
 
 class WanS2VDecodingStage(PipelineStage):
     """Decode Wan S2V latents using the official Wan VAE."""
 
-    def __init__(self, transformer):
+    def __init__(self, vae, transformer=None):
         super().__init__()
+        self.vae = vae
         self.transformer = transformer
 
     @property
@@ -207,13 +605,60 @@ class WanS2VDecodingStage(PipelineStage):
         result.add_check("wan_s2v_extra", batch.extra.get("wan_s2v"), V.not_none)
         return result
 
+    def _scale_and_shift(self, latents: torch.Tensor, server_args: ServerArgs):
+        if hasattr(self.vae, "decode_video"):
+            return latents
+        scaling_factor, shift_factor = (
+            server_args.pipeline_config.get_decode_scale_and_shift(
+                latents.device, latents.dtype, self.vae
+            )
+        )
+        if scaling_factor is not None:
+            if isinstance(scaling_factor, torch.Tensor):
+                latents = latents / scaling_factor.to(latents.device, latents.dtype)
+            else:
+                latents = latents / scaling_factor
+        if shift_factor is not None:
+            if isinstance(shift_factor, torch.Tensor):
+                latents = latents + shift_factor.to(latents.device, latents.dtype)
+            else:
+                latents = latents + shift_factor
+        return latents
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         extra = batch.extra["wan_s2v"]
-        batch.output = self.transformer.decode_standard_s2v_output(
-            latents=batch.latents,
-            ref_latents=extra["ref_latents"],
-            motion_latents=extra["motion_latents"],
-            infer_frames=extra["infer_frames"],
-            drop_motion_frames=extra["drop_motion_frames"],
+        if self.transformer is not None and not getattr(
+            self.transformer, "uses_native_components", True
+        ):
+            batch.output = self.transformer.decode_reference_output(
+                latents=batch.latents,
+                ref_latents=extra["ref_latents"],
+                motion_latents=extra["motion_latents"],
+                infer_frames=extra["infer_frames"],
+                drop_motion_frames=extra["drop_motion_frames"],
+            )
+            return batch
+        if extra["drop_motion_frames"]:
+            prefix_latents = extra["ref_latents"]
+        else:
+            prefix_latents = extra["motion_latents"]
+        prefix_latents = prefix_latents.to(
+            device=batch.latents.device,
+            dtype=batch.latents.dtype,
         )
+        if extra["drop_motion_frames"]:
+            decode_latents = torch.cat([prefix_latents, batch.latents], dim=2)
+        else:
+            decode_latents = torch.cat([prefix_latents, batch.latents], dim=2)
+        decode_latents = self._scale_and_shift(decode_latents, server_args)
+        if hasattr(self.vae, "decode_video"):
+            batch.output = self.vae.decode_video(decode_latents)
+        else:
+            self.vae = self.vae.to(get_local_torch_device())
+            batch.output = self.vae.decode(decode_latents)
+        batch.output = batch.output[:, :, -extra["infer_frames"] :]
+        if extra["drop_motion_frames"]:
+            batch.output = batch.output[:, :, 3:]
+        if server_args.vae_cpu_offload and not hasattr(self.vae, "decode_video"):
+            self.vae = self.vae.to("cpu")
         return batch

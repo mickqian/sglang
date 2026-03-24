@@ -150,6 +150,7 @@ class ServerArgs:
     dit_offload_prefetch_size: float = 0.0
     text_encoder_cpu_offload: bool | None = None
     image_encoder_cpu_offload: bool | None = None
+    audio_encoder_cpu_offload: bool | None = None
     vae_cpu_offload: bool | None = None
     use_fsdp_inference: bool = False
     pin_cpu_memory: bool = True
@@ -705,6 +706,11 @@ class ServerArgs:
             "--image-encoder-cpu-offload",
             action=StoreBoolean,
             help="Use CPU offload for image encoder. Enable if run out of memory.",
+        )
+        parser.add_argument(
+            "--audio-encoder-cpu-offload",
+            action=StoreBoolean,
+            help="Use CPU offload for audio encoder. Enable if run out of memory.",
         )
         parser.add_argument(
             "--vae-cpu-offload",

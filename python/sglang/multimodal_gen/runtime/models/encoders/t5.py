@@ -706,6 +706,31 @@ class UMT5EncoderModel(TextEncoder):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if name.startswith("token_embedding."):
+                name = name.replace("token_embedding.weight", "shared.weight")
+            elif name == "norm.weight":
+                name = "encoder.final_layer_norm.weight"
+            elif name.startswith("blocks."):
+                name = name.replace("blocks.", "encoder.block.", 1)
+                name = name.replace(".norm1.weight", ".layer.0.layer_norm.weight")
+                name = name.replace(".attn.q.weight", ".layer.0.SelfAttention.q.weight")
+                name = name.replace(".attn.k.weight", ".layer.0.SelfAttention.k.weight")
+                name = name.replace(".attn.v.weight", ".layer.0.SelfAttention.v.weight")
+                name = name.replace(".attn.o.weight", ".layer.0.SelfAttention.o.weight")
+                name = name.replace(".norm2.weight", ".layer.1.layer_norm.weight")
+                name = name.replace(
+                    ".ffn.gate.0.weight", ".layer.1.DenseReluDense.wi_0.weight"
+                )
+                name = name.replace(
+                    ".ffn.fc1.weight", ".layer.1.DenseReluDense.wi_1.weight"
+                )
+                name = name.replace(
+                    ".ffn.fc2.weight", ".layer.1.DenseReluDense.wo.weight"
+                )
+                name = name.replace(
+                    ".pos_embedding.embedding.weight",
+                    ".layer.0.SelfAttention.relative_attention_bias.weight",
+                )
             loaded = False
             if "decoder" in name or "lm_head" in name:
                 continue

@@ -1,6 +1,8 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+import html
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -12,6 +14,7 @@ from sglang.multimodal_gen.configs.models.encoders import (
     BaseEncoderOutput,
     CLIPVisionConfig,
     T5Config,
+    WanS2VAudioEncoderConfig,
 )
 from sglang.multimodal_gen.configs.models.vaes import WanVAEConfig
 from sglang.multimodal_gen.configs.pipeline_configs.base import (
@@ -21,6 +24,43 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+try:
+    import ftfy
+except ImportError:  # pragma: no cover
+    ftfy = None
+
+
+def _wan_basic_clean(text: str) -> str:
+    if ftfy is not None:
+        text = ftfy.fix_text(text)
+    text = html.unescape(html.unescape(text))
+    return text.strip()
+
+
+def _wan_whitespace_clean(text: str) -> str:
+    text = _wan_basic_clean(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _make_wan_s2v_text_encoder_config() -> T5Config:
+    config = T5Config()
+    arch = config.arch_config
+    arch.vocab_size = 256384
+    arch.architectures = ["UMT5EncoderModel"]
+    arch.d_model = 4096
+    arch.hidden_size = 4096
+    arch.d_kv = 64
+    arch.d_ff = 10240
+    arch.num_layers = 24
+    arch.num_attention_heads = 64
+    arch.num_heads = 64
+    arch.relative_attention_num_buckets = 32
+    arch.feed_forward_proj = "gated-gelu"
+    arch.text_len = 512
+    arch.__post_init__()
+    return config
 
 
 def t5_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
@@ -135,6 +175,9 @@ class WanI2V480PConfig(WanT2V480PConfig, WanI2VCommonConfig):
     def __post_init__(self) -> None:
         self.vae_config.load_encoder = True
         self.vae_config.load_decoder = True
+        self.vae_config.use_feature_cache = False
+        self.vae_config.use_parallel_encode = False
+        self.vae_config.use_parallel_decode = False
 
 
 @dataclass
@@ -226,6 +269,16 @@ class Wan2_2_I2V_A14B_Config(WanI2V480PConfig):
 @dataclass
 class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
     dit_config: DiTConfig = field(default_factory=WanS2VConfig)
+    text_encoder_configs: tuple[EncoderConfig, ...] = field(
+        default_factory=lambda: (_make_wan_s2v_text_encoder_config(),)
+    )
+    preprocess_text_funcs: tuple[Callable[[str], str], ...] = field(
+        default_factory=lambda: (_wan_whitespace_clean,)
+    )
+    audio_encoder_config: EncoderConfig = field(
+        default_factory=WanS2VAudioEncoderConfig
+    )
+    audio_encoder_precision: str = "fp32"
     flow_shift: float | None = 3.0
     task_type: ModelTaskType = ModelTaskType.S2V
     vae_stride = (4, 8, 8)

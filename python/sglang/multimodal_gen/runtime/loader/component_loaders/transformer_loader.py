@@ -149,10 +149,10 @@ class TransformerLoader(ComponentLoader):
         dit_config = getattr(server_args.pipeline_config, pipeline_dit_config_attr)
         dit_config.update_model_arch(config)
 
-        if cls_name == "WanS2VOfficialEngine":
-            model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
+        model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
+        if hasattr(model_cls, "from_component_path"):
             logger.info(
-                "Loading official Wan S2V engine wrapper from %s", component_model_path
+                "Loading %s from component path %s", cls_name, component_model_path
             )
             engine_config = dict(config)
             engine_config.pop("_class_name", None)

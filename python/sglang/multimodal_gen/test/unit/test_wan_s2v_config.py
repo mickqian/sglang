@@ -1,8 +1,9 @@
+import torch
+
 from sglang.multimodal_gen.configs.models.dits import WanS2VConfig
 from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_S2V_14B_Config
 from sglang.multimodal_gen.configs.sample.wan import Wan2_2_S2V_14B_SamplingParam
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
-import torch
 
 
 def test_wan_s2v_sampling_defaults():

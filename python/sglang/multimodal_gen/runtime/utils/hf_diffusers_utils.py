@@ -127,6 +127,134 @@ def resolve_model_overlay(model_name_or_path: str) -> dict[str, Any] | None:
     return registry.get(model_name_or_path)
 
 
+def _load_overlay_manifest_if_present(overlay_dir: str) -> dict[str, Any] | None:
+    overlay_manifest_path = os.path.join(
+        overlay_dir, "_overlay", "overlay_manifest.json"
+    )
+    if not os.path.exists(overlay_manifest_path):
+        return None
+    with open(overlay_manifest_path, encoding="utf-8") as f:
+        manifest = cast(dict[str, Any], json.load(f))
+    return manifest
+
+
+def _find_missing_required_paths(
+    root_dir: str, required_paths: list[str] | tuple[str, ...]
+) -> list[str]:
+    missing: list[str] = []
+    for rel_path in required_paths:
+        if not os.path.exists(os.path.join(root_dir, rel_path)):
+            missing.append(rel_path)
+    return missing
+
+
+def _ensure_overlay_source_dir_complete(
+    *,
+    source_model_id: str,
+    source_dir: str,
+    manifest: dict[str, Any],
+    local_dir: str | None,
+    allow_patterns: list[str] | None,
+    download: bool,
+) -> str:
+    required_source_files = cast(
+        list[str], list(manifest.get("required_source_files", []))
+    )
+    if not required_source_files:
+        return source_dir
+
+    missing_paths = _find_missing_required_paths(source_dir, required_source_files)
+    if not missing_paths:
+        return source_dir
+
+    if not download:
+        raise ValueError(
+            f"Overlay source model {source_model_id} is missing required files "
+            f"{missing_paths} and download=False."
+        )
+
+    logger.warning(
+        "Overlay source model %s is missing required files %s. "
+        "Re-downloading source snapshot.",
+        source_model_id,
+        missing_paths,
+    )
+    source_allow_patterns = manifest.get("source_allow_patterns")
+    effective_allow_patterns = (
+        cast(list[str] | None, source_allow_patterns)
+        if source_allow_patterns is not None
+        else allow_patterns
+    )
+    with get_lock(source_model_id).acquire(poll_interval=2):
+        source_dir = snapshot_download(
+            repo_id=source_model_id,
+            ignore_patterns=["*.onnx", "*.msgpack"],
+            allow_patterns=effective_allow_patterns,
+            local_dir=local_dir,
+            max_workers=8,
+            force_download=True,
+        )
+    missing_after_redownload = _find_missing_required_paths(
+        source_dir, required_source_files
+    )
+    if missing_after_redownload:
+        raise ValueError(
+            f"Overlay source model {source_model_id} is still missing required files "
+            f"{missing_after_redownload} after re-download."
+        )
+    return str(source_dir)
+
+
+def _resolve_direct_overlay_repo(
+    model_name_or_path: str,
+) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
+    if os.path.exists(model_name_or_path):
+        manifest = _load_overlay_manifest_if_present(model_name_or_path)
+        if manifest is None:
+            return None
+        source_model_id = manifest.get("source_model_id")
+        if not source_model_id:
+            raise ValueError(
+                f"Overlay repo {model_name_or_path} is missing source_model_id in _overlay/overlay_manifest.json"
+            )
+        overlay_spec = {
+            "overlay_repo_id": model_name_or_path,
+            "overlay_revision": "local",
+        }
+        return overlay_spec, model_name_or_path, manifest
+
+    try:
+        manifest_path = hf_hub_download(
+            repo_id=model_name_or_path,
+            filename="_overlay/overlay_manifest.json",
+        )
+        overlay_dir = os.path.dirname(os.path.dirname(manifest_path))
+    except (
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+        LocalEntryNotFoundError,
+        RequestsConnectionError,
+        RequestException,
+    ):
+        return None
+    except Exception:
+        return None
+
+    manifest = _load_overlay_manifest_if_present(overlay_dir)
+    if manifest is None:
+        return None
+    source_model_id = manifest.get("source_model_id")
+    if not source_model_id:
+        raise ValueError(
+            f"Overlay repo {model_name_or_path} is missing source_model_id in _overlay/overlay_manifest.json"
+        )
+    overlay_spec = {
+        "overlay_repo_id": model_name_or_path,
+        "overlay_revision": "main",
+    }
+    return overlay_spec, overlay_dir, manifest
+
+
 def _download_overlay_metadata(
     source_model_id: str,
     overlay_spec: dict[str, Any],
@@ -172,6 +300,7 @@ def _ensure_dir(path: str) -> None:
 
 
 def _link_or_copy_file(src: str, dst: str) -> None:
+    src = os.path.realpath(src)
     _ensure_dir(os.path.dirname(dst))
     if os.path.lexists(dst):
         os.remove(dst)
@@ -804,6 +933,9 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
 
     # If it's a local path, verify it directly
     if os.path.exists(model_name_or_path):
+        manifest = _load_overlay_manifest_if_present(model_name_or_path)
+        if manifest is not None:
+            return _load_model_index_from_dir(model_name_or_path)
         try:
             return verify_model_config_and_directory(model_name_or_path)
         except ValueError:
@@ -821,6 +953,11 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
             model_name_or_path, overlay_spec
         )
         return _load_model_index_from_dir(overlay_metadata_dir)
+
+    direct_overlay = _resolve_direct_overlay_repo(model_name_or_path)
+    if direct_overlay is not None:
+        _, overlay_dir, _ = direct_overlay
+        return _load_model_index_from_dir(overlay_dir)
 
     # For remote models, download just the model_index.json
     try:
@@ -910,17 +1047,26 @@ def maybe_download_model(
             overlay_metadata_dir = _download_overlay_metadata(
                 model_name_or_path, overlay_spec
             )
-            overlay_manifest_path = os.path.join(
-                overlay_metadata_dir, "_overlay", "overlay_manifest.json"
-            )
-            if os.path.exists(overlay_manifest_path):
+            manifest = _load_overlay_manifest_if_present(overlay_metadata_dir)
+            if manifest is not None:
+                source_allow_patterns = cast(
+                    list[str] | None, manifest.get("source_allow_patterns")
+                )
                 source_dir = maybe_download_model(
                     model_name_or_path,
                     local_dir=local_dir,
                     download=download,
-                    allow_patterns=allow_patterns,
+                    allow_patterns=source_allow_patterns or allow_patterns,
                     force_diffusers_model=False,
                     skip_overlay_resolution=True,
+                )
+                source_dir = _ensure_overlay_source_dir_complete(
+                    source_model_id=model_name_or_path,
+                    source_dir=source_dir,
+                    manifest=manifest,
+                    local_dir=local_dir,
+                    allow_patterns=allow_patterns,
+                    download=download,
                 )
                 return _materialize_overlay_model(
                     source_model_id=model_name_or_path,
@@ -936,6 +1082,37 @@ def maybe_download_model(
                 allow_patterns=allow_patterns,
                 force_diffusers_model=True,
                 skip_overlay_resolution=True,
+            )
+
+    if force_diffusers_model and not skip_overlay_resolution:
+        direct_overlay = _resolve_direct_overlay_repo(model_name_or_path)
+        if direct_overlay is not None:
+            overlay_spec, overlay_dir, manifest = direct_overlay
+            source_model_id = str(manifest["source_model_id"])
+            source_allow_patterns = cast(
+                list[str] | None, manifest.get("source_allow_patterns")
+            )
+            source_dir = maybe_download_model(
+                source_model_id,
+                local_dir=local_dir,
+                download=download,
+                allow_patterns=source_allow_patterns or allow_patterns,
+                force_diffusers_model=False,
+                skip_overlay_resolution=True,
+            )
+            source_dir = _ensure_overlay_source_dir_complete(
+                source_model_id=source_model_id,
+                source_dir=source_dir,
+                manifest=manifest,
+                local_dir=local_dir,
+                allow_patterns=allow_patterns,
+                download=download,
+            )
+            return _materialize_overlay_model(
+                source_model_id=source_model_id,
+                overlay_spec=overlay_spec,
+                overlay_dir=overlay_dir,
+                source_dir=source_dir,
             )
 
     # 1. Local path check: if path exists locally, verify it's complete (skip for LoRA)

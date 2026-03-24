@@ -126,6 +126,13 @@ class VAELoader(ComponentLoader):
             skip_init_modules(),
         ):
             vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
+            if hasattr(vae_cls, "from_component_path"):
+                engine_config = dict(config)
+                return vae_cls.from_component_path(
+                    component_model_path=component_model_path,
+                    server_args=server_args,
+                    config=engine_config,
+                )
             vae = vae_cls(vae_config).to(target_device)
 
         safetensors_list = _list_safetensors_files(component_model_path)

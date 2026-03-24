@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from diffusers.utils.torch_utils import randn_tensor
 from PIL import Image
@@ -28,14 +29,17 @@ try:
 except ImportError:  # pragma: no cover
     sf = None
 
+from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-class WanS2VOfficialEngine(torch.nn.Module):
+class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
     _aliases = ["WanS2VOfficialEngine"]
     _sdpa_warned_padding_mask = False
+    layer_names = ["blocks"]
 
     def __init__(
         self,
@@ -50,12 +54,16 @@ class WanS2VOfficialEngine(torch.nn.Module):
         self.config = config
         self.scheduler_cls = scheduler_cls
         self.noise_model = engine.noise_model
+        self.blocks = getattr(self.noise_model, "blocks", None)
         self.supports_standard_denoising = bool(
             config.get("enable_standard_denoising", False)
         )
+        self.uses_native_components = bool(config.get("use_native_components", True))
 
     @staticmethod
-    def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:
+    def _resolve_existing_path(
+        component_model_path: str, path_value: str | None
+    ) -> str:
         if not path_value:
             raise ValueError("WanS2VOfficialEngine config is missing a required path")
         path_value = os.path.expanduser(path_value)
@@ -122,7 +130,9 @@ class WanS2VOfficialEngine(torch.nn.Module):
             return
 
         if backend == "auto":
-            has_fa2 = getattr(importlib.import_module("flash_attn"), "flash_attn_varlen_func", None)
+            has_fa2 = getattr(
+                importlib.import_module("flash_attn"), "flash_attn_varlen_func", None
+            )
             has_fa3 = getattr(module_attention, "FLASH_ATTN_3_AVAILABLE", False)
             if has_fa2 or not has_fa3:
                 logger.info(
@@ -150,7 +160,9 @@ class WanS2VOfficialEngine(torch.nn.Module):
             setattr(module, "flash_attention", cls._sdpa_flash_attention)
 
     @classmethod
-    def from_component_path(cls, component_model_path: str, server_args, config: dict[str, Any]):
+    def from_component_path(
+        cls, component_model_path: str, server_args, config: dict[str, Any]
+    ):
         code_root = cls._resolve_existing_path(
             component_model_path, config.get("wan_code_root", "official_code")
         )
@@ -172,30 +184,44 @@ class WanS2VOfficialEngine(torch.nn.Module):
                 f"Official Wan config {task_name!r} not found under {code_root}"
             )
 
-        if server_args.num_gpus != 1:
-            raise NotImplementedError(
-                "Wan S2V official-engine wrapper currently supports only num_gpus=1"
+        local_device = get_local_torch_device()
+        device_id = 0 if local_device.index is None else int(local_device.index)
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        use_sp = (
+            max(
+                getattr(server_args, "sp_degree", 1) or 1,
+                getattr(server_args, "ulysses_degree", 1) or 1,
             )
+            > 1
+        )
 
         config_obj = wan_configs[task_name]
         engine = module_s2v.WanS2V(
             config=config_obj,
             checkpoint_dir=checkpoint_root,
-            device_id=0,
-            rank=0,
+            device_id=device_id,
+            rank=rank,
             t5_fsdp=False,
             dit_fsdp=False,
-            use_sp=False,
+            use_sp=use_sp,
             t5_cpu=bool(config.get("t5_cpu", False)),
             init_on_cpu=bool(config.get("init_on_cpu", True)),
             convert_model_dtype=bool(config.get("convert_model_dtype", False)),
         )
-        return cls(
+        instance = cls(
             engine=engine,
             component_model_path=component_model_path,
             config=config,
             scheduler_cls=getattr(module_unipc, "FlowUniPCMultistepScheduler", None),
         )
+        if instance.supports_standard_denoising and instance.uses_native_components:
+            if hasattr(engine, "text_encoder"):
+                engine.text_encoder = None
+            if hasattr(engine, "audio_encoder"):
+                engine.audio_encoder = None
+            if hasattr(engine, "vae"):
+                engine.vae = None
+        return instance
 
     @property
     def device(self):
@@ -208,6 +234,17 @@ class WanS2VOfficialEngine(torch.nn.Module):
             num_train_timesteps=self.engine.num_train_timesteps,
             shift=1,
             use_dynamic_shifting=False,
+        )
+
+    def get_default_negative_prompt(self) -> str:
+        return self.engine.sample_neg_prompt
+
+    def get_generation_size(self, *, image_path: str) -> tuple[int, int]:
+        return self.engine.get_gen_size(
+            size=None,
+            max_area=int(self.config.get("max_area", 720 * 1280)),
+            ref_image_path=image_path,
+            pre_video_path=None,
         )
 
     def _normalize_infer_frames(self, num_frames: int) -> int:
@@ -250,7 +287,9 @@ class WanS2VOfficialEngine(torch.nn.Module):
         if sf is None:
             return None, None
         try:
-            audio_np, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
+            audio_np, sample_rate = sf.read(
+                audio_path, dtype="float32", always_2d=False
+            )
         except Exception as exc:  # pragma: no cover - best effort only
             logger.warning("Failed to load source audio for output muxing: %s", exc)
             return None, None
@@ -316,7 +355,9 @@ class WanS2VOfficialEngine(torch.nn.Module):
             infer_frames=infer_frames,
             size=(height, width),
         )
-        cond_latents = cond_list[0].to(dtype=self.engine.param_dtype, device=self.device)
+        cond_latents = cond_list[0].to(
+            dtype=self.engine.param_dtype, device=self.device
+        )
         if pose_video_path is None:
             cond_latents = cond_latents * 0
 
@@ -408,7 +449,10 @@ class WanS2VOfficialEngine(torch.nn.Module):
             context = encoder_hidden_states
         elif isinstance(encoder_hidden_states, torch.Tensor):
             if encoder_hidden_states.ndim == 3:
-                context = [encoder_hidden_states[i] for i in range(encoder_hidden_states.shape[0])]
+                context = [
+                    encoder_hidden_states[i]
+                    for i in range(encoder_hidden_states.shape[0])
+                ]
             else:
                 context = [encoder_hidden_states]
         else:

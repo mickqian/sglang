@@ -200,6 +200,10 @@ class PipelineConfig:
     image_encoder_config: EncoderConfig = field(default_factory=EncoderConfig)
     image_encoder_precision: str = "fp32"
 
+    # Audio encoder configuration
+    audio_encoder_config: EncoderConfig = field(default_factory=EncoderConfig)
+    audio_encoder_precision: str = "fp32"
+
     # Text encoder configuration
     DEFAULT_TEXT_ENCODER_PRECISIONS = ("fp32",)
     text_encoder_configs: tuple[EncoderConfig, ...] = field(
@@ -617,7 +621,10 @@ class PipelineConfig:
         from sglang.multimodal_gen.configs.pipeline_configs.flux import (
             Flux2PipelineConfig,
         )
-        from sglang.multimodal_gen.registry import get_pipeline_config_classes
+        from sglang.multimodal_gen.registry import (
+            get_model_info,
+            get_pipeline_config_classes,
+        )
 
         # If model_path is a safetensors file and pipeline_class_name is specified,
         # try to get PipelineConfig from the registry first
