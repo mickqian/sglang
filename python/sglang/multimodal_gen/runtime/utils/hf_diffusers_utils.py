@@ -20,6 +20,8 @@
 
 import contextlib
 import glob
+import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -48,6 +50,317 @@ from sglang.srt.environ import envs
 from sglang.utils import is_in_ci
 
 logger = init_logger(__name__)
+
+MODEL_OVERLAY_METADATA_PATTERNS = [
+    "*.json",
+    "*.md",
+    "*.py",
+    "*.txt",
+    "**/*.json",
+    "**/*.md",
+    "**/*.py",
+    "**/*.txt",
+]
+
+_MODEL_OVERLAY_REGISTRY_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def _get_diffusion_cache_root() -> str:
+    return os.path.expanduser(
+        os.getenv("SGLANG_DIFFUSION_CACHE_ROOT", "~/.cache/sgl_diffusion")
+    )
+
+
+def clear_model_overlay_registry_cache() -> None:
+    global _MODEL_OVERLAY_REGISTRY_CACHE
+    _MODEL_OVERLAY_REGISTRY_CACHE = None
+
+
+def _load_model_overlay_registry() -> dict[str, dict[str, Any]]:
+    global _MODEL_OVERLAY_REGISTRY_CACHE
+    if _MODEL_OVERLAY_REGISTRY_CACHE is not None:
+        return _MODEL_OVERLAY_REGISTRY_CACHE
+
+    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
+    if not raw_value:
+        _MODEL_OVERLAY_REGISTRY_CACHE = {}
+        return _MODEL_OVERLAY_REGISTRY_CACHE
+
+    try:
+        if raw_value.startswith("{"):
+            payload = json.loads(raw_value)
+        else:
+            with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
+                payload = json.load(f)
+    except Exception as exc:
+        raise ValueError(
+            "Failed to parse SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY must be a JSON object"
+        )
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for source_model_id, spec in payload.items():
+        if isinstance(spec, str):
+            normalized[source_model_id] = {"overlay_repo_id": spec}
+            continue
+        if not isinstance(spec, dict):
+            raise ValueError(
+                "Overlay registry values must be either strings or JSON objects"
+            )
+        overlay_repo_id = spec.get("overlay_repo_id")
+        if not overlay_repo_id:
+            raise ValueError(
+                f"Overlay registry entry for {source_model_id!r} is missing overlay_repo_id"
+            )
+        normalized[source_model_id] = dict(spec)
+
+    _MODEL_OVERLAY_REGISTRY_CACHE = normalized
+    return _MODEL_OVERLAY_REGISTRY_CACHE
+
+
+def resolve_model_overlay(model_name_or_path: str) -> dict[str, Any] | None:
+    registry = _load_model_overlay_registry()
+    return registry.get(model_name_or_path)
+
+
+def _download_overlay_metadata(
+    source_model_id: str,
+    overlay_spec: dict[str, Any],
+) -> str:
+    overlay_repo_id = str(overlay_spec["overlay_repo_id"])
+    if os.path.exists(overlay_repo_id):
+        logger.info(
+            "Using local overlay metadata for %s from %s",
+            source_model_id,
+            overlay_repo_id,
+        )
+        return overlay_repo_id
+    revision = overlay_spec.get("overlay_revision")
+    logger.info(
+        "Downloading overlay metadata for %s from %s",
+        source_model_id,
+        overlay_repo_id,
+    )
+    return str(
+        snapshot_download(
+            repo_id=overlay_repo_id,
+            allow_patterns=MODEL_OVERLAY_METADATA_PATTERNS,
+            revision=revision,
+            max_workers=4,
+        )
+    )
+
+
+def _load_model_index_from_dir(model_dir: str) -> dict[str, Any]:
+    model_index_path = os.path.join(model_dir, "model_index.json")
+    if not os.path.exists(model_index_path):
+        raise ValueError(f"model_index.json not found under {model_dir}")
+    with open(model_index_path, encoding="utf-8") as f:
+        config = cast(dict[str, Any], json.load(f))
+    if "_class_name" not in config or "_diffusers_version" not in config:
+        raise ValueError(f"Invalid model_index.json under {model_dir}")
+    config["pipeline_name"] = config["_class_name"]
+    return config
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _link_or_copy_file(src: str, dst: str) -> None:
+    _ensure_dir(os.path.dirname(dst))
+    if os.path.lexists(dst):
+        os.remove(dst)
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    try:
+        os.symlink(src, dst)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
+
+
+def _copytree_link_or_copy(src_dir: str, dst_dir: str) -> None:
+    for root, _, files in os.walk(src_dir):
+        rel_root = os.path.relpath(root, src_dir)
+        target_root = dst_dir if rel_root == "." else os.path.join(dst_dir, rel_root)
+        _ensure_dir(target_root)
+        for file_name in files:
+            src_file = os.path.join(root, file_name)
+            dst_file = os.path.join(target_root, file_name)
+            _link_or_copy_file(src_file, dst_file)
+
+
+def _apply_overlay_file_mappings(
+    *,
+    source_dir: str,
+    output_dir: str,
+    file_mappings: list[dict[str, Any]],
+) -> None:
+    for mapping in file_mappings:
+        mapping_type = mapping.get("type", "file")
+        src_rel = mapping.get("src")
+        if not src_rel:
+            raise ValueError(f"Overlay file mapping is missing src: {mapping}")
+        src_path = os.path.join(source_dir, src_rel)
+        if mapping_type == "tree":
+            if not os.path.isdir(src_path):
+                raise ValueError(f"Tree mapping source does not exist: {src_path}")
+            dst_dir = os.path.join(output_dir, str(mapping.get("dst_dir", src_rel)))
+            _copytree_link_or_copy(src_path, dst_dir)
+            continue
+        if mapping_type == "glob":
+            matched = glob.glob(src_path, recursive=True)
+            if not matched:
+                raise ValueError(f"Glob mapping matched no files: {src_path}")
+            for matched_path in matched:
+                if os.path.isdir(matched_path):
+                    continue
+                rel_path = os.path.relpath(matched_path, source_dir)
+                dst_path = os.path.join(output_dir, rel_path)
+                _link_or_copy_file(matched_path, dst_path)
+            continue
+
+        if not os.path.isfile(src_path):
+            raise ValueError(f"File mapping source does not exist: {src_path}")
+        dst_rel = str(mapping.get("dst", os.path.basename(src_rel)))
+        dst_path = os.path.join(output_dir, dst_rel)
+        _link_or_copy_file(src_path, dst_path)
+
+
+def _run_overlay_custom_materializer(
+    *,
+    overlay_dir: str,
+    source_dir: str,
+    output_dir: str,
+    manifest: dict[str, Any],
+) -> None:
+    custom_materializer = manifest.get("custom_materializer")
+    if not custom_materializer:
+        return
+    script_path = os.path.join(overlay_dir, str(custom_materializer))
+    if not os.path.exists(script_path):
+        raise ValueError(f"Custom materializer script not found: {script_path}")
+
+    spec = importlib.util.spec_from_file_location(
+        "_sglang_overlay_materializer", script_path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Failed to import custom materializer: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    materialize_fn = getattr(module, "materialize", None)
+    if materialize_fn is None:
+        raise ValueError(
+            f"Custom materializer {script_path} must define materialize(...)"
+        )
+
+    materialize_fn(
+        overlay_dir=overlay_dir,
+        source_dir=source_dir,
+        output_dir=output_dir,
+        manifest=manifest,
+    )
+
+
+def _materialize_overlay_model(
+    *,
+    source_model_id: str,
+    overlay_spec: dict[str, Any],
+    overlay_dir: str,
+    source_dir: str,
+) -> str:
+    overlay_manifest_path = os.path.join(overlay_dir, "_overlay", "overlay_manifest.json")
+    if not os.path.exists(overlay_manifest_path):
+        raise ValueError(
+            f"Overlay repo for {source_model_id} is missing _overlay/overlay_manifest.json"
+        )
+
+    with open(overlay_manifest_path, encoding="utf-8") as f:
+        manifest = cast(dict[str, Any], json.load(f))
+
+    materializer_version = str(manifest.get("materializer_version", "v1"))
+    overlay_repo_id = str(overlay_spec["overlay_repo_id"])
+    overlay_revision = str(overlay_spec.get("overlay_revision", "main"))
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "source_model_id": source_model_id,
+                "overlay_repo_id": overlay_repo_id,
+                "overlay_revision": overlay_revision,
+                "materializer_version": materializer_version,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    cache_root = os.path.join(_get_diffusion_cache_root(), "materialized_models")
+    _ensure_dir(cache_root)
+    safe_name = source_model_id.replace("/", "__")
+    final_dir = os.path.join(cache_root, f"{safe_name}-{cache_key}")
+    marker_path = os.path.join(final_dir, ".sglang_overlay_materialized.json")
+    if _verify_diffusers_model_complete(final_dir) and os.path.exists(marker_path):
+        return final_dir
+
+    lock_name = f"overlay-materialize::{source_model_id}::{overlay_repo_id}::{overlay_revision}"
+    with get_lock(lock_name).acquire(poll_interval=2):
+        if _verify_diffusers_model_complete(final_dir) and os.path.exists(marker_path):
+            return final_dir
+
+        tmp_dir = final_dir + ".tmp"
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        if os.path.exists(final_dir):
+            shutil.rmtree(final_dir)
+        shutil.copytree(
+            overlay_dir,
+            tmp_dir,
+            ignore=shutil.ignore_patterns("*.safetensors", "*.bin", "*.pth", "*.pt"),
+        )
+
+        overlay_hidden_dir = os.path.join(tmp_dir, "_overlay")
+        if os.path.isdir(overlay_hidden_dir):
+            shutil.rmtree(overlay_hidden_dir)
+
+        file_mappings = manifest.get("file_mappings", [])
+        if file_mappings:
+            _apply_overlay_file_mappings(
+                source_dir=source_dir,
+                output_dir=tmp_dir,
+                file_mappings=cast(list[dict[str, Any]], file_mappings),
+            )
+        _run_overlay_custom_materializer(
+            overlay_dir=overlay_dir,
+            source_dir=source_dir,
+            output_dir=tmp_dir,
+            manifest=manifest,
+        )
+
+        with open(marker_path.replace(final_dir, tmp_dir), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "source_model_id": source_model_id,
+                    "source_dir": source_dir,
+                    "overlay_repo_id": overlay_repo_id,
+                    "overlay_revision": overlay_revision,
+                    "materializer_version": materializer_version,
+                },
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+
+        os.replace(tmp_dir, final_dir)
+
+    return final_dir
 
 
 def _check_index_files_for_missing_shards(
@@ -498,6 +811,13 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
                 return config
             raise
 
+    overlay_spec = resolve_model_overlay(model_name_or_path)
+    if overlay_spec is not None:
+        overlay_metadata_dir = _download_overlay_metadata(
+            model_name_or_path, overlay_spec
+        )
+        return _load_model_index_from_dir(overlay_metadata_dir)
+
     # For remote models, download just the model_index.json
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -560,6 +880,7 @@ def maybe_download_model(
     is_lora: bool = False,
     allow_patterns: list[str] | None = None,
     force_diffusers_model: bool = False,
+    skip_overlay_resolution: bool = False,
 ) -> str:
     """
     Check if the model path is a Hugging Face Hub model ID and download it if needed.
@@ -573,6 +894,45 @@ def maybe_download_model(
     Returns:
         Local path to the model
     """
+
+    overlay_spec = None
+    if (
+        force_diffusers_model
+        and not skip_overlay_resolution
+        and not os.path.exists(model_name_or_path)
+    ):
+        overlay_spec = resolve_model_overlay(model_name_or_path)
+        if overlay_spec is not None:
+            overlay_metadata_dir = _download_overlay_metadata(
+                model_name_or_path, overlay_spec
+            )
+            overlay_manifest_path = os.path.join(
+                overlay_metadata_dir, "_overlay", "overlay_manifest.json"
+            )
+            if os.path.exists(overlay_manifest_path):
+                source_dir = maybe_download_model(
+                    model_name_or_path,
+                    local_dir=local_dir,
+                    download=download,
+                    allow_patterns=allow_patterns,
+                    force_diffusers_model=False,
+                    skip_overlay_resolution=True,
+                )
+                return _materialize_overlay_model(
+                    source_model_id=model_name_or_path,
+                    overlay_spec=overlay_spec,
+                    overlay_dir=overlay_metadata_dir,
+                    source_dir=source_dir,
+                )
+            return maybe_download_model(
+                str(overlay_spec["overlay_repo_id"]),
+                local_dir=local_dir,
+                download=download,
+                is_lora=is_lora,
+                allow_patterns=allow_patterns,
+                force_diffusers_model=True,
+                skip_overlay_resolution=True,
+            )
 
     # 1. Local path check: if path exists locally, verify it's complete (skip for LoRA)
     if os.path.exists(model_name_or_path):

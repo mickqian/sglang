@@ -279,6 +279,25 @@ class Wan2_2_I2V_A14B_SamplingParam(Wan2_2_Base_SamplingParams):
 
 
 @dataclass
+class Wan2_2_S2V_14B_SamplingParam(Wan2_2_Base_SamplingParams):
+    """Sampling parameters for Wan2.2 S2V 14B model."""
+
+    height: int = 704
+    width: int = 1024
+    num_frames: int = 81
+    fps: int = 16
+    guidance_scale: float = 4.5
+    num_inference_steps: int = 40
+
+    supported_resolutions: list[tuple[int, int]] | None = field(
+        default_factory=lambda: [
+            (1024, 704),
+            (704, 1024),
+        ]
+    )
+
+
+@dataclass
 class Turbo_Wan2_2_I2V_A14B_SamplingParam(Wan2_2_Base_SamplingParams):
     guidance_scale: float = 3.5  # high_noise
     guidance_scale_2: float = 3.5  # low_noise

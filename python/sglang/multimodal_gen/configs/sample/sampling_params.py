@@ -93,6 +93,9 @@ class SamplingParams:
 
     # Image inputs
     image_path: str | list[str] | None = None
+    audio_path: str | None = None
+    pose_video_path: str | None = None
+    num_clip: int | None = None
 
     # Text inputs
     prompt: str | list[str] | None = None
@@ -341,6 +344,12 @@ class SamplingParams:
                     f"boundary_ratio must be within [0, 1], got {self.boundary_ratio!r}"
                 )
 
+        if self.num_clip is not None:
+            if not isinstance(self.num_clip, int) or self.num_clip <= 0:
+                raise ValueError(
+                    f"num_clip must be a positive int, got {self.num_clip!r}"
+                )
+
     def check_sampling_param(self):
         # Keep backward-compatibility for old call sites.
         self._validate()
@@ -362,6 +371,23 @@ class SamplingParams:
                 raise ValueError(
                     f"input_reference is not supported for {pipeline_config.task_type.name} models."
                 )
+
+        if pipeline_config.task_type.requires_audio_input():
+            if self.audio_path is None:
+                raise ValueError(
+                    f"Served model with task type '{pipeline_config.task_type.name}' requires an 'audio_path' input, but none was provided"
+                )
+
+        if not pipeline_config.task_type.accepts_audio_input():
+            if self.audio_path is not None:
+                raise ValueError(
+                    f"audio_path is not supported for {pipeline_config.task_type.name} models."
+                )
+
+        if self.pose_video_path is not None and not pipeline_config.task_type.accepts_audio_input():
+            raise ValueError(
+                f"pose_video_path is not supported for {pipeline_config.task_type.name} models."
+            )
 
     def _adjust(
         self,
@@ -792,6 +818,21 @@ class SamplingParams:
                 "values, e.g.: "
                 '--image-path "img1.png" "img2.png"'
             ),
+        )
+        add_argument(
+            "--audio-path",
+            type=str,
+            help="Path to the input audio file for speech-driven video generation.",
+        )
+        add_argument(
+            "--pose-video-path",
+            type=str,
+            help="Optional pose guidance video for speech-driven video generation.",
+        )
+        add_argument(
+            "--num-clip",
+            type=int,
+            help="Optional clip repeat/count override for speech-driven video generation.",
         )
         add_argument(
             "--moba-config-path",

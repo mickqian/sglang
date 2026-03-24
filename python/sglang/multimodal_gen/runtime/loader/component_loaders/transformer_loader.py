@@ -130,17 +130,13 @@ class TransformerLoader(ComponentLoader):
         """Load the transformer based on the model path, and inference args."""
         # 1. hf config
         config = get_diffusers_component_config(component_path=component_model_path)
+        cls_name = config.get("_class_name")
+        if cls_name is None:
+            raise ValueError(
+                f"Transformer config at {component_model_path} does not contain _class_name"
+            )
 
-        # 2. quant config
-        safetensors_list = self.get_list_of_safetensors_to_load(
-            server_args, component_model_path
-        )
-
-        quant_config = self._resolve_quant_config(
-            config, server_args, safetensors_list, component_model_path
-        )
-
-        # 3. dit config
+        # 2. dit config
         # Config from Diffusers supersedes sgl_diffusion's model config
         component_name = _normalize_component_type(component_name)
         server_args.model_paths[component_name] = component_model_path
@@ -152,6 +148,27 @@ class TransformerLoader(ComponentLoader):
             raise ValueError(f"Invalid module name: {component_name}")
         dit_config = getattr(server_args.pipeline_config, pipeline_dit_config_attr)
         dit_config.update_model_arch(config)
+
+        if cls_name == "WanS2VOfficialEngine":
+            model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
+            logger.info(
+                "Loading official Wan S2V engine wrapper from %s", component_model_path
+            )
+            engine_config = dict(config)
+            engine_config.pop("_class_name", None)
+            return model_cls.from_component_path(
+                component_model_path=component_model_path,
+                server_args=server_args,
+                config=engine_config,
+            )
+
+        # 3. quant config
+        safetensors_list = self.get_list_of_safetensors_to_load(
+            server_args, component_model_path
+        )
+        quant_config = self._resolve_quant_config(
+            config, server_args, safetensors_list, component_model_path
+        )
 
         cls_name = config.pop("_class_name")
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)

@@ -71,6 +71,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.wan import (
     TurboWanI2V720Config,
     TurboWanT2V480PConfig,
     Wan2_2_I2V_A14B_Config,
+    Wan2_2_S2V_14B_Config,
     Wan2_2_T2V_A14B_Config,
     Wan2_2_TI2V_5B_Config,
 )
@@ -106,6 +107,7 @@ from sglang.multimodal_gen.configs.sample.wan import (
     Turbo_Wan2_2_I2V_A14B_SamplingParam,
     Wan2_1_Fun_1_3B_InP_SamplingParams,
     Wan2_2_I2V_A14B_SamplingParam,
+    Wan2_2_S2V_14B_SamplingParam,
     Wan2_2_T2V_A14B_SamplingParam,
     Wan2_2_TI2V_5B_SamplingParam,
     WanI2V_14B_480P_SamplingParam,
@@ -650,6 +652,12 @@ def _register_configs():
         sampling_param_cls=Wan2_2_I2V_A14B_SamplingParam,
         pipeline_config_cls=Wan2_2_I2V_A14B_Config,
         hf_model_paths=["Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
+    )
+    register_configs(
+        sampling_param_cls=Wan2_2_S2V_14B_SamplingParam,
+        pipeline_config_cls=Wan2_2_S2V_14B_Config,
+        hf_model_paths=["Wan-AI/Wan2.2-S2V-14B"],
+        model_detectors=[lambda hf_id: "wan2.2-s2v-14b" in hf_id.lower()],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,

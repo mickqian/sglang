@@ -223,6 +223,30 @@ class Wan2_2_I2V_A14B_Config(WanI2V480PConfig):
         self.dit_config.boundary_ratio = self.boundary_ratio
 
 
+@dataclass
+class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
+    flow_shift: float | None = 3.0
+    task_type: ModelTaskType = ModelTaskType.S2V
+    vae_stride = (4, 8, 8)
+    max_area: int = 704 * 1024
+
+    def prepare_latent_shape(self, batch, batch_size, num_frames):
+        z_dim = self.vae_config.arch_config.z_dim
+        oh = batch.height
+        ow = batch.width
+        return (
+            batch_size,
+            z_dim,
+            num_frames,
+            oh // self.vae_stride[1],
+            ow // self.vae_stride[2],
+        )
+
+    def __post_init__(self) -> None:
+        self.vae_config.load_encoder = True
+        self.vae_config.load_decoder = True
+
+
 # =============================================
 # ============= Causal Self-Forcing =============
 # =============================================
