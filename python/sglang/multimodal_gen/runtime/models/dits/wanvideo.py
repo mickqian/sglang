@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -62,6 +63,25 @@ from sglang.srt.utils import add_prefix
 
 logger = init_logger(__name__)
 _is_cuda = current_platform.is_cuda()
+
+
+def _build_wan_freqs_cis(
+    freqs_cos: torch.Tensor | None, freqs_sin: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None:
+    if freqs_cos is None or freqs_sin is None:
+        return None
+
+    freqs_cos = freqs_cos.float()
+    freqs_sin = freqs_sin.float()
+    cos_sin_cache = None
+    if _is_cuda and os.getenv(
+        "SGLANG_DIFFUSION_WAN_PREBUILD_COS_SIN_CACHE", "1"
+    ).lower() not in {"0", "false", "off", "no"}:
+        cos_sin_cache = torch.cat(
+            [freqs_cos.contiguous(), freqs_sin.contiguous()],
+            dim=-1,
+        )
+    return freqs_cos, freqs_sin, cos_sin_cache
 
 
 class WanImageEmbedding(torch.nn.Module):
@@ -488,7 +508,7 @@ class WanTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -536,15 +556,13 @@ class WanTransformerBlock(nn.Module):
         value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
 
         # Apply rotary embeddings
-        cos, sin = freqs_cis
+        cos, sin, cos_sin_cache = freqs_cis
         if _is_cuda and query.shape == key.shape:
-            cos_sin_cache = torch.cat(
-                [
-                    cos.to(dtype=torch.float32).contiguous(),
-                    sin.to(dtype=torch.float32).contiguous(),
-                ],
-                dim=-1,
-            )
+            if cos_sin_cache is None:
+                cos_sin_cache = torch.cat(
+                    [cos.contiguous(), sin.contiguous()],
+                    dim=-1,
+                )
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
@@ -730,7 +748,7 @@ class WanTransformerBlock_VSA(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -763,15 +781,13 @@ class WanTransformerBlock_VSA(nn.Module):
         )
 
         # Apply rotary embeddings
-        cos, sin = freqs_cis
+        cos, sin, cos_sin_cache = freqs_cis
         if _is_cuda and query.shape == key.shape:
-            cos_sin_cache = torch.cat(
-                [
-                    cos.to(dtype=torch.float32).contiguous(),
-                    sin.to(dtype=torch.float32).contiguous(),
-                ],
-                dim=-1,
-            )
+            if cos_sin_cache is None:
+                cos_sin_cache = torch.cat(
+                    [cos.contiguous(), sin.contiguous()],
+                    dim=-1,
+                )
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
@@ -999,11 +1015,7 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             )
             assert freqs_cos.dtype == torch.float32
             assert freqs_cos.device == hidden_states.device
-            freqs_cis = (
-                (freqs_cos.float(), freqs_sin.float())
-                if freqs_cos is not None
-                else None
-            )
+            freqs_cis = _build_wan_freqs_cis(freqs_cos, freqs_sin)
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
@@ -1035,7 +1047,7 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 post_patch_width,
                 hidden_states.device,
             )
-            freqs_cis = (freqs_cos.float(), freqs_sin.float())
+            freqs_cis = _build_wan_freqs_cis(freqs_cos, freqs_sin)
 
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.dim() == 2:
