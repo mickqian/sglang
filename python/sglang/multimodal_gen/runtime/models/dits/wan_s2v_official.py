@@ -119,6 +119,115 @@ class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
         return out.transpose(1, 2).contiguous()
 
     @classmethod
+    def _compatible_flash_attention(
+        cls,
+        q,
+        k,
+        v,
+        q_lens=None,
+        k_lens=None,
+        dropout_p=0.0,
+        softmax_scale=None,
+        q_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        deterministic=False,
+        dtype=torch.bfloat16,
+        version=None,
+    ):
+        del dropout_p
+        half_dtypes = (torch.float16, torch.bfloat16)
+        assert dtype in half_dtypes
+        assert q.device.type == "cuda" and q.size(-1) <= 256
+
+        b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+
+        def half(x):
+            return x if x.dtype in half_dtypes else x.to(dtype)
+
+        if q_lens is None:
+            q = half(q.flatten(0, 1))
+            q_lens = torch.tensor([lq] * b, dtype=torch.int32, device=q.device)
+        else:
+            q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
+
+        if k_lens is None:
+            k = half(k.flatten(0, 1))
+            v = half(v.flatten(0, 1))
+            k_lens = torch.tensor([lk] * b, dtype=torch.int32, device=k.device)
+        else:
+            k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
+            v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
+
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+        if q_scale is not None:
+            q = q * q_scale
+
+        module_attention = importlib.import_module("wan.modules.attention")
+        fa3_func = getattr(
+            importlib.import_module("flash_attn_interface"),
+            "flash_attn_varlen_func",
+            None,
+        )
+        fa2_func = getattr(
+            importlib.import_module("flash_attn"), "flash_attn_varlen_func", None
+        )
+
+        use_fa3 = (
+            (version is None or version == 3)
+            and getattr(module_attention, "FLASH_ATTN_3_AVAILABLE", False)
+            and fa3_func is not None
+        )
+        if use_fa3:
+            x = fa3_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens])
+                .cumsum(0, dtype=torch.int32)
+                .to(q.device, non_blocking=True),
+                cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens])
+                .cumsum(0, dtype=torch.int32)
+                .to(q.device, non_blocking=True),
+                seqused_q=None,
+                seqused_k=None,
+                max_seqlen_q=lq,
+                max_seqlen_k=lk,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                deterministic=deterministic,
+                window_size=window_size,
+            )
+            if isinstance(x, tuple):
+                x = x[0]
+            return x.unflatten(0, (b, lq)).type(out_dtype)
+
+        if fa2_func is None:
+            raise RuntimeError(
+                "No compatible flash attention varlen kernel is available for Wan S2V"
+            )
+        x = fa2_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens])
+            .cumsum(0, dtype=torch.int32)
+            .to(q.device, non_blocking=True),
+            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens])
+            .cumsum(0, dtype=torch.int32)
+            .to(q.device, non_blocking=True),
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            dropout_p=0.0,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+        )
+        return x.unflatten(0, (b, lq)).type(out_dtype)
+
+    @classmethod
     def _patch_attention_backend(cls, config: dict[str, Any]):
         backend = str(config.get("attention_backend", "auto")).lower()
         if backend not in {"auto", "flash", "sdpa"}:
@@ -126,7 +235,20 @@ class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
 
         module_attention = importlib.import_module("wan.modules.attention")
         if backend == "flash":
-            logger.info("Using official Wan flash attention backend")
+            module_attention.flash_attention = cls._compatible_flash_attention
+            module_model = importlib.import_module("wan.modules.model")
+            module_model.flash_attention = cls._compatible_flash_attention
+            for module_name in (
+                "wan.modules.s2v.model_s2v",
+                "wan.modules.s2v.motioner",
+                "wan.distributed.ulysses",
+            ):
+                try:
+                    module = importlib.import_module(module_name)
+                except ModuleNotFoundError:
+                    continue
+                setattr(module, "flash_attention", cls._compatible_flash_attention)
+            logger.info("Using official Wan flash attention backend (compat)")
             return
 
         if backend == "auto":
@@ -134,9 +256,27 @@ class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
                 importlib.import_module("flash_attn"), "flash_attn_varlen_func", None
             )
             has_fa3 = getattr(module_attention, "FLASH_ATTN_3_AVAILABLE", False)
-            if has_fa2 or not has_fa3:
+            has_fa3_func = getattr(
+                importlib.import_module("flash_attn_interface"),
+                "flash_attn_varlen_func",
+                None,
+            )
+            if has_fa2 or has_fa3_func or not has_fa3:
+                module_attention.flash_attention = cls._compatible_flash_attention
+                module_model = importlib.import_module("wan.modules.model")
+                module_model.flash_attention = cls._compatible_flash_attention
+                for module_name in (
+                    "wan.modules.s2v.model_s2v",
+                    "wan.modules.s2v.motioner",
+                    "wan.distributed.ulysses",
+                ):
+                    try:
+                        module = importlib.import_module(module_name)
+                    except ModuleNotFoundError:
+                        continue
+                    setattr(module, "flash_attention", cls._compatible_flash_attention)
                 logger.info(
-                    "Using official Wan flash attention backend (auto detected)"
+                    "Using official Wan flash attention backend (auto compat)"
                 )
                 return
             backend = "sdpa"
@@ -160,6 +300,18 @@ class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
             setattr(module, "flash_attention", cls._sdpa_flash_attention)
 
     @classmethod
+    def _resolve_attention_backend(cls, server_args, config: dict[str, Any]) -> str:
+        backend = getattr(server_args, "attention_backend", None)
+        if backend is None:
+            return str(config.get("attention_backend", "auto")).lower()
+        backend = str(backend).lower()
+        if backend in {"torch_sdpa", "sdpa"}:
+            return "sdpa"
+        if backend in {"fa", "flash", "flashattention", "flash_attention"}:
+            return "flash"
+        return backend
+
+    @classmethod
     def from_component_path(
         cls, component_model_path: str, server_args, config: dict[str, Any]
     ):
@@ -176,6 +328,10 @@ class WanS2VOfficialEngine(torch.nn.Module, OffloadableDiTMixin):
         module_configs = importlib.import_module("wan.configs")
         module_s2v = importlib.import_module("wan.speech2video")
         module_unipc = importlib.import_module("wan.utils.fm_solvers_unipc")
+        config = dict(config)
+        config["attention_backend"] = cls._resolve_attention_backend(
+            server_args, config
+        )
         cls._patch_attention_backend(config)
 
         wan_configs = getattr(module_configs, "WAN_CONFIGS", None)

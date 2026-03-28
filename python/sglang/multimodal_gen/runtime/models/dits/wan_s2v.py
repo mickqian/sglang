@@ -421,6 +421,8 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.reference_text_encoder is None:
             raise RuntimeError("Reference text encoder is not initialized")
+        if negative_prompt == "":
+            negative_prompt = self.sample_neg_prompt
         if not self.t5_cpu:
             self.reference_text_encoder.model.to(self.device)
             context = self.reference_text_encoder([prompt], self.device)
