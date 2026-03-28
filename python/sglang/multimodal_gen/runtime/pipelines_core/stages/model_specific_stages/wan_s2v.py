@@ -625,6 +625,11 @@ class WanS2VDecodingStage(PipelineStage):
                 latents = latents + shift_factor
         return latents
 
+    def _normalize_decoded_video(self, video: torch.Tensor) -> torch.Tensor:
+        # Official Wan save_video normalizes decoded tensors from [-1, 1] into [0, 1]
+        # before writing frames. SGLang save_outputs expects video tensors in [0, 1].
+        return ((video + 1.0) / 2.0).clamp(0.0, 1.0)
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         extra = batch.extra["wan_s2v"]
         if self.transformer is not None and not getattr(
@@ -637,6 +642,17 @@ class WanS2VDecodingStage(PipelineStage):
                 infer_frames=extra["infer_frames"],
                 drop_motion_frames=extra["drop_motion_frames"],
             )
+            debug_dump_path = os.environ.get("SGLANG_WAN_S2V_DEBUG_DUMP_DECODED_OUTPUT")
+            if debug_dump_path:
+                torch.save(
+                    {
+                        "output": batch.output.detach().float().cpu(),
+                        "infer_frames": int(extra["infer_frames"]),
+                        "drop_motion_frames": bool(extra["drop_motion_frames"]),
+                    },
+                    debug_dump_path,
+                )
+            batch.output = self._normalize_decoded_video(batch.output)
             return batch
         if extra["drop_motion_frames"]:
             prefix_latents = extra["ref_latents"]
@@ -659,6 +675,17 @@ class WanS2VDecodingStage(PipelineStage):
         batch.output = batch.output[:, :, -extra["infer_frames"] :]
         if extra["drop_motion_frames"]:
             batch.output = batch.output[:, :, 3:]
+        debug_dump_path = os.environ.get("SGLANG_WAN_S2V_DEBUG_DUMP_DECODED_OUTPUT")
+        if debug_dump_path:
+            torch.save(
+                {
+                    "output": batch.output.detach().float().cpu(),
+                    "infer_frames": int(extra["infer_frames"]),
+                    "drop_motion_frames": bool(extra["drop_motion_frames"]),
+                },
+                debug_dump_path,
+            )
+        batch.output = self._normalize_decoded_video(batch.output)
         if server_args.vae_cpu_offload and not hasattr(self.vae, "decode_video"):
             self.vae = self.vae.to("cpu")
         return batch
