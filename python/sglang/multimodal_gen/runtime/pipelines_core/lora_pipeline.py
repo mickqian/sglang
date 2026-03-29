@@ -108,6 +108,15 @@ class LoRAPipeline(ComposedPipelineBase):
             target_name in module_name for target_name in self.lora_target_modules
         )
 
+    def _should_keep_lora_unmerged(self, module_name: str) -> bool:
+        # LTX2 two-stage refinement uses official PEFT-style dynamic LoRA on the
+        # AV cross-attention modulation branch. Materializing those LoRA weights
+        # early changes the live weights away from official runtime behavior, so
+        # keep the whole AV-CA branch unmerged for this pipeline.
+        if self.server_args.pipeline_class_name != "LTX2TwoStagePipeline":
+            return False
+        return "av_ca_" in module_name
+
     def _get_target_lora_layers(
         self, target: str
     ) -> tuple[list[tuple[str, dict[str, BaseLayerWithLoRA]]], str | None]:
@@ -249,6 +258,8 @@ class LoRAPipeline(ComposedPipelineBase):
                 lora_alpha=self.lora_alpha,
             )
             if lora_layer is not None:
+                if self._should_keep_lora_unmerged(name):
+                    lora_layer.keep_unmerged = True
                 target_lora_layers[name] = lora_layer
                 replace_submodule(self.modules[module_name], name, lora_layer)
                 converted_count += 1

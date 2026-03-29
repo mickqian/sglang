@@ -44,6 +44,25 @@ class AdapterLoader(ComponentLoader):
         config.pop("_name_or_path", None)
 
         server_args.model_paths["connectors"] = component_model_path
+        if (
+            server_args.pipeline_class_name is not None
+            and "LTX2" in server_args.pipeline_class_name
+        ):
+            setattr(
+                server_args.pipeline_config,
+                "ltx2_connector_per_modality_projections",
+                bool(config.get("per_modality_projections", False)),
+            )
+            setattr(
+                server_args.pipeline_config,
+                "ltx2_connector_caption_channels",
+                int(config.get("caption_channels", 3840)),
+            )
+            setattr(
+                server_args.pipeline_config,
+                "ltx2_connector_text_proj_in_factor",
+                int(config.get("text_proj_in_factor", 49)),
+            )
 
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
 

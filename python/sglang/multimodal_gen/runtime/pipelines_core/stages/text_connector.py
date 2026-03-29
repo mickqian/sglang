@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
@@ -15,6 +17,23 @@ class LTX2TextConnectorStage(PipelineStage):
     def __init__(self, connectors):
         super().__init__()
         self.connectors = connectors
+
+    def _maybe_save_dump(
+        self, batch: Req, file_name: str, tensor: torch.Tensor | None
+    ) -> None:
+        if tensor is None:
+            return
+        save_dir = None
+        if os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+            save_dir = os.environ.get("EXPERIMENTS_DIR", "/data/experiments")
+        else:
+            output_path = getattr(batch, "output_path", None)
+            if output_path and "ltx2_example_stage1" in output_path:
+                save_dir = output_path
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         # Input: batch.prompt_embeds (from Gemma, [B, S, D])
@@ -45,6 +64,19 @@ class LTX2TextConnectorStage(PipelineStage):
                 else None
             )
 
+        self._maybe_save_dump(batch, "sglang_text_prompt_embeds.pt", prompt_embeds)
+        self._maybe_save_dump(
+            batch, "sglang_text_prompt_attention_mask.pt", prompt_attention_mask
+        )
+        self._maybe_save_dump(
+            batch, "sglang_text_negative_prompt_embeds.pt", neg_prompt_embeds
+        )
+        self._maybe_save_dump(
+            batch,
+            "sglang_text_negative_attention_mask.pt",
+            neg_prompt_attention_mask,
+        )
+
         # Handle CFG: Concatenate negative and positive inputs
         if batch.do_classifier_free_guidance:
 
@@ -54,19 +86,56 @@ class LTX2TextConnectorStage(PipelineStage):
                 [neg_prompt_attention_mask, prompt_attention_mask], dim=0
             )
 
-        # Prepare additive mask for connectors (as per Diffusers implementation)
-        dtype = prompt_embeds.dtype
-
-        additive_attention_mask = (1 - prompt_attention_mask.to(dtype)) * -1000000.0
+        self._maybe_save_dump(
+            batch,
+            "sglang_connector_input_prompt_embeds.pt",
+            prompt_embeds,
+        )
+        self._maybe_save_dump(
+            batch,
+            "sglang_connector_input_attention_mask.pt",
+            prompt_attention_mask,
+        )
 
         # Call connectors
-        # Expects: prompt_embeds, attention_mask, additive_mask=True
         with set_forward_context(current_timestep=None, attn_metadata=None):
-            connector_prompt_embeds, connector_audio_prompt_embeds, connector_mask = (
-                self.connectors(
+            if getattr(self.connectors, "per_modality_projections", False):
+                (
+                    connector_prompt_embeds,
+                    connector_audio_prompt_embeds,
+                    connector_mask,
+                ) = self.connectors(
+                    prompt_embeds,
+                    prompt_attention_mask,
+                )
+            else:
+                dtype = prompt_embeds.dtype
+                additive_attention_mask = (1 - prompt_attention_mask.to(dtype)) * (
+                    -1000000.0
+                )
+                (
+                    connector_prompt_embeds,
+                    connector_audio_prompt_embeds,
+                    connector_mask,
+                ) = self.connectors(
                     prompt_embeds, additive_attention_mask, additive_mask=True
                 )
-            )
+
+        self._maybe_save_dump(
+            batch,
+            "sglang_connector_prompt_embeds.pt",
+            connector_prompt_embeds,
+        )
+        self._maybe_save_dump(
+            batch,
+            "sglang_connector_audio_prompt_embeds.pt",
+            connector_audio_prompt_embeds,
+        )
+        self._maybe_save_dump(
+            batch,
+            "sglang_connector_attention_mask.pt",
+            connector_mask,
+        )
 
         # Split results if CFG was enabled
         if batch.do_classifier_free_guidance:

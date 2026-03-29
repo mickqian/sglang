@@ -78,6 +78,8 @@ class LTX2ArchConfig(DiTArchConfig):
             r"^av_cross_attn_audio_scale_shift\.(.*)$": r"av_ca_audio_scale_shift_adaln_single.\1",
             r"^av_cross_attn_video_a2v_gate\.(.*)$": r"av_ca_a2v_gate_adaln_single.\1",
             r"^av_cross_attn_audio_v2a_gate\.(.*)$": r"av_ca_v2a_gate_adaln_single.\1",
+            r"^prompt_adaln\.(.*)$": r"prompt_adaln_single.\1",
+            r"^audio_prompt_adaln\.(.*)$": r"audio_prompt_adaln_single.\1",
             # Scale Shift Tables (Block Level)
             # HF: scale_shift_table_a2v_ca_video -> SGLang: video_a2v_cross_attn_scale_shift_table
             r"(.*)scale_shift_table_a2v_ca_video": r"\1video_a2v_cross_attn_scale_shift_table",
@@ -103,6 +105,8 @@ class LTX2ArchConfig(DiTArchConfig):
             r"^av_ca_audio_scale_shift_adaln_single\.(.*)$": r"av_cross_attn_audio_scale_shift.\1",
             r"^av_ca_a2v_gate_adaln_single\.(.*)$": r"av_cross_attn_video_a2v_gate.\1",
             r"^av_ca_v2a_gate_adaln_single\.(.*)$": r"av_cross_attn_audio_v2a_gate.\1",
+            r"^prompt_adaln_single\.(.*)$": r"prompt_adaln.\1",
+            r"^audio_prompt_adaln_single\.(.*)$": r"audio_prompt_adaln.\1",
             # Scale Shift Tables (Block Level)
             # SGLang: video_a2v_cross_attn_scale_shift_table -> HF: scale_shift_table_a2v_ca_video
             r"(.*)video_a2v_cross_attn_scale_shift_table": r"\1scale_shift_table_a2v_ca_video",
@@ -137,6 +141,7 @@ class LTX2ArchConfig(DiTArchConfig):
     positional_embedding_max_pos: list[int] | None = None
     timestep_scale_multiplier: int = 1000
     use_middle_indices_grid: bool = True
+    cross_attn_mod: bool = False
 
     # Audio parameters
     audio_num_attention_heads: int = 32
@@ -146,6 +151,7 @@ class LTX2ArchConfig(DiTArchConfig):
     audio_cross_attention_dim: int = 2048
     audio_positional_embedding_max_pos: list[int] | None = None
     av_ca_timestep_scale_multiplier: int = 1
+    audio_cross_attn_mod: bool = False
 
     # SGLang-specific parameters
     patch_size: tuple[int, int, int] = (1, 2, 2)

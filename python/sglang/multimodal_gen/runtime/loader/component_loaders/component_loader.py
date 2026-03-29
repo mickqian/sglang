@@ -40,6 +40,39 @@ class ComponentLoader(ABC):
 
     _loaders_registered = False
 
+    @staticmethod
+    def normalize_library_for_component(
+        component_name: str, transformers_or_diffusers: str
+    ) -> str:
+        component_name = _normalize_component_type(component_name)
+
+        # NOTE(FlamingoPg): official LTX-2 model_index.json marks these components
+        # with a custom "ltx2" library tag, but they still load through our
+        # diffusers-compatible paths.
+        if component_name in ["vocoder", "connectors"] and transformers_or_diffusers in [
+            "ltx2",
+            "diffusers",
+        ]:
+            return "diffusers"
+
+        # NOTE(CloudRipple): special for MOVA models
+        # TODO(CloudRipple): remove most of these special cases after unifying the loading logic
+        if component_name in [
+            "audio_vae",
+            "audio_dit",
+            "dual_tower_bridge",
+            "video_dit",
+        ]:
+            return "diffusers"
+
+        if (
+            component_name == "scheduler"
+            and transformers_or_diffusers == "mova.diffusion.schedulers.flow_match_pair"
+        ):
+            return "diffusers"
+
+        return transformers_or_diffusers
+
     def __init_subclass__(cls, **kwargs):
         """
         register loaders, called when subclass is imported
@@ -222,25 +255,9 @@ class ComponentLoader(ABC):
         # Map of component types to their loader classes and expected library
         component_name = _normalize_component_type(component_name)
 
-        # NOTE(FlamingoPg): special for LTX-2 models
-        if component_name == "vocoder" or component_name == "connectors":
-            transformers_or_diffusers = "diffusers"
-
-        # NOTE(CloudRipple): special for MOVA models
-        # TODO(CloudRipple): remove most of these special cases after unifying the loading logic
-        if component_name in [
-            "audio_vae",
-            "audio_dit",
-            "dual_tower_bridge",
-            "video_dit",
-        ]:
-            transformers_or_diffusers = "diffusers"
-
-        if (
-            component_name == "scheduler"
-            and transformers_or_diffusers == "mova.diffusion.schedulers.flow_match_pair"
-        ):
-            transformers_or_diffusers = "diffusers"
+        transformers_or_diffusers = cls.normalize_library_for_component(
+            component_name, transformers_or_diffusers
+        )
 
         if component_name in component_name_to_loader_cls:
             loader_cls: Type[ComponentLoader] = component_name_to_loader_cls[
@@ -329,6 +346,10 @@ class PipelineComponentLoader:
             transformers_or_diffusers: Whether the component is from transformers or diffusers
 
         """
+
+        transformers_or_diffusers = ComponentLoader.normalize_library_for_component(
+            component_name, transformers_or_diffusers
+        )
 
         # Get the appropriate loader for this component type
         loader = ComponentLoader.for_component_type(
