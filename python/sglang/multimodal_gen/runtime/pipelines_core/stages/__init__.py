@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding_av import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising import DenoisingStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2AVDenoisingStage,
+    LTX2RefinementStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_dmd import (
     DmdDenoisingStage,
@@ -61,6 +62,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_encoding import (
     TextEncodingStage,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
+    LTX2HalveResolutionStage,
+    LTX2LoRASwitchStage,
+    LTX2UpsampleStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import (
     TimestepPreparationStage,
 )
@@ -75,6 +81,7 @@ __all__ = [
     "DenoisingStage",
     "DmdDenoisingStage",
     "LTX2AVDenoisingStage",
+    "LTX2RefinementStage",
     "CausalDMDDenoisingStage",
     "EncodingStage",
     "DecodingStage",
@@ -83,6 +90,9 @@ __all__ = [
     "ImageVAEEncodingStage",
     "TextEncodingStage",
     "LTX2TextConnectorStage",
+    "LTX2HalveResolutionStage",
+    "LTX2LoRASwitchStage",
+    "LTX2UpsampleStage",
     # Hunyuan3D shape stages
     "Hunyuan3DShapeBeforeDenoisingStage",
     "Hunyuan3DShapeDenoisingStage",
