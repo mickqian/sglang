@@ -1,12 +1,10 @@
 import math
+import os
 
 import numpy as np
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
-
-from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
-    PipelineComponentLoader,
-)
+from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
@@ -207,14 +205,21 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 "LTX2TwoStagePipeline requires --spatial-upsampler-path "
                 "(component_paths['spatial_upsampler'])."
             )
-        module, memory_usage = PipelineComponentLoader.load_component(
-            component_name="spatial_upsampler",
-            component_model_path=upsampler_path,
-            transformers_or_diffusers="diffusers",
-            server_args=server_args,
+        upsampler_path = os.path.expanduser(upsampler_path)
+        upsampler_root = upsampler_path
+        upsampler_subfolder = None
+        if os.path.isdir(upsampler_path):
+            upsampler_root = os.path.dirname(upsampler_path.rstrip("/"))
+            upsampler_subfolder = os.path.basename(upsampler_path.rstrip("/"))
+
+        module = LTX2LatentUpsamplerModel.from_pretrained(
+            upsampler_root,
+            subfolder=upsampler_subfolder,
+            revision=server_args.revision,
+            torch_dtype=torch.bfloat16,
         )
         self.modules["spatial_upsampler"] = module
-        self.memory_usages["spatial_upsampler"] = memory_usage
+        self.memory_usages["spatial_upsampler"] = 0.0
 
         distilled_lora_path = server_args.component_paths.get("distilled_lora")
         if not distilled_lora_path:
