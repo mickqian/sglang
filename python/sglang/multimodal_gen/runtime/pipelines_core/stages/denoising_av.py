@@ -422,21 +422,16 @@ class LTX2AVDenoisingStage(DenoisingStage):
                         # Predict noise residual
                         attn_metadata = self._build_attn_metadata(i, batch, server_args)
 
-                        # === LTX-2 sigma-space Euler step (flow matching) ===
-                        # Use scheduler-generated sigmas (includes terminal sigma=0).
-                        sigmas = getattr(self.scheduler, "sigmas", None)
-                        if sigmas is None or not isinstance(sigmas, torch.Tensor):
-                            raise ValueError(
-                                "Expected scheduler.sigmas to be a tensor for LTX-2."
-                            )
-                        sigma = sigmas[i].to(device=latents.device, dtype=torch.float32)
-                        sigma_next = sigmas[i + 1].to(
-                            device=latents.device, dtype=torch.float32
-                        )
-                        dt = sigma_next - sigma
-
                         latent_model_input = latents.to(target_dtype)
                         audio_latent_model_input = audio_latents.to(target_dtype)
+                        if batch.do_classifier_free_guidance:
+                            latent_model_input = torch.cat(
+                                [latent_model_input, latent_model_input], dim=0
+                            )
+                            audio_latent_model_input = torch.cat(
+                                [audio_latent_model_input, audio_latent_model_input],
+                                dim=0,
+                            )
 
                         latent_num_frames = latent_num_frames_for_model
 
@@ -471,13 +466,33 @@ class LTX2AVDenoisingStage(DenoisingStage):
                         encoder_hidden_states = batch.prompt_embeds[0]
                         audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
                         encoder_attention_mask = batch.prompt_attention_mask
+                        if batch.do_classifier_free_guidance:
+                            encoder_hidden_states = torch.cat(
+                                [
+                                    batch.negative_prompt_embeds[0],
+                                    encoder_hidden_states,
+                                ],
+                                dim=0,
+                            )
+                            audio_encoder_hidden_states = torch.cat(
+                                [
+                                    batch.negative_audio_prompt_embeds[0],
+                                    audio_encoder_hidden_states,
+                                ],
+                                dim=0,
+                            )
+                            encoder_attention_mask = torch.cat(
+                                [batch.negative_attention_mask, encoder_attention_mask],
+                                dim=0,
+                            )
 
-                        # Follow ltx-pipelines structure: separate pos/neg forward passes,
-                        # then apply CFG on denoised (x0) predictions.
+                        # Match official diffusers LTX-2 semantics:
+                        # run a single batch-2 forward for CFG and apply guidance
+                        # directly on the model velocity/noise prediction.
                         with set_forward_context(
                             current_timestep=i, attn_metadata=attn_metadata
                         ):
-                            v_pos, a_v_pos = current_model(
+                            v_video, v_audio = current_model(
                                 hidden_states=latent_model_input,
                                 audio_hidden_states=audio_latent_model_input,
                                 encoder_hidden_states=encoder_hidden_states,
@@ -496,106 +511,36 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                 return_latents=False,
                                 return_dict=False,
                             )
+                        v_video = v_video.float()
+                        v_audio = v_audio.float()
 
-                            if batch.do_classifier_free_guidance:
-                                neg_encoder_hidden_states = (
-                                    batch.negative_prompt_embeds[0]
-                                )
-                                neg_audio_encoder_hidden_states = (
-                                    batch.negative_audio_prompt_embeds[0]
-                                )
-                                neg_encoder_attention_mask = (
-                                    batch.negative_attention_mask
-                                )
-
-                                v_neg, a_v_neg = current_model(
-                                    hidden_states=latent_model_input,
-                                    audio_hidden_states=audio_latent_model_input,
-                                    encoder_hidden_states=neg_encoder_hidden_states,
-                                    audio_encoder_hidden_states=neg_audio_encoder_hidden_states,
-                                    timestep=timestep_video,
-                                    audio_timestep=timestep_audio,
-                                    encoder_attention_mask=neg_encoder_attention_mask,
-                                    audio_encoder_attention_mask=neg_encoder_attention_mask,
-                                    num_frames=latent_num_frames,
-                                    height=latent_height,
-                                    width=latent_width,
-                                    fps=batch.fps,
-                                    audio_num_frames=audio_num_frames_latent,
-                                    video_coords=video_coords,
-                                    audio_coords=audio_coords,
-                                    return_latents=False,
-                                    return_dict=False,
-                                )
-                            else:
-                                v_neg = None
-                                a_v_neg = None
-
-                        v_pos = v_pos.float()
-                        a_v_pos = a_v_pos.float()
-                        if v_neg is not None:
-                            v_neg = v_neg.float()
-                        if a_v_neg is not None:
-                            a_v_neg = a_v_neg.float()
-
-                        # Velocity -> denoised (x0): x0 = x - sigma * v
-                        sigma_val = float(sigma.item())
-                        denoised_video = (latents.float() - sigma_val * v_pos).to(
-                            latents.dtype
-                        )
-                        denoised_audio = (
-                            audio_latents.float() - sigma_val * a_v_pos
-                        ).to(audio_latents.dtype)
-
-                        if (
-                            batch.do_classifier_free_guidance
-                            and v_neg is not None
-                            and a_v_neg is not None
-                        ):
-                            denoised_video_neg = (
-                                latents.float() - sigma_val * v_neg
-                            ).to(latents.dtype)
-                            denoised_audio_neg = (
-                                audio_latents.float() - sigma_val * a_v_neg
-                            ).to(audio_latents.dtype)
-                            denoised_video = denoised_video + (
-                                batch.guidance_scale - 1.0
-                            ) * (denoised_video - denoised_video_neg)
-                            denoised_audio = denoised_audio + (
-                                batch.guidance_scale - 1.0
-                            ) * (denoised_audio - denoised_audio_neg)
-
-                        # Apply conditioning mask (keep conditioned tokens clean).
-                        if (
-                            do_ti2v
-                            and denoise_mask is not None
-                            and clean_latent is not None
-                        ):
-                            denoised_video = (
-                                denoised_video * denoise_mask
-                                + clean_latent.float() * (1.0 - denoise_mask)
+                        if batch.do_classifier_free_guidance:
+                            v_video_uncond, v_video_text = v_video.chunk(2)
+                            v_video = v_video_uncond + current_guidance_scale * (
+                                v_video_text - v_video_uncond
                             )
+                            v_audio_uncond, v_audio_text = v_audio.chunk(2)
+                            v_audio = v_audio_uncond + current_guidance_scale * (
+                                v_audio_text - v_audio_uncond
+                            )
+                            if batch.guidance_rescale > 0.0:
+                                v_video = self._rescale_noise_cfg(
+                                    v_video,
+                                    v_video_text,
+                                    guidance_rescale=batch.guidance_rescale,
+                                )
+                                v_audio = self._rescale_noise_cfg(
+                                    v_audio,
+                                    v_audio_text,
+                                    guidance_rescale=batch.guidance_rescale,
+                                )
 
-                        # Euler step in sigma space: x_next = x + (sigma_next - sigma) * v,
-                        # where v = (x - x0) / sigma.
-                        if sigma_val == 0.0:
-                            v_video = torch.zeros_like(denoised_video)
-                            v_audio = torch.zeros_like(denoised_audio)
-                        else:
-                            v_video = (
-                                (latents.float() - denoised_video.float()) / sigma_val
-                            ).to(latents.dtype)
-                            v_audio = (
-                                (audio_latents.float() - denoised_audio.float())
-                                / sigma_val
-                            ).to(audio_latents.dtype)
-
-                        latents = (latents.float() + v_video.float() * dt).to(
-                            dtype=latents.dtype
-                        )
-                        audio_latents = (
-                            audio_latents.float() + v_audio.float() * dt
-                        ).to(dtype=audio_latents.dtype)
+                        latents = self.scheduler.step(
+                            v_video, t_device, latents, return_dict=False
+                        )[0]
+                        audio_latents = audio_scheduler.step(
+                            v_audio, t_device, audio_latents, return_dict=False
+                        )[0]
 
                         if do_ti2v:
                             latents[:, :num_img_tokens, :] = batch.image_latent[
