@@ -109,13 +109,21 @@ class LoRAPipeline(ComposedPipelineBase):
         )
 
     def _should_keep_lora_unmerged(self, module_name: str) -> bool:
-        # LTX2 two-stage refinement uses official PEFT-style dynamic LoRA on the
-        # AV cross-attention modulation branch. Materializing those LoRA weights
-        # early changes the live weights away from official runtime behavior, so
-        # keep the whole AV-CA branch unmerged for this pipeline.
+        # LTX2 two-stage refinement is numerically sensitive on the global AV-CA
+        # modulation heads, but keeping the entire av_ca_* branch unmerged makes
+        # stage2 peak memory too high for single-H100 exact runs. Restrict the
+        # dynamic LoRA path to the four modulation modules only.
         if self.server_args.pipeline_class_name != "LTX2TwoStagePipeline":
             return False
-        return "av_ca_" in module_name
+        return any(
+            target_name in module_name
+            for target_name in (
+                "av_ca_video_scale_shift_adaln_single",
+                "av_ca_a2v_gate_adaln_single",
+                "av_ca_audio_scale_shift_adaln_single",
+                "av_ca_v2a_gate_adaln_single",
+            )
+        )
 
     def _get_target_lora_layers(
         self, target: str
