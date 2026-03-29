@@ -49,6 +49,40 @@ def _maybe_save_ltx2_stage1_text_dump(
     torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
 
+def _maybe_save_ltx2_text_encoder_debug(
+    batch: Req,
+    text_encoder: torch.nn.Module | None,
+) -> None:
+    if text_encoder is None:
+        return
+    save_dir = None
+    if os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        save_dir = os.environ.get("EXPERIMENTS_DIR", "/data/experiments")
+    else:
+        output_path = getattr(batch, "output_path", None)
+        if output_path and "ltx2_example_stage1" in output_path:
+            save_dir = output_path
+    if not save_dir:
+        return
+
+    first_param = next(text_encoder.parameters(), None)
+    config = getattr(text_encoder, "config", None)
+    debug_info = {
+        "text_encoder_type": type(text_encoder).__name__,
+        "training": bool(text_encoder.training),
+        "device": str(first_param.device) if first_param is not None else None,
+        "dtype": str(first_param.dtype) if first_param is not None else None,
+        "attn_implementation": getattr(config, "_attn_implementation", None),
+        "attn_implementation_internal": getattr(
+            config, "_attn_implementation_internal", None
+        ),
+    }
+    if hasattr(torch.backends.cuda, "cudnn_sdp_enabled"):
+        debug_info["cudnn_sdp_enabled"] = bool(torch.backends.cuda.cudnn_sdp_enabled())
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(debug_info, os.path.join(save_dir, "sglang_text_encoder_debug.pt"))
+
+
 class TextEncodingStage(PipelineStage):
     """
     Stage for encoding text prompts into embeddings for diffusion models.
@@ -108,6 +142,7 @@ class TextEncodingStage(PipelineStage):
             _maybe_save_ltx2_stage1_text_dump(
                 batch, "sglang_text_prompt_embeds.pt", prompt_embeds_list[0]
             )
+            _maybe_save_ltx2_text_encoder_debug(batch, self.text_encoders[0])
         if prompt_masks_list:
             _maybe_save_ltx2_stage1_text_dump(
                 batch,
