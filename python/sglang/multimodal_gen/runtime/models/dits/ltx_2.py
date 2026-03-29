@@ -380,12 +380,21 @@ def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
     return hidden_states.to(dtype=input_dtype)
 
 
-def _ltx2_forward_linear_exact(layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def _ltx2_forward_linear_exact(
+    layer: nn.Module,
+    x: torch.Tensor,
+    force_compute_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     base_layer = getattr(layer, "base_layer", layer)
     weight = base_layer.weight
     bias = getattr(base_layer, "bias", None)
-    if x.dtype != weight.dtype:
-        x = x.to(dtype=weight.dtype)
+    compute_dtype = force_compute_dtype or weight.dtype
+    if x.dtype != compute_dtype:
+        x = x.to(dtype=compute_dtype)
+    if weight.dtype != compute_dtype:
+        weight = weight.to(dtype=compute_dtype)
+    if bias is not None and bias.dtype != compute_dtype:
+        bias = bias.to(dtype=compute_dtype)
     out = F.linear(x, weight, bias)
 
     if (
@@ -484,7 +493,11 @@ class LTX2TimestepEmbedder(nn.Module):
                         layer_lora_b,
                     )
         if use_exact_linear and get_tp_world_size() == 1:
-            x = _ltx2_forward_linear_exact(self.linear_1, t_emb)
+            x = _ltx2_forward_linear_exact(
+                self.linear_1,
+                t_emb,
+                force_compute_dtype=torch.float32,
+            )
         else:
             x, _ = self.linear_1(t_emb)
         if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
@@ -493,7 +506,11 @@ class LTX2TimestepEmbedder(nn.Module):
         if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
             _ltx2_debug_save(f"sglang_timestep_silu_{debug_time_embed_name}", x)
         if use_exact_linear and get_tp_world_size() == 1:
-            x = _ltx2_forward_linear_exact(self.linear_2, x)
+            x = _ltx2_forward_linear_exact(
+                self.linear_2,
+                x,
+                force_compute_dtype=torch.float32,
+            )
         else:
             x, _ = self.linear_2(x)
         if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
@@ -542,8 +559,6 @@ class LTX2AdaLayerNormSingle(nn.Module):
             bias=True,
             gather_output=True,
         )
-        if self.force_fp32:
-            self.float()
 
     def forward(
         self, timestep: torch.Tensor, hidden_dtype: torch.dtype | None = None
@@ -553,10 +568,14 @@ class LTX2AdaLayerNormSingle(nn.Module):
             timestep,
             hidden_dtype=compute_dtype,
             use_exact_linear=self.force_fp32,
-        ).to(dtype=self.linear.weight.dtype)
+        ).to(dtype=torch.float32 if self.force_fp32 else self.linear.weight.dtype)
         silu_embedded = self.silu(embedded_timestep)
         if self.force_fp32 and get_tp_world_size() == 1:
-            out = _ltx2_forward_linear_exact(self.linear, silu_embedded)
+            out = _ltx2_forward_linear_exact(
+                self.linear,
+                silu_embedded,
+                force_compute_dtype=torch.float32,
+            )
         else:
             out, _ = self.linear(silu_embedded)
         if self.force_fp32 and hidden_dtype is not None:
