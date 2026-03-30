@@ -116,6 +116,24 @@ class LTX2AVDenoisingStage(DenoisingStage):
         return super()._maybe_enable_cache_dit(num_inference_steps, batch)
 
     @staticmethod
+    def _convert_velocity_to_x0(
+        sample: torch.Tensor,
+        velocity: torch.Tensor,
+        step_idx: int,
+        scheduler,
+    ) -> torch.Tensor:
+        return sample - velocity * scheduler.sigmas[step_idx]
+
+    @staticmethod
+    def _convert_x0_to_velocity(
+        sample: torch.Tensor,
+        x0: torch.Tensor,
+        step_idx: int,
+        scheduler,
+    ) -> torch.Tensor:
+        return (sample - x0) / scheduler.sigmas[step_idx]
+
+    @staticmethod
     def _resize_center_crop(
         img: PIL.Image.Image, *, width: int, height: int
     ) -> PIL.Image.Image:
@@ -540,24 +558,49 @@ class LTX2AVDenoisingStage(DenoisingStage):
 
                         if batch.do_classifier_free_guidance:
                             v_video_uncond, v_video_text = v_video.chunk(2)
-                            v_video = v_video_uncond + current_guidance_scale * (
-                                v_video_text - v_video_uncond
+                            x0_video = self._convert_velocity_to_x0(
+                                latents, v_video_text, i, self.scheduler
                             )
+                            x0_video_uncond = self._convert_velocity_to_x0(
+                                latents, v_video_uncond, i, self.scheduler
+                            )
+                            x0_video = x0_video + (current_guidance_scale - 1.0) * (
+                                x0_video - x0_video_uncond
+                            )
+
                             v_audio_uncond, v_audio_text = v_audio.chunk(2)
-                            v_audio = v_audio_uncond + current_guidance_scale * (
-                                v_audio_text - v_audio_uncond
+                            x0_audio = self._convert_velocity_to_x0(
+                                audio_latents, v_audio_text, i, audio_scheduler
                             )
+                            x0_audio_uncond = self._convert_velocity_to_x0(
+                                audio_latents, v_audio_uncond, i, audio_scheduler
+                            )
+                            x0_audio = x0_audio + (current_guidance_scale - 1.0) * (
+                                x0_audio - x0_audio_uncond
+                            )
+
                             if batch.guidance_rescale > 0.0:
-                                v_video = self._rescale_noise_cfg(
-                                    v_video,
-                                    v_video_text,
+                                x0_video = self._rescale_noise_cfg(
+                                    x0_video,
+                                    self._convert_velocity_to_x0(
+                                        latents, v_video_text, i, self.scheduler
+                                    ),
                                     guidance_rescale=batch.guidance_rescale,
                                 )
-                                v_audio = self._rescale_noise_cfg(
-                                    v_audio,
-                                    v_audio_text,
+                                x0_audio = self._rescale_noise_cfg(
+                                    x0_audio,
+                                    self._convert_velocity_to_x0(
+                                        audio_latents, v_audio_text, i, audio_scheduler
+                                    ),
                                     guidance_rescale=batch.guidance_rescale,
                                 )
+
+                            v_video = self._convert_x0_to_velocity(
+                                latents, x0_video, i, self.scheduler
+                            )
+                            v_audio = self._convert_x0_to_velocity(
+                                audio_latents, x0_audio, i, audio_scheduler
+                            )
 
                         latents = self.scheduler.step(
                             v_video, t_device, latents, return_dict=False
