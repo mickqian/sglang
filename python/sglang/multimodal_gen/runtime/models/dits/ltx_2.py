@@ -887,6 +887,33 @@ class LTX2FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         debug_ff_name = _LTX2_DEBUG_STATE.get("ff_name")
+        if x.ndim == 3 and x.shape[1] > 4096 and get_tp_world_size() == 1:
+            proj_in_chunks = [] if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name else None
+            act_chunks = [] if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name else None
+            out_chunks = []
+            for x_chunk in x.split(4096, dim=1):
+                proj_in_chunk, _ = self.proj_in(x_chunk)
+                if proj_in_chunks is not None:
+                    proj_in_chunks.append(proj_in_chunk)
+                act_chunk = self.act(proj_in_chunk)
+                if act_chunks is not None:
+                    act_chunks.append(act_chunk)
+                out_chunk, _ = self.proj_out(act_chunk)
+                out_chunks.append(out_chunk)
+            if proj_in_chunks is not None:
+                _ltx2_debug_save(
+                    f"sglang_{debug_ff_name}_proj_in",
+                    torch.cat(proj_in_chunks, dim=1),
+                )
+                _ltx2_debug_save(
+                    f"sglang_{debug_ff_name}_act",
+                    torch.cat(act_chunks, dim=1),
+                )
+            x = torch.cat(out_chunks, dim=1)
+            if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
+                _ltx2_debug_save(f"sglang_{debug_ff_name}_proj_out", x)
+            return x
+
         x, _ = self.proj_in(x)
         if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
             _ltx2_debug_save(f"sglang_{debug_ff_name}_proj_in", x)
