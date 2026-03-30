@@ -55,6 +55,8 @@ class LTX2AVDecodingStage(DecodingStage):
             try:
                 if server_args.pipeline_config.vae_tiling:
                     self.vae.enable_tiling()
+                    if hasattr(self.vae, "use_framewise_decoding"):
+                        self.vae.use_framewise_decoding = True
             except Exception:
                 pass
             decode_output = self.vae.decode(latents)
