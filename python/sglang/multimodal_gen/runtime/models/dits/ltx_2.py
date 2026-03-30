@@ -807,10 +807,17 @@ class LTX2Attention(nn.Module):
                     m = m[:, None, :, :]
                 sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
 
-        if sdpa_mask is None and get_sp_world_size() == 1 and _ltx2_should_force_cudnn_sdpa(
-            q_, None
+        if (
+            sdpa_mask is None
+            and get_sp_world_size() == 1
+            and self.attn.backend == AttentionBackendEnum.TORCH_SDPA
         ):
-            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+            if _ltx2_should_force_cudnn_sdpa(q_, None):
+                with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                    out = torch.nn.functional.scaled_dot_product_attention(
+                        q_, k_, v_, attn_mask=None, dropout_p=0.0, is_causal=False
+                    ).transpose(1, 2)
+            else:
                 out = torch.nn.functional.scaled_dot_product_attention(
                     q_, k_, v_, attn_mask=None, dropout_p=0.0, is_causal=False
                 ).transpose(1, 2)
