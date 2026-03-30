@@ -195,7 +195,7 @@ class LTX2Pipeline(_BaseLTX2Pipeline):
 
 class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     pipeline_name = "LTX2TwoStagePipeline"
-    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
+    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875]
 
     def initialize_pipeline(self, server_args: ServerArgs):
         super().initialize_pipeline(server_args)
