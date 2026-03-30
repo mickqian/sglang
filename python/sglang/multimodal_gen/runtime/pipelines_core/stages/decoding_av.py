@@ -54,7 +54,15 @@ class LTX2AVDecodingStage(DecodingStage):
         ):
             try:
                 if server_args.pipeline_config.vae_tiling:
-                    self.vae.enable_tiling()
+                    if latents.shape[-2] >= 32 or latents.shape[-1] >= 48:
+                        self.vae.enable_tiling(
+                            tile_sample_min_height=384,
+                            tile_sample_min_width=384,
+                            tile_sample_stride_height=320,
+                            tile_sample_stride_width=320,
+                        )
+                    else:
+                        self.vae.enable_tiling()
                     if hasattr(self.vae, "use_framewise_decoding"):
                         self.vae.use_framewise_decoding = True
             except Exception:
