@@ -76,7 +76,9 @@ class LTX2AVDecodingStage(DecodingStage):
                 video = decode_output
 
         self.vae.to(original_dtype)
-        video = video.float().cpu()
+        video = video.cpu()
+        if video.dtype != torch.float32:
+            video = video.float()
         video = self.video_processor.postprocess_video(video, output_type="np")
 
         output_batch = OutputBatch(
