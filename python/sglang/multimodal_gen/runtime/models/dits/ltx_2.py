@@ -1733,7 +1733,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         encoder_hidden_states: torch.Tensor,
         audio_encoder_hidden_states: torch.Tensor,
         timestep: torch.LongTensor,
+        sigma: Optional[torch.Tensor] = None,
         audio_timestep: Optional[torch.LongTensor] = None,
+        audio_sigma: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         audio_encoder_attention_mask: Optional[torch.Tensor] = None,
         num_frames: Optional[int] = None,
@@ -1743,11 +1745,13 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_num_frames: Optional[int] = None,
         video_coords: Optional[torch.Tensor] = None,
         audio_coords: Optional[torch.Tensor] = None,
+        use_cross_timestep: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         debug_forward = _ltx2_debug_start_forward()
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
+        audio_sigma = audio_sigma if audio_sigma is not None else sigma
         try:
             if (
                 encoder_attention_mask is not None
@@ -1957,10 +1961,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             )
             if self.prompt_modulation:
                 temb_prompt, _ = self.prompt_adaln_single(
-                    timestep.flatten(), hidden_dtype=hidden_states.dtype
+                    sigma.flatten(), hidden_dtype=hidden_states.dtype
                 )
                 temb_prompt_audio, _ = self.audio_prompt_adaln_single(
-                    audio_timestep.flatten(), hidden_dtype=audio_hidden_states.dtype
+                    audio_sigma.flatten(), hidden_dtype=audio_hidden_states.dtype
                 )
                 temb_prompt = temb_prompt.view(batch_size, -1, temb_prompt.size(-1))
                 temb_prompt_audio = temb_prompt_audio.view(
@@ -2066,11 +2070,14 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
 
             # 3.2. Prepare global modality cross attention modulation parameters
             hidden_dtype = hidden_states.dtype
+            video_ca_timestep = (
+                audio_sigma.flatten() if use_cross_timestep else timestep.flatten()
+            )
             if debug_forward:
                 _LTX2_DEBUG_STATE["time_embed_name"] = "ca_scale_shift_video"
             temb_ca_scale_shift, embedded_temb_ca_scale_shift = (
                 self.av_ca_video_scale_shift_adaln_single(
-                timestep.flatten(), hidden_dtype=hidden_dtype
+                    video_ca_timestep, hidden_dtype=hidden_dtype
                 )
             )
             temb_ca_scale_shift = temb_ca_scale_shift.view(
@@ -2083,7 +2090,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             if debug_forward:
                 _LTX2_DEBUG_STATE["time_embed_name"] = "ca_gate_video"
             temb_ca_gate, embedded_temb_ca_gate = self.av_ca_a2v_gate_adaln_single(
-                timestep.flatten() * self.av_ca_timestep_scale_multiplier,
+                video_ca_timestep * self.av_ca_timestep_scale_multiplier,
                 hidden_dtype=hidden_dtype,
             )
             temb_ca_gate = temb_ca_gate.view(batch_size, -1, temb_ca_gate.shape[-1])
@@ -2091,11 +2098,14 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 batch_size, -1, embedded_temb_ca_gate.shape[-1]
             )
 
+            audio_ca_timestep = (
+                sigma.flatten() if use_cross_timestep else audio_timestep.flatten()
+            )
             if debug_forward:
                 _LTX2_DEBUG_STATE["time_embed_name"] = "ca_scale_shift_audio"
             temb_ca_audio_scale_shift, embedded_temb_ca_audio_scale_shift = (
                 self.av_ca_audio_scale_shift_adaln_single(
-                    audio_timestep.flatten(), hidden_dtype=audio_hidden_states.dtype
+                    audio_ca_timestep, hidden_dtype=audio_hidden_states.dtype
                 )
             )
             temb_ca_audio_scale_shift = temb_ca_audio_scale_shift.view(
@@ -2111,8 +2121,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 _LTX2_DEBUG_STATE["time_embed_name"] = "ca_gate_audio"
             temb_ca_audio_gate, embedded_temb_ca_audio_gate = (
                 self.av_ca_v2a_gate_adaln_single(
-                audio_timestep.flatten() * self.av_ca_timestep_scale_multiplier,
-                hidden_dtype=audio_hidden_states.dtype,
+                    audio_ca_timestep * self.av_ca_timestep_scale_multiplier,
+                    hidden_dtype=audio_hidden_states.dtype,
                 )
             )
             temb_ca_audio_gate = temb_ca_audio_gate.view(

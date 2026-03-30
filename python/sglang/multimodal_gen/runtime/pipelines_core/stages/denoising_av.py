@@ -526,7 +526,9 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                 encoder_hidden_states=encoder_hidden_states,
                                 audio_encoder_hidden_states=audio_encoder_hidden_states,
                                 timestep=timestep_video,
+                                sigma=timestep_video,
                                 audio_timestep=timestep_audio,
+                                audio_sigma=timestep_audio,
                                 encoder_attention_mask=encoder_attention_mask,
                                 audio_encoder_attention_mask=encoder_attention_mask,
                                 num_frames=latent_num_frames,
@@ -536,6 +538,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                 audio_num_frames=audio_num_frames_latent,
                                 video_coords=video_coords,
                                 audio_coords=audio_coords,
+                                use_cross_timestep=False,
                                 return_latents=False,
                                 return_dict=False,
                             )
