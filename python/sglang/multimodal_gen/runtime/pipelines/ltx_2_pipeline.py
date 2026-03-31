@@ -268,7 +268,6 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
     def create_pipeline_stages(self, server_args: ServerArgs):
         _add_ltx2_front_stages(self)
-        self.add_stage(LTX2HalveResolutionStage())
         self.add_stage(
             LTX2LoRASwitchStage(pipeline=self, phase="stage1"),
             stage_name="ltx2_lora_switch_stage1",
