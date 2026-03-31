@@ -730,7 +730,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         need_wait_for_image=obj.need_wait_for_image,
                     )
                 if mm_inputs is None:
-                    mm_inputs: Dict = await self.mm_data_processor.process(
+                    mm_inputs = await self.mm_data_processor.process(
                         image_data=obj.image_data,
                         audio_data=obj.audio_data,
                         input_text_or_ids=(input_text or input_ids),
@@ -744,7 +744,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             ):
                 # In language_only mode with zmq_to_scheduler, if we didn't dispatch
                 # to encoder (e.g., only one image), process locally like non-language_only mode
-                mm_inputs: Dict = await self.mm_data_processor.process(
+                mm_inputs = await self.mm_data_processor.process(
                     image_data=obj.image_data,
                     audio_data=obj.audio_data,
                     input_text_or_ids=(input_text or input_ids),
@@ -752,14 +752,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     max_req_input_len=self.max_req_input_len,
                 )
 
-            if mm_inputs and "input_ids" in mm_inputs:
-                input_ids = mm_inputs["input_ids"]
+            if mm_inputs and mm_inputs.input_ids is not None:
+                input_ids = mm_inputs.input_ids
             if (
                 envs.SGLANG_MM_PRECOMPUTE_HASH.get()
                 and mm_inputs
-                and "mm_items" in mm_inputs
+                and mm_inputs.mm_items
             ):
-                for item in mm_inputs["mm_items"]:
+                for item in mm_inputs.mm_items:
                     if isinstance(item, MultimodalDataItem):
                         item.set_pad_value()
         else:
@@ -934,7 +934,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         input_text: str,
         input_ids: List[int],
         input_embeds: Optional[Union[List[float], None]] = None,
-        mm_inputs: Optional[Dict] = None,
+        mm_inputs=None,
         token_type_ids: Optional[List[int]] = None,
     ) -> Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput]:
         """Create a tokenized request object from common parameters."""

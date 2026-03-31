@@ -337,6 +337,56 @@ class MultimodalDataItem:
 
 
 @dataclasses.dataclass
+class MultimodalProcessorOutput:
+    """Raw output from multimodal processors, before pad/hash computation.
+
+    This is the typed replacement for the dict previously returned by
+    ``BaseMultimodalProcessor.process_mm_data_async``.  Unlike
+    ``MultimodalInputs``, items here do NOT carry pad_value or hash yet.
+    """
+
+    mm_items: List[MultimodalDataItem]
+    input_ids: Optional[List[int]] = None
+
+    # image
+    im_token_id: Optional[int] = None
+    im_start_id: Optional[int] = None
+    im_end_id: Optional[int] = None
+    slice_start_id: Optional[int] = None
+    slice_end_id: Optional[int] = None
+
+    # video
+    video_token_id: Optional[int] = None
+
+    # audio
+    audio_token_id: Optional[int] = None
+    audio_start_id: Optional[int] = None
+    audio_end_id: Optional[int] = None
+
+    # QWen2-VL related
+    mrope_positions: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[torch.Tensor] = None
+
+    @staticmethod
+    def from_dict(d: dict) -> "MultimodalProcessorOutput":
+        return MultimodalProcessorOutput(
+            mm_items=d["mm_items"],
+            input_ids=d.get("input_ids"),
+            im_token_id=d.get("im_token_id"),
+            im_start_id=d.get("im_start_id"),
+            im_end_id=d.get("im_end_id"),
+            slice_start_id=d.get("slice_start_id"),
+            slice_end_id=d.get("slice_end_id"),
+            video_token_id=d.get("video_token_id"),
+            audio_token_id=d.get("audio_token_id"),
+            audio_start_id=d.get("audio_start_id"),
+            audio_end_id=d.get("audio_end_id"),
+            mrope_positions=d.get("mrope_positions"),
+            mrope_position_delta=d.get("mrope_position_delta"),
+        )
+
+
+@dataclasses.dataclass
 class MultimodalInputs:
     """The multimodal data related inputs."""
 
@@ -366,14 +416,14 @@ class MultimodalInputs:
     mrope_position_delta_repeated_cache: Optional[torch.Tensor] = None
 
     @staticmethod
-    def from_dict(obj: dict):
+    def from_processor_output(obj: "MultimodalProcessorOutput"):
         # Check if MM splitting is enabled
         if not envs.SGLANG_ENABLE_MM_SPLITTING.get():
-            mm_items = obj["mm_items"]
+            mm_items = obj.mm_items
         else:
             from sglang.srt.managers.mm_utils import get_new_expanded_mm_items
 
-            original_mm_items = obj["mm_items"]
+            original_mm_items = obj.mm_items
             # Now, `mm_items` contains one item per image.
             mm_items = get_new_expanded_mm_items(original_mm_items)
 
@@ -426,8 +476,9 @@ class MultimodalInputs:
             "audio_token_id",
         ]
         for arg in optional_args:
-            if arg in obj:
-                setattr(ret, arg, obj[arg])
+            val = getattr(obj, arg, None)
+            if val is not None:
+                setattr(ret, arg, val)
 
         return ret
 
