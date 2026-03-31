@@ -469,6 +469,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
         num_img_tokens = int(getattr(batch, "ltx2_num_image_tokens", 0))
         denoise_mask = None
         clean_latent = None
+        did_sp_shard = bool(getattr(batch, "did_sp_shard_latents", False))
         if do_ti2v:
             if not (isinstance(latents, torch.Tensor) and latents.ndim == 3):
                 raise ValueError("LTX-2 TI2V expects packed token latents [B, S, D].")
@@ -485,6 +486,30 @@ class LTX2AVDenoisingStage(DenoisingStage):
             clean_latent[:, :num_img_tokens, :] = batch.image_latent[
                 :, :num_img_tokens, :
             ].to(device=latents.device, dtype=latents.dtype)
+        if audio_latents.ndim == 3:
+            audio_num_frames_latent_base = int(audio_latents.shape[1])
+        elif audio_latents.ndim == 4:
+            audio_num_frames_latent_base = int(audio_latents.shape[2])
+        else:
+            raise ValueError(
+                f"Unexpected audio latents rank: {audio_latents.ndim}, shape={tuple(audio_latents.shape)}"
+            )
+        video_coords_base = None
+        audio_coords_base = None
+        if not did_sp_shard:
+            video_coords_base = self.transformer.rope.prepare_video_coords(
+                latents.shape[0],
+                latent_num_frames_for_model,
+                latent_height,
+                latent_width,
+                latents.device,
+                fps=batch.fps,
+            )
+            audio_coords_base = self.transformer.audio_rope.prepare_audio_coords(
+                audio_latents.shape[0],
+                audio_num_frames_latent_base,
+                audio_latents.device,
+            )
         with torch.autocast(
             device_type=current_platform.device_type,
             dtype=target_dtype,
@@ -546,9 +571,21 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                 f"Unexpected audio latents rank: {audio_latent_model_input.ndim}, shape={tuple(audio_latent_model_input.shape)}"
                             )
 
-                        # LTX-2 model can generate coords internally.
-                        video_coords = None
-                        audio_coords = None
+                        use_official_cfg_path = stage1_guider_params is None
+                        video_coords = video_coords_base
+                        audio_coords = audio_coords_base
+                        if (
+                            use_official_cfg_path
+                            and batch.do_classifier_free_guidance
+                            and video_coords is not None
+                            and audio_coords is not None
+                        ):
+                            video_coords = video_coords.repeat(
+                                (2,) + (1,) * (video_coords.ndim - 1)
+                            )
+                            audio_coords = audio_coords.repeat(
+                                (2,) + (1,) * (audio_coords.ndim - 1)
+                            )
 
                         timestep = t_device.expand(int(latent_model_input.shape[0]))
                         if do_ti2v and denoise_mask is not None:
@@ -559,7 +596,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             timestep_video = timestep
                         timestep_audio = timestep
 
-                        use_official_cfg_path = stage1_guider_params is None
                         if use_official_cfg_path:
                             encoder_hidden_states = batch.prompt_embeds[0]
                             audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
