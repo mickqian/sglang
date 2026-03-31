@@ -244,7 +244,6 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
         device = device or coords.device
         num_pos_dims = coords.shape[1]
 
-        coords = coords.to(self.coords_dtype)
         if coords.ndim == 4:
             coords_start, coords_end = coords.chunk(2, dim=-1)
             coords = (coords_start + coords_end) / 2.0
@@ -309,9 +308,7 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)
 
-        # Cast to bf16 to match model weights dtype. coords_dtype controls
-        # intermediate coordinate precision (fp32 for audio) and differs.
-        return cos_freqs.to(torch.bfloat16), sin_freqs.to(torch.bfloat16)
+        return cos_freqs, sin_freqs
 
 
 def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
