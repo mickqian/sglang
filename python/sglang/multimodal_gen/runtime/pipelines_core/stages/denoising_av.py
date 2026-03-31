@@ -141,9 +141,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
         if pipeline_name != "LTX2TwoStagePipeline":
             return None
 
-        return batch.extra.get(
-            "ltx2_stage1_guider_params", LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS
-        )
+        return batch.extra.get("ltx2_stage1_guider_params")
 
     @staticmethod
     def _ltx2_should_skip_step(step_index: int, skip_step: int) -> bool:
