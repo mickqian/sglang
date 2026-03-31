@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -21,6 +22,7 @@ from sglang.multimodal_gen.runtime.distributed import (
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     tensor_model_parallel_all_reduce,
 )
+from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
@@ -36,6 +38,37 @@ from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiT
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def _maybe_save_ltx2_block_debug_tensor(
+    file_name: str, tensor: torch.Tensor | None
+) -> None:
+    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
+
+
+def _should_dump_ltx2_block_debug(block_idx: int | None = None) -> bool:
+    target_step = os.environ.get("LTX2_BLOCK_DEBUG_STEP")
+    if target_step is None:
+        return False
+    try:
+        current_step = int(get_forward_context().current_timestep)
+        target_step = int(target_step)
+    except Exception:
+        return False
+    if current_step != target_step:
+        return False
+    if block_idx is None:
+        return True
+    target_blocks = os.environ.get("LTX2_BLOCK_DEBUG_BLOCKS", "0")
+    try:
+        blocks = {int(x) for x in target_blocks.split(",") if x.strip()}
+    except Exception:
+        blocks = {0}
+    return block_idx in blocks
 
 
 def apply_interleaved_rotary_emb(
@@ -837,6 +870,7 @@ class LTX2TransformerBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
+        dump_block = _should_dump_ltx2_block_debug(self.idx)
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
@@ -845,11 +879,21 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_norm1_video_hidden_states.pt",
+                norm_hidden_states,
+            )
         attn_hidden_states = self.attn1(
             norm_hidden_states,
             pe=video_rotary_emb,
             all_perturbed=skip_video_self_attn,
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_attn1_video_hidden_states.pt",
+                attn_hidden_states,
+            )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
@@ -858,27 +902,57 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_norm1_audio_hidden_states.pt",
+                norm_audio_hidden_states,
+            )
         attn_audio_hidden_states = self.audio_attn1(
             norm_audio_hidden_states,
             pe=audio_rotary_emb,
             all_perturbed=skip_audio_self_attn,
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_attn1_audio_hidden_states.pt",
+                attn_audio_hidden_states,
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
         # 2. Prompt Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_norm2_video_hidden_states.pt",
+                norm_hidden_states,
+            )
         attn_hidden_states = self.attn2(
             norm_hidden_states,
             context=encoder_hidden_states,
             mask=encoder_attention_mask,
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_attn2_video_hidden_states.pt",
+                attn_hidden_states,
+            )
         hidden_states = hidden_states + attn_hidden_states
 
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_norm2_audio_hidden_states.pt",
+                norm_audio_hidden_states,
+            )
         attn_audio_hidden_states = self.audio_attn2(
             norm_audio_hidden_states,
             context=audio_encoder_hidden_states,
             mask=audio_encoder_attention_mask,
         )
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_attn2_audio_hidden_states.pt",
+                attn_audio_hidden_states,
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
@@ -997,6 +1071,15 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        if dump_block:
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_video_hidden_states.pt",
+                hidden_states,
+            )
+            _maybe_save_ltx2_block_debug_tensor(
+                f"sglang_step0_block{self.idx}_audio_hidden_states.pt",
+                audio_hidden_states,
+            )
         return hidden_states, audio_hidden_states
 
 
@@ -1355,6 +1438,13 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         # 2. Patchify input projections
         hidden_states, _ = self.patchify_proj(hidden_states)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
+        if _should_dump_ltx2_block_debug():
+            _maybe_save_ltx2_block_debug_tensor(
+                "sglang_step0_proj_video_hidden_states.pt", hidden_states
+            )
+            _maybe_save_ltx2_block_debug_tensor(
+                "sglang_step0_proj_audio_hidden_states.pt", audio_hidden_states
+            )
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
         temb, embedded_timestep = self.adaln_single(
@@ -1408,10 +1498,18 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         # 4. Prepare prompt embeddings
+        if _should_dump_ltx2_block_debug():
+            _maybe_save_ltx2_block_debug_tensor(
+                "sglang_step0_pre_proj_encoder_hidden_states.pt", encoder_hidden_states
+            )
         encoder_hidden_states = self.caption_projection(encoder_hidden_states)
         audio_encoder_hidden_states = self.audio_caption_projection(
             audio_encoder_hidden_states
         )
+        if _should_dump_ltx2_block_debug():
+            _maybe_save_ltx2_block_debug_tensor(
+                "sglang_step0_proj_encoder_hidden_states.pt", encoder_hidden_states
+            )
         # 5. Run blocks
         skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
         skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
