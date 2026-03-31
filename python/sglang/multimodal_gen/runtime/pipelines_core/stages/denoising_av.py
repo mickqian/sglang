@@ -50,6 +50,19 @@ LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS = {
 }
 
 
+def _ltx2_debug_step_indices() -> set[int]:
+    raw = os.environ.get("LTX2_DEBUG_STEP_INDICES")
+    if not raw:
+        return {0}
+    out = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.add(int(part))
+    return out
+
+
 def _maybe_save_ltx2_latent_dump(file_name: str, tensor: torch.Tensor | None) -> None:
     if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
         return
@@ -68,6 +81,10 @@ class LTX2AVDenoisingStage(DenoisingStage):
             transformer=transformer, scheduler=scheduler, vae=vae, **kwargs
         )
         self.audio_vae = audio_vae
+
+    @staticmethod
+    def _should_dump_ltx2_step(stage: str, step_idx: int) -> bool:
+        return stage == "stage1" and step_idx in _ltx2_debug_step_indices()
 
     @staticmethod
     def _get_video_latent_num_frames_for_model(
@@ -608,13 +625,13 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             model_video = model_video.float()
                             model_audio = model_audio.float()
                             if batch.do_classifier_free_guidance:
-                                if i == 0 and stage == "stage1":
+                                if self._should_dump_ltx2_step(stage, i):
                                     _maybe_save_ltx2_latent_dump(
-                                        "sglang_stage1_step0_model_video_raw.pt",
+                                        f"sglang_stage1_step{i}_model_video_raw.pt",
                                         model_video,
                                     )
                                     _maybe_save_ltx2_latent_dump(
-                                        "sglang_stage1_step0_model_audio_raw.pt",
+                                        f"sglang_stage1_step{i}_model_audio_raw.pt",
                                         model_audio,
                                     )
                                 model_video_uncond, model_video_text = (
@@ -631,13 +648,13 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                     batch.guidance_scale
                                     * (model_audio_text - model_audio_uncond)
                                 )
-                            if i == 0 and stage == "stage1":
+                            if self._should_dump_ltx2_step(stage, i):
                                 _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_model_video_guided.pt",
+                                    f"sglang_stage1_step{i}_model_video_guided.pt",
                                     model_video,
                                 )
                                 _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_model_audio_guided.pt",
+                                    f"sglang_stage1_step{i}_model_audio_guided.pt",
                                     model_audio,
                                 )
                             v_pos = model_video
@@ -651,13 +668,13 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             audio_latents = audio_scheduler.step(
                                 a_v_pos, t_device, audio_latents, return_dict=False
                             )[0]
-                            if i == 0 and stage == "stage1":
+                            if self._should_dump_ltx2_step(stage, i):
                                 _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_video_latents_after.pt",
+                                    f"sglang_stage1_step{i}_video_latents_after.pt",
                                     latents,
                                 )
                                 _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_audio_latents_after.pt",
+                                    f"sglang_stage1_step{i}_audio_latents_after.pt",
                                     audio_latents,
                                 )
 
