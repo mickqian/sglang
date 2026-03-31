@@ -1,12 +1,10 @@
 import math
+import os
 
 import numpy as np
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
-
-from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
-    PipelineComponentLoader,
-)
+from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
@@ -43,20 +41,21 @@ def build_ltx2_native_sigmas(
     stretch: bool = True,
     terminal: float = 0.1,
 ) -> torch.FloatTensor:
-    # Copied and adapted from /root/LTX-2/packages/ltx-core/src/ltx_core/components/schedulers.py
-    _ = server_args
-    tokens = MAX_SHIFT_ANCHOR
-
-    sigmas = torch.linspace(1.0, 0.0, int(batch.num_inference_steps) + 1)
-
-    mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR)
-    b = base_shift - mm * BASE_SHIFT_ANCHOR
-    sigma_shift = tokens * mm + b
-    sigmas = torch.where(
-        sigmas != 0,
-        math.exp(sigma_shift) / (math.exp(sigma_shift) + (1 / sigmas - 1)),
-        0,
+    # Match the official diffusers==0.37.0 LTX2Pipeline stage-1 schedule used by
+    # the trusted two-stage sunset baseline:
+    # 1. start from a linear sigma ramp [1.0, 1 / steps]
+    # 2. apply dynamic exponential shifting with mu=calculate_shift(max_image_seq_len)
+    # 3. stretch the schedule to terminate at shift_terminal=0.1
+    #
+    # For the shipped scheduler config, calculate_shift(max_image_seq_len, ...)
+    # equals max_shift, so the stage-1 schedule is resolution-independent.
+    sigmas = torch.linspace(
+        1.0,
+        1.0 / int(batch.num_inference_steps),
+        int(batch.num_inference_steps),
+        dtype=torch.float32,
     )
+    sigmas = math.exp(max_shift) / (math.exp(max_shift) + (1 / sigmas - 1))
 
     if stretch:
         non_zero_mask = sigmas != 0
@@ -66,6 +65,7 @@ def build_ltx2_native_sigmas(
         stretched = 1.0 - (one_minus_z / scale_factor)
         sigmas[non_zero_mask] = stretched
 
+    sigmas = torch.cat([sigmas, torch.zeros(1, dtype=sigmas.dtype)])
     return sigmas.to(torch.float32)
 
 
@@ -180,7 +180,6 @@ class _BaseLTX2Pipeline(LoRAPipeline):
 
 
 class LTX2Pipeline(_BaseLTX2Pipeline):
-    # Must match model_index.json `_class_name`.
     pipeline_name = "LTX2Pipeline"
 
     def create_pipeline_stages(self, server_args: ServerArgs):
@@ -191,7 +190,7 @@ class LTX2Pipeline(_BaseLTX2Pipeline):
 
 class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     pipeline_name = "LTX2TwoStagePipeline"
-    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
+    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875]
 
     def initialize_pipeline(self, server_args: ServerArgs):
         super().initialize_pipeline(server_args)
@@ -201,14 +200,21 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 "LTX2TwoStagePipeline requires --spatial-upsampler-path "
                 "(component_paths['spatial_upsampler'])."
             )
-        module, memory_usage = PipelineComponentLoader.load_component(
-            component_name="spatial_upsampler",
-            component_model_path=upsampler_path,
-            transformers_or_diffusers="diffusers",
-            server_args=server_args,
+        upsampler_path = os.path.expanduser(upsampler_path)
+        upsampler_root = upsampler_path
+        upsampler_subfolder = None
+        if os.path.isdir(upsampler_path):
+            upsampler_root = os.path.dirname(upsampler_path.rstrip("/"))
+            upsampler_subfolder = os.path.basename(upsampler_path.rstrip("/"))
+
+        module = LTX2LatentUpsamplerModel.from_pretrained(
+            upsampler_root,
+            subfolder=upsampler_subfolder,
+            revision=server_args.revision,
+            torch_dtype=torch.bfloat16,
         )
         self.modules["spatial_upsampler"] = module
-        self.memory_usages["spatial_upsampler"] = memory_usage
+        self.memory_usages["spatial_upsampler"] = 0.0
 
         distilled_lora_path = server_args.component_paths.get("distilled_lora")
         if not distilled_lora_path:

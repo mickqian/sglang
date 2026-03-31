@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from diffusers.models.attention_dispatch import dispatch_attention_fn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
@@ -19,6 +22,7 @@ from sglang.multimodal_gen.runtime.distributed import (
     model_parallel_is_initialized,
 )
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
@@ -29,13 +33,99 @@ from sglang.multimodal_gen.runtime.layers.linear import (
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
 )
-from sglang.multimodal_gen.runtime.layers.visual_embedding import timestep_embedding
+from sglang.multimodal_gen.runtime.layers.visual_embedding import Timesteps
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+_LTX2_DEBUG_FORWARD_COUNT = 0
+_LTX2_DEBUG_STATE: dict[str, Any] = {
+    "enabled": False,
+    "dir": None,
+    "attn_name": None,
+    "ff_name": None,
+}
+
+
+def _ltx2_prepare_attention_mask_like_diffusers(
+    attention_mask: torch.Tensor,
+    *,
+    target_length: int,
+    batch_size: int,
+    head_size: int,
+) -> torch.Tensor:
+    if attention_mask.ndim == 2:
+        attention_mask = attention_mask.unsqueeze(1)
+    elif attention_mask.ndim == 4 and attention_mask.shape[1] == 1:
+        attention_mask = attention_mask.squeeze(1)
+
+    current_length = int(attention_mask.shape[-1])
+    if current_length != target_length:
+        attention_mask = F.pad(attention_mask, (0, target_length), value=0.0)
+
+    if attention_mask.shape[0] < batch_size * head_size:
+        attention_mask = attention_mask.repeat_interleave(
+            head_size,
+            dim=0,
+            output_size=attention_mask.shape[0] * head_size,
+        )
+
+    return attention_mask
+
+
+def _ltx2_should_force_cudnn_sdpa(q: torch.Tensor, sdpa_mask: torch.Tensor | None) -> bool:
+    disable_env = os.environ.get("SGLANG_DISABLE_CUDNN_SDPA", "").strip().lower()
+    if disable_env in ("1", "true", "yes", "on"):
+        return False
+
+    version = torch.__version__.split("+", 1)[0]
+    parts = version.split(".")
+    try:
+        torch_major_minor = (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        return False
+
+    return (
+        torch_major_minor >= (2, 9)
+        and q.is_cuda
+        and sdpa_mask is None
+        and q.dtype in (torch.float16, torch.bfloat16)
+    )
+
+
+def _ltx2_debug_start_forward() -> bool:
+    global _LTX2_DEBUG_FORWARD_COUNT
+    debug_dir = os.environ.get("LTX2_DEBUG_DIR")
+    target_forward = int(os.environ.get("LTX2_DEBUG_FORWARD_INDEX", "0"))
+    enabled = bool(debug_dir) and _LTX2_DEBUG_FORWARD_COUNT == target_forward
+    _LTX2_DEBUG_STATE["enabled"] = enabled
+    _LTX2_DEBUG_STATE["dir"] = debug_dir
+    _LTX2_DEBUG_FORWARD_COUNT += 1
+    return enabled
+
+
+def _ltx2_debug_end_forward() -> None:
+    _LTX2_DEBUG_STATE["enabled"] = False
+    _LTX2_DEBUG_STATE["dir"] = None
+    _LTX2_DEBUG_STATE["attn_name"] = None
+    _LTX2_DEBUG_STATE["ff_name"] = None
+    _LTX2_DEBUG_STATE["time_embed_name"] = None
+
+
+def _ltx2_debug_save(name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not _LTX2_DEBUG_STATE["enabled"]:
+        return
+    debug_dir = _LTX2_DEBUG_STATE["dir"]
+    if not debug_dir:
+        return
+    os.makedirs(debug_dir, exist_ok=True)
+    torch.save(
+        tensor.detach().to(device="cpu"),
+        os.path.join(debug_dir, f"{name}.pt"),
+    )
 
 
 def apply_interleaved_rotary_emb(
@@ -66,7 +156,7 @@ def apply_split_rotary_emb(
         )
     r = last // 2
 
-    split_x = x.reshape(*x.shape[:-1], 2, r)
+    split_x = x.reshape(*x.shape[:-1], 2, r).float()
     first_x = split_x[..., :1, :]
     second_x = split_x[..., 1:, :]
 
@@ -243,8 +333,6 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         device = device or coords.device
         num_pos_dims = coords.shape[1]
-
-        coords = coords.to(self.coords_dtype)
         if coords.ndim == 4:
             coords_start, coords_end = coords.chunk(2, dim=-1)
             coords = (coords_start + coords_end) / 2.0
@@ -309,13 +397,47 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)
 
-        # Cast to bf16 to match model weights dtype. coords_dtype controls
-        # intermediate coordinate precision (fp32 for audio) and differs.
-        return cos_freqs.to(torch.bfloat16), sin_freqs.to(torch.bfloat16)
+        return cos_freqs, sin_freqs
 
 
 def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
-    return F.rms_norm(x, normalized_shape=(x.shape[-1],), eps=eps)
+    input_dtype = x.dtype
+    variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
+    hidden_states = x * torch.rsqrt(variance + eps)
+    return hidden_states.to(dtype=input_dtype)
+
+
+def _ltx2_forward_linear_exact(
+    layer: nn.Module,
+    x: torch.Tensor,
+    force_compute_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    base_layer = getattr(layer, "base_layer", layer)
+    weight = base_layer.weight
+    bias = getattr(base_layer, "bias", None)
+    compute_dtype = force_compute_dtype or weight.dtype
+    if x.dtype != compute_dtype:
+        x = x.to(dtype=compute_dtype)
+    if weight.dtype != compute_dtype:
+        weight = weight.to(dtype=compute_dtype)
+    if bias is not None and bias.dtype != compute_dtype:
+        bias = bias.to(dtype=compute_dtype)
+    out = F.linear(x, weight, bias)
+
+    if (
+        hasattr(layer, "compute_lora_delta")
+        and not getattr(layer, "merged", True)
+        and not getattr(layer, "disable_lora", True)
+    ):
+        lora_a = layer.lora_A
+        lora_b = layer.lora_B
+        if hasattr(lora_a, "to_local"):
+            lora_a = lora_a.to_local()
+        if hasattr(lora_b, "to_local"):
+            lora_b = lora_b.to_local()
+        out = out + layer.compute_lora_delta(x, lora_a, lora_b).to(dtype=out.dtype)
+
+    return out
 
 
 class LTX2TextProjection(nn.Module):
@@ -361,31 +483,95 @@ class LTX2TimestepEmbedder(nn.Module):
             embedding_dim, embedding_dim, bias=True, gather_output=True
         )
 
-    def forward(self, t_emb: torch.Tensor) -> torch.Tensor:
-        x, _ = self.linear_1(t_emb)
+    def forward(
+        self, t_emb: torch.Tensor, use_exact_linear: bool = False
+    ) -> torch.Tensor:
+        debug_time_embed_name = _LTX2_DEBUG_STATE.get("time_embed_name")
+        if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
+            for idx, layer in [("1", self.linear_1), ("2", self.linear_2)]:
+                layer_base = getattr(layer, "base_layer", layer)
+                _ltx2_debug_save(
+                    f"sglang_timestep_linear{idx}_weight_{debug_time_embed_name}",
+                    layer_base.weight,
+                )
+                _ltx2_debug_save(
+                    f"sglang_timestep_linear{idx}_bias_{debug_time_embed_name}",
+                    getattr(layer_base, "bias", None),
+                )
+                if getattr(layer, "lora_A", None) is not None:
+                    layer_lora_a = layer.lora_A
+                    layer_lora_b = layer.lora_B
+                    if hasattr(layer_lora_a, "to_local"):
+                        layer_lora_a = layer_lora_a.to_local()
+                    if hasattr(layer_lora_b, "to_local"):
+                        layer_lora_b = layer_lora_b.to_local()
+                    _ltx2_debug_save(
+                        f"sglang_timestep_linear{idx}_lora_A_{debug_time_embed_name}",
+                        layer_lora_a,
+                    )
+                    _ltx2_debug_save(
+                        f"sglang_timestep_linear{idx}_lora_B_{debug_time_embed_name}",
+                        layer_lora_b,
+                    )
+        if use_exact_linear and get_tp_world_size() == 1:
+            x = _ltx2_forward_linear_exact(
+                self.linear_1,
+                t_emb,
+                force_compute_dtype=torch.float32,
+            )
+        else:
+            x, _ = self.linear_1(t_emb)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
+            _ltx2_debug_save(f"sglang_timestep_linear1_{debug_time_embed_name}", x)
         x = F.silu(x)
-        x, _ = self.linear_2(x)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
+            _ltx2_debug_save(f"sglang_timestep_silu_{debug_time_embed_name}", x)
+        if use_exact_linear and get_tp_world_size() == 1:
+            x = _ltx2_forward_linear_exact(
+                self.linear_2,
+                x,
+                force_compute_dtype=torch.float32,
+            )
+        else:
+            x, _ = self.linear_2(x)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
+            _ltx2_debug_save(f"sglang_timestep_linear2_{debug_time_embed_name}", x)
         return x
 
 
 class LTX2PixArtAlphaCombinedTimestepSizeEmbeddings(nn.Module):
     def __init__(self, embedding_dim: int) -> None:
         super().__init__()
+        self.time_proj = Timesteps(
+            num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0
+        )
         self.timestep_embedder = LTX2TimestepEmbedder(embedding_dim, in_channels=256)
 
     def forward(
-        self, timestep: torch.Tensor, hidden_dtype: torch.dtype | None = None
+        self,
+        timestep: torch.Tensor,
+        hidden_dtype: torch.dtype | None = None,
+        use_exact_linear: bool = False,
     ) -> torch.Tensor:
         t = timestep.reshape(-1).to(dtype=torch.float32)
-        t_emb = timestep_embedding(t, dim=256, max_period=10000, dtype=torch.float32)
+        t_emb = self.time_proj(t).to(dtype=torch.float32)
+        debug_time_embed_name = _LTX2_DEBUG_STATE.get("time_embed_name")
+        if _LTX2_DEBUG_STATE["enabled"] and debug_time_embed_name:
+            _ltx2_debug_save(f"sglang_timestep_proj_{debug_time_embed_name}", t_emb)
         if hidden_dtype is not None:
             t_emb = t_emb.to(dtype=hidden_dtype)
-        return self.timestep_embedder(t_emb)
+        return self.timestep_embedder(t_emb, use_exact_linear=use_exact_linear)
 
 
 class LTX2AdaLayerNormSingle(nn.Module):
-    def __init__(self, embedding_dim: int, embedding_coefficient: int = 6) -> None:
+    def __init__(
+        self,
+        embedding_dim: int,
+        embedding_coefficient: int = 6,
+        force_fp32: bool = False,
+    ) -> None:
         super().__init__()
+        self.force_fp32 = force_fp32
         self.emb = LTX2PixArtAlphaCombinedTimestepSizeEmbeddings(embedding_dim)
         self.silu = nn.SiLU()
         self.linear = ColumnParallelLinear(
@@ -398,10 +584,24 @@ class LTX2AdaLayerNormSingle(nn.Module):
     def forward(
         self, timestep: torch.Tensor, hidden_dtype: torch.dtype | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embedded_timestep = self.emb(timestep, hidden_dtype=hidden_dtype).to(
-            dtype=self.linear.weight.dtype
-        )
-        out, _ = self.linear(self.silu(embedded_timestep))
+        compute_dtype = torch.float32 if self.force_fp32 else hidden_dtype
+        embedded_timestep = self.emb(
+            timestep,
+            hidden_dtype=compute_dtype,
+            use_exact_linear=self.force_fp32,
+        ).to(dtype=torch.float32 if self.force_fp32 else self.linear.weight.dtype)
+        silu_embedded = self.silu(embedded_timestep)
+        if self.force_fp32 and get_tp_world_size() == 1:
+            out = _ltx2_forward_linear_exact(
+                self.linear,
+                silu_embedded,
+                force_compute_dtype=torch.float32,
+            )
+        else:
+            out, _ = self.linear(silu_embedded)
+        if self.force_fp32 and hidden_dtype is not None:
+            out = out.to(dtype=hidden_dtype)
+            embedded_timestep = embedded_timestep.to(dtype=hidden_dtype)
         return out, embedded_timestep
 
 
@@ -549,51 +749,97 @@ class LTX2Attention(nn.Module):
         mask: torch.Tensor | None = None,
         pe: tuple[torch.Tensor, torch.Tensor] | None = None,
         k_pe: tuple[torch.Tensor, torch.Tensor] | None = None,
-        perturbation_mask: torch.Tensor | None = None,
-        all_perturbed: bool = False,
     ) -> torch.Tensor:
+        debug_attn_name = _LTX2_DEBUG_STATE.get("attn_name")
         context_ = x if context is None else context
+        q, _ = self.to_q(x)
+        k, _ = self.to_k(context_)
         v, _ = self.to_v(context_)
-        use_attention = not all_perturbed
+        if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_q_weight", self.to_q.weight)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_k_weight", self.to_k.weight)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_v_weight", self.to_v.weight)
+            if self.to_q.bias is not None:
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_q_bias", self.to_q.bias)
+            if self.to_k.bias is not None:
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_k_bias", self.to_k.bias)
+            if self.to_v.bias is not None:
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_v_bias", self.to_v.bias)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_q_linear", q)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_k_linear", k)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_v_linear", v)
 
-        if use_attention:
-            q, _ = self.to_q(x)
-            k, _ = self.to_k(context_)
+        if self.qk_norm:
+            assert self.q_norm is not None and self.k_norm is not None
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+            if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_q_norm", q)
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_k_norm", k)
 
-            if self.qk_norm:
-                assert self.q_norm is not None and self.k_norm is not None
-                q = self.q_norm(q)
-                k = self.k_norm(k)
+        if pe is not None:
+            cos, sin = pe
+            k_cos, k_sin = pe if k_pe is None else k_pe
+            tp_size = get_tp_world_size()
+            if tp_size > 1:
+                tp_rank = get_tp_rank()
+                cos, sin = self._slice_rope_for_tp(
+                    cos, sin, tp_rank=tp_rank, tp_size=tp_size
+                )
+                k_cos, k_sin = self._slice_rope_for_tp(
+                    k_cos, k_sin, tp_rank=tp_rank, tp_size=tp_size
+                )
+            if cos.dim() == 3:
+                q = apply_interleaved_rotary_emb(q, (cos, sin))
+                k = apply_interleaved_rotary_emb(k, (k_cos, k_sin))
+            else:
+                q = apply_split_rotary_emb(q, (cos, sin))
+                k = apply_split_rotary_emb(k, (k_cos, k_sin))
+            if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_q_rope", q)
+                _ltx2_debug_save(f"sglang_{debug_attn_name}_k_rope", k)
 
-            if pe is not None:
-                cos, sin = pe
-                k_cos, k_sin = pe if k_pe is None else k_pe
-                tp_size = get_tp_world_size()
-                if tp_size > 1:
-                    tp_rank = get_tp_rank()
-                    cos, sin = self._slice_rope_for_tp(
-                        cos, sin, tp_rank=tp_rank, tp_size=tp_size
-                    )
-                    k_cos, k_sin = self._slice_rope_for_tp(
-                        k_cos, k_sin, tp_rank=tp_rank, tp_size=tp_size
-                    )
-                if cos.dim() == 3:
-                    q = apply_interleaved_rotary_emb(q, (cos, sin))
-                    k = apply_interleaved_rotary_emb(k, (k_cos, k_sin))
-                else:
-                    q = apply_split_rotary_emb(q, (cos, sin))
-                    k = apply_split_rotary_emb(k, (k_cos, k_sin))
-
+        q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
+        k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
         v = v.view(*v.shape[:-1], self.local_heads, self.dim_head)
-        if use_attention:
-            q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
-            k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_q_heads", q)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_k_heads", k)
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_v_heads", v)
 
+        q_ = q.transpose(1, 2)
+        k_ = k.transpose(1, 2)
+        v_ = v.transpose(1, 2)
+
+        if get_tp_world_size() == 1 and get_sp_world_size() == 1:
+            dispatch_mask = None
             if mask is not None:
-                q_ = q.transpose(1, 2)
-                k_ = k.transpose(1, 2)
-                v_ = v.transpose(1, 2)
-
+                dispatch_mask = _ltx2_prepare_attention_mask_like_diffusers(
+                    mask.to(dtype=q_.dtype, device=q_.device),
+                    target_length=k.shape[1],
+                    batch_size=q.shape[0],
+                    head_size=self.heads,
+                )
+                dispatch_mask = dispatch_mask.view(
+                    q.shape[0], self.heads, -1, dispatch_mask.shape[-1]
+                )
+                if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+                    _ltx2_debug_save(
+                        f"sglang_{debug_attn_name}_attention_mask_prepared",
+                        dispatch_mask,
+                    )
+            out = dispatch_attention_fn(
+                q,
+                k,
+                v,
+                attn_mask=dispatch_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                backend=None,
+            )
+        else:
+            sdpa_mask = None
+            if mask is not None:
                 if torch.is_floating_point(mask):
                     m = mask
                     if m.dim() == 2:
@@ -609,20 +855,34 @@ class LTX2Attention(nn.Module):
                         m = m[:, None, :, :]
                     sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
 
+            if (
+                sdpa_mask is None
+                and self.attn.backend == AttentionBackendEnum.TORCH_SDPA
+            ):
+                if _ltx2_should_force_cudnn_sdpa(q_, None):
+                    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                        out = torch.nn.functional.scaled_dot_product_attention(
+                            q_, k_, v_, attn_mask=None, dropout_p=0.0, is_causal=False
+                        ).transpose(1, 2)
+                else:
+                    out = torch.nn.functional.scaled_dot_product_attention(
+                        q_, k_, v_, attn_mask=None, dropout_p=0.0, is_causal=False
+                    ).transpose(1, 2)
+            elif sdpa_mask is None:
+            # Keep USPAttention for the no-mask path when sequence parallelism is
+            # active or when CUDNN SDPA is not appropriate on this runtime.
+                out = self.attn(q, k, v)
+            else:
                 out = torch.nn.functional.scaled_dot_product_attention(
                     q_, k_, v_, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=False
                 ).transpose(1, 2)
-            else:
-                out = self.attn(q, k, v)
-
-            if perturbation_mask is not None:
-                out = out * perturbation_mask + v * (1 - perturbation_mask)
-
-        if not use_attention:
-            out = v
+        if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_sdpa_out", out)
 
         out = out.flatten(2)
         out, _ = self.to_out[0](out)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_attn_name:
+            _ltx2_debug_save(f"sglang_{debug_attn_name}_out_proj", out)
         return out
 
     def _slice_rope_for_tp(
@@ -680,9 +940,43 @@ class LTX2FeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        debug_ff_name = _LTX2_DEBUG_STATE.get("ff_name")
+        if x.ndim == 3 and x.shape[1] > 4096 and get_tp_world_size() == 1:
+            proj_in_chunks = [] if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name else None
+            act_chunks = [] if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name else None
+            out_chunks = []
+            for x_chunk in x.split(4096, dim=1):
+                proj_in_chunk, _ = self.proj_in(x_chunk)
+                if proj_in_chunks is not None:
+                    proj_in_chunks.append(proj_in_chunk)
+                act_chunk = self.act(proj_in_chunk)
+                if act_chunks is not None:
+                    act_chunks.append(act_chunk)
+                out_chunk, _ = self.proj_out(act_chunk)
+                out_chunks.append(out_chunk)
+            if proj_in_chunks is not None:
+                _ltx2_debug_save(
+                    f"sglang_{debug_ff_name}_proj_in",
+                    torch.cat(proj_in_chunks, dim=1),
+                )
+                _ltx2_debug_save(
+                    f"sglang_{debug_ff_name}_act",
+                    torch.cat(act_chunks, dim=1),
+                )
+            x = torch.cat(out_chunks, dim=1)
+            if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
+                _ltx2_debug_save(f"sglang_{debug_ff_name}_proj_out", x)
+            return x
+
         x, _ = self.proj_in(x)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
+            _ltx2_debug_save(f"sglang_{debug_ff_name}_proj_in", x)
         x = self.act(x)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
+            _ltx2_debug_save(f"sglang_{debug_ff_name}_act", x)
         x, _ = self.proj_out(x)
+        if _LTX2_DEBUG_STATE["enabled"] and debug_ff_name:
+            _ltx2_debug_save(f"sglang_{debug_ff_name}_proj_out", x)
         return x
 
 
@@ -700,6 +994,8 @@ class LTX2TransformerBlock(nn.Module):
         audio_cross_attention_dim: int,
         qk_norm: bool = True,
         norm_eps: float = 1e-6,
+        video_cross_attn_adaln: bool = False,
+        audio_cross_attn_adaln: bool = False,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
         prefix: str = "",
         quant_config: QuantizationConfig | None = None,
@@ -707,6 +1003,11 @@ class LTX2TransformerBlock(nn.Module):
         super().__init__()
         self.idx = idx
         self.norm_eps = norm_eps
+        self.video_cross_attn_adaln = bool(video_cross_attn_adaln)
+        self.audio_cross_attn_adaln = bool(audio_cross_attn_adaln)
+        self.cross_attn_adaln = (
+            self.video_cross_attn_adaln or self.audio_cross_attn_adaln
+        )
 
         # 1. Self-Attention (video and audio)
         self.attn1 = LTX2Attention(
@@ -785,13 +1086,28 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         # 5. Modulation Parameters
-        self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
-        self.audio_scale_shift_table = nn.Parameter(
-            torch.randn(6, audio_dim) / audio_dim**0.5
+        video_mod_param_num = 9 if self.video_cross_attn_adaln else 6
+        audio_mod_param_num = 9 if self.audio_cross_attn_adaln else 6
+        self.scale_shift_table = nn.Parameter(
+            (torch.randn(video_mod_param_num, dim) / dim**0.5).to(torch.float32)
         )
-        self.video_a2v_cross_attn_scale_shift_table = nn.Parameter(torch.randn(5, dim))
+        self.audio_scale_shift_table = nn.Parameter(
+            (torch.randn(audio_mod_param_num, audio_dim) / audio_dim**0.5).to(
+                torch.float32
+            )
+        )
+        if self.cross_attn_adaln:
+            self.prompt_scale_shift_table = nn.Parameter(
+                torch.randn(2, dim, dtype=torch.float32)
+            )
+            self.audio_prompt_scale_shift_table = nn.Parameter(
+                torch.randn(2, audio_dim, dtype=torch.float32)
+            )
+        self.video_a2v_cross_attn_scale_shift_table = nn.Parameter(
+            torch.randn(5, dim, dtype=torch.float32)
+        )
         self.audio_a2v_cross_attn_scale_shift_table = nn.Parameter(
-            torch.randn(5, audio_dim)
+            torch.randn(5, audio_dim, dtype=torch.float32)
         )
 
     def get_ada_values(
@@ -825,6 +1141,8 @@ class LTX2TransformerBlock(nn.Module):
         temb_ca_audio_scale_shift: torch.Tensor,
         temb_ca_gate: torch.Tensor,
         temb_ca_audio_gate: torch.Tensor,
+        temb_prompt: Optional[torch.Tensor] = None,
+        temb_prompt_audio: Optional[torch.Tensor] = None,
         video_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         audio_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         ca_video_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
@@ -833,56 +1151,148 @@ class LTX2TransformerBlock(nn.Module):
         audio_encoder_attention_mask: Optional[torch.Tensor] = None,
         a2v_cross_attention_mask: Optional[torch.Tensor] = None,
         v2a_cross_attention_mask: Optional[torch.Tensor] = None,
-        skip_video_self_attn: bool = False,
-        skip_audio_self_attn: bool = False,
-        skip_a2v_cross_attn: bool = False,
-        skip_v2a_cross_attn: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
+        debug_block0 = bool(_LTX2_DEBUG_STATE["enabled"]) and self.idx == 0
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(0, 3)
         )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_self_attn_video_shift", vshift_msa)
+            _ltx2_debug_save("sglang_block0_self_attn_video_scale", vscale_msa)
+            _ltx2_debug_save("sglang_block0_self_attn_video_gate", vgate_msa)
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
-        attn_hidden_states = self.attn1(
-            norm_hidden_states,
-            pe=video_rotary_emb,
-            all_perturbed=skip_video_self_attn,
-        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_self_attn_video_input", norm_hidden_states)
+            _LTX2_DEBUG_STATE["attn_name"] = "block0_self_attn_video"
+        attn_hidden_states = self.attn1(norm_hidden_states, pe=video_rotary_emb)
+        if debug_block0:
+            _LTX2_DEBUG_STATE["attn_name"] = None
+            _ltx2_debug_save("sglang_block0_self_attn_video_output", attn_hidden_states)
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_self_attn_video_residual", hidden_states)
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
         )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_self_attn_audio_shift", ashift_msa)
+            _ltx2_debug_save("sglang_block0_self_attn_audio_scale", ascale_msa)
+            _ltx2_debug_save("sglang_block0_self_attn_audio_gate", agate_msa)
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
+        if debug_block0:
+            _ltx2_debug_save(
+                "sglang_block0_self_attn_audio_input", norm_audio_hidden_states
+            )
+            _LTX2_DEBUG_STATE["attn_name"] = "block0_self_attn_audio"
         attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states,
-            pe=audio_rotary_emb,
-            all_perturbed=skip_audio_self_attn,
+            norm_audio_hidden_states, pe=audio_rotary_emb
         )
+        if debug_block0:
+            _LTX2_DEBUG_STATE["attn_name"] = None
+            _ltx2_debug_save(
+                "sglang_block0_self_attn_audio_output", attn_audio_hidden_states
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_self_attn_audio_residual", audio_hidden_states)
+
         # 2. Prompt Cross-Attention
+        if self.cross_attn_adaln:
+            if temb_prompt is None or temb_prompt_audio is None:
+                raise ValueError(
+                    "Prompt modulation is enabled, but temb_prompt / temb_prompt_audio is missing."
+                )
+            shift_text_kv, scale_text_kv = self.get_ada_values(
+                self.prompt_scale_shift_table, batch_size, temb_prompt, slice(0, 2)
+            )
+            audio_shift_text_kv, audio_scale_text_kv = self.get_ada_values(
+                self.audio_prompt_scale_shift_table,
+                batch_size,
+                temb_prompt_audio,
+                slice(0, 2),
+            )
+        if self.video_cross_attn_adaln:
+            shift_text_q, scale_text_q, gate_text_q = self.get_ada_values(
+                self.scale_shift_table, batch_size, temb, slice(6, 9)
+            )
+        if self.audio_cross_attn_adaln:
+            audio_shift_text_q, audio_scale_text_q, audio_gate_text_q = (
+                self.get_ada_values(
+                    self.audio_scale_shift_table, batch_size, temb_audio, slice(6, 9)
+                )
+            )
+
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
+        if self.video_cross_attn_adaln:
+            norm_hidden_states = norm_hidden_states * (1 + scale_text_q) + shift_text_q
+        video_encoder_hidden_states = encoder_hidden_states
+        if self.cross_attn_adaln:
+            video_encoder_hidden_states = video_encoder_hidden_states * (
+                1 + scale_text_kv
+            ) + shift_text_kv
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_cross_attn_video_input", norm_hidden_states)
+            _LTX2_DEBUG_STATE["attn_name"] = "block0_cross_attn_video"
         attn_hidden_states = self.attn2(
             norm_hidden_states,
-            context=encoder_hidden_states,
+            context=video_encoder_hidden_states,
             mask=encoder_attention_mask,
         )
+        if self.video_cross_attn_adaln:
+            attn_hidden_states = attn_hidden_states * gate_text_q
+        if debug_block0:
+            _LTX2_DEBUG_STATE["attn_name"] = None
+            _ltx2_debug_save("sglang_block0_cross_attn_video_output", attn_hidden_states)
         hidden_states = hidden_states + attn_hidden_states
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_cross_attn_video_residual", hidden_states)
 
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
+        if self.audio_cross_attn_adaln:
+            norm_audio_hidden_states = norm_audio_hidden_states * (
+                1 + audio_scale_text_q
+            ) + audio_shift_text_q
+        mod_audio_encoder_hidden_states = audio_encoder_hidden_states
+        if self.cross_attn_adaln:
+            mod_audio_encoder_hidden_states = mod_audio_encoder_hidden_states * (
+                1 + audio_scale_text_kv
+            ) + audio_shift_text_kv
+        if debug_block0:
+            _ltx2_debug_save(
+                "sglang_block0_cross_attn_audio_input", norm_audio_hidden_states
+            )
+            _ltx2_debug_save(
+                "sglang_block0_cross_attn_audio_context", mod_audio_encoder_hidden_states
+            )
+            _ltx2_debug_save(
+                "sglang_block0_cross_attn_audio_mask", audio_encoder_attention_mask
+            )
+            _LTX2_DEBUG_STATE["attn_name"] = "block0_cross_attn_audio"
         attn_audio_hidden_states = self.audio_attn2(
             norm_audio_hidden_states,
-            context=audio_encoder_hidden_states,
+            context=mod_audio_encoder_hidden_states,
             mask=audio_encoder_attention_mask,
         )
+        if self.audio_cross_attn_adaln:
+            attn_audio_hidden_states = attn_audio_hidden_states * audio_gate_text_q
+        if debug_block0:
+            _LTX2_DEBUG_STATE["attn_name"] = None
+            _ltx2_debug_save(
+                "sglang_block0_cross_attn_audio_output", attn_audio_hidden_states
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_cross_attn_audio_residual", audio_hidden_states)
+
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -915,6 +1325,12 @@ class LTX2TransformerBlock(nn.Module):
             video_v2a_ca_shift,
         ) = [t.squeeze(2) for t in video_ca_scale_shift_table]
         a2v_gate = video_ca_gate[0].squeeze(2)
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_a2v_video_scale", video_a2v_ca_scale)
+            _ltx2_debug_save("sglang_block0_a2v_video_shift", video_a2v_ca_shift)
+            _ltx2_debug_save("sglang_block0_v2a_video_scale", video_v2a_ca_scale)
+            _ltx2_debug_save("sglang_block0_v2a_video_shift", video_v2a_ca_shift)
+            _ltx2_debug_save("sglang_block0_a2v_gate", a2v_gate)
 
         audio_per_layer_ca_scale_shift = self.audio_a2v_cross_attn_scale_shift_table[
             :4, :
@@ -944,6 +1360,12 @@ class LTX2TransformerBlock(nn.Module):
             audio_v2a_ca_shift,
         ) = [t.squeeze(2) for t in audio_ca_scale_shift_table]
         v2a_gate = audio_ca_gate[0].squeeze(2)
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_a2v_audio_scale", audio_a2v_ca_scale)
+            _ltx2_debug_save("sglang_block0_a2v_audio_shift", audio_a2v_ca_shift)
+            _ltx2_debug_save("sglang_block0_v2a_audio_scale", audio_v2a_ca_scale)
+            _ltx2_debug_save("sglang_block0_v2a_audio_shift", audio_v2a_ca_shift)
+            _ltx2_debug_save("sglang_block0_v2a_gate", v2a_gate)
 
         # A2V
         mod_norm_hidden_states = (
@@ -952,16 +1374,24 @@ class LTX2TransformerBlock(nn.Module):
         mod_norm_audio_hidden_states = (
             norm_audio_hidden_states * (1 + audio_a2v_ca_scale) + audio_a2v_ca_shift
         )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_a2v_video_input", mod_norm_hidden_states)
+            _ltx2_debug_save("sglang_block0_a2v_audio_input", mod_norm_audio_hidden_states)
+            _LTX2_DEBUG_STATE["attn_name"] = "block0_a2v"
 
-        if not skip_a2v_cross_attn:
-            a2v_attn_hidden_states = self.audio_to_video_attn(
-                mod_norm_hidden_states,
-                context=mod_norm_audio_hidden_states,
-                pe=ca_video_rotary_emb,
-                k_pe=ca_audio_rotary_emb,
-                mask=a2v_cross_attention_mask,
-            )
-            hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
+        a2v_attn_hidden_states = self.audio_to_video_attn(
+            mod_norm_hidden_states,
+            context=mod_norm_audio_hidden_states,
+            pe=ca_video_rotary_emb,
+            k_pe=ca_audio_rotary_emb,
+            mask=a2v_cross_attention_mask,
+        )
+        if debug_block0:
+            _LTX2_DEBUG_STATE["attn_name"] = None
+            _ltx2_debug_save("sglang_block0_a2v_output", a2v_attn_hidden_states)
+        hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_a2v_video_residual", hidden_states)
 
         # V2A
         mod_norm_hidden_states = (
@@ -970,37 +1400,98 @@ class LTX2TransformerBlock(nn.Module):
         mod_norm_audio_hidden_states = (
             norm_audio_hidden_states * (1 + audio_v2a_ca_scale) + audio_v2a_ca_shift
         )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_v2a_video_input", mod_norm_hidden_states)
+            _ltx2_debug_save("sglang_block0_v2a_audio_input", mod_norm_audio_hidden_states)
+            _ltx2_debug_save("sglang_block0_v2a_context", mod_norm_hidden_states)
+            _ltx2_debug_save("sglang_block0_v2a_mask", v2a_cross_attention_mask)
 
-        if not skip_v2a_cross_attn:
-            v2a_attn_hidden_states = self.video_to_audio_attn(
+        v2a_attn_hidden_states = self.video_to_audio_attn(
+            mod_norm_audio_hidden_states,
+            context=mod_norm_hidden_states,
+            pe=ca_audio_rotary_emb,
+            k_pe=ca_video_rotary_emb,
+            mask=v2a_cross_attention_mask,
+        ) if not debug_block0 else self._debug_v2a_attn(
+            mod_norm_audio_hidden_states=mod_norm_audio_hidden_states,
+            mod_norm_hidden_states=mod_norm_hidden_states,
+            ca_audio_rotary_emb=ca_audio_rotary_emb,
+            ca_video_rotary_emb=ca_video_rotary_emb,
+            v2a_cross_attention_mask=v2a_cross_attention_mask,
+        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_v2a_output", v2a_attn_hidden_states)
+        audio_hidden_states = audio_hidden_states + v2a_gate * v2a_attn_hidden_states
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_v2a_audio_residual", audio_hidden_states)
+
+        # 4. Feedforward
+        vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
+            self.scale_shift_table, batch_size, temb, slice(3, 6)
+        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_ff_video_shift", vshift_mlp)
+            _ltx2_debug_save("sglang_block0_ff_video_scale", vscale_mlp)
+            _ltx2_debug_save("sglang_block0_ff_video_gate", vgate_mlp)
+            _ltx2_debug_save("sglang_block0_ff_video_prenorm_hidden", hidden_states)
+        norm_hidden_states = (
+            rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
+        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_ff_video_input", norm_hidden_states)
+            _LTX2_DEBUG_STATE["ff_name"] = "block0_ff_video"
+        ff_output = self.ff(norm_hidden_states)
+        if debug_block0:
+            _LTX2_DEBUG_STATE["ff_name"] = None
+            _ltx2_debug_save("sglang_block0_ff_video_output", ff_output)
+        hidden_states = hidden_states + ff_output * vgate_mlp
+
+        ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
+            self.audio_scale_shift_table, batch_size, temb_audio, slice(3, 6)
+        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_ff_audio_shift", ashift_mlp)
+            _ltx2_debug_save("sglang_block0_ff_audio_scale", ascale_mlp)
+            _ltx2_debug_save("sglang_block0_ff_audio_gate", agate_mlp)
+            _ltx2_debug_save("sglang_block0_ff_audio_prenorm_hidden", audio_hidden_states)
+        norm_audio_hidden_states = (
+            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
+        )
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_ff_audio_input", norm_audio_hidden_states)
+            _LTX2_DEBUG_STATE["ff_name"] = "block0_ff_audio"
+        audio_ff_output = self.audio_ff(norm_audio_hidden_states)
+        if debug_block0:
+            _LTX2_DEBUG_STATE["ff_name"] = None
+            _ltx2_debug_save("sglang_block0_ff_audio_output", audio_ff_output)
+        audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+
+        if debug_block0:
+            _ltx2_debug_save("sglang_block0_video_output", hidden_states)
+            _ltx2_debug_save("sglang_block0_audio_output", audio_hidden_states)
+
+        return hidden_states, audio_hidden_states
+
+    def _debug_v2a_attn(
+        self,
+        *,
+        mod_norm_audio_hidden_states: torch.Tensor,
+        mod_norm_hidden_states: torch.Tensor,
+        ca_audio_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        ca_video_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        v2a_cross_attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        _LTX2_DEBUG_STATE["attn_name"] = "block0_v2a"
+        try:
+            return self.video_to_audio_attn(
                 mod_norm_audio_hidden_states,
                 context=mod_norm_hidden_states,
                 pe=ca_audio_rotary_emb,
                 k_pe=ca_video_rotary_emb,
                 mask=v2a_cross_attention_mask,
             )
-            audio_hidden_states = (
-                audio_hidden_states + v2a_gate * v2a_attn_hidden_states
-            )
-        # 4. Feedforward
-        vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
-            self.scale_shift_table, batch_size, temb, slice(3, None)
-        )
-        norm_hidden_states = (
-            rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
-        )
-        ff_output = self.ff(norm_hidden_states)
-        hidden_states = hidden_states + ff_output * vgate_mlp
-
-        ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
-            self.audio_scale_shift_table, batch_size, temb_audio, slice(3, None)
-        )
-        norm_audio_hidden_states = (
-            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
-        )
-        audio_ff_output = self.audio_ff(norm_audio_hidden_states)
-        audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
-        return hidden_states, audio_hidden_states
+        finally:
+            _LTX2_DEBUG_STATE["attn_name"] = None
 
 
 class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
@@ -1075,6 +1566,11 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         self.audio_hidden_size = arch.audio_hidden_size
         self.audio_num_attention_heads = arch.audio_num_attention_heads
         self.norm_eps = arch.norm_eps
+        # Align to the trusted official diffusers==0.37.0 LTX2 baseline, whose
+        # transformer block does not implement prompt cross-attention modulation.
+        self.cross_attn_mod = False
+        self.audio_cross_attn_mod = False
+        self.prompt_modulation = self.cross_attn_mod or self.audio_cross_attn_mod
 
         tp_size = get_tp_world_size()
         self._validate_tp_config(arch=arch, tp_size=tp_size)
@@ -1106,10 +1602,12 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
 
         # 3. Timestep Modulation Params and Embedding
         self.adaln_single = LTX2AdaLayerNormSingle(
-            self.hidden_size, embedding_coefficient=6
+            self.hidden_size,
+            embedding_coefficient=9 if self.cross_attn_mod else 6,
         )
         self.audio_adaln_single = LTX2AdaLayerNormSingle(
-            self.audio_hidden_size, embedding_coefficient=6
+            self.audio_hidden_size,
+            embedding_coefficient=9 if self.audio_cross_attn_mod else 6,
         )
 
         # Global Cross Attention Modulation Parameters
@@ -1125,6 +1623,13 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         self.av_ca_v2a_gate_adaln_single = LTX2AdaLayerNormSingle(
             self.audio_hidden_size, embedding_coefficient=1
         )
+        if self.prompt_modulation:
+            self.prompt_adaln_single = LTX2AdaLayerNormSingle(
+                self.hidden_size, embedding_coefficient=2
+            )
+            self.audio_prompt_adaln_single = LTX2AdaLayerNormSingle(
+                self.audio_hidden_size, embedding_coefficient=2
+            )
 
         # Output Layer Scale/Shift Modulation parameters
         self.scale_shift_table = nn.Parameter(
@@ -1238,6 +1743,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                     // self.audio_num_attention_heads,
                     audio_cross_attention_dim=arch.audio_cross_attention_dim,
                     norm_eps=self.norm_eps,
+                    video_cross_attn_adaln=self.cross_attn_mod,
+                    audio_cross_attn_adaln=self.audio_cross_attn_mod,
                     qk_norm=True,  # Always True in LTX2
                     supported_attention_backends=self._supported_attention_backends,
                     prefix=config.prefix,
@@ -1286,7 +1793,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         encoder_hidden_states: torch.Tensor,
         audio_encoder_hidden_states: torch.Tensor,
         timestep: torch.LongTensor,
+        sigma: Optional[torch.Tensor] = None,
         audio_timestep: Optional[torch.LongTensor] = None,
+        audio_sigma: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         audio_encoder_attention_mask: Optional[torch.Tensor] = None,
         num_frames: Optional[int] = None,
@@ -1296,204 +1805,544 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_num_frames: Optional[int] = None,
         video_coords: Optional[torch.Tensor] = None,
         audio_coords: Optional[torch.Tensor] = None,
-        skip_video_self_attn_blocks: Optional[tuple[int, ...]] = None,
-        skip_audio_self_attn_blocks: Optional[tuple[int, ...]] = None,
-        disable_a2v_cross_attn: bool = False,
-        disable_v2a_cross_attn: bool = False,
+        use_cross_timestep: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-
+        debug_forward = _ltx2_debug_start_forward()
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
+        audio_sigma = audio_sigma if audio_sigma is not None else sigma
+        try:
+            if (
+                encoder_attention_mask is not None
+                and encoder_attention_mask.ndim == 2
+            ):
+                encoder_attention_mask = (
+                    1 - encoder_attention_mask.to(hidden_states.dtype)
+                ) * -10000.0
+                encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
-        if num_frames is None or height is None or width is None:
-            raise ValueError(
-                "num_frames/height/width must be provided for RoPE coordinate generation."
+            if (
+                audio_encoder_attention_mask is not None
+                and audio_encoder_attention_mask.ndim == 2
+            ):
+                audio_encoder_attention_mask = (
+                    1 - audio_encoder_attention_mask.to(audio_hidden_states.dtype)
+                ) * -10000.0
+                audio_encoder_attention_mask = audio_encoder_attention_mask.unsqueeze(1)
+
+            if num_frames is None or height is None or width is None:
+                raise ValueError(
+                    "num_frames/height/width must be provided for RoPE coordinate generation."
+                )
+            if audio_num_frames is None:
+                raise ValueError(
+                    "audio_num_frames must be provided for RoPE coordinate generation."
+                )
+
+            if video_coords is None:
+                # Wan-style SP-RoPE: when SP is enabled, each rank runs on its local
+                # time shard but RoPE positions must be offset to global time.
+                #
+                # We assume equal time sharding across SP ranks.
+                if model_parallel_is_initialized():
+                    sp_world_size = get_sp_world_size()
+                    sp_rank = get_sp_parallel_rank()
+                else:
+                    sp_world_size = 1
+                    sp_rank = 0
+
+                video_shift = int(sp_rank) * int(num_frames) if sp_world_size > 1 else 0
+                video_coords = self.rope.prepare_video_coords(
+                    batch_size=batch_size,
+                    num_frames=num_frames,
+                    height=height,
+                    width=width,
+                    device=hidden_states.device,
+                    fps=fps,
+                    start_frame=video_shift,
+                )
+            if audio_coords is None:
+                audio_coords = self.audio_rope.prepare_audio_coords(
+                    batch_size=batch_size,
+                    num_frames=audio_num_frames,
+                    device=audio_hidden_states.device,
+                )
+
+            video_rotary_emb = self.rope(video_coords, device=hidden_states.device)
+            audio_rotary_emb = self.audio_rope(
+                audio_coords, device=audio_hidden_states.device
             )
-        if audio_num_frames is None:
-            raise ValueError(
-                "audio_num_frames must be provided for RoPE coordinate generation."
+            ca_video_rotary_emb = self.cross_attn_rope(
+                video_coords[:, 0:1, :], device=hidden_states.device
+            )
+            ca_audio_rotary_emb = self.cross_attn_audio_rope(
+                audio_coords[:, 0:1, :], device=audio_hidden_states.device
             )
 
-        if video_coords is None:
-            # Wan-style SP-RoPE: when SP is enabled, each rank runs on its local
-            # time shard but RoPE positions must be offset to global time.
-            #
-            # We assume equal time sharding across SP ranks.
-            if model_parallel_is_initialized():
-                sp_world_size = get_sp_world_size()
-                sp_rank = get_sp_parallel_rank()
+            # 2. Patchify input projections
+            patchify_input = hidden_states
+            audio_patchify_input = audio_hidden_states
+            hidden_states, _ = self.patchify_proj(hidden_states)
+            audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
+            if debug_forward:
+                patchify_layer = getattr(
+                    self.patchify_proj, "base_layer", self.patchify_proj
+                )
+                patchify_bias = (
+                    patchify_layer.bias
+                    if not patchify_layer.skip_bias_add
+                    else None
+                )
+                _ltx2_debug_save("sglang_stage1_step0_input_video", patchify_input)
+                _ltx2_debug_save("sglang_stage1_step0_input_audio", audio_patchify_input)
+                audio_patchify_layer = getattr(
+                    self.audio_patchify_proj, "base_layer", self.audio_patchify_proj
+                )
+                audio_patchify_bias = (
+                    audio_patchify_layer.bias
+                    if getattr(audio_patchify_layer, "bias", None) is not None
+                    else None
+                )
+                with torch.autocast(
+                    device_type=patchify_input.device.type, enabled=False
+                ):
+                    manual_patchify_video = F.linear(
+                        patchify_input.float(),
+                        patchify_layer.weight.float(),
+                        patchify_bias.float() if patchify_bias is not None else None,
+                    )
+                manual_patchify_video = manual_patchify_video.to(
+                    dtype=patchify_input.dtype
+                )
+                manual_patchify_audio = F.linear(
+                    audio_patchify_input,
+                    audio_patchify_layer.weight,
+                    audio_patchify_bias,
+                )
+                _ltx2_debug_save(
+                    "sglang_patchify_proj_weight", patchify_layer.weight
+                )
+                _ltx2_debug_save("sglang_patchify_proj_bias", patchify_layer.bias)
+                _ltx2_debug_save(
+                    "sglang_audio_patchify_proj_weight", audio_patchify_layer.weight
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_patchify_proj_bias", audio_patchify_layer.bias
+                )
+                _ltx2_debug_save("sglang_patchify_video", hidden_states)
+                _ltx2_debug_save("sglang_patchify_audio", audio_hidden_states)
+                _ltx2_debug_save("sglang_patchify_video_manual", manual_patchify_video)
+                _ltx2_debug_save("sglang_patchify_audio_manual", manual_patchify_audio)
+                debug_dir = _LTX2_DEBUG_STATE["dir"]
+                if debug_dir:
+                    patchify_type = type(self.patchify_proj).__name__
+                    audio_patchify_type = type(self.audio_patchify_proj).__name__
+                    patchify_base = getattr(self.patchify_proj, "base_layer", None)
+                    audio_patchify_base = getattr(
+                        self.audio_patchify_proj, "base_layer", None
+                    )
+                    with open(
+                        os.path.join(debug_dir, "sglang_patchify_proj_debug.txt"),
+                        "w",
+                        encoding="utf-8",
+                    ) as f:
+                        f.write(f"patchify_type={patchify_type}\n")
+                        f.write(f"audio_patchify_type={audio_patchify_type}\n")
+                        f.write(
+                            "patchify_has_base_layer="
+                            f"{patchify_base is not None}\n"
+                        )
+                        f.write(
+                            "audio_patchify_has_base_layer="
+                            f"{audio_patchify_base is not None}\n"
+                        )
+                        if patchify_base is not None:
+                            f.write(
+                                "patchify_base_type="
+                                f"{type(patchify_base).__name__}\n"
+                            )
+                            f.write(
+                                "patchify_merged="
+                                f"{getattr(self.patchify_proj, 'merged', 'NA')}\n"
+                            )
+                            f.write(
+                                "patchify_disable_lora="
+                                f"{getattr(self.patchify_proj, 'disable_lora', 'NA')}\n"
+                            )
+                        if audio_patchify_base is not None:
+                            f.write(
+                                "audio_patchify_base_type="
+                                f"{type(audio_patchify_base).__name__}\n"
+                            )
+                            f.write(
+                                "audio_patchify_merged="
+                                f"{getattr(self.audio_patchify_proj, 'merged', 'NA')}\n"
+                            )
+                            f.write(
+                                "audio_patchify_disable_lora="
+                                f"{getattr(self.audio_patchify_proj, 'disable_lora', 'NA')}\n"
+                            )
+
+            # 3. Prepare timestep embeddings
+            # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "video"
+                _ltx2_debug_save("sglang_timestep_video", timestep.flatten())
+            temb, embedded_timestep = self.adaln_single(
+                timestep.flatten(),
+                hidden_dtype=hidden_states.dtype,
+            )
+            temb = temb.view(batch_size, -1, temb.size(-1))
+            embedded_timestep = embedded_timestep.view(
+                batch_size, -1, embedded_timestep.size(-1)
+            )
+
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "audio"
+                _ltx2_debug_save("sglang_timestep_audio", audio_timestep.flatten())
+            temb_audio, audio_embedded_timestep = self.audio_adaln_single(
+                audio_timestep.flatten(),
+                hidden_dtype=audio_hidden_states.dtype,
+            )
+            temb_audio = temb_audio.view(batch_size, -1, temb_audio.size(-1))
+            audio_embedded_timestep = audio_embedded_timestep.view(
+                batch_size, -1, audio_embedded_timestep.size(-1)
+            )
+            if self.prompt_modulation:
+                temb_prompt, _ = self.prompt_adaln_single(
+                    sigma.flatten(), hidden_dtype=hidden_states.dtype
+                )
+                temb_prompt_audio, _ = self.audio_prompt_adaln_single(
+                    audio_sigma.flatten(), hidden_dtype=audio_hidden_states.dtype
+                )
+                temb_prompt = temb_prompt.view(batch_size, -1, temb_prompt.size(-1))
+                temb_prompt_audio = temb_prompt_audio.view(
+                    batch_size, -1, temb_prompt_audio.size(-1)
+                )
             else:
-                sp_world_size = 1
-                sp_rank = 0
+                temb_prompt = temb_prompt_audio = None
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = None
+                _ltx2_debug_save("sglang_temb_video", temb)
+                _ltx2_debug_save("sglang_temb_audio", temb_audio)
+                _ltx2_debug_save("sglang_embedded_timestep_video", embedded_timestep)
+                _ltx2_debug_save(
+                    "sglang_embedded_timestep_audio", audio_embedded_timestep
+                )
+                ca_video_linear = getattr(
+                    self.av_ca_video_scale_shift_adaln_single.linear,
+                    "base_layer",
+                    self.av_ca_video_scale_shift_adaln_single.linear,
+                )
+                ca_audio_linear = getattr(
+                    self.av_ca_audio_scale_shift_adaln_single.linear,
+                    "base_layer",
+                    self.av_ca_audio_scale_shift_adaln_single.linear,
+                )
+                a2v_gate_linear = getattr(
+                    self.av_ca_a2v_gate_adaln_single.linear,
+                    "base_layer",
+                    self.av_ca_a2v_gate_adaln_single.linear,
+                )
+                v2a_gate_linear = getattr(
+                    self.av_ca_v2a_gate_adaln_single.linear,
+                    "base_layer",
+                    self.av_ca_v2a_gate_adaln_single.linear,
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_video_scale_shift_linear_weight",
+                    ca_video_linear.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_video_scale_shift_linear_bias",
+                    getattr(ca_video_linear, "bias", None),
+                )
+                if getattr(self.av_ca_video_scale_shift_adaln_single.linear, "lora_A", None) is not None:
+                    lora_a = self.av_ca_video_scale_shift_adaln_single.linear.lora_A
+                    lora_b = self.av_ca_video_scale_shift_adaln_single.linear.lora_B
+                    if hasattr(lora_a, "to_local"):
+                        lora_a = lora_a.to_local()
+                    if hasattr(lora_b, "to_local"):
+                        lora_b = lora_b.to_local()
+                    _ltx2_debug_save("sglang_av_ca_video_scale_shift_linear_lora_A", lora_a)
+                    _ltx2_debug_save("sglang_av_ca_video_scale_shift_linear_lora_B", lora_b)
+                ca_emb = self.av_ca_video_scale_shift_adaln_single.emb.timestep_embedder
+                for idx, layer in [("1", ca_emb.linear_1), ("2", ca_emb.linear_2)]:
+                    layer_base = getattr(layer, "base_layer", layer)
+                    _ltx2_debug_save(
+                        f"sglang_av_ca_video_scale_shift_embed_linear_{idx}_weight",
+                        layer_base.weight,
+                    )
+                    _ltx2_debug_save(
+                        f"sglang_av_ca_video_scale_shift_embed_linear_{idx}_bias",
+                        getattr(layer_base, "bias", None),
+                    )
+                    if getattr(layer, "lora_A", None) is not None:
+                        layer_lora_a = layer.lora_A
+                        layer_lora_b = layer.lora_B
+                        if hasattr(layer_lora_a, "to_local"):
+                            layer_lora_a = layer_lora_a.to_local()
+                        if hasattr(layer_lora_b, "to_local"):
+                            layer_lora_b = layer_lora_b.to_local()
+                        _ltx2_debug_save(
+                            f"sglang_av_ca_video_scale_shift_embed_linear_{idx}_lora_A",
+                            layer_lora_a,
+                        )
+                        _ltx2_debug_save(
+                            f"sglang_av_ca_video_scale_shift_embed_linear_{idx}_lora_B",
+                            layer_lora_b,
+                        )
+                _ltx2_debug_save(
+                    "sglang_av_ca_audio_scale_shift_linear_weight",
+                    ca_audio_linear.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_audio_scale_shift_linear_bias",
+                    getattr(ca_audio_linear, "bias", None),
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_a2v_gate_linear_weight",
+                    a2v_gate_linear.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_a2v_gate_linear_bias",
+                    getattr(a2v_gate_linear, "bias", None),
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_v2a_gate_linear_weight",
+                    v2a_gate_linear.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_av_ca_v2a_gate_linear_bias",
+                    getattr(v2a_gate_linear, "bias", None),
+                )
 
-            video_shift = int(sp_rank) * int(num_frames) if sp_world_size > 1 else 0
-            video_coords = self.rope.prepare_video_coords(
-                batch_size=batch_size,
-                num_frames=num_frames,
-                height=height,
-                width=width,
-                device=hidden_states.device,
-                fps=fps,
-                start_frame=video_shift,
+            # 3.2. Prepare global modality cross attention modulation parameters
+            hidden_dtype = hidden_states.dtype
+            video_ca_timestep = (
+                audio_sigma.flatten() if use_cross_timestep else timestep.flatten()
             )
-        if audio_coords is None:
-            audio_coords = self.audio_rope.prepare_audio_coords(
-                batch_size=batch_size,
-                num_frames=audio_num_frames,
-                device=audio_hidden_states.device,
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "ca_scale_shift_video"
+            temb_ca_scale_shift, embedded_temb_ca_scale_shift = (
+                self.av_ca_video_scale_shift_adaln_single(
+                    video_ca_timestep, hidden_dtype=hidden_dtype
+                )
             )
-
-        video_rotary_emb = self.rope(video_coords, device=hidden_states.device)
-        audio_rotary_emb = self.audio_rope(
-            audio_coords, device=audio_hidden_states.device
-        )
-        ca_video_rotary_emb = self.cross_attn_rope(
-            video_coords[:, 0:1, :], device=hidden_states.device
-        )
-        ca_audio_rotary_emb = self.cross_attn_audio_rope(
-            audio_coords[:, 0:1, :], device=audio_hidden_states.device
-        )
-
-        # 2. Patchify input projections
-        hidden_states, _ = self.patchify_proj(hidden_states)
-        audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
-        # 3. Prepare timestep embeddings
-        # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
-        temb, embedded_timestep = self.adaln_single(
-            timestep.flatten(),
-        )
-        temb = temb.view(batch_size, -1, temb.size(-1))
-        embedded_timestep = embedded_timestep.view(
-            batch_size, -1, embedded_timestep.size(-1)
-        )
-
-        temb_audio, audio_embedded_timestep = self.audio_adaln_single(
-            audio_timestep.flatten()
-        )
-        temb_audio = temb_audio.view(batch_size, -1, temb_audio.size(-1))
-        audio_embedded_timestep = audio_embedded_timestep.view(
-            batch_size, -1, audio_embedded_timestep.size(-1)
-        )
-
-        # 3.2. Prepare global modality cross attention modulation parameters
-        ts_ca_mult = (
-            self.av_ca_timestep_scale_multiplier / self.timestep_scale_multiplier
-        )
-
-        hidden_dtype = hidden_states.dtype
-        temb_ca_scale_shift, _ = self.av_ca_video_scale_shift_adaln_single(
-            timestep.flatten(), hidden_dtype=hidden_dtype
-        )
-        temb_ca_scale_shift = temb_ca_scale_shift.view(
-            batch_size, -1, temb_ca_scale_shift.shape[-1]
-        )
-
-        temb_ca_gate, _ = self.av_ca_a2v_gate_adaln_single(
-            timestep.flatten() * self.av_ca_timestep_scale_multiplier,
-            hidden_dtype=hidden_dtype,
-        )
-        temb_ca_gate = temb_ca_gate.view(batch_size, -1, temb_ca_gate.shape[-1])
-
-        temb_ca_audio_scale_shift, _ = self.av_ca_audio_scale_shift_adaln_single(
-            audio_timestep.flatten(), hidden_dtype=audio_hidden_states.dtype
-        )
-        temb_ca_audio_scale_shift = temb_ca_audio_scale_shift.view(
-            batch_size, -1, temb_ca_audio_scale_shift.shape[-1]
-        )
-
-        temb_ca_audio_gate, _ = self.av_ca_v2a_gate_adaln_single(
-            audio_timestep.flatten() * self.av_ca_timestep_scale_multiplier,
-            hidden_dtype=audio_hidden_states.dtype,
-        )
-        temb_ca_audio_gate = temb_ca_audio_gate.view(
-            batch_size, -1, temb_ca_audio_gate.shape[-1]
-        )
-
-        # 4. Prepare prompt embeddings
-        encoder_hidden_states = self.caption_projection(encoder_hidden_states)
-        audio_encoder_hidden_states = self.audio_caption_projection(
-            audio_encoder_hidden_states
-        )
-        # 5. Run blocks
-        skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
-        skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
-        for block in self.transformer_blocks:
-            hidden_states, audio_hidden_states = block(
-                hidden_states,
-                audio_hidden_states,
-                encoder_hidden_states,
-                audio_encoder_hidden_states,
-                # Keep the first 4 args positional to stay compatible with cache-dit's
-                # LTX2 adapter, which treats `audio_hidden_states` as `encoder_hidden_states`
-                # under ForwardPattern.Pattern_0.
-                temb=temb,
-                temb_audio=temb_audio,
-                temb_ca_scale_shift=temb_ca_scale_shift,
-                temb_ca_audio_scale_shift=temb_ca_audio_scale_shift,
-                temb_ca_gate=temb_ca_gate,
-                temb_ca_audio_gate=temb_ca_audio_gate,
-                video_rotary_emb=video_rotary_emb,
-                audio_rotary_emb=audio_rotary_emb,
-                ca_video_rotary_emb=ca_video_rotary_emb,
-                ca_audio_rotary_emb=ca_audio_rotary_emb,
-                encoder_attention_mask=encoder_attention_mask,
-                audio_encoder_attention_mask=audio_encoder_attention_mask,
-                skip_video_self_attn=block.idx in skip_video_self_attn_blocks,
-                skip_audio_self_attn=block.idx in skip_audio_self_attn_blocks,
-                skip_a2v_cross_attn=disable_a2v_cross_attn,
-                skip_v2a_cross_attn=disable_v2a_cross_attn,
+            temb_ca_scale_shift = temb_ca_scale_shift.view(
+                batch_size, -1, temb_ca_scale_shift.shape[-1]
+            )
+            embedded_temb_ca_scale_shift = embedded_temb_ca_scale_shift.view(
+                batch_size, -1, embedded_temb_ca_scale_shift.shape[-1]
             )
 
-        # 6. Output layers
-        # Video
-        scale_shift_values = self.scale_shift_table[None, None].to(
-            device=hidden_states.device, dtype=hidden_states.dtype
-        ) + embedded_timestep[:, :, None].to(dtype=hidden_states.dtype)
-        shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
-        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "ca_gate_video"
+            temb_ca_gate, embedded_temb_ca_gate = self.av_ca_a2v_gate_adaln_single(
+                video_ca_timestep * self.av_ca_timestep_scale_multiplier,
+                hidden_dtype=hidden_dtype,
+            )
+            temb_ca_gate = temb_ca_gate.view(batch_size, -1, temb_ca_gate.shape[-1])
+            embedded_temb_ca_gate = embedded_temb_ca_gate.view(
+                batch_size, -1, embedded_temb_ca_gate.shape[-1]
+            )
+
+            audio_ca_timestep = (
+                sigma.flatten() if use_cross_timestep else audio_timestep.flatten()
+            )
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "ca_scale_shift_audio"
+            temb_ca_audio_scale_shift, embedded_temb_ca_audio_scale_shift = (
+                self.av_ca_audio_scale_shift_adaln_single(
+                    audio_ca_timestep, hidden_dtype=audio_hidden_states.dtype
+                )
+            )
+            temb_ca_audio_scale_shift = temb_ca_audio_scale_shift.view(
+                batch_size, -1, temb_ca_audio_scale_shift.shape[-1]
+            )
+            embedded_temb_ca_audio_scale_shift = (
+                embedded_temb_ca_audio_scale_shift.view(
+                    batch_size, -1, embedded_temb_ca_audio_scale_shift.shape[-1]
+                )
+            )
+
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = "ca_gate_audio"
+            temb_ca_audio_gate, embedded_temb_ca_audio_gate = (
+                self.av_ca_v2a_gate_adaln_single(
+                    audio_ca_timestep * self.av_ca_timestep_scale_multiplier,
+                    hidden_dtype=audio_hidden_states.dtype,
+                )
+            )
+            temb_ca_audio_gate = temb_ca_audio_gate.view(
+                batch_size, -1, temb_ca_audio_gate.shape[-1]
+            )
+            embedded_temb_ca_audio_gate = embedded_temb_ca_audio_gate.view(
+                batch_size, -1, embedded_temb_ca_audio_gate.shape[-1]
+            )
+            if debug_forward:
+                _LTX2_DEBUG_STATE["time_embed_name"] = None
+                _ltx2_debug_save("sglang_temb_ca_scale_shift_video", temb_ca_scale_shift)
+                _ltx2_debug_save("sglang_temb_ca_gate_video", temb_ca_gate)
+                _ltx2_debug_save(
+                    "sglang_temb_ca_scale_shift_audio", temb_ca_audio_scale_shift
+                )
+                _ltx2_debug_save("sglang_temb_ca_gate_audio", temb_ca_audio_gate)
+                _ltx2_debug_save(
+                    "sglang_embedded_timestep_ca_scale_shift_video",
+                    embedded_temb_ca_scale_shift,
+                )
+                _ltx2_debug_save(
+                    "sglang_embedded_timestep_ca_gate_video",
+                    embedded_temb_ca_gate,
+                )
+                _ltx2_debug_save(
+                    "sglang_embedded_timestep_ca_scale_shift_audio",
+                    embedded_temb_ca_audio_scale_shift,
+                )
+                _ltx2_debug_save(
+                    "sglang_embedded_timestep_ca_gate_audio",
+                    embedded_temb_ca_audio_gate,
+                )
+
+            # 4. Prepare prompt embeddings
+            encoder_hidden_states = self.caption_projection(encoder_hidden_states)
+            audio_encoder_hidden_states = self.audio_caption_projection(
+                audio_encoder_hidden_states
+            )
+            if debug_forward:
+                _ltx2_debug_save(
+                    "sglang_caption_linear1_weight",
+                    self.caption_projection.linear_1.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_caption_linear1_bias",
+                    self.caption_projection.linear_1.bias,
+                )
+                _ltx2_debug_save(
+                    "sglang_caption_linear2_weight",
+                    self.caption_projection.linear_2.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_caption_linear2_bias",
+                    self.caption_projection.linear_2.bias,
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_caption_linear1_weight",
+                    self.audio_caption_projection.linear_1.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_caption_linear1_bias",
+                    self.audio_caption_projection.linear_1.bias,
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_caption_linear2_weight",
+                    self.audio_caption_projection.linear_2.weight,
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_caption_linear2_bias",
+                    self.audio_caption_projection.linear_2.bias,
+                )
+                _ltx2_debug_save("sglang_caption_projection_video", encoder_hidden_states)
+                _ltx2_debug_save(
+                    "sglang_caption_projection_audio", audio_encoder_hidden_states
+                )
+                _ltx2_debug_save(
+                    "sglang_encoder_attention_mask", encoder_attention_mask
+                )
+                _ltx2_debug_save(
+                    "sglang_audio_encoder_attention_mask",
+                    audio_encoder_attention_mask,
+                )
+
+            # 5. Run blocks
+            for block in self.transformer_blocks:
+                hidden_states, audio_hidden_states = block(
+                    hidden_states,
+                    audio_hidden_states,
+                    encoder_hidden_states,
+                    audio_encoder_hidden_states,
+                    # Keep the first 4 args positional to stay compatible with cache-dit's
+                    # LTX2 adapter, which treats `audio_hidden_states` as `encoder_hidden_states`
+                    # under ForwardPattern.Pattern_0.
+                    temb=temb,
+                    temb_audio=temb_audio,
+                    temb_ca_scale_shift=temb_ca_scale_shift,
+                    temb_ca_audio_scale_shift=temb_ca_audio_scale_shift,
+                    temb_ca_gate=temb_ca_gate,
+                    temb_ca_audio_gate=temb_ca_audio_gate,
+                    temb_prompt=temb_prompt,
+                    temb_prompt_audio=temb_prompt_audio,
+                    video_rotary_emb=video_rotary_emb,
+                    audio_rotary_emb=audio_rotary_emb,
+                    ca_video_rotary_emb=ca_video_rotary_emb,
+                    ca_audio_rotary_emb=ca_audio_rotary_emb,
+                    encoder_attention_mask=encoder_attention_mask,
+                    audio_encoder_attention_mask=audio_encoder_attention_mask,
+                )
+
+            # 6. Output layers
+            # Video
+            scale_shift_values = self.scale_shift_table[None, None].to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            ) + embedded_timestep[:, :, None].to(dtype=hidden_states.dtype)
+            shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
             hidden_states = self.norm_out(hidden_states)
-        hidden_states = hidden_states * (1 + scale) + shift
-        hidden_states, _ = self.proj_out(hidden_states)
+            hidden_states = hidden_states * (1 + scale) + shift
+            hidden_states, _ = self.proj_out(hidden_states)
 
-        # Audio
-        audio_scale_shift_values = self.audio_scale_shift_table[None, None].to(
-            device=audio_hidden_states.device, dtype=audio_hidden_states.dtype
-        ) + audio_embedded_timestep[:, :, None].to(dtype=audio_hidden_states.dtype)
-        audio_shift, audio_scale = (
-            audio_scale_shift_values[:, :, 0],
-            audio_scale_shift_values[:, :, 1],
-        )
-        with torch.autocast(device_type=audio_hidden_states.device.type, enabled=False):
+            # Audio
+            audio_scale_shift_values = self.audio_scale_shift_table[None, None].to(
+                device=audio_hidden_states.device, dtype=audio_hidden_states.dtype
+            ) + audio_embedded_timestep[:, :, None].to(dtype=audio_hidden_states.dtype)
+            audio_shift, audio_scale = (
+                audio_scale_shift_values[:, :, 0],
+                audio_scale_shift_values[:, :, 1],
+            )
             audio_hidden_states = self.audio_norm_out(audio_hidden_states)
-        audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
-        audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
-        # Unpatchify if requested (default True for pipeline compatibility)
-        return_latents = kwargs.get("return_latents", True)
+            audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
+            audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
 
-        if return_latents:
-            # Unpatchify Video
-            # [B, N, C_out_raw*patch_vol] -> [B, C_out_raw, T, H, W]
-            # Requires num_frames, height, width to be known
-            if num_frames is not None and height is not None and width is not None:
-                p_t, p_h, p_w = self.patch_size
-                post_t, post_h, post_w = num_frames // p_t, height // p_h, width // p_w
-                b = batch_size
-                hidden_states = hidden_states.reshape(
-                    b, post_t, post_h, post_w, self.out_channels_raw, p_t, p_h, p_w
-                )
-                hidden_states = hidden_states.permute(0, 4, 1, 5, 2, 6, 3, 7).reshape(
-                    b, self.out_channels_raw, num_frames, height, width
-                )
+            # Unpatchify if requested (default True for pipeline compatibility)
+            return_latents = kwargs.get("return_latents", True)
 
-            # Unpatchify Audio
-            # [B, N, C_out] -> [B, C_out, T] (or 4D/5D)
-            if audio_num_frames is not None:
-                b = batch_size
-                # simple reshape for 1D patch
-                audio_hidden_states = audio_hidden_states.permute(0, 2, 1)  # [B, C, T]
+            if return_latents:
+                # Unpatchify Video
+                # [B, N, C_out_raw*patch_vol] -> [B, C_out_raw, T, H, W]
+                # Requires num_frames, height, width to be known
+                if num_frames is not None and height is not None and width is not None:
+                    p_t, p_h, p_w = self.patch_size
+                    post_t, post_h, post_w = (
+                        num_frames // p_t,
+                        height // p_h,
+                        width // p_w,
+                    )
+                    b = batch_size
+                    hidden_states = hidden_states.reshape(
+                        b,
+                        post_t,
+                        post_h,
+                        post_w,
+                        self.out_channels_raw,
+                        p_t,
+                        p_h,
+                        p_w,
+                    )
+                    hidden_states = hidden_states.permute(
+                        0, 4, 1, 5, 2, 6, 3, 7
+                    ).reshape(b, self.out_channels_raw, num_frames, height, width)
 
-        return hidden_states, audio_hidden_states
+                # Unpatchify Audio
+                # [B, N, C_out] -> [B, C_out, T] (or 4D/5D)
+                if audio_num_frames is not None:
+                    audio_hidden_states = audio_hidden_states.permute(
+                        0, 2, 1
+                    )  # [B, C, T]
+
+            return hidden_states, audio_hidden_states
+        finally:
+            _ltx2_debug_end_forward()
 
 
 # Backward-compatible alias (older internal name).

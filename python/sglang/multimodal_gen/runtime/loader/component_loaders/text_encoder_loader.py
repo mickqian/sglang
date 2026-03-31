@@ -7,12 +7,14 @@ from typing import Generator, Iterable, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import transformers
 from torch import nn
 from torch.distributed import init_device_mesh
-from transformers import AutoModel
+from transformers import AutoConfig, AutoModel
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from sglang.multimodal_gen.configs.models import EncoderConfig, ModelConfig
+from sglang.multimodal_gen.configs.models.encoders.gemma_3 import Gemma3Config
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImageEditPipelineConfig,
 )
@@ -50,6 +52,29 @@ class TextEncoderLoader(ComponentLoader):
 
     component_names = ["text_encoder"]
     expected_library = "transformers"
+
+    @staticmethod
+    def _should_force_native_gemma3(encoder_config: EncoderConfig) -> bool:
+        """Gemma3 must use the HF native path for LTX-2 prompt exactness.
+
+        In some runtime paths the config object is deserialized/reconstructed in a
+        way that breaks a plain ``isinstance(..., Gemma3Config)`` check even
+        though it still represents the Gemma3 text encoder. Fall back to stable
+        structural markers so the runtime does not silently load the custom
+        SGLang Gemma3 implementation.
+        """
+        if isinstance(encoder_config, Gemma3Config):
+            return True
+
+        cfg_cls_name = type(encoder_config).__name__.lower()
+        cfg_prefix = str(getattr(encoder_config, "prefix", "")).lower()
+        arch_cls_name = type(getattr(encoder_config, "arch_config", None)).__name__.lower()
+
+        return any(
+            marker in value
+            for marker in ("gemma3", "gemma_3")
+            for value in (cfg_cls_name, cfg_prefix, arch_cls_name)
+        )
 
     @dataclasses.dataclass
     class Source:
@@ -96,12 +121,20 @@ class TextEncoderLoader(ComponentLoader):
             1 if component_model_path.rstrip("/").endswith("text_encoder_2") else 0
         )
         encoder_dtype = server_args.pipeline_config.text_encoder_precisions[encoder_idx]
-        return AutoModel.from_pretrained(
-            component_model_path,
+        common_kwargs = dict(
             trust_remote_code=server_args.trust_remote_code,
             revision=server_args.revision,
             torch_dtype=PRECISION_TO_TYPE[encoder_dtype],
         )
+
+        config = AutoConfig.from_pretrained(component_model_path, **common_kwargs)
+        architectures = list(getattr(config, "architectures", []) or [])
+        if architectures:
+            model_cls = getattr(transformers, architectures[0], None)
+            if model_cls is not None and hasattr(model_cls, "from_pretrained"):
+                return model_cls.from_pretrained(component_model_path, **common_kwargs)
+
+        return AutoModel.from_pretrained(component_model_path, **common_kwargs)
 
     def _prepare_weights(
         self,
@@ -221,6 +254,18 @@ class TextEncoderLoader(ComponentLoader):
             encoder_config = server_args.pipeline_config.text_encoder_configs[1]
             encoder_config.update_model_arch(model_config)
             encoder_dtype = server_args.pipeline_config.text_encoder_precisions[1]
+
+        if self._should_force_native_gemma3(encoder_config):
+            logger.info(
+                "Using native HF Gemma3 text encoder for HF-exact prompt embeddings"
+            )
+            model = self.load_native(
+                component_model_path,
+                server_args,
+                transformers_or_diffusers="transformers",
+            )
+            return model.to(device=get_local_torch_device())
+
         # TODO(will): add support for other dtypes
         return self.load_model(
             component_model_path,

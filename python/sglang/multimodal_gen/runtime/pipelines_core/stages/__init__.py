@@ -62,13 +62,13 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_encoding import (
     TextEncodingStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import (
-    TimestepPreparationStage,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
     LTX2HalveResolutionStage,
     LTX2LoRASwitchStage,
     LTX2UpsampleStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import (
+    TimestepPreparationStage,
 )
 
 __all__ = [
@@ -81,6 +81,7 @@ __all__ = [
     "DenoisingStage",
     "DmdDenoisingStage",
     "LTX2AVDenoisingStage",
+    "LTX2RefinementStage",
     "CausalDMDDenoisingStage",
     "EncodingStage",
     "DecodingStage",
@@ -89,6 +90,9 @@ __all__ = [
     "ImageVAEEncodingStage",
     "TextEncodingStage",
     "LTX2TextConnectorStage",
+    "LTX2HalveResolutionStage",
+    "LTX2LoRASwitchStage",
+    "LTX2UpsampleStage",
     # Hunyuan3D shape stages
     "Hunyuan3DShapeBeforeDenoisingStage",
     "Hunyuan3DShapeDenoisingStage",
@@ -98,9 +102,4 @@ __all__ = [
     "Hunyuan3DPaintPreprocessStage",
     "Hunyuan3DPaintTexGenStage",
     "Hunyuan3DPaintPostprocessStage",
-    # LTX-2 two-stage
-    "LTX2RefinementStage",
-    "LTX2HalveResolutionStage",
-    "LTX2LoRASwitchStage",
-    "LTX2UpsampleStage",
 ]

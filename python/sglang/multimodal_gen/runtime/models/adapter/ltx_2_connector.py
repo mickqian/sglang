@@ -1,15 +1,45 @@
+import inspect
+import math
+import os
 from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.models.attention import FeedForward
+from diffusers.models.transformers.transformer_ltx2 import (
+    LTX2Attention as DiffusersLTX2Attention,
+)
+from diffusers.models.transformers.transformer_ltx2 import (
+    LTX2AudioVideoAttnProcessor,
+)
 
 from sglang.multimodal_gen.configs.models.adapter.ltx_2_connector import (
     LTX2ConnectorConfig,
 )
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
+
+
+_DIFFUSERS_LTX2_ATTENTION_SUPPORTS_GATED_ATTENTION = (
+    "apply_gated_attention"
+    in inspect.signature(DiffusersLTX2Attention.__init__).parameters
+)
+
+
+def _maybe_save_connector_debug(name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(tensor.detach().cpu(), os.path.join(save_dir, f"{name}.pt"))
+
+
+def per_token_rms_norm(
+    text_encoder_hidden_states: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    variance = torch.mean(text_encoder_hidden_states**2, dim=2, keepdim=True)
+    return text_encoder_hidden_states * torch.rsqrt(variance + eps)
 
 
 def apply_interleaved_rotary_emb(
@@ -298,9 +328,6 @@ class LTX2RotaryPosEmbed1d(nn.Module):
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)  # (B,H,T,D//2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)  # (B,H,T,D//2)
 
-        if dtype is not None:
-            cos_freqs = cos_freqs.to(dtype)
-            sin_freqs = sin_freqs.to(dtype)
         return cos_freqs, sin_freqs
 
 
@@ -313,17 +340,22 @@ class LTX2TransformerBlock1d(nn.Module):
         activation_fn: str = "gelu-approximate",
         eps: float = 1e-6,
         rope_type: str = "interleaved",
+        apply_gated_attention: bool = False,
     ):
         super().__init__()
 
         self.norm1 = torch.nn.RMSNorm(dim, eps=eps, elementwise_affine=False)
-        self.attn1 = LTX2Attention(
+        attn_kwargs = dict(
             query_dim=dim,
             heads=num_attention_heads,
             kv_heads=num_attention_heads,
             dim_head=attention_head_dim,
+            processor=LTX2AudioVideoAttnProcessor(),
             rope_type=rope_type,
         )
+        if _DIFFUSERS_LTX2_ATTENTION_SUPPORTS_GATED_ATTENTION:
+            attn_kwargs["apply_gated_attention"] = apply_gated_attention
+        self.attn1 = DiffusersLTX2Attention(**attn_kwargs)
 
         self.norm2 = torch.nn.RMSNorm(dim, eps=eps, elementwise_affine=False)
         self.ff = FeedForward(dim, activation_fn=activation_fn)
@@ -334,17 +366,46 @@ class LTX2TransformerBlock1d(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        debug_prefix = getattr(self, "_debug_prefix", None)
         norm_hidden_states = self.norm1(hidden_states)
+        if debug_prefix:
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_attn_input", norm_hidden_states)
+            q_linear = self.attn1.to_q(norm_hidden_states)
+            k_linear = self.attn1.to_k(norm_hidden_states)
+            v_linear = self.attn1.to_v(norm_hidden_states)
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_q_linear", q_linear)
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_k_linear", k_linear)
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_v_linear", v_linear)
+            _maybe_save_connector_debug(
+                f"sglang_{debug_prefix}_q_norm",
+                self.attn1.norm_q(q_linear),
+            )
+            _maybe_save_connector_debug(
+                f"sglang_{debug_prefix}_k_norm",
+                self.attn1.norm_k(k_linear),
+            )
+            self.attn1._debug_attn_name = debug_prefix
         attn_hidden_states = self.attn1(
             norm_hidden_states,
             attention_mask=attention_mask,
             query_rotary_emb=rotary_emb,
         )
+        if debug_prefix:
+            self.attn1._debug_attn_name = None
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_attn_output", attn_hidden_states)
         hidden_states = hidden_states + attn_hidden_states
+        if debug_prefix:
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_attn_residual", hidden_states)
 
         norm_hidden_states = self.norm2(hidden_states)
+        if debug_prefix:
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_ff_input", norm_hidden_states)
         ff_hidden_states = self.ff(norm_hidden_states)
+        if debug_prefix:
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_ff_output", ff_hidden_states)
         hidden_states = hidden_states + ff_hidden_states
+        if debug_prefix:
+            _maybe_save_connector_debug(f"sglang_{debug_prefix}_block_output", hidden_states)
 
         return hidden_states
 
@@ -369,6 +430,7 @@ class LTX2ConnectorTransformer1d(nn.Module):
         eps: float = 1e-6,
         causal_temporal_positioning: bool = False,
         rope_type: str = "interleaved",
+        gated_attention: bool = False,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -399,6 +461,7 @@ class LTX2ConnectorTransformer1d(nn.Module):
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
                     rope_type=rope_type,
+                    apply_gated_attention=gated_attention,
                 )
                 for _ in range(num_layers)
             ]
@@ -409,6 +472,8 @@ class LTX2ConnectorTransformer1d(nn.Module):
         )
 
         self.gradient_checkpointing = False
+        if len(self.transformer_blocks) > 0:
+            self.transformer_blocks[0]._debug_prefix = getattr(self, "_debug_prefix", None)
 
     def forward(
         self,
@@ -514,10 +579,29 @@ class LTX2TextConnectors(nn.Module):
         rope_double_precision = config.rope_double_precision
         causal_temporal_positioning = config.causal_temporal_positioning
         rope_type = config.rope_type
-
-        self.text_proj_in = nn.Linear(
-            caption_channels * text_proj_in_factor, caption_channels, bias=False
+        per_modality_projections = bool(
+            getattr(config, "per_modality_projections", False)
         )
+        video_hidden_dim = int(getattr(config, "video_hidden_dim", caption_channels))
+        audio_hidden_dim = int(getattr(config, "audio_hidden_dim", caption_channels))
+        proj_bias = bool(getattr(config, "proj_bias", False))
+        video_gated_attn = bool(getattr(config, "video_gated_attn", False))
+        audio_gated_attn = bool(getattr(config, "audio_gated_attn", False))
+        self.per_modality_projections = per_modality_projections
+        self.caption_channels = caption_channels
+
+        text_encoder_dim = caption_channels * text_proj_in_factor
+        if per_modality_projections:
+            self.video_text_proj_in = nn.Linear(
+                text_encoder_dim, video_hidden_dim, bias=proj_bias
+            )
+            self.audio_text_proj_in = nn.Linear(
+                text_encoder_dim, audio_hidden_dim, bias=proj_bias
+            )
+        else:
+            self.text_proj_in = nn.Linear(
+                text_encoder_dim, caption_channels, bias=proj_bias
+            )
         self.video_connector = LTX2ConnectorTransformer1d(
             num_attention_heads=video_connector_num_attention_heads,
             attention_head_dim=video_connector_attention_head_dim,
@@ -528,7 +612,11 @@ class LTX2TextConnectors(nn.Module):
             rope_double_precision=rope_double_precision,
             causal_temporal_positioning=causal_temporal_positioning,
             rope_type=rope_type,
+            gated_attention=video_gated_attn,
         )
+        self.video_connector._debug_prefix = "connector_video_block0"
+        if len(self.video_connector.transformer_blocks) > 0:
+            self.video_connector.transformer_blocks[0]._debug_prefix = "connector_video_block0"
         self.audio_connector = LTX2ConnectorTransformer1d(
             num_attention_heads=audio_connector_num_attention_heads,
             attention_head_dim=audio_connector_attention_head_dim,
@@ -539,14 +627,126 @@ class LTX2TextConnectors(nn.Module):
             rope_double_precision=rope_double_precision,
             causal_temporal_positioning=causal_temporal_positioning,
             rope_type=rope_type,
+            gated_attention=audio_gated_attn,
         )
+        self.audio_connector._debug_prefix = "connector_audio_block0"
+        if len(self.audio_connector.transformer_blocks) > 0:
+            self.audio_connector.transformer_blocks[0]._debug_prefix = "connector_audio_block0"
 
     def forward(
         self,
         text_encoder_hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         additive_mask: bool = False,
+        padding_side: str = "left",
+        scale_factor: int = 8,
     ):
+        if self.per_modality_projections:
+            if additive_mask:
+                raise ValueError(
+                    "LTX-2.3 per_modality_projections path expects a binary attention mask."
+                )
+            if text_encoder_hidden_states.ndim == 3:
+                text_encoder_hidden_states = text_encoder_hidden_states.unflatten(
+                    2, (self.caption_channels, -1)
+                )
+
+            norm_text_encoder_hidden_states = per_token_rms_norm(
+                text_encoder_hidden_states
+            )
+            norm_text_encoder_hidden_states = norm_text_encoder_hidden_states.flatten(
+                2, 3
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_norm_text_hidden_states",
+                norm_text_encoder_hidden_states,
+            )
+            bool_mask = attention_mask.bool().unsqueeze(-1)
+            norm_text_encoder_hidden_states = torch.where(
+                bool_mask,
+                norm_text_encoder_hidden_states,
+                torch.zeros_like(norm_text_encoder_hidden_states),
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_masked_norm_text_hidden_states",
+                norm_text_encoder_hidden_states,
+            )
+
+            video_scale_factor = math.sqrt(
+                self.video_text_proj_in.out_features / self.caption_channels
+            )
+            audio_scale_factor = math.sqrt(
+                self.audio_text_proj_in.out_features / self.caption_channels
+            )
+            video_text_encoder_hidden_states = (
+                norm_text_encoder_hidden_states * video_scale_factor
+            )
+            audio_text_encoder_hidden_states = (
+                norm_text_encoder_hidden_states * audio_scale_factor
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_video_proj_input",
+                video_text_encoder_hidden_states,
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_audio_proj_input",
+                audio_text_encoder_hidden_states,
+            )
+            video_text_encoder_hidden_states = self.video_text_proj_in(
+                video_text_encoder_hidden_states
+            )
+            audio_text_encoder_hidden_states = self.audio_text_proj_in(
+                audio_text_encoder_hidden_states
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_video_proj_output",
+                video_text_encoder_hidden_states,
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_audio_proj_output",
+                audio_text_encoder_hidden_states,
+            )
+
+            text_dtype = video_text_encoder_hidden_states.dtype
+            add_attn_mask = (attention_mask.to(torch.int64) - 1).to(text_dtype)
+            add_attn_mask = add_attn_mask.reshape(
+                add_attn_mask.shape[0], 1, -1, add_attn_mask.shape[-1]
+            )
+            add_attn_mask = add_attn_mask * torch.finfo(text_dtype).max
+            _maybe_save_connector_debug(
+                "sglang_connector_additive_attention_mask",
+                add_attn_mask,
+            )
+
+            video_text_embedding, video_attn_mask = self.video_connector(
+                video_text_encoder_hidden_states, add_attn_mask
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_video_pre_mask_output",
+                video_text_embedding,
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_video_raw_attention_mask",
+                video_attn_mask,
+            )
+            binary_attn_mask = (video_attn_mask < 1e-6).to(torch.int64)
+            binary_attn_mask = binary_attn_mask.reshape(
+                video_text_embedding.shape[0], video_text_embedding.shape[1], 1
+            )
+            video_text_embedding = video_text_embedding * binary_attn_mask
+            audio_text_embedding, _ = self.audio_connector(
+                audio_text_encoder_hidden_states, add_attn_mask
+            )
+            _maybe_save_connector_debug(
+                "sglang_connector_audio_output",
+                audio_text_embedding,
+            )
+            return (
+                video_text_embedding,
+                audio_text_embedding,
+                binary_attn_mask.squeeze(-1),
+            )
+
         # Convert to additive attention mask, if necessary
         if not additive_mask:
             text_dtype = text_encoder_hidden_states.dtype
@@ -554,33 +754,43 @@ class LTX2TextConnectors(nn.Module):
                 attention_mask.shape[0], 1, -1, attention_mask.shape[-1]
             )
             attention_mask = attention_mask.to(text_dtype) * torch.finfo(text_dtype).max
+        _maybe_save_connector_debug(
+            "sglang_connector_additive_attention_mask",
+            attention_mask,
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_masked_norm_text_hidden_states",
+            text_encoder_hidden_states,
+        )
 
-        # Ensure input dtype matches the layer's weight dtype
-        if text_encoder_hidden_states.dtype != self.text_proj_in.weight.dtype:
-            text_encoder_hidden_states = text_encoder_hidden_states.to(
-                self.text_proj_in.weight.dtype
-            )
-
-        # Ensure sequence length is divisible by num_learnable_registers (128)
-        seq_len = text_encoder_hidden_states.shape[1]
-        num_learnable_registers = self.video_connector.num_learnable_registers
-        if (
-            num_learnable_registers is not None
-            and seq_len % num_learnable_registers != 0
-        ):
-            pad_len = num_learnable_registers - (seq_len % num_learnable_registers)
-            text_encoder_hidden_states = F.pad(
-                text_encoder_hidden_states, (0, 0, 0, pad_len), value=0.0
-            )
-
-            if attention_mask.shape[-1] == seq_len:
-                # Pad with a large negative value to mask out the new tokens
-                attention_mask = F.pad(attention_mask, (0, pad_len), value=-1000000.0)
-
+        _maybe_save_connector_debug(
+            "sglang_connector_video_proj_input",
+            text_encoder_hidden_states,
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_audio_proj_input",
+            text_encoder_hidden_states,
+        )
         text_encoder_hidden_states = self.text_proj_in(text_encoder_hidden_states)
+        _maybe_save_connector_debug(
+            "sglang_connector_video_proj_output",
+            text_encoder_hidden_states,
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_audio_proj_output",
+            text_encoder_hidden_states,
+        )
 
         video_text_embedding, new_attn_mask = self.video_connector(
             text_encoder_hidden_states, attention_mask
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_video_pre_mask_output",
+            video_text_embedding,
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_video_raw_attention_mask",
+            new_attn_mask,
         )
 
         attn_mask = (new_attn_mask < 1e-6).to(torch.int64)
@@ -592,6 +802,10 @@ class LTX2TextConnectors(nn.Module):
 
         audio_text_embedding, _ = self.audio_connector(
             text_encoder_hidden_states, attention_mask
+        )
+        _maybe_save_connector_debug(
+            "sglang_connector_audio_output",
+            audio_text_embedding,
         )
 
         return video_text_embedding, audio_text_embedding, new_attn_mask

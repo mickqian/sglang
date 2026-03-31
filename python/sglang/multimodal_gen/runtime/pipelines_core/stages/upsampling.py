@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -111,8 +113,28 @@ class LTX2UpsampleStage(PipelineStage):
         )
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        if os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+            save_dir = os.environ.get("EXPERIMENTS_DIR", "/data/experiments")
+            os.makedirs(save_dir, exist_ok=True)
+            torch.save(
+                batch.latents.cpu(),
+                os.path.join(save_dir, "sglang_stage1_video_latent.pt"),
+            )
+            if batch.audio_latents is not None:
+                torch.save(
+                    batch.audio_latents.cpu(),
+                    os.path.join(save_dir, "sglang_stage1_audio_latent.pt"),
+                )
+
         device = get_local_torch_device()
         latents = self._upsample_video_latents(batch.latents, server_args, device)
+        if os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+            save_dir = os.environ.get("EXPERIMENTS_DIR", "/data/experiments")
+            os.makedirs(save_dir, exist_ok=True)
+            torch.save(
+                latents.cpu(),
+                os.path.join(save_dir, "sglang_upsampled_video_latent.pt"),
+            )
         logger.info("Upsampled video latents: %s", list(latents.shape))
         self._restore_full_resolution(batch)
         self._pack_video_latents(batch, latents, server_args)

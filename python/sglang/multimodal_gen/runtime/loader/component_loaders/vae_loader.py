@@ -3,6 +3,8 @@ import os
 
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
+from safetensors import safe_open
 from safetensors.torch import load_file as safetensors_load_file
 
 from sglang.multimodal_gen import envs
@@ -25,6 +27,52 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 logger = init_logger(__name__)
+
+
+def _load_audio_vae_root_statistics(component_model_path: str) -> dict[str, torch.Tensor]:
+    root_dir = os.path.dirname(component_model_path.rstrip("/"))
+    key_mapping = {
+        "audio_vae.per_channel_statistics.mean-of-means": "decoder.per_channel_statistics.mean-of-means",
+        "audio_vae.per_channel_statistics.std-of-means": "decoder.per_channel_statistics.std-of-means",
+        # Keep compatibility with checkpoints that already store decoder-prefixed keys.
+        "decoder.per_channel_statistics.mean-of-means": "decoder.per_channel_statistics.mean-of-means",
+        "decoder.per_channel_statistics.std-of-means": "decoder.per_channel_statistics.std-of-means",
+    }
+
+    for sf_path in _list_safetensors_files(root_dir):
+        try:
+            with safe_open(sf_path, framework="pt", device="cpu") as handle:
+                found = {
+                    target_key: handle.get_tensor(source_key)
+                    for source_key, target_key in key_mapping.items()
+                    if source_key in handle.keys()
+                }
+        except Exception:
+            continue
+        if found:
+            logger.info("Loaded audio VAE per-channel statistics from %s", sf_path)
+            return found
+
+    try:
+        repo_stats_path = hf_hub_download(
+            repo_id="Lightricks/LTX-2",
+            filename="ltx-2-19b-dev.safetensors",
+        )
+        with safe_open(repo_stats_path, framework="pt", device="cpu") as handle:
+            found = {
+                target_key: handle.get_tensor(source_key)
+                for source_key, target_key in key_mapping.items()
+                if source_key in handle.keys()
+            }
+        if found:
+            logger.info(
+                "Loaded audio VAE per-channel statistics from %s", repo_stats_path
+            )
+            return found
+    except Exception:
+        pass
+
+    return {}
 
 
 def _convert_conv3d_weights_to_channels_last_3d(module: nn.Module) -> int:
@@ -135,6 +183,10 @@ class VAELoader(ComponentLoader):
         loaded = {}
         for sf_path in safetensors_list:
             loaded.update(safetensors_load_file(sf_path))
+        if component_name == "audio_vae":
+            extra_stats = _load_audio_vae_root_statistics(component_model_path)
+            if extra_stats:
+                loaded.update(extra_stats)
         vae.load_state_dict(loaded, strict=False)
 
         state_keys = set(vae.state_dict().keys())
