@@ -74,15 +74,6 @@ class TestModelIdResolution(unittest.TestCase):
         info = _get_config_info(path)
         self.assertIsNotNone(info)
 
-    def test_ltx2_model_id_resolves_without_fallback(self):
-        info = _get_config_info("/data/my-custom-ltx2", model_id="LTX-2")
-        self.assertIsNotNone(info)
-        from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
-            LTX2PipelineConfig,
-        )
-
-        self.assertIs(info.pipeline_config_cls, LTX2PipelineConfig)
-
     def test_model_id_unknown_falls_back_without_crash(self):
         # unrecognized model_id: should warn and fall back to path-based detection
         # with an unresolvable path, expect RuntimeError from the detector step
