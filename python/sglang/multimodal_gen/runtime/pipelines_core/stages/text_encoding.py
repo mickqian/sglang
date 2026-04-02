@@ -263,24 +263,15 @@ class TextEncodingStage(PipelineStage):
                 attention_mask = torch.ones(input_ids.shape[:2], device=target_device)
             else:
                 attention_mask = text_inputs["attention_mask"]
-            is_ltx2_gemma3 = (
-                type(server_args.pipeline_config).__name__ == "LTX2PipelineConfig"
-                and type(text_encoder).__name__ == "Gemma3ForConditionalGeneration"
-            )
-            if is_ltx2_gemma3:
-                outputs: BaseEncoderOutput = text_encoder(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
-                )
-            else:
-                with set_forward_context(current_timestep=0, attn_metadata=None):
-                    outputs: BaseEncoderOutput = text_encoder(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=True,
-                        use_cache=False,
-                    )
+            encoder_forward_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "output_hidden_states": True,
+            }
+            if "use_cache" in inspect.signature(text_encoder.forward).parameters:
+                encoder_forward_kwargs["use_cache"] = False
+            with set_forward_context(current_timestep=0, attn_metadata=None):
+                outputs: BaseEncoderOutput = text_encoder(**encoder_forward_kwargs)
             postprocess_sig = inspect.signature(postprocess_func)
             if len(postprocess_sig.parameters) >= 3:
                 prompt_embeds = postprocess_func(

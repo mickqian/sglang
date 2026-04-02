@@ -880,7 +880,6 @@ _register_configs()
 _NON_DIFFUSERS_MULTIMODAL_PATTERNS: Dict[str, str] = {
     "hunyuan3d": "Hunyuan3D2Pipeline",
     "flux.2-dev-nvfp4": "Flux2NvfpPipeline",
-    "ltx-2": "LTX2Pipeline",
 }
 
 

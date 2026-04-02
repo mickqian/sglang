@@ -436,32 +436,22 @@ class LoRAPipeline(ComposedPipelineBase):
                     lora_A_name in self.lora_adapters[nickname]
                     and lora_B_name in self.lora_adapters[nickname]
                 ):
-                    # Some LoRA checkpoints (e.g. Lightning distill) store per-layer alpha as "<layer>.alpha".
-                    # If present, we must apply the standard LoRA scaling: scale = alpha / rank.
-                    try:
-                        inferred_rank = int(
-                            self.lora_adapters[nickname][lora_A_name].shape[0]
-                        )
-                    except Exception:
-                        inferred_rank = None
-                    # Default to None for some checkpoints without "<layer>.alpha"
-                    inferred_alpha: int | None = None
+                    inferred_rank = int(
+                        self.lora_adapters[nickname][lora_A_name].shape[0]
+                    )
                     alpha_key = name + ".alpha"
                     if alpha_key in self.lora_adapters[nickname]:
-                        try:
-                            inferred_alpha = int(
-                                self.lora_adapters[nickname][alpha_key].item()
-                            )
-                        except Exception:
-                            inferred_alpha = None
-
-                    if inferred_rank is not None:
-                        layer.lora_rank = inferred_rank
-                        layer.lora_alpha = (
-                            inferred_alpha
-                            if inferred_alpha is not None
-                            else inferred_rank
+                        inferred_alpha = int(
+                            self.lora_adapters[nickname][alpha_key].item()
                         )
+                    else:
+                        # Some distilled LoRAs omit per-layer alpha and rely on the
+                        # default LoRA scale of alpha == rank. Falling back to rank
+                        # keeps the effective delta consistent with the official path.
+                        inferred_alpha = inferred_rank
+
+                    layer.lora_rank = inferred_rank
+                    layer.lora_alpha = inferred_alpha
 
                     layer.set_lora_weights(
                         self.lora_adapters[nickname][lora_A_name],
@@ -729,7 +719,7 @@ class LoRAPipeline(ComposedPipelineBase):
         modules_requiring_unmerge = []
         for module_name, lora_layers_dict in target_modules:
             if self.is_lora_merged.get(module_name, False) or any(
-                getattr(layer, "merged", False) for layer in lora_layers_dict.values()
+                layer.merged for layer in lora_layers_dict.values()
             ):
                 modules_requiring_unmerge.append((module_name, lora_layers_dict))
 
@@ -738,13 +728,10 @@ class LoRAPipeline(ComposedPipelineBase):
         )
         with offload_context:
             for module_name, lora_layers_dict in target_modules:
-                for name, layer in lora_layers_dict.items():
-                    if hasattr(layer, "merged") and layer.merged:
-                        try:
-                            layer.unmerge_lora_weights()
-                        except ValueError as e:
-                            logger.warning("Could not unmerge layer %s: %s", name, e)
-                    if hasattr(layer, "disable_lora"):
+                for layer in lora_layers_dict.values():
+                    if layer.merged:
+                        layer.unmerge_lora_weights()
+                    if not layer.disable_lora:
                         layer.disable_lora = True
                 self.is_lora_merged[module_name] = False
                 self.cur_adapter_strength.pop(module_name, None)

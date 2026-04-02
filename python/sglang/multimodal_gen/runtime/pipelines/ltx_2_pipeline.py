@@ -61,7 +61,9 @@ def _resolve_ltx2_two_stage_component_paths(
             auto_resolved.append(f"distilled_lora={distilled_lora}")
 
     if auto_resolved:
-        logger.info("Auto-resolved LTX2 two-stage components: %s", ", ".join(auto_resolved))
+        logger.info(
+            "Auto-resolved LTX2 two-stage components: %s", ", ".join(auto_resolved)
+        )
 
     return resolved
 
@@ -264,6 +266,9 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                     strength=self._stage1_lora_scale,
                 )
             else:
+                # Stage 1 must run on the base transformer weights. If stage 2 left the
+                # distilled adapter active, stage 1 quality drifts away from the official
+                # two-stage pipeline immediately.
                 self.deactivate_lora_weights(target="transformer")
         elif phase == "stage2":
             lora_nicknames = []
@@ -284,6 +289,9 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_path=lora_paths,
                 target=lora_targets,
                 strength=lora_strengths,
+                # Keep the distilled adapter unmerged when it is the only active LoRA.
+                # Merging it into the base weights makes the subsequent switch back to
+                # stage 1 depend on unmerge bookkeeping instead of the original base.
                 merge_weights=self._stage1_lora_path is not None,
             )
         else:

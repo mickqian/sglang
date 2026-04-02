@@ -42,7 +42,9 @@ class LatentPreparationStage(PipelineStage):
         batch: Req,
         server_args: ServerArgs,
     ):
-        return batch.prompt_embeds[0].dtype
+        return server_args.pipeline_config.get_latent_dtype(
+            batch.prompt_embeds[0].dtype
+        )
 
     def forward(
         self,
