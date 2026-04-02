@@ -7,6 +7,8 @@ Prompt encoding stages for diffusion pipelines.
 This module contains implementations of prompt encoding stages for diffusion pipelines.
 """
 
+import inspect
+
 import torch
 
 from sglang.multimodal_gen.configs.models.encoders import BaseEncoderOutput
@@ -239,7 +241,7 @@ class TextEncodingStage(PipelineStage):
             processed_text_list: list[str] = []
             for prompt_str in texts:
                 preprocessed = preprocess_func(prompt_str)
-                processed_text_list.append(preprocessed)
+                processed_text_list.append(preprocessed.strip())
 
             # Prepare tokenizer args
             tok_kwargs = self.prepare_tokenizer_kwargs(
@@ -261,14 +263,31 @@ class TextEncodingStage(PipelineStage):
                 attention_mask = torch.ones(input_ids.shape[:2], device=target_device)
             else:
                 attention_mask = text_inputs["attention_mask"]
-            with set_forward_context(current_timestep=0, attn_metadata=None):
+            is_ltx2_gemma3 = (
+                type(server_args.pipeline_config).__name__ == "LTX2PipelineConfig"
+                and type(text_encoder).__name__ == "Gemma3ForConditionalGeneration"
+            )
+            if is_ltx2_gemma3:
                 outputs: BaseEncoderOutput = text_encoder(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     output_hidden_states=True,
-                    use_cache=False,
                 )
-            prompt_embeds = postprocess_func(outputs, text_inputs)
+            else:
+                with set_forward_context(current_timestep=0, attn_metadata=None):
+                    outputs: BaseEncoderOutput = text_encoder(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                        use_cache=False,
+                    )
+            postprocess_sig = inspect.signature(postprocess_func)
+            if len(postprocess_sig.parameters) >= 3:
+                prompt_embeds = postprocess_func(
+                    outputs, text_inputs, server_args.pipeline_config
+                )
+            else:
+                prompt_embeds = postprocess_func(outputs, text_inputs)
             if dtype is not None:
                 prompt_embeds = prompt_embeds.to(dtype=dtype)
 

@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import field
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 
@@ -94,8 +94,11 @@ def pack_text_embeds(
 
 
 def _gemma_postprocess_func(
-    outputs: BaseEncoderOutput, text_inputs: dict
+    outputs: BaseEncoderOutput,
+    text_inputs: dict,
+    pipeline_config: Optional["LTX2PipelineConfig"] = None,
 ) -> torch.Tensor:
+    _ = pipeline_config
     # LTX-2 requires all hidden states concatenated for the connector
     if hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
         # outputs.hidden_states is a tuple of tensors
@@ -117,6 +120,7 @@ class LTX2PipelineConfig(PipelineConfig):
 
     task_type: ModelTaskType = ModelTaskType.TI2V
     skip_input_image_preprocess: bool = True
+    generator_device: str = "cpu"
     dit_config: LTX2Config = field(default_factory=LTX2Config)
 
     # Model architecture
@@ -140,21 +144,10 @@ class LTX2PipelineConfig(PipelineConfig):
         return getattr(self.vae_config.arch_config, "temporal_compression_ratio", 8)
 
     def prepare_latent_shape(self, batch, batch_size, num_frames):
-        """Return packed latent shape [B, seq, C] directly."""
+        """Return unpacked latent shape [B, C, F, H, W]."""
         height = batch.height // self.vae_scale_factor
         width = batch.width // self.vae_scale_factor
-
-        post_patch_num_frames = num_frames // self.patch_size_t
-        post_patch_height = height // self.patch_size
-        post_patch_width = width // self.patch_size
-        seq_len = post_patch_num_frames * post_patch_height * post_patch_width
-
-        num_channels = (
-            self.in_channels * self.patch_size_t * self.patch_size * self.patch_size
-        )
-
-        shape = (batch_size, seq_len, num_channels)
-        return shape
+        return (batch_size, self.in_channels, num_frames, height, width)
 
     def prepare_audio_latent_shape(self, batch, batch_size, num_frames):
         # Adapted from diffusers pipeline prepare_audio_latents
@@ -176,9 +169,7 @@ class LTX2PipelineConfig(PipelineConfig):
         # Default to 8
         num_channels_latents = self.audio_vae_config.arch_config.latent_channels
 
-        shape = (batch_size, latent_length, num_channels_latents * latent_mel_bins)
-
-        return shape
+        return (batch_size, num_channels_latents, latent_length, latent_mel_bins)
 
     # Text encoding stage (Gemma)
     # LTX-2 needs separate contexts for video/audio streams. We model this as
@@ -222,6 +213,7 @@ class LTX2PipelineConfig(PipelineConfig):
             padding="max_length",
             max_length=max_sequence_length,
             truncation=True,
+            add_special_tokens=True,
             return_tensors="pt",
         )
         return text_inputs

@@ -1,4 +1,5 @@
 import math
+import os
 
 import numpy as np
 import torch
@@ -34,39 +35,59 @@ BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
 
 
-def build_ltx2_native_sigmas(
-    batch: Req,
-    server_args: ServerArgs,
-    *,
-    max_shift: float = 2.05,
+def _resolve_ltx2_two_stage_component_paths(
+    model_path: str, component_paths: dict[str, str]
+) -> dict[str, str]:
+    resolved = dict(component_paths)
+    auto_resolved = []
+
+    if "spatial_upsampler" not in resolved:
+        spatial_candidates = [
+            os.path.join(model_path, "latent_upsampler"),
+            os.path.join(model_path, "ltx-2-spatial-upscaler-x2-1.0.safetensors"),
+        ]
+        for candidate in spatial_candidates:
+            if os.path.exists(candidate):
+                resolved["spatial_upsampler"] = candidate
+                auto_resolved.append(f"spatial_upsampler={candidate}")
+                break
+
+    if "distilled_lora" not in resolved:
+        distilled_lora = os.path.join(
+            model_path, "ltx-2-19b-distilled-lora-384.safetensors"
+        )
+        if os.path.exists(distilled_lora):
+            resolved["distilled_lora"] = distilled_lora
+            auto_resolved.append(f"distilled_lora={distilled_lora}")
+
+    if auto_resolved:
+        logger.info("Auto-resolved LTX2 two-stage components: %s", ", ".join(auto_resolved))
+
+    return resolved
+
+
+def calculate_ltx2_shift(
+    image_seq_len: int,
+    base_seq_len: int = BASE_SHIFT_ANCHOR,
+    max_seq_len: int = MAX_SHIFT_ANCHOR,
     base_shift: float = 0.95,
-    stretch: bool = True,
-    terminal: float = 0.1,
-) -> torch.FloatTensor:
-    # Copied and adapted from /root/LTX-2/packages/ltx-core/src/ltx_core/components/schedulers.py
-    _ = server_args
-    tokens = MAX_SHIFT_ANCHOR
+    max_shift: float = 2.05,
+) -> float:
+    mm = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - mm * base_seq_len
+    return image_seq_len * mm + b
 
-    sigmas = torch.linspace(1.0, 0.0, int(batch.num_inference_steps) + 1)
 
-    mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR)
-    b = base_shift - mm * BASE_SHIFT_ANCHOR
-    sigma_shift = tokens * mm + b
-    sigmas = torch.where(
-        sigmas != 0,
-        math.exp(sigma_shift) / (math.exp(sigma_shift) + (1 / sigmas - 1)),
-        0,
+def prepare_ltx2_mu(batch: Req, server_args: ServerArgs):
+    latent_num_frames = (int(batch.num_frames) - 1) // int(
+        server_args.pipeline_config.vae_temporal_compression
+    ) + 1
+    latent_height = int(batch.height) // int(
+        server_args.pipeline_config.vae_scale_factor
     )
-
-    if stretch:
-        non_zero_mask = sigmas != 0
-        non_zero_sigmas = sigmas[non_zero_mask]
-        one_minus_z = 1.0 - non_zero_sigmas
-        scale_factor = one_minus_z[-1] / (1.0 - terminal)
-        stretched = 1.0 - (one_minus_z / scale_factor)
-        sigmas[non_zero_mask] = stretched
-
-    return sigmas.to(torch.float32)
+    latent_width = int(batch.width) // int(server_args.pipeline_config.vae_scale_factor)
+    video_sequence_length = latent_num_frames * latent_height * latent_width
+    return "mu", calculate_ltx2_shift(video_sequence_length)
 
 
 class LTX2SigmaPreparationStage(PipelineStage):
@@ -74,8 +95,11 @@ class LTX2SigmaPreparationStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         batch.extra["ltx2_phase"] = "stage1"
-        sigmas = build_ltx2_native_sigmas(batch, server_args)
-        batch.sigmas = sigmas[:-1].tolist()
+        batch.sigmas = np.linspace(
+            1.0,
+            1.0 / int(batch.num_inference_steps),
+            int(batch.num_inference_steps),
+        ).tolist()
         return batch
 
 
@@ -94,7 +118,9 @@ def _add_ltx2_front_stages(pipeline: ComposedPipelineBase):
 
 def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
     pipeline.add_stage(LTX2SigmaPreparationStage())
-    pipeline.add_standard_timestep_preparation_stage()
+    pipeline.add_standard_timestep_preparation_stage(
+        prepare_extra_kwargs=[prepare_ltx2_mu]
+    )
     pipeline.add_stages(
         [
             LTX2AVLatentPreparationStage(
@@ -135,7 +161,7 @@ class LTX2FlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         mu=None,
         timesteps=None,
     ):
-        if sigmas is not None and timesteps is None:
+        if sigmas is not None and timesteps is None and mu is None:
             sigmas = torch.tensor(sigmas, dtype=torch.float32, device=device)
             timesteps = sigmas * self.config.num_train_timesteps
             sigmas = torch.cat([sigmas, torch.zeros(1, device=sigmas.device)])
@@ -195,6 +221,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
     def initialize_pipeline(self, server_args: ServerArgs):
         super().initialize_pipeline(server_args)
+        server_args.component_paths = _resolve_ltx2_two_stage_component_paths(
+            self.model_path, server_args.component_paths
+        )
+
         upsampler_path = server_args.component_paths.get("spatial_upsampler")
         if not upsampler_path:
             raise ValueError(
@@ -234,7 +264,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                     strength=self._stage1_lora_scale,
                 )
             else:
-                self.unmerge_lora_weights(target="transformer")
+                self.deactivate_lora_weights(target="transformer")
         elif phase == "stage2":
             lora_nicknames = []
             lora_paths = []
@@ -254,6 +284,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_path=lora_paths,
                 target=lora_targets,
                 strength=lora_strengths,
+                merge_weights=self._stage1_lora_path is not None,
             )
         else:
             raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")

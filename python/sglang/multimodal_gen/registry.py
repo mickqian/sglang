@@ -572,6 +572,9 @@ def _register_configs():
     register_configs(
         sampling_param_cls=LTX2SamplingParams,
         pipeline_config_cls=LTX2PipelineConfig,
+        hf_model_paths=[
+            "Lightricks/LTX-2",
+        ],
         model_detectors=[
             lambda path: "ltx" in path.lower() and "video" in path.lower(),
             lambda path: "ltx-2" in path.lower(),
@@ -877,6 +880,7 @@ _register_configs()
 _NON_DIFFUSERS_MULTIMODAL_PATTERNS: Dict[str, str] = {
     "hunyuan3d": "Hunyuan3D2Pipeline",
     "flux.2-dev-nvfp4": "Flux2NvfpPipeline",
+    "ltx-2": "LTX2Pipeline",
 }
 
 

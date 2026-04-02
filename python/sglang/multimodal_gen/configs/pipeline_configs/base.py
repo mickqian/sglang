@@ -173,6 +173,7 @@ class PipelineConfig:
     # controls the timestep embedding generation
     should_use_guidance: bool = True
     embedded_cfg_scale: float = 6.0
+    generator_device: str | None = None
     flow_shift: float | None = None
     disable_autocast: bool = False
 

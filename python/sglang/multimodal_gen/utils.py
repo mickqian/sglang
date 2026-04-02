@@ -181,12 +181,15 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             kwargs["formatter_class"] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(  # type: ignore[override]
-        self, args=None, namespace=None
-    ) -> argparse.Namespace:
-        if args is None:
-            args = sys.argv[1:]
+    def _get_config_path(self, args: list[str]) -> str | None:
+        for i, arg in enumerate(args):
+            if arg.startswith("--config="):
+                return arg.split("=", 1)[1]
+            if arg == "--config" and i + 1 < len(args):
+                return args[i + 1]
+        return None
 
+    def _preprocess_args(self, args: list[str]) -> list[str]:
         if any(arg.startswith("--config") for arg in args):
             args = self._pull_args_from_config(args)
 
@@ -207,9 +210,11 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        namespace = super().parse_args(processed_args, namespace)
+        return processed_args
 
-        # Track which arguments were explicitly provided
+    def _mark_provided_args(
+        self, namespace: argparse.Namespace, args: list[str]
+    ) -> None:
         namespace._provided = set()
 
         i = 0
@@ -233,7 +238,29 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 i += 1
 
-        return namespace  # type: ignore[no-any-return]
+    def parse_known_args(  # type: ignore[override]
+        self, args=None, namespace=None
+    ) -> tuple[argparse.Namespace, list[str]]:
+        if args is None:
+            args = sys.argv[1:]
+        else:
+            args = list(args)
+
+        config_path = self._get_config_path(args)
+        processed_args = self._preprocess_args(args)
+        namespace, remaining = super().parse_known_args(processed_args, namespace)
+        if config_path is not None and hasattr(namespace, "config"):
+            setattr(namespace, "config", config_path)
+        self._mark_provided_args(namespace, args)
+        return namespace, remaining  # type: ignore[no-any-return]
+
+    def parse_args(  # type: ignore[override]
+        self, args=None, namespace=None
+    ) -> argparse.Namespace:
+        namespace, remaining = self.parse_known_args(args, namespace)
+        if remaining:
+            self.error(f"unrecognized arguments: {' '.join(remaining)}")
+        return namespace
 
     def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file

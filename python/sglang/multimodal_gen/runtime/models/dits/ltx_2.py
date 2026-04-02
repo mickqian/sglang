@@ -66,7 +66,7 @@ def apply_split_rotary_emb(
         )
     r = last // 2
 
-    split_x = x.reshape(*x.shape[:-1], 2, r)
+    split_x = x.reshape(*x.shape[:-1], 2, r).float()
     first_x = split_x[..., :1, :]
     second_x = split_x[..., 1:, :]
 
@@ -137,7 +137,6 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
         self.causal_offset = int(causal_offset)
 
         self.modality = modality
-        self.coords_dtype = torch.bfloat16 if modality == "video" else torch.float32
         if self.modality not in ["video", "audio"]:
             raise ValueError(
                 f"Modality {modality} is not supported. Supported modalities are `video` and `audio`."
@@ -244,7 +243,6 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
         device = device or coords.device
         num_pos_dims = coords.shape[1]
 
-        coords = coords.to(self.coords_dtype)
         if coords.ndim == 4:
             coords_start, coords_end = coords.chunk(2, dim=-1)
             coords = (coords_start + coords_end) / 2.0
@@ -309,9 +307,7 @@ class LTX2AudioVideoRotaryPosEmbed(nn.Module):
             cos_freqs = torch.swapaxes(cos_freq, 1, 2)
             sin_freqs = torch.swapaxes(sin_freq, 1, 2)
 
-        # Cast to bf16 to match model weights dtype. coords_dtype controls
-        # intermediate coordinate precision (fp32 for audio) and differs.
-        return cos_freqs.to(torch.bfloat16), sin_freqs.to(torch.bfloat16)
+        return cos_freqs, sin_freqs
 
 
 def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -589,25 +585,27 @@ class LTX2Attention(nn.Module):
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
             k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
 
-            if mask is not None:
+            use_sdpa = get_tp_world_size() == 1 and get_sp_world_size() == 1
+            if use_sdpa:
                 q_ = q.transpose(1, 2)
                 k_ = k.transpose(1, 2)
                 v_ = v.transpose(1, 2)
-
-                if torch.is_floating_point(mask):
-                    m = mask
-                    if m.dim() == 2:
-                        m = m[:, None, None, :]
-                    elif m.dim() == 3:
-                        m = m[:, None, :, :]
-                    sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
-                else:
-                    m = mask.to(dtype=q_.dtype, device=q_.device)
-                    if m.dim() == 2:
-                        m = m[:, None, None, :]
-                    elif m.dim() == 3:
-                        m = m[:, None, :, :]
-                    sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
+                sdpa_mask = None
+                if mask is not None:
+                    if torch.is_floating_point(mask):
+                        m = mask
+                        if m.dim() == 2:
+                            m = m[:, None, None, :]
+                        elif m.dim() == 3:
+                            m = m[:, None, :, :]
+                        sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
+                    else:
+                        m = mask.to(dtype=q_.dtype, device=q_.device)
+                        if m.dim() == 2:
+                            m = m[:, None, None, :]
+                        elif m.dim() == 3:
+                            m = m[:, None, :, :]
+                        sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
 
                 out = torch.nn.functional.scaled_dot_product_attention(
                     q_, k_, v_, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=False

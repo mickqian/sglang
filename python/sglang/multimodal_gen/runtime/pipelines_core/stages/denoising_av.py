@@ -9,6 +9,7 @@ import PIL.Image
 import torch
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
+from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.vision_utils import (
@@ -133,9 +134,11 @@ class LTX2AVDenoisingStage(DenoisingStage):
         if pipeline_name != "LTX2TwoStagePipeline":
             return None
 
-        return batch.extra.get(
-            "ltx2_stage1_guider_params", LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS
-        )
+        params = batch.extra.get("ltx2_stage1_guider_params")
+        if params is None:
+            params = copy.deepcopy(LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS)
+            batch.extra["ltx2_stage1_guider_params"] = params
+        return params
 
     @staticmethod
     def _ltx2_should_skip_step(step_index: int, skip_step: int) -> bool:
@@ -536,59 +539,58 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             timestep_video = timestep
                         timestep_audio = timestep
 
-                        # Conditions
-                        encoder_hidden_states = batch.prompt_embeds[0]
-                        audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
-                        encoder_attention_mask = batch.prompt_attention_mask
+                        use_official_cfg_path = stage1_guider_params is None
+                        if use_official_cfg_path:
+                            encoder_hidden_states = batch.prompt_embeds[0]
+                            audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
+                            encoder_attention_mask = batch.prompt_attention_mask
+                            if batch.do_classifier_free_guidance:
+                                latent_model_input = torch.cat(
+                                    [latent_model_input] * 2, dim=0
+                                )
+                                audio_latent_model_input = torch.cat(
+                                    [audio_latent_model_input] * 2, dim=0
+                                )
+                                encoder_hidden_states = torch.cat(
+                                    [
+                                        batch.negative_prompt_embeds[0],
+                                        encoder_hidden_states,
+                                    ],
+                                    dim=0,
+                                )
+                                audio_encoder_hidden_states = torch.cat(
+                                    [
+                                        batch.negative_audio_prompt_embeds[0],
+                                        audio_encoder_hidden_states,
+                                    ],
+                                    dim=0,
+                                )
+                                encoder_attention_mask = torch.cat(
+                                    [
+                                        batch.negative_attention_mask,
+                                        encoder_attention_mask,
+                                    ],
+                                    dim=0,
+                                )
+                                timestep_video = timestep_video.expand(
+                                    int(latent_model_input.shape[0])
+                                )
+                                timestep_audio = timestep_audio.expand(
+                                    int(latent_model_input.shape[0])
+                                )
 
-                        # Follow ltx-pipelines structure: separate pos/neg forward passes,
-                        # then apply CFG on denoised (x0) predictions.
-                        with set_forward_context(
-                            current_timestep=i, attn_metadata=attn_metadata
-                        ):
-                            v_pos, a_v_pos = current_model(
-                                hidden_states=latent_model_input,
-                                audio_hidden_states=audio_latent_model_input,
-                                encoder_hidden_states=encoder_hidden_states,
-                                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                                timestep=timestep_video,
-                                audio_timestep=timestep_audio,
-                                encoder_attention_mask=encoder_attention_mask,
-                                audio_encoder_attention_mask=encoder_attention_mask,
-                                num_frames=latent_num_frames,
-                                height=latent_height,
-                                width=latent_width,
-                                fps=batch.fps,
-                                audio_num_frames=audio_num_frames_latent,
-                                video_coords=video_coords,
-                                audio_coords=audio_coords,
-                                return_latents=False,
-                                return_dict=False,
-                            )
-
-                            if (
-                                stage1_guider_params is not None
-                                or batch.do_classifier_free_guidance
+                            with set_forward_context(
+                                current_timestep=i, attn_metadata=attn_metadata
                             ):
-                                neg_encoder_hidden_states = (
-                                    batch.negative_prompt_embeds[0]
-                                )
-                                neg_audio_encoder_hidden_states = (
-                                    batch.negative_audio_prompt_embeds[0]
-                                )
-                                neg_encoder_attention_mask = (
-                                    batch.negative_attention_mask
-                                )
-
-                                v_neg, a_v_neg = current_model(
+                                model_video, model_audio = current_model(
                                     hidden_states=latent_model_input,
                                     audio_hidden_states=audio_latent_model_input,
-                                    encoder_hidden_states=neg_encoder_hidden_states,
-                                    audio_encoder_hidden_states=neg_audio_encoder_hidden_states,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                    audio_encoder_hidden_states=audio_encoder_hidden_states,
                                     timestep=timestep_video,
                                     audio_timestep=timestep_audio,
-                                    encoder_attention_mask=neg_encoder_attention_mask,
-                                    audio_encoder_attention_mask=neg_encoder_attention_mask,
+                                    encoder_attention_mask=encoder_attention_mask,
+                                    audio_encoder_attention_mask=encoder_attention_mask,
                                     num_frames=latent_num_frames,
                                     height=latent_height,
                                     width=latent_width,
@@ -599,16 +601,132 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                     return_latents=False,
                                     return_dict=False,
                                 )
-                            else:
-                                v_neg = None
-                                a_v_neg = None
 
-                        v_pos = v_pos.float()
-                        a_v_pos = a_v_pos.float()
-                        if v_neg is not None:
-                            v_neg = v_neg.float()
-                        if a_v_neg is not None:
-                            a_v_neg = a_v_neg.float()
+                            model_video = model_video.float()
+                            model_audio = model_audio.float()
+                            if batch.do_classifier_free_guidance:
+                                model_video_uncond, model_video_text = (
+                                    model_video.chunk(2)
+                                )
+                                model_audio_uncond, model_audio_text = (
+                                    model_audio.chunk(2)
+                                )
+                                model_video = model_video_uncond + (
+                                    batch.guidance_scale
+                                    * (model_video_text - model_video_uncond)
+                                )
+                                model_audio = model_audio_uncond + (
+                                    batch.guidance_scale
+                                    * (model_audio_text - model_audio_uncond)
+                                )
+                            v_pos = model_video
+                            a_v_pos = model_audio
+                            v_neg = None
+                            a_v_neg = None
+
+                            latents = self.scheduler.step(
+                                v_pos, t_device, latents, return_dict=False
+                            )[0]
+                            audio_latents = audio_scheduler.step(
+                                a_v_pos, t_device, audio_latents, return_dict=False
+                            )[0]
+                            if do_ti2v:
+                                latents[:, :num_img_tokens, :] = batch.image_latent[
+                                    :, :num_img_tokens, :
+                                ].to(device=latents.device, dtype=latents.dtype)
+
+                            latents = self.post_forward_for_ti2v_task(
+                                batch, server_args, reserved_frames_mask, latents, z
+                            )
+
+                            if batch.return_trajectory_latents:
+                                trajectory_timesteps.append(t_host)
+                                trajectory_latents.append(latents)
+                                if audio_latents is not None:
+                                    trajectory_audio_latents.append(audio_latents)
+
+                            if i == num_timesteps - 1 or (
+                                (i + 1) > num_warmup_steps
+                                and (i + 1) % self.scheduler.order == 0
+                                and progress_bar is not None
+                            ):
+                                progress_bar.update()
+
+                            if not is_warmup:
+                                self.step_profile()
+                            continue
+                        else:
+                            # Follow ltx-pipelines structure: separate pos/neg forward passes,
+                            # then apply CFG on denoised (x0) predictions.
+                            encoder_hidden_states = batch.prompt_embeds[0]
+                            audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
+                            encoder_attention_mask = batch.prompt_attention_mask
+                            with set_forward_context(
+                                current_timestep=i, attn_metadata=attn_metadata
+                            ):
+                                v_pos, a_v_pos = current_model(
+                                    hidden_states=latent_model_input,
+                                    audio_hidden_states=audio_latent_model_input,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                    audio_encoder_hidden_states=audio_encoder_hidden_states,
+                                    timestep=timestep_video,
+                                    audio_timestep=timestep_audio,
+                                    encoder_attention_mask=encoder_attention_mask,
+                                    audio_encoder_attention_mask=encoder_attention_mask,
+                                    num_frames=latent_num_frames,
+                                    height=latent_height,
+                                    width=latent_width,
+                                    fps=batch.fps,
+                                    audio_num_frames=audio_num_frames_latent,
+                                    video_coords=video_coords,
+                                    audio_coords=audio_coords,
+                                    return_latents=False,
+                                    return_dict=False,
+                                )
+
+                                if (
+                                    stage1_guider_params is not None
+                                    or batch.do_classifier_free_guidance
+                                ):
+                                    neg_encoder_hidden_states = (
+                                        batch.negative_prompt_embeds[0]
+                                    )
+                                    neg_audio_encoder_hidden_states = (
+                                        batch.negative_audio_prompt_embeds[0]
+                                    )
+                                    neg_encoder_attention_mask = (
+                                        batch.negative_attention_mask
+                                    )
+
+                                    v_neg, a_v_neg = current_model(
+                                        hidden_states=latent_model_input,
+                                        audio_hidden_states=audio_latent_model_input,
+                                        encoder_hidden_states=neg_encoder_hidden_states,
+                                        audio_encoder_hidden_states=neg_audio_encoder_hidden_states,
+                                        timestep=timestep_video,
+                                        audio_timestep=timestep_audio,
+                                        encoder_attention_mask=neg_encoder_attention_mask,
+                                        audio_encoder_attention_mask=neg_encoder_attention_mask,
+                                        num_frames=latent_num_frames,
+                                        height=latent_height,
+                                        width=latent_width,
+                                        fps=batch.fps,
+                                        audio_num_frames=audio_num_frames_latent,
+                                        video_coords=video_coords,
+                                        audio_coords=audio_coords,
+                                        return_latents=False,
+                                        return_dict=False,
+                                    )
+                                else:
+                                    v_neg = None
+                                    a_v_neg = None
+
+                            v_pos = v_pos.float()
+                            a_v_pos = a_v_pos.float()
+                            if v_neg is not None:
+                                v_neg = v_neg.float()
+                            if a_v_neg is not None:
+                                a_v_neg = a_v_neg.float()
 
                         # Velocity -> denoised (x0): x0 = x - sigma * v
                         sigma_val = float(sigma.item())
@@ -1001,43 +1119,50 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         reference_tensor: torch.Tensor, batch: Req
     ) -> torch.Tensor:
         generator = getattr(batch, "generator", None)
-        if isinstance(generator, torch.Generator):
-            return torch.randn(
-                reference_tensor.shape,
-                device=reference_tensor.device,
-                dtype=reference_tensor.dtype,
-                generator=generator,
-            )
         if isinstance(generator, list):
             bsz = int(reference_tensor.shape[0])
             valid_generators = [g for g in generator if isinstance(g, torch.Generator)]
             if len(valid_generators) == 1:
-                return torch.randn(
-                    reference_tensor.shape,
-                    device=reference_tensor.device,
-                    dtype=reference_tensor.dtype,
-                    generator=valid_generators[0],
-                )
-            if len(valid_generators) >= bsz:
-                per_sample_noise = []
-                for i in range(bsz):
-                    per_sample_noise.append(
-                        torch.randn(
-                            (1, *reference_tensor.shape[1:]),
-                            device=reference_tensor.device,
-                            dtype=reference_tensor.dtype,
-                            generator=valid_generators[i],
-                        )
-                    )
-                return torch.cat(per_sample_noise, dim=0)
-        return torch.randn(
+                generator = valid_generators[0]
+            elif len(valid_generators) >= bsz:
+                generator = valid_generators[:bsz]
+            else:
+                generator = None
+        elif not isinstance(generator, torch.Generator):
+            generator = None
+
+        return randn_tensor(
             reference_tensor.shape,
+            generator=generator,
             device=reference_tensor.device,
             dtype=reference_tensor.dtype,
         )
 
+    @staticmethod
+    def _reset_stage2_generators(batch: Req) -> None:
+        generator = getattr(batch, "generator", None)
+        if isinstance(generator, list) and generator:
+            generator_device = str(generator[0].device)
+        elif isinstance(generator, torch.Generator):
+            generator_device = str(generator.device)
+        else:
+            generator_device = "cpu"
+
+        seeds = getattr(batch, "seeds", None)
+        if not seeds:
+            seed = getattr(batch, "seed", None)
+            if seed is None:
+                return
+            seeds = [int(seed)]
+
+        batch.generator = [
+            torch.Generator(device=generator_device).manual_seed(int(seed))
+            for seed in seeds
+        ]
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         batch.extra["ltx2_phase"] = "stage2"
+        self._reset_stage2_generators(batch)
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
         video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = video_noise * noise_scale + batch.latents * (1 - noise_scale)
@@ -1052,6 +1177,13 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             batch.audio_latents = (
                 audio_noise * audio_noise_scale
                 + batch.audio_latents * (1 - audio_noise_scale)
+            )
+        batch.latents = batch.latents.to(
+            device=batch.latents.device, dtype=torch.float32
+        )
+        if isinstance(batch.audio_latents, torch.Tensor):
+            batch.audio_latents = batch.audio_latents.to(
+                device=batch.audio_latents.device, dtype=torch.float32
             )
 
         # Stage 2 runs at full resolution, so Stage 1 TI2V conditioning is invalid.
@@ -1071,6 +1203,8 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         self.scheduler.timesteps = (self.distilled_sigmas[:num_steps] * 1000).to(
             distilled_device
         )
+        self.scheduler._step_index = None
+        self.scheduler._begin_index = None
 
         batch.timesteps = self.scheduler.timesteps
         batch.num_inference_steps = num_steps
