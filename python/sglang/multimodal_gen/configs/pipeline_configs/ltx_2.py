@@ -11,6 +11,7 @@ from sglang.multimodal_gen.configs.models.encoders import (
 )
 from sglang.multimodal_gen.configs.models.encoders.gemma_3 import Gemma3Config
 from sglang.multimodal_gen.configs.models.vaes.ltx_audio import LTXAudioVAEConfig
+from sglang.multimodal_gen.configs.models.vaes.ltx_video import LTXVideoVAEConfig
 from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ModelTaskType,
     PipelineConfig,
@@ -130,6 +131,7 @@ class LTX2PipelineConfig(PipelineConfig):
     patch_size_t: int = 1
 
     # Audio VAE configuration
+    vae_config: LTXVideoVAEConfig = field(default_factory=LTXVideoVAEConfig)
     audio_vae_config: LTXAudioVAEConfig = field(default_factory=LTXAudioVAEConfig)
     audio_vae_precision: str = "fp32"
     audio_vae_temporal_compression_ratio: int = 4
