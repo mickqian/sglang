@@ -35,21 +35,6 @@ from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 logger = init_logger(__name__)
 
-LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS = {
-    "video_cfg_scale": 3.0,
-    "video_stg_scale": 1.0,
-    "video_rescale_scale": 0.7,
-    "video_modality_scale": 3.0,
-    "video_skip_step": 0,
-    "video_stg_blocks": (29,),
-    "audio_cfg_scale": 7.0,
-    "audio_stg_scale": 1.0,
-    "audio_rescale_scale": 0.7,
-    "audio_modality_scale": 3.0,
-    "audio_skip_step": 0,
-    "audio_stg_blocks": (29,),
-}
-
 
 class LTX2AVDenoisingStage(DenoisingStage):
     """
@@ -134,11 +119,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
         if pipeline_name != "LTX2TwoStagePipeline":
             return None
 
-        params = batch.extra.get("ltx2_stage1_guider_params")
-        if params is None:
-            params = copy.deepcopy(LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS)
-            batch.extra["ltx2_stage1_guider_params"] = params
-        return params
+        return batch.extra.get("ltx2_stage1_guider_params")
 
     @staticmethod
     def _ltx2_should_skip_step(step_index: int, skip_step: int) -> bool:
