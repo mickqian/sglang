@@ -37,6 +37,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2RefinementStage,
 )
 from sglang.multimodal_gen.runtime.utils.model_overlay import (
+    _resolve_bundled_overlay_dir,
     resolve_model_overlay_target,
 )
 
@@ -58,6 +59,17 @@ def test_ltx23_builtin_overlay_target_is_hf_repo():
     assert str(overlay_spec["overlay_repo_id"]) == "MickJ/LTX-2.3-overlay"
     assert str(overlay_spec["overlay_revision"]) == "main"
     assert str(overlay_spec["bundled_overlay_subdir"]) == "ltx_2_3"
+
+
+def test_ltx23_builtin_overlay_prefers_bundled_overlay_dir():
+    target = resolve_model_overlay_target("Lightricks/LTX-2.3")
+    assert target is not None
+
+    _, overlay_spec = target
+    bundled_overlay_dir = _resolve_bundled_overlay_dir(overlay_spec)
+
+    assert bundled_overlay_dir is not None
+    assert bundled_overlay_dir.endswith("model_overlays/ltx_2_3")
 
 
 def test_ltx23_model_info_resolves_to_native_pipeline_and_sampling_params():
