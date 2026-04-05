@@ -20,6 +20,7 @@ from sglang.multimodal_gen.model_overlays.ltx_2_3._overlay.materialize import (
     _rename_connector_key,
     _repack_ltx23_image_encoder_weights,
     _repack_ltx23_video_decoder_weights,
+    _resolve_existing_file,
 )
 from sglang.multimodal_gen.registry import get_model_info
 from sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline import (
@@ -33,6 +34,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding_av import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2AVDenoisingStage,
+    LTX2RefinementStage,
 )
 from sglang.multimodal_gen.runtime.utils.model_overlay import (
     resolve_model_overlay_target,
@@ -338,6 +340,38 @@ def test_ltx23_repack_video_decoder_keeps_decoder_and_stats():
             ]
 
 
+def test_ltx23_materializer_prefers_current_official_artifact_names(tmp_path):
+    current = tmp_path / "ltx-2.3-20b-dev.safetensors"
+    legacy = tmp_path / "ltx-2.3-22b-dev.safetensors"
+    current.touch()
+    legacy.touch()
+
+    resolved = _resolve_existing_file(
+        str(tmp_path),
+        (
+            "ltx-2.3-20b-dev.safetensors",
+            "ltx-2.3-22b-dev.safetensors",
+        ),
+    )
+
+    assert resolved == str(current)
+
+
+def test_ltx23_materializer_falls_back_to_legacy_artifact_names(tmp_path):
+    legacy = tmp_path / "ltx-2.3-22b-distilled-lora-384.safetensors"
+    legacy.touch()
+
+    resolved = _resolve_existing_file(
+        str(tmp_path),
+        (
+            "ltx-2.3-20b-distilled-lora-384.safetensors",
+            "ltx-2.3-22b-distilled-lora-384.safetensors",
+        ),
+    )
+
+    assert resolved == str(legacy)
+
+
 def test_ltx23_decode_skips_external_denorm():
     ltx23_server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(
@@ -380,13 +414,102 @@ def test_ltx2_two_stage_component_auto_resolution_preserves_legacy_candidates(tm
     assert resolved["distilled_lora"] == str(legacy_lora)
 
 
-def test_ltx23_two_stage_component_auto_resolution_prefers_23_assets(tmp_path):
-    spatial = tmp_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
-    lora = tmp_path / "ltx-2.3-22b-distilled-lora-384.safetensors"
-    spatial.touch()
-    lora.touch()
+def test_ltx23_two_stage_component_auto_resolution_prefers_current_assets(tmp_path):
+    current_spatial = tmp_path / "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+    legacy_spatial = tmp_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    current_lora = tmp_path / "ltx-2.3-20b-distilled-lora-384.safetensors"
+    legacy_lora = tmp_path / "ltx-2.3-22b-distilled-lora-384.safetensors"
+    current_spatial.touch()
+    legacy_spatial.touch()
+    current_lora.touch()
+    legacy_lora.touch()
 
     resolved = _resolve_ltx2_two_stage_component_paths(str(tmp_path), {})
 
-    assert resolved["spatial_upsampler"] == str(spatial)
-    assert resolved["distilled_lora"] == str(lora)
+    assert resolved["spatial_upsampler"] == str(current_spatial)
+    assert resolved["distilled_lora"] == str(current_lora)
+
+
+def test_ltx23_two_stage_component_auto_resolution_falls_back_to_legacy_assets(
+    tmp_path,
+):
+    legacy_spatial = tmp_path / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+    legacy_lora = tmp_path / "ltx-2.3-22b-distilled-lora-384.safetensors"
+    legacy_spatial.touch()
+    legacy_lora.touch()
+
+    resolved = _resolve_ltx2_two_stage_component_paths(str(tmp_path), {})
+
+    assert resolved["spatial_upsampler"] == str(legacy_spatial)
+    assert resolved["distilled_lora"] == str(legacy_lora)
+
+
+def test_ltx23_stage1_guider_params_are_ignored_during_stage2():
+    stage = object.__new__(LTX2AVDenoisingStage)
+    req = Req(
+        sampling_params=SamplingParams(),
+        prompt="prompt",
+        extra={"ltx2_stage1_guider_params": {"video_cfg_scale": 3.0}},
+    )
+
+    assert (
+        stage._get_ltx2_stage1_guider_params(req, SimpleNamespace(), "stage1")
+        == req.extra["ltx2_stage1_guider_params"]
+    )
+    assert stage._get_ltx2_stage1_guider_params(req, SimpleNamespace(), "stage2") is None
+
+
+def test_ltx23_refinement_stage_clears_ti2v_conditioning_and_restores_batch_state(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_forward(self, batch, server_args):
+        captured["phase"] = batch.extra["ltx2_phase"]
+        captured["image_latent"] = batch.image_latent
+        captured["num_image_tokens"] = batch.ltx2_num_image_tokens
+        captured["do_cfg"] = batch.do_classifier_free_guidance
+        captured["num_inference_steps"] = batch.num_inference_steps
+        captured["timesteps"] = batch.timesteps.clone()
+        return batch
+
+    monkeypatch.setattr(LTX2AVDenoisingStage, "forward", fake_forward)
+
+    scheduler = SimpleNamespace(
+        sigmas=torch.tensor([1.0, 0.5, 0.0], dtype=torch.float32),
+        timesteps=torch.tensor([1000.0, 500.0], dtype=torch.float32),
+        _step_index=None,
+        _begin_index=None,
+    )
+    stage = LTX2RefinementStage(
+        transformer=None,
+        scheduler=scheduler,
+        distilled_sigmas=[0.9, 0.4, 0.0],
+    )
+    original_timesteps = torch.tensor([42.0, 21.0], dtype=torch.float32)
+    req = Req(
+        sampling_params=SamplingParams(seed=7),
+        prompt="prompt",
+        latents=torch.zeros((1, 2, 3), dtype=torch.float32),
+        audio_latents=torch.zeros((1, 2, 3), dtype=torch.float32),
+        image_latent=torch.ones((1, 1, 3), dtype=torch.float32),
+        timesteps=original_timesteps.clone(),
+        num_inference_steps=8,
+        do_classifier_free_guidance=True,
+    )
+    req.ltx2_num_image_tokens = 1
+
+    result = stage.forward(req, SimpleNamespace())
+
+    assert result is req
+    assert captured["phase"] == "stage2"
+    assert captured["image_latent"] is None
+    assert captured["num_image_tokens"] == 0
+    assert captured["do_cfg"] is False
+    assert captured["num_inference_steps"] == 2
+    assert torch.equal(
+        captured["timesteps"], torch.tensor([900.0, 400.0], dtype=torch.float32)
+    )
+    assert torch.equal(req.timesteps, original_timesteps)
+    assert req.num_inference_steps == 8
+    assert req.do_classifier_free_guidance is True

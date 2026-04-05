@@ -36,6 +36,18 @@ AUDIO_CONNECTOR_PREFIX = f"{MONOLITH_PREFIX}audio_embeddings_connector."
 TEXT_PROJ_IN_PREFIX = f"{MONOLITH_PREFIX}text_proj_in."
 VIDEO_AGGREGATE_PREFIX = "text_embedding_projection.video_aggregate_embed."
 AUDIO_AGGREGATE_PREFIX = "text_embedding_projection.audio_aggregate_embed."
+LTX23_DEV_CHECKPOINT_FILENAMES = (
+    "ltx-2.3-20b-dev.safetensors",
+    "ltx-2.3-22b-dev.safetensors",
+)
+LTX23_DISTILLED_LORA_FILENAMES = (
+    "ltx-2.3-20b-distilled-lora-384.safetensors",
+    "ltx-2.3-22b-distilled-lora-384.safetensors",
+)
+LTX23_SPATIAL_UPSAMPLER_FILENAMES = (
+    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+)
 
 
 def _load_json(path: str) -> dict:
@@ -47,6 +59,16 @@ def _write_json(path: str, payload: dict) -> None:
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
+
+
+def _resolve_existing_file(parent_dir: str, filenames: tuple[str, ...]) -> str:
+    for filename in filenames:
+        candidate = os.path.join(parent_dir, filename)
+        if os.path.exists(candidate):
+            return candidate
+
+    joined = ", ".join(filenames)
+    raise FileNotFoundError(f"Could not find any of [{joined}] under {parent_dir}")
 
 
 def _rename_connector_key(key: str) -> str | None:
@@ -247,7 +269,7 @@ def materialize(
         os.path.join(output_dir, "vocoder"),
     )
 
-    source_checkpoint = os.path.join(source_dir, "ltx-2.3-22b-dev.safetensors")
+    source_checkpoint = _resolve_existing_file(source_dir, LTX23_DEV_CHECKPOINT_FILENAMES)
 
     transformer_dir = os.path.join(output_dir, "transformer")
     _ensure_dir(transformer_dir)
@@ -292,11 +314,15 @@ def materialize(
         os.path.join(image_encoder_dir, "model.safetensors"),
     )
 
+    distilled_lora = _resolve_existing_file(source_dir, LTX23_DISTILLED_LORA_FILENAMES)
     _link_or_copy_file(
-        os.path.join(source_dir, "ltx-2.3-22b-distilled-lora-384.safetensors"),
-        os.path.join(output_dir, "ltx-2.3-22b-distilled-lora-384.safetensors"),
+        distilled_lora,
+        os.path.join(output_dir, os.path.basename(distilled_lora)),
+    )
+    spatial_upsampler = _resolve_existing_file(
+        source_dir, LTX23_SPATIAL_UPSAMPLER_FILENAMES
     )
     _link_or_copy_file(
-        os.path.join(source_dir, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
-        os.path.join(output_dir, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
+        spatial_upsampler,
+        os.path.join(output_dir, os.path.basename(spatial_upsampler)),
     )
