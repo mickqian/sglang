@@ -499,6 +499,7 @@ def test_ltx23_refinement_stage_clears_ti2v_conditioning_and_restores_batch_stat
         distilled_sigmas=[0.9, 0.4, 0.0],
     )
     original_timesteps = torch.tensor([42.0, 21.0], dtype=torch.float32)
+    original_generator = torch.Generator(device="cpu").manual_seed(7)
     req = Req(
         sampling_params=SamplingParams(seed=7),
         prompt="prompt",
@@ -508,6 +509,7 @@ def test_ltx23_refinement_stage_clears_ti2v_conditioning_and_restores_batch_stat
         timesteps=original_timesteps.clone(),
         num_inference_steps=8,
         do_classifier_free_guidance=True,
+        generator=[original_generator],
     )
     req.ltx2_num_image_tokens = 1
 
@@ -522,6 +524,7 @@ def test_ltx23_refinement_stage_clears_ti2v_conditioning_and_restores_batch_stat
     assert torch.equal(
         captured["timesteps"], torch.tensor([900.0, 400.0], dtype=torch.float32)
     )
+    assert req.generator[0] is original_generator
     assert torch.equal(req.timesteps, original_timesteps)
     assert req.num_inference_steps == 8
     assert req.do_classifier_free_guidance is True

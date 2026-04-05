@@ -1227,31 +1227,11 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             dtype=reference_tensor.dtype,
         )
 
-    @staticmethod
-    def _reset_stage2_generators(batch: Req) -> None:
-        generator = getattr(batch, "generator", None)
-        if isinstance(generator, list) and generator:
-            generator_device = str(generator[0].device)
-        elif isinstance(generator, torch.Generator):
-            generator_device = str(generator.device)
-        else:
-            generator_device = "cpu"
-
-        seeds = getattr(batch, "seeds", None)
-        if not seeds:
-            seed = getattr(batch, "seed", None)
-            if seed is None:
-                return
-            seeds = [int(seed)]
-
-        batch.generator = [
-            torch.Generator(device=generator_device).manual_seed(int(seed))
-            for seed in seeds
-        ]
-
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         batch.extra["ltx2_phase"] = "stage2"
-        self._reset_stage2_generators(batch)
+        # Official LTX-2.3 two-stage refinement reuses the same generator/noiser
+        # instance from stage 1, so stage 2 must continue the RNG stream instead
+        # of rewinding it back to the request seed.
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
         video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = video_noise * noise_scale + batch.latents * (1 - noise_scale)
