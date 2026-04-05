@@ -1232,20 +1232,35 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         # Official LTX-2.3 two-stage refinement reuses the same generator/noiser
         # instance from stage 1, so stage 2 must continue the RNG stream instead
         # of rewinding it back to the request seed.
-        noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
-        video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
-        batch.latents = video_noise * noise_scale + batch.latents * (1 - noise_scale)
+        video_latents, audio_latents = server_args.pipeline_config._unpad_and_unpack_latents(
+            batch.latents.clone(),
+            batch.audio_latents.clone()
+            if isinstance(batch.audio_latents, torch.Tensor)
+            else None,
+            batch,
+            self.vae,
+            self.audio_vae,
+        )
+        noise_scale = self.distilled_sigmas[0].to(
+            device=video_latents.device, dtype=video_latents.dtype
+        )
+        video_noise = self._randn_like_with_batch_generators(video_latents, batch)
+        video_latents = video_noise * noise_scale + video_latents * (1 - noise_scale)
+        batch.latents = server_args.pipeline_config.maybe_pack_latents(
+            video_latents, video_latents.shape[0], batch
+        )
 
-        if isinstance(batch.audio_latents, torch.Tensor):
-            audio_noise = self._randn_like_with_batch_generators(
-                batch.audio_latents, batch
-            )
+        if isinstance(audio_latents, torch.Tensor):
+            audio_noise = self._randn_like_with_batch_generators(audio_latents, batch)
             audio_noise_scale = noise_scale.to(
-                batch.audio_latents.device, batch.audio_latents.dtype
+                device=audio_latents.device, dtype=audio_latents.dtype
             )
-            batch.audio_latents = (
+            audio_latents = (
                 audio_noise * audio_noise_scale
-                + batch.audio_latents * (1 - audio_noise_scale)
+                + audio_latents * (1 - audio_noise_scale)
+            )
+            batch.audio_latents = server_args.pipeline_config.maybe_pack_audio_latents(
+                audio_latents, audio_latents.shape[0], batch
             )
         batch.latents = batch.latents.to(
             device=batch.latents.device, dtype=torch.float32
