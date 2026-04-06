@@ -333,10 +333,11 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_path=lora_paths,
                 target=lora_targets,
                 strength=lora_strengths,
-                # Keep the distilled adapter unmerged when it is the only active LoRA.
-                # Merging it into the base weights makes the subsequent switch back to
-                # stage 1 depend on unmerge bookkeeping instead of the original base.
-                merge_weights=self._stage1_lora_path is not None,
+                # Official LTX-2.3 two-stage builds stage 2 with distilled LoRA fused
+                # into the transformer weights. Keep the native explicit two-stage path
+                # aligned to that behavior and rely on deactivate_lora_weights() to
+                # unmerge before the next stage-1 request.
+                merge_weights=True,
             )
         else:
             raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")
