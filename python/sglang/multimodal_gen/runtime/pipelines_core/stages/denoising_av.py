@@ -1247,13 +1247,14 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 audio_noise * audio_noise_scale
                 + batch.audio_latents * (1 - audio_noise_scale)
             )
-        batch.latents = batch.latents.to(
-            device=batch.latents.device, dtype=torch.float32
-        )
-        if isinstance(batch.audio_latents, torch.Tensor):
-            batch.audio_latents = batch.audio_latents.to(
-                device=batch.audio_latents.device, dtype=torch.float32
+        if not is_ltx23_native_variant(server_args.pipeline_config.vae_config.arch_config):
+            batch.latents = batch.latents.to(
+                device=batch.latents.device, dtype=torch.float32
             )
+            if isinstance(batch.audio_latents, torch.Tensor):
+                batch.audio_latents = batch.audio_latents.to(
+                    device=batch.audio_latents.device, dtype=torch.float32
+                )
 
         # Stage 2 runs at full resolution, so Stage 1 TI2V conditioning is invalid.
         batch.image_latent = None
