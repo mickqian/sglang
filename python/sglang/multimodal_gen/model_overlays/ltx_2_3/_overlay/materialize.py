@@ -127,6 +127,8 @@ def _repack_connectors_weights(source_path: str, output_path: str) -> None:
 def _build_transformer_config(config_donor_dir: str) -> dict:
     config = _load_json(os.path.join(config_donor_dir, "transformer", "config.json"))
     config["_class_name"] = "LTX2VideoTransformer3DModel"
+    config["force_sdpa_v2a_cross_attention"] = True
+    config["quantize_video_rope_coords_to_hidden_dtype"] = True
     return config
 
 
