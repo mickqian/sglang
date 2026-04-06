@@ -1546,8 +1546,11 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             batch_size, -1, temb_ca_scale_shift.shape[-1]
         )
 
+        av_ca_gate_factor = (
+            self.av_ca_timestep_scale_multiplier / self.timestep_scale_multiplier
+        )
         temb_ca_gate, _ = self.av_ca_a2v_gate_adaln_single(
-            timestep.flatten() * self.av_ca_timestep_scale_multiplier,
+            timestep.flatten() * av_ca_gate_factor,
             hidden_dtype=hidden_dtype,
         )
         temb_ca_gate = temb_ca_gate.view(batch_size, -1, temb_ca_gate.shape[-1])
@@ -1560,7 +1563,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         temb_ca_audio_gate, _ = self.av_ca_v2a_gate_adaln_single(
-            audio_timestep.flatten() * self.av_ca_timestep_scale_multiplier,
+            audio_timestep.flatten() * av_ca_gate_factor,
             hidden_dtype=audio_hidden_states.dtype,
         )
         temb_ca_audio_gate = temb_ca_audio_gate.view(

@@ -36,6 +36,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2AVDenoisingStage,
     LTX2RefinementStage,
 )
+from sglang.multimodal_gen.runtime.models.dits.ltx_2 import (
+    LTX2VideoTransformer3DModel,
+)
 from sglang.multimodal_gen.runtime.utils.model_overlay import (
     _resolve_bundled_overlay_dir,
     resolve_model_overlay_target,
@@ -528,3 +531,124 @@ def test_ltx23_refinement_stage_clears_ti2v_conditioning_and_restores_batch_stat
     assert torch.equal(req.timesteps, original_timesteps)
     assert req.num_inference_steps == 8
     assert req.do_classifier_free_guidance is True
+
+
+def test_ltx23_av_cross_attn_gate_uses_sigma_scale():
+    class IdentityPatchify(torch.nn.Module):
+        def forward(self, x):
+            return x, None
+
+    class RecordingAdaLN(torch.nn.Module):
+        def __init__(self, hidden_size, embedding_coefficient=1):
+            super().__init__()
+            self.hidden_size = hidden_size
+            self.embedding_coefficient = embedding_coefficient
+            self.last_timestep = None
+
+        def forward(self, timestep, hidden_dtype=None):
+            self.last_timestep = timestep.detach().clone()
+            dtype = hidden_dtype or torch.float32
+            batch = int(timestep.numel())
+            out = torch.zeros(
+                batch,
+                self.embedding_coefficient * self.hidden_size,
+                dtype=dtype,
+                device=timestep.device,
+            )
+            embedded = torch.zeros(
+                batch,
+                self.hidden_size,
+                dtype=dtype,
+                device=timestep.device,
+            )
+            return out, embedded
+
+    class IdentityNorm(torch.nn.Module):
+        def forward(self, x):
+            return x
+
+    class IdentityProj(torch.nn.Module):
+        def forward(self, x):
+            return x, None
+
+    class ZeroRope(torch.nn.Module):
+        def forward(self, coords, device=None):
+            device = device or coords.device
+            shape = (coords.shape[0], 1, coords.shape[-1], 2)
+            zeros = torch.zeros(shape, device=device, dtype=torch.float32)
+            return zeros, zeros
+
+    hidden_size = 8
+    model = object.__new__(LTX2VideoTransformer3DModel)
+    torch.nn.Module.__init__(model)
+    model.patchify_proj = IdentityPatchify()
+    model.audio_patchify_proj = IdentityPatchify()
+    model.rope = ZeroRope()
+    model.audio_rope = ZeroRope()
+    model.cross_attn_rope = ZeroRope()
+    model.cross_attn_audio_rope = ZeroRope()
+    model.adaln_single = RecordingAdaLN(hidden_size, embedding_coefficient=6)
+    model.audio_adaln_single = RecordingAdaLN(hidden_size, embedding_coefficient=6)
+    model.prompt_adaln_single = RecordingAdaLN(hidden_size, embedding_coefficient=2)
+    model.audio_prompt_adaln_single = RecordingAdaLN(
+        hidden_size, embedding_coefficient=2
+    )
+    model.av_ca_video_scale_shift_adaln_single = RecordingAdaLN(
+        hidden_size, embedding_coefficient=4
+    )
+    model.av_ca_a2v_gate_adaln_single = RecordingAdaLN(
+        hidden_size, embedding_coefficient=1
+    )
+    model.av_ca_audio_scale_shift_adaln_single = RecordingAdaLN(
+        hidden_size, embedding_coefficient=4
+    )
+    model.av_ca_v2a_gate_adaln_single = RecordingAdaLN(
+        hidden_size, embedding_coefficient=1
+    )
+    model.caption_projection = None
+    model.audio_caption_projection = None
+    model.transformer_blocks = torch.nn.ModuleList([])
+    model.scale_shift_table = torch.nn.Parameter(torch.zeros(2, hidden_size))
+    model.audio_scale_shift_table = torch.nn.Parameter(torch.zeros(2, hidden_size))
+    model.norm_out = IdentityNorm()
+    model.audio_norm_out = IdentityNorm()
+    model.proj_out = IdentityProj()
+    model.audio_proj_out = IdentityProj()
+    model.patch_size = (1, 1, 1)
+    model.out_channels_raw = hidden_size
+    model.audio_out_channels = hidden_size
+    model.timestep_scale_multiplier = 1000
+    model.av_ca_timestep_scale_multiplier = 1
+
+    timestep = torch.tensor([647.0], dtype=torch.float32)
+    model.forward(
+        hidden_states=torch.zeros((1, 4, hidden_size), dtype=torch.float32),
+        audio_hidden_states=torch.zeros((1, 4, hidden_size), dtype=torch.float32),
+        encoder_hidden_states=torch.zeros((1, 2, hidden_size), dtype=torch.float32),
+        audio_encoder_hidden_states=torch.zeros(
+            (1, 2, hidden_size), dtype=torch.float32
+        ),
+        timestep=timestep,
+        audio_timestep=timestep,
+        num_frames=1,
+        height=2,
+        width=2,
+        audio_num_frames=4,
+        video_coords=torch.zeros((1, 3, 4, 2), dtype=torch.float32),
+        audio_coords=torch.zeros((1, 1, 4, 2), dtype=torch.float32),
+        return_latents=False,
+    )
+
+    expected_gate_timestep = torch.tensor([0.647], dtype=torch.float32)
+    assert torch.equal(
+        model.av_ca_video_scale_shift_adaln_single.last_timestep, timestep
+    )
+    assert torch.equal(
+        model.av_ca_audio_scale_shift_adaln_single.last_timestep, timestep
+    )
+    assert torch.allclose(
+        model.av_ca_a2v_gate_adaln_single.last_timestep, expected_gate_timestep
+    )
+    assert torch.allclose(
+        model.av_ca_v2a_gate_adaln_single.last_timestep, expected_gate_timestep
+    )
