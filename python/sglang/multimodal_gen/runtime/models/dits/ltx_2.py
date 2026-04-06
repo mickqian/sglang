@@ -1415,6 +1415,16 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
 
         self.layer_names = ["transformer_blocks"]
 
+    def _maybe_quantize_video_rope_coords(
+        self,
+        video_coords: torch.Tensor,
+        hidden_device: torch.device,
+        hidden_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if self.quantize_video_rope_coords_to_hidden_dtype:
+            return video_coords.to(device=hidden_device, dtype=hidden_dtype)
+        return video_coords.to(device=hidden_device)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1480,14 +1490,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 device=audio_hidden_states.device,
             )
 
-        if self.quantize_video_rope_coords_to_hidden_dtype:
-            video_coords = video_coords.to(
-                device=hidden_states.device, dtype=hidden_states.dtype
-            )
-        else:
-            video_coords = video_coords.to(device=hidden_states.device)
+        video_coords = self._maybe_quantize_video_rope_coords(
+            video_coords, hidden_states.device, hidden_states.dtype
+        )
         audio_coords = audio_coords.to(device=audio_hidden_states.device)
-
         video_rotary_emb = self.rope(video_coords, device=hidden_states.device)
         audio_rotary_emb = self.audio_rope(
             audio_coords, device=audio_hidden_states.device
