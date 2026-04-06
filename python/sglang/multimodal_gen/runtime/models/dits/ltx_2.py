@@ -1512,6 +1512,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
         temb, embedded_timestep = self.adaln_single(
             timestep.flatten(),
+            hidden_dtype=hidden_states.dtype,
         )
         temb = temb.view(batch_size, -1, temb.size(-1))
         embedded_timestep = embedded_timestep.view(
@@ -1519,7 +1520,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         temb_audio, audio_embedded_timestep = self.audio_adaln_single(
-            audio_timestep.flatten()
+            audio_timestep.flatten(),
+            hidden_dtype=audio_hidden_states.dtype,
         )
         temb_audio = temb_audio.view(batch_size, -1, temb_audio.size(-1))
         audio_embedded_timestep = audio_embedded_timestep.view(
