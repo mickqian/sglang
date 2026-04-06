@@ -246,17 +246,26 @@ def test_ltx23_connector_repack_renames_qk_norm_keys():
     )
 
 
-def test_ltx23_transformer_config_forces_sdpa_for_v2a_cross_attention():
+def test_ltx23_transformer_config_keeps_official_video_rope_flags():
     with tempfile.TemporaryDirectory() as tmpdir:
         donor_dir = os.path.join(tmpdir, "donor")
         os.makedirs(os.path.join(donor_dir, "transformer"), exist_ok=True)
         with open(os.path.join(donor_dir, "transformer", "config.json"), "w") as f:
-            json.dump({"_class_name": "OldClass", "num_layers": 1}, f)
+            json.dump(
+                {
+                    "_class_name": "OldClass",
+                    "num_layers": 1,
+                    "force_sdpa_v2a_cross_attention": False,
+                    "quantize_video_rope_coords_to_hidden_dtype": False,
+                },
+                f,
+            )
 
         config = _build_transformer_config(donor_dir)
 
     assert config["_class_name"] == "LTX2VideoTransformer3DModel"
-    assert config["force_sdpa_v2a_cross_attention"] is True
+    assert config["force_sdpa_v2a_cross_attention"] is False
+    assert config["quantize_video_rope_coords_to_hidden_dtype"] is False
 
 
 def test_ltx23_vae_config_adds_required_markers():
