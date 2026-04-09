@@ -351,6 +351,8 @@ class LTX2AVDenoisingStage(DenoisingStage):
         device: torch.device,
         dtype: torch.dtype,
     ) -> LTX23VideoConditionEncoder | None:
+        if server_args.pipeline_class_name != "LTX2TwoStagePipeline":
+            return None
         arch_config = server_args.pipeline_config.vae_config.arch_config
         encoder_subdir = str(getattr(arch_config, "condition_encoder_subdir", ""))
         if not encoder_subdir:
