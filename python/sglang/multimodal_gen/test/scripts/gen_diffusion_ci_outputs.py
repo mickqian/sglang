@@ -27,6 +27,14 @@ from sglang.multimodal_gen.test.run_suite import (
 logger = init_logger(__name__)
 
 
+def _is_gt_generation_test_file(path: Path) -> bool:
+    return path.name.startswith("test_server")
+
+
+def _is_gt_generation_test_item(node_id: str) -> bool:
+    return "::test_diffusion_generation[" in node_id
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Generate diffusion CI outputs")
@@ -107,6 +115,9 @@ def main():
         if not f_abs.exists():
             logger.warning(f"Test file {f_rel} not found in {target_dir}. Skipping.")
             continue
+        if not _is_gt_generation_test_file(f_abs):
+            logger.info(f"Skipping non-GT test file: {f_rel}")
+            continue
         suite_files_abs.append(str(f_abs))
 
     if not suite_files_abs:
@@ -123,6 +134,9 @@ def main():
 
     # Collect all test items (same as run_suite.py)
     all_test_items = collect_test_items(suite_files_abs, filter_expr=filter_expr)
+    all_test_items = [
+        item for item in all_test_items if _is_gt_generation_test_item(item)
+    ]
 
     if not all_test_items:
         logger.warning(f"No test items found for suite '{args.suite}'.")

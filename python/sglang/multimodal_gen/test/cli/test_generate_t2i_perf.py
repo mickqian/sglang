@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 
 class TestFlux_T2V(CLIBase):
     model_path = DEFAULT_FLUX_1_DEV_MODEL_NAME_FOR_TEST
-    extra_args = []
+    extra_args = ["--warmup"]
     data_type: DataType = DataType.IMAGE
 
 
