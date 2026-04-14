@@ -40,3 +40,12 @@
 - 验证: two-stage 逐帧比较结果为 `mean_mae=5.5512`、`mean_psnr=28.3202 dB`；比 one-stage 松一些，但仍然明显处于“同一 pipeline 语义、内容接近”的区间，不像是 stage2 路径错接或 LoRA 没有生效。
 - 验证: `SGLang` two-stage 日志确认走到了 `LTX2UpsampleStage -> LTX2LoRASwitchStage -> LTX2RefinementStage -> LTX2AVDecodingStage`，并且 stage2 切换后仍然只输出一条 `Transition-LORA` 的 missing-layer 摘要。
 - 当前精度对齐判断: `95%`。`valiantcat/LTX-2.3-Transition-LORA` 在 native one-stage / two-stage 上都已跑通，`SGLang` 与官方 native 的 T2V 结果基本对齐；若还要继续追，就该下钻到 `prompt embeds / one-step noise_pred / stage2 refine inputs` 的中间张量级对拍。
+
+## 2026-04-15（第六次更新）
+
+- 基线 git hash: `ea149b2105feb0ab8c1db18a967ad36470c3c21d`
+- 进展: 已确认 `spongebob` case 就是 `valiantcat/LTX-2.3-Transition-LORA` model card 的 `output3`；按同一 prompt 跑通了 `10.041667s / 241 frames / 24 fps` 的官方 native one-stage 与 `SGLang` one-stage，对应输出分别为 `/tmp/ltx23_native_runs/official_one_stage_241f_spongebob.mp4` 和 `/tmp/ltx23_native_runs/sglang_one_stage_241f_spongebob.mp4`。
+- 验证: 两边长视频元信息仍然完全一致，都是 `768x512 / 241 frames / 24 fps / 10.041667s`。
+- 验证: 逐帧比较结果为 `mean_mae=11.2966`、`mean_psnr=22.1348 dB`；明显比 `33` 帧短视频 case 漂移更大，说明长时长下 `SGLang` 和官方 native 的采样轨迹会进一步分叉，但仍保持同一 prompt / LoRA / 输出规格。
+- 观察: `SGLang` one-stage 这条长视频的 denoise 平均步长约 `3.78s/step`，总像素生成时间约 `127.56s`；官方 native 单步约 `4.24s/step`，生成时间略慢。
+- 当前精度对齐判断: `90%`。短视频 one-stage / two-stage 已较稳；长视频 `241f` one-stage 仍可用，但和官方 native 的像素级一致性明显下降，后续若要继续追，需要看 `prompt embeds / sigma schedule / one-step noise_pred` 是否已经在长序列开始处出现偏移。
