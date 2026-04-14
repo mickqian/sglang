@@ -49,3 +49,14 @@
 - 验证: 逐帧比较结果为 `mean_mae=11.2966`、`mean_psnr=22.1348 dB`；明显比 `33` 帧短视频 case 漂移更大，说明长时长下 `SGLang` 和官方 native 的采样轨迹会进一步分叉，但仍保持同一 prompt / LoRA / 输出规格。
 - 观察: `SGLang` one-stage 这条长视频的 denoise 平均步长约 `3.78s/step`，总像素生成时间约 `127.56s`；官方 native 单步约 `4.24s/step`，生成时间略慢。
 - 当前精度对齐判断: `90%`。短视频 one-stage / two-stage 已较稳；长视频 `241f` one-stage 仍可用，但和官方 native 的像素级一致性明显下降，后续若要继续追，需要看 `prompt embeds / sigma schedule / one-step noise_pred` 是否已经在长序列开始处出现偏移。
+
+## 2026-04-15（第七次更新）
+
+- 基线 git hash: `895fde5ae`
+- 进展: 已针对 `spongebob 241f` 长视频 case 下钻中间张量，对拍官方 native one-stage 与 `SGLang` one-stage 的 `prompt_embeds / latent_0 / latent_1 / full trajectory`。
+- 发现: prompt embeds 本身已经很接近，`video prompt` 的 `MAE` 约 `0.00124`；修正前 `latent_0 / latent_1` 也只在 `1e-3` 量级偏差，但 `SGLang` trajectory 从 step 10 之后开始持续放大，到 step 29 时 `trajectory_video` 的单步 `MAE` 已到 `0.2855`。
+- 根因: `SGLang` native LTX-2.3 one-stage 之前把 latent 固定成 `fp32`，而官方 native one-stage 实际沿用 pipeline 的 `bf16` latent / noise dtype。长视频下这类微小数值差异会沿 denoise 轨迹逐步累积。
+- 修复: `LTX2AVLatentPreparationStage._get_latent_dtype()` 已改为对 native LTX-2.3 也走 `pipeline_config.get_latent_dtype(prompt_dtype)`，不再强制 one-stage `fp32`。
+- 验证: 修正后 `audio_latent_0 / video_latent_0` 已与官方完全一致；`video_latent_1` 的 `MAE` 降到 `0.000108`。`trajectory_video` 整体 `MAE` 从 `0.05866` 降到 `0.03810`，step 29 的单步 `MAE` 从 `0.2855` 降到 `0.1958`。
+- 验证: 最终成片对拍也同步改善。`official_one_stage_241f_spongebob.mp4` 对 `sglang_one_stage_241f_spongebob_after_bf16.mp4` 的逐帧比较结果为 `mean_mae=7.5984`、`mean_psnr=25.5048 dB`；相比修正前的 `11.2966 / 22.1348 dB` 有明显提升。
+- 当前精度对齐判断: `93%`。`LTX-2.3 Transition LoRA` 的 native one-stage 长视频精度已经实质收敛；剩余漂移更像是 scheduler / denoise 内部数值路径上的细部差异，而不是 LoRA、prompt、或 condition 语义没对上。
