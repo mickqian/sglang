@@ -164,24 +164,128 @@ class LTX2DenoisingStage(DenoisingStage):
         return pred * factor
 
     @staticmethod
-    def _prepare_ltx2_ti2v_clean_state(
+    def _normalize_ltx2_condition_image_paths(
+        image_path: str | list[str] | None,
+    ) -> list[str]:
+        if image_path is None:
+            return []
+        if isinstance(image_path, list):
+            image_paths = image_path
+        else:
+            image_paths = [image_path]
+        if len(image_paths) > 2:
+            raise ValueError(
+                "LTX-2 TI2V currently supports at most two conditioning images "
+                "([first_frame, last_frame])."
+            )
+        return image_paths
+
+    @staticmethod
+    def _normalize_ltx2_condition_latents(
+        image_latent: torch.Tensor | list[torch.Tensor] | None,
+    ) -> list[torch.Tensor]:
+        if image_latent is None:
+            return []
+        if isinstance(image_latent, list):
+            return image_latent
+        return [image_latent]
+
+    @classmethod
+    def _get_ltx2_condition_spans(
+        cls,
+        batch: Req,
         latents: torch.Tensor,
-        image_latent: torch.Tensor,
+        image_latent: torch.Tensor | list[torch.Tensor] | None,
+        num_img_tokens: int,
+    ) -> list[tuple[int, torch.Tensor]]:
+        if num_img_tokens <= 0:
+            return []
+        if not (isinstance(latents, torch.Tensor) and latents.ndim == 3):
+            raise ValueError("LTX-2 TI2V expects packed token latents [B, S, D].")
+
+        condition_latents = cls._normalize_ltx2_condition_latents(image_latent)
+        if not condition_latents:
+            return []
+        if len(condition_latents) > 2:
+            raise ValueError(
+                "LTX-2 TI2V currently supports at most two conditioning images."
+            )
+
+        for cond in condition_latents:
+            if not (isinstance(cond, torch.Tensor) and cond.ndim == 3):
+                raise ValueError(
+                    "Expected LTX-2 conditioning latents to be packed tensors [B, S, D]."
+                )
+            if int(cond.shape[1]) < int(num_img_tokens):
+                raise ValueError(
+                    "LTX-2 conditioning latent is shorter than one frame token span."
+                )
+
+        did_sp_shard = bool(getattr(batch, "did_sp_shard_latents", False))
+        if not did_sp_shard:
+            if int(latents.shape[1]) < int(num_img_tokens):
+                raise ValueError(
+                    "LTX-2 latent sequence is shorter than one conditioning frame."
+                )
+            if len(condition_latents) == 1:
+                return [(0, condition_latents[0])]
+            return [
+                (0, condition_latents[0]),
+                (int(latents.shape[1]) - int(num_img_tokens), condition_latents[1]),
+            ]
+
+        tokens_per_frame = int(getattr(batch, "sp_video_tokens_per_frame", 0))
+        if tokens_per_frame <= 0:
+            raise ValueError(
+                "SP-sharded LTX-2 TI2V requires batch.sp_video_tokens_per_frame."
+            )
+        if int(num_img_tokens) != int(tokens_per_frame):
+            raise ValueError(
+                "LTX-2 conditioning token count must match one latent frame when using SP."
+            )
+
+        raw_shape = getattr(batch, "raw_latent_shape", None)
+        if raw_shape is None:
+            raise ValueError("SP-sharded LTX-2 TI2V requires batch.raw_latent_shape.")
+        global_seq_len = int(raw_shape[1])
+        if global_seq_len % tokens_per_frame != 0:
+            raise ValueError(
+                "SP-sharded LTX-2 TI2V expected raw seq_len divisible by tokens_per_frame."
+            )
+
+        global_num_frames = global_seq_len // tokens_per_frame
+        local_start_frame = int(getattr(batch, "sp_video_start_frame", 0))
+        local_num_frames = int(getattr(batch, "sp_video_latent_num_frames", 0))
+        local_end_frame = local_start_frame + local_num_frames
+
+        spans: list[tuple[int, torch.Tensor]] = []
+        if local_start_frame == 0:
+            spans.append((0, condition_latents[0]))
+
+        if len(condition_latents) == 2:
+            last_global_frame = global_num_frames - 1
+            if local_start_frame <= last_global_frame < local_end_frame:
+                local_last_frame = last_global_frame - local_start_frame
+                spans.append((local_last_frame * tokens_per_frame, condition_latents[1]))
+
+        return spans
+
+    @classmethod
+    def _prepare_ltx2_ti2v_clean_state(
+        cls,
+        batch: Req,
+        latents: torch.Tensor,
+        image_latent: torch.Tensor | list[torch.Tensor] | None,
         num_img_tokens: int,
         zero_clean_latent: bool,
         clean_latent_background: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         latents = latents.clone()
-        conditioned = image_latent[:, :num_img_tokens, :].to(
-            device=latents.device, dtype=latents.dtype
-        )
-        latents[:, :num_img_tokens, :] = conditioned
         denoise_mask = torch.ones(
             (latents.shape[0], latents.shape[1], 1),
             device=latents.device,
             dtype=torch.float32,
         )
-        denoise_mask[:, :num_img_tokens, :] = 0.0
         if clean_latent_background is not None:
             clean_latent = (
                 clean_latent_background.detach()
@@ -192,7 +296,24 @@ class LTX2DenoisingStage(DenoisingStage):
             clean_latent = torch.zeros_like(latents)
         else:
             clean_latent = latents.detach().clone()
-        clean_latent[:, :num_img_tokens, :] = conditioned
+
+        spans = cls._get_ltx2_condition_spans(
+            batch=batch,
+            latents=latents,
+            image_latent=image_latent,
+            num_img_tokens=num_img_tokens,
+        )
+        for start, cond in spans:
+            stop = int(start) + int(num_img_tokens)
+            conditioned = cls._repeat_batch_dim(
+                cond[:, :num_img_tokens, :].to(
+                    device=latents.device, dtype=latents.dtype
+                ),
+                int(latents.shape[0]),
+            )
+            latents[:, start:stop, :] = conditioned
+            denoise_mask[:, start:stop, :] = 0.0
+            clean_latent[:, start:stop, :] = conditioned
         return latents, denoise_mask, clean_latent
 
     @staticmethod
@@ -380,23 +501,6 @@ class LTX2DenoisingStage(DenoisingStage):
         return normalize(t)
 
     @staticmethod
-    def _should_apply_ltx2_ti2v(batch: Req) -> bool:
-        """True if we have an image-latent token prefix to condition with.
-
-        SP note: when token latents are time-sharded, only the rank that owns the
-        *global* first latent frame should apply TI2V conditioning (rank with start_frame==0).
-        """
-        if (
-            batch.image_latent is None
-            or int(getattr(batch, "ltx2_num_image_tokens", 0)) <= 0
-        ):
-            return False
-        did_sp_shard = bool(getattr(batch, "did_sp_shard_latents", False))
-        if not did_sp_shard:
-            return True
-        return int(getattr(batch, "sp_video_start_frame", 0)) == 0
-
-    @staticmethod
     def _should_replicate_ltx23_audio_for_sp(
         batch: Req,
         server_args: ServerArgs,
@@ -449,26 +553,13 @@ class LTX2DenoisingStage(DenoisingStage):
         batch.ltx2_num_image_tokens = 0
         batch.image_latent = None
 
-        if batch.image_path is None:
+        image_paths = self._normalize_ltx2_condition_image_paths(batch.image_path)
+        if not image_paths:
             return
         if batch.width is None or batch.height is None:
             raise ValueError("width/height must be provided for LTX-2 TI2V.")
         if self.vae is None:
             raise ValueError("VAE must be provided for LTX-2 TI2V.")
-
-        image_path = (
-            batch.image_path[0]
-            if isinstance(batch.image_path, list)
-            else batch.image_path
-        )
-
-        img = load_image(image_path)
-        img_array = np.array(img).astype(np.uint8)[..., :3]
-        img_array = self._apply_video_codec_compression(img_array, crf=33)
-        conditioned_img = PIL.Image.fromarray(img_array)
-        batch.condition_image = self._resize_center_crop(
-            conditioned_img, width=int(batch.width), height=int(batch.height)
-        )
 
         latents_device = (
             batch.latents.device
@@ -485,15 +576,13 @@ class LTX2DenoisingStage(DenoisingStage):
         )
         if condition_image_encoder is None:
             self.vae = self.vae.to(device=latents_device, dtype=encode_dtype)
-
-        video_condition = self._resize_center_crop_tensor(
-            conditioned_img,
-            width=int(batch.width),
-            height=int(batch.height),
-            device=latents_device,
-            dtype=encode_dtype,
-            apply_codec_compression=False,
-        )
+        vae_sf = int(server_args.pipeline_config.vae_scale_factor)
+        patch = int(server_args.pipeline_config.patch_size)
+        latent_h = int(batch.height) // vae_sf
+        latent_w = int(batch.width) // vae_sf
+        expected_tokens = (latent_h // patch) * (latent_w // patch)
+        packed_conditions: list[torch.Tensor] = []
+        processed_images: list[PIL.Image.Image] = []
 
         with torch.autocast(
             device_type=current_platform.device_type,
@@ -508,62 +597,92 @@ class LTX2DenoisingStage(DenoisingStage):
                     self.vae.enable_tiling()
             except Exception:
                 pass
-            if not vae_autocast_enabled:
-                video_condition = video_condition.to(encode_dtype)
 
-            if condition_image_encoder is not None:
-                latent = condition_image_encoder(video_condition)
-            else:
-                latent_dist: DiagonalGaussianDistribution = self.vae.encode(
-                    video_condition
+            for image_path in image_paths:
+                img = load_image(image_path)
+                img_array = np.array(img).astype(np.uint8)[..., :3]
+                img_array = self._apply_video_codec_compression(img_array, crf=33)
+                conditioned_img = PIL.Image.fromarray(img_array)
+                processed_images.append(
+                    self._resize_center_crop(
+                        conditioned_img, width=int(batch.width), height=int(batch.height)
+                    )
                 )
-                if isinstance(latent_dist, AutoencoderKLOutput):
-                    latent_dist = latent_dist.latent_dist
 
-        if condition_image_encoder is None:
-            mode = server_args.pipeline_config.vae_config.encode_sample_mode()
-            if mode == "argmax":
-                latent = latent_dist.mode()
-            elif mode == "sample":
-                if batch.generator is None:
-                    raise ValueError("Generator must be provided for VAE sampling.")
-                latent = latent_dist.sample(batch.generator)
-            else:
-                raise ValueError(f"Unsupported encode_sample_mode: {mode}")
+                video_condition = self._resize_center_crop_tensor(
+                    conditioned_img,
+                    width=int(batch.width),
+                    height=int(batch.height),
+                    device=latents_device,
+                    dtype=encode_dtype,
+                    apply_codec_compression=False,
+                )
+                if not vae_autocast_enabled:
+                    video_condition = video_condition.to(encode_dtype)
 
-            # Per-channel normalization: normalized = (x - mean) / std
-            mean = self.vae.latents_mean.view(1, -1, 1, 1, 1).to(latent)
-            std = self.vae.latents_std.view(1, -1, 1, 1, 1).to(latent)
-            latent = (latent - mean) / std
-        else:
-            latent = latent.to(dtype=encode_dtype)
+                if condition_image_encoder is not None:
+                    latent = condition_image_encoder(video_condition).to(
+                        dtype=encode_dtype
+                    )
+                else:
+                    latent_dist: DiagonalGaussianDistribution = self.vae.encode(
+                        video_condition
+                    )
+                    if isinstance(latent_dist, AutoencoderKLOutput):
+                        latent_dist = latent_dist.latent_dist
 
-        packed = server_args.pipeline_config.maybe_pack_latents(
-            latent, latent.shape[0], batch
+                    mode = server_args.pipeline_config.vae_config.encode_sample_mode()
+                    if mode == "argmax":
+                        latent = latent_dist.mode()
+                    elif mode == "sample":
+                        if batch.generator is None:
+                            raise ValueError(
+                                "Generator must be provided for VAE sampling."
+                            )
+                        latent = latent_dist.sample(batch.generator)
+                    else:
+                        raise ValueError(
+                            f"Unsupported encode_sample_mode: {mode}"
+                        )
+
+                    mean = self.vae.latents_mean.view(1, -1, 1, 1, 1).to(latent)
+                    std = self.vae.latents_std.view(1, -1, 1, 1, 1).to(latent)
+                    latent = (latent - mean) / std
+
+                packed = server_args.pipeline_config.maybe_pack_latents(
+                    latent, latent.shape[0], batch
+                )
+                if not (isinstance(packed, torch.Tensor) and packed.ndim == 3):
+                    raise ValueError("Expected packed image latents [B, S0, D].")
+                if int(packed.shape[1]) != int(expected_tokens):
+                    raise ValueError(
+                        "LTX-2 conditioning token count mismatch: "
+                        f"{int(packed.shape[1])=} {int(expected_tokens)=}."
+                    )
+                packed_conditions.append(packed)
+
+        batch.condition_image = (
+            processed_images[0] if len(processed_images) == 1 else processed_images
         )
-        if not (isinstance(packed, torch.Tensor) and packed.ndim == 3):
-            raise ValueError("Expected packed image latents [B, S0, D].")
+        batch.image_latent = (
+            packed_conditions[0]
+            if len(packed_conditions) == 1
+            else packed_conditions
+        )
+        batch.ltx2_num_image_tokens = int(expected_tokens)
 
-        # Fail-fast token count: must match one latent frame's tokens.
-        vae_sf = int(server_args.pipeline_config.vae_scale_factor)
-        patch = int(server_args.pipeline_config.patch_size)
-        latent_h = int(batch.height) // vae_sf
-        latent_w = int(batch.width) // vae_sf
-        expected_tokens = (latent_h // patch) * (latent_w // patch)
-        if int(packed.shape[1]) != int(expected_tokens):
-            raise ValueError(
-                "LTX-2 conditioning token count mismatch: "
-                f"{int(packed.shape[1])=} {int(expected_tokens)=}."
+        if len(image_paths) == 2:
+            logger.info(
+                "LTX2 TI2V first/last conditioning active with 2 images at %sx%s",
+                batch.width,
+                batch.height,
             )
-
-        batch.image_latent = packed
-        batch.ltx2_num_image_tokens = int(packed.shape[1])
 
         if batch.debug:
             logger.info(
-                "LTX2 TI2V conditioning prepared: %d tokens (shape=%s) for %sx%s",
+                "LTX2 TI2V conditioning prepared: %d image(s), %d tokens/frame for %sx%s",
+                len(image_paths),
                 batch.ltx2_num_image_tokens,
-                tuple(batch.image_latent.shape),
                 batch.width,
                 batch.height,
             )
@@ -604,7 +723,13 @@ class LTX2DenoisingStage(DenoisingStage):
 
         # Prepare image latents and embeddings for LTX-2 TI2V generation.
         self._prepare_ltx2_image_latent(batch, server_args)
-        do_ti2v = self._should_apply_ltx2_ti2v(batch)
+        ti2v_spans = self._get_ltx2_condition_spans(
+            batch=batch,
+            latents=ctx.latents,
+            image_latent=batch.image_latent,
+            num_img_tokens=int(getattr(batch, "ltx2_num_image_tokens", 0)),
+        )
+        do_ti2v = bool(ti2v_spans)
 
         if ctx.use_ltx23_legacy_one_stage:
             batch.ltx23_audio_replicated_for_sp = False
@@ -662,6 +787,7 @@ class LTX2DenoisingStage(DenoisingStage):
             # Keep conditioned tokens clean and reuse the mask during every step update.
             ctx.latents, ctx.denoise_mask, ctx.clean_latent = (
                 self._prepare_ltx2_ti2v_clean_state(
+                    batch=batch,
                     latents=ctx.latents,
                     image_latent=batch.image_latent,
                     num_img_tokens=int(getattr(batch, "ltx2_num_image_tokens", 0)),

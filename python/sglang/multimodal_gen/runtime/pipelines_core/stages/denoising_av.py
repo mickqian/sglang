@@ -172,7 +172,12 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             self._reset_stage2_generators(batch)
         noise_scale = float(self.distilled_sigmas[0].item())
         if is_native_ti2v:
+            batch.did_sp_shard_latents = False
+            batch.image_latent = None
+            batch.ltx2_num_image_tokens = 0
+            self._prepare_ltx2_image_latent(batch, server_args)
             prepared_latents, denoise_mask, _ = self._prepare_ltx2_ti2v_clean_state(
+                batch=batch,
                 latents=batch.latents,
                 image_latent=batch.image_latent,
                 num_img_tokens=int(getattr(batch, "ltx2_num_image_tokens", 0)),
@@ -217,9 +222,6 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 batch.audio_latents = batch.audio_latents.to(
                     device=batch.audio_latents.device, dtype=torch.float32
                 )
-
-        batch.image_latent = None
-        batch.ltx2_num_image_tokens = 0
 
         original_scheduler = self.scheduler
         original_batch_timesteps = batch.timesteps

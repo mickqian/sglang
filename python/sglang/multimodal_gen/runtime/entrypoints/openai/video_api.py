@@ -20,6 +20,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 
+from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
 from sglang.multimodal_gen.configs.sample.sampling_params import (
     SamplingParams,
     generate_request_id,
@@ -47,6 +48,66 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/videos", tags=["videos"])
+
+
+def _is_remote_image_source(image_source: Any) -> bool:
+    return isinstance(image_source, str) and image_source.lower().startswith(
+        ("http://", "https://", "data:image")
+    )
+
+
+def _is_ltx2_video_ti2v_request(server_args) -> bool:
+    return (
+        isinstance(server_args.pipeline_config, LTX2PipelineConfig)
+        and server_args.pipeline_config.task_type.requires_image_input()
+    )
+
+
+def _validate_video_reference_inputs(server_args, image_sources: list[Any]) -> None:
+    if _is_ltx2_video_ti2v_request(server_args) and len(image_sources) > 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "LTX-2/LTX-2.3 TI2V currently supports at most 2 references "
+                "([first_frame, last_frame])."
+            ),
+        )
+
+
+async def _save_input_images(
+    image_sources, request_id: str, uploads_dir: str
+) -> list[str]:
+    image_list = merge_image_input_list(image_sources)
+    if not image_list:
+        return []
+
+    os.makedirs(uploads_dir, exist_ok=True)
+    input_paths: list[str] = []
+    for idx, image in enumerate(image_list):
+        if isinstance(image, str) and not _is_remote_image_source(image):
+            input_paths.append(image)
+            continue
+
+        filename = image.filename if hasattr(image, "filename") else f"image_{idx}"
+        target_path = os.path.join(uploads_dir, f"{request_id}_{idx}_{filename}")
+        input_paths.append(await save_image_to_path(image, target_path))
+    return input_paths
+
+
+async def _collect_multipart_reference_sources(request: Request) -> list[Any]:
+    form = await request.form()
+    image_sources: list[Any] = []
+    for key, value in form.multi_items():
+        if key in {
+            "input_reference",
+            "input_reference[]",
+            "reference_url",
+            "reference_url[]",
+        }:
+            if value in (None, ""):
+                continue
+            image_sources.append(value)
+    return image_sources
 
 
 def _build_video_sampling_params(request_id: str, request: VideoGenerationsRequest):
@@ -107,22 +168,6 @@ def _video_job_from_sampling(
     }
 
 
-async def _save_first_input_image(
-    image_sources, request_id: str, uploads_dir: str
-) -> str | None:
-    """Save the first input image from a list of sources and return its path."""
-    image_list = merge_image_input_list(image_sources)
-    if not image_list:
-        return None
-    image = image_list[0]
-
-    os.makedirs(uploads_dir, exist_ok=True)
-
-    filename = image.filename if hasattr(image, "filename") else "url_image"
-    target_path = os.path.join(uploads_dir, f"{request_id}_{filename}")
-    return await save_image_to_path(image, target_path)
-
-
 async def _dispatch_job_async(
     job_id: str,
     batch: Req,
@@ -170,8 +215,8 @@ async def create_video(
     request: Request,
     # multipart/form-data fields (optional; used only when content-type is multipart)
     prompt: Optional[str] = Form(None),
-    input_reference: Optional[UploadFile] = File(None),
-    reference_url: Optional[str] = Form(None),
+    input_reference: Optional[list[UploadFile]] = File(None),
+    reference_url: Optional[list[str]] = Form(None),
     model: Optional[str] = Form(None),
     seconds: Optional[int] = Form(None),
     size: Optional[str] = Form(None),
@@ -220,14 +265,17 @@ async def create_video(
         if not prompt:
             raise HTTPException(status_code=400, detail="prompt is required")
         # Validate image input based on model task type
-        image_sources = merge_image_input_list(input_reference, reference_url)
+        image_sources = await _collect_multipart_reference_sources(request)
+        if not image_sources:
+            image_sources = merge_image_input_list(input_reference, reference_url)
         if task_type.requires_image_input() and not image_sources:
             raise HTTPException(
                 status_code=400,
                 detail="input_reference or reference_url is required for image-to-video generation",
             )
+        _validate_video_reference_inputs(server_args, image_sources)
         try:
-            input_path = await _save_first_input_image(
+            input_paths = await _save_input_images(
                 image_sources, request_id, uploads_dir
             )
         except Exception as e:
@@ -250,7 +298,7 @@ async def create_video(
 
         req = VideoGenerationsRequest(
             prompt=prompt,
-            input_reference=input_path,
+            input_reference=input_paths[0] if len(input_paths) == 1 else input_paths,
             model=model,
             seconds=seconds if seconds is not None else 4,
             size=size,
@@ -299,18 +347,24 @@ async def create_video(
                     status_code=400,
                     detail="input_reference or reference_url is required for image-to-video generation",
                 )
-            # for non-multipart/form-data type
-            if payload.get("reference_url"):
+            image_sources = merge_image_input_list(
+                payload.get("input_reference"), payload.get("reference_url")
+            )
+            _validate_video_reference_inputs(server_args, image_sources)
+            if image_sources:
                 try:
-                    input_path = await _save_first_input_image(
-                        payload.get("reference_url"), request_id, uploads_dir
+                    input_paths = await _save_input_images(
+                        image_sources, request_id, uploads_dir
                     )
                 except Exception as e:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Failed to process image source: {str(e)}",
                     )
-                payload["input_reference"] = input_path
+                payload["input_reference"] = (
+                    input_paths[0] if len(input_paths) == 1 else input_paths
+                )
+                payload.pop("reference_url", None)
             req = VideoGenerationsRequest(**payload)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request body: {e}")

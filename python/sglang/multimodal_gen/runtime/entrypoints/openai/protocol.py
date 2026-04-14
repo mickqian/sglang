@@ -82,8 +82,8 @@ class VideoResponse(BaseModel):
 
 class VideoGenerationsRequest(BaseModel):
     prompt: str
-    input_reference: Optional[str] = None
-    reference_url: Optional[str] = None
+    input_reference: Optional[Union[str, List[str]]] = None
+    reference_url: Optional[Union[str, List[str]]] = None
     model: Optional[str] = None
     seconds: Optional[int] = 4
     size: Optional[str] = ""
