@@ -62,11 +62,13 @@ class LTX2AVLatentPreparationStage(LatentPreparationStage):
         server_args: ServerArgs,
     ):
         if is_ltx23_native_variant(server_args.pipeline_config.vae_config.arch_config):
-            if server_args.pipeline_class_name == "LTX2TwoStagePipeline":
-                return server_args.pipeline_config.get_latent_dtype(
-                    batch.prompt_embeds[0].dtype
-                )
-            return torch.float32
+            # Official native LTX-2.3 one-stage/two-stage pipelines sample and carry
+            # video/audio latents in the prompt dtype (bf16 for Gemma-3 runs). For
+            # long denoising trajectories, forcing fp32 here introduces a small but
+            # systematic divergence that compounds over time against the native path.
+            return server_args.pipeline_config.get_latent_dtype(
+                batch.prompt_embeds[0].dtype
+            )
         return torch.float32
 
     @staticmethod
