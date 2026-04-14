@@ -14,3 +14,11 @@
 - 验证: `py_compile` 已通过；`git diff --check` 已通过。
 - 验证失败点: 尝试补纯 UT，但本机 `pytest` 在 import `sglang` 时被 optional quantization / triton 依赖链拖住，和本次功能改动无关。UT 文件已撤掉，避免把环境 hack 带入分支。
 - 当前精度对齐判断: `78%`。代码路径、语法、静态 diff 已稳定；还缺真实生成 smoke 或 API e2e 才能接近 `90%+`。
+
+## 2026-04-15（第三次更新）
+
+- 基线 git hash: `917d14c57496d5509319b241234ad948464370b4`
+- 进展: 已把 `LoRA adapter ... does not contain the weights for layer ...` 的逐层 warning 改成按 adapter 聚合摘要；正常 partial coverage 现在只打一条 summary，包含 `missing/applied/total` 和少量 example layers。
+- 进展: 仅当某个 adapter `applied_count == 0` 时保留 `warning` 级别；其余 partial coverage 降成 `info`，避免 `LTX-2.3` 社区 LoRA 把日志刷爆。
+- 验证: `py_compile` 已通过；`git diff --check` 已通过。
+- 当前精度对齐判断: `82%`。日志行为已经和之前 smoke 分支的经验对齐；还没在这条分支上复跑真实生成确认新摘要日志输出。

@@ -425,6 +425,8 @@ class LoRAPipeline(ComposedPipelineBase):
             )
 
         adapted_count = 0
+        missing_layers_by_adapter = [[] for _ in lora_nicknames]
+        applied_count_by_adapter = [0 for _ in lora_nicknames]
         for name, layer in lora_layers.items():
             # Apply all LoRA adapters in order
             for idx, (nickname, path, lora_strength) in enumerate(
@@ -464,13 +466,9 @@ class LoRAPipeline(ComposedPipelineBase):
                         ),  # Only clear on first LoRA
                     )
                     adapted_count += 1
+                    applied_count_by_adapter[idx] += 1
                 else:
-                    if rank == 0 and idx == 0:  # Only warn for first missing LoRA
-                        logger.warning(
-                            "LoRA adapter %s does not contain the weights for layer '%s'. LoRA will not be applied to it.",
-                            path,
-                            name,
-                        )
+                    missing_layers_by_adapter[idx].append(name)
                     # Only disable if no LoRA was applied at all
                     if idx == len(lora_nicknames) - 1:
                         has_any_lora = any(
@@ -480,6 +478,29 @@ class LoRAPipeline(ComposedPipelineBase):
                         )
                         if not has_any_lora:
                             layer.disable_lora = True
+
+        if rank == 0:
+            total_layers = len(lora_layers)
+            example_limit = 8
+            for idx, path in enumerate(lora_paths):
+                missing_layers = missing_layers_by_adapter[idx]
+                if not missing_layers:
+                    continue
+                missing_count = len(missing_layers)
+                applied_count = applied_count_by_adapter[idx]
+                examples = ", ".join(missing_layers[:example_limit])
+                if missing_count > example_limit:
+                    examples += ", ..."
+                log_fn = logger.warning if applied_count == 0 else logger.info
+                log_fn(
+                    "LoRA adapter %s missing weights for %d/%d layers; those layers will use base weights. "
+                    "Applied to %d layers. Examples: %s",
+                    path,
+                    missing_count,
+                    total_layers,
+                    applied_count,
+                    examples,
+                )
         return adapted_count
 
     def is_lora_effective(self, target: str = "all") -> bool:
