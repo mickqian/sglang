@@ -22,3 +22,21 @@
 - 进展: 仅当某个 adapter `applied_count == 0` 时保留 `warning` 级别；其余 partial coverage 降成 `info`，避免 `LTX-2.3` 社区 LoRA 把日志刷爆。
 - 验证: `py_compile` 已通过；`git diff --check` 已通过。
 - 当前精度对齐判断: `82%`。日志行为已经和之前 smoke 分支的经验对齐；还没在这条分支上复跑真实生成确认新摘要日志输出。
+
+## 2026-04-15（第四次更新）
+
+- 基线 git hash: `ec902788ebe49b664ed3e4e1fd2ca8b147106a88`
+- 进展: 已在远端 `sglang_mick` 容器上用官方 native one-stage pipeline 跑通 `valiantcat/LTX-2.3-Transition-LORA` 的 model card `output2` prompt，输出 `/tmp/ltx23_native_runs/official_one_stage_33f.mp4`；同配置的 `SGLang` 输出为 `/tmp/ltx23_native_runs/sglang_one_stage_33f.mp4`。
+- 验证: 两边视频元信息完全一致，都是 `768x512 / 33 frames / 24 fps / 1.375s`。
+- 验证: 逐帧比较结果为 `mean_mae=3.3099`、`mean_psnr=33.1304 dB`；sample frames 的 MAE 落在 `2.48 ~ 3.98`，说明 `SGLang` one-stage 与官方 native one-stage 已经比较接近。
+- 验证: 新的 LoRA 聚合日志已在远端生成路径确认生效，`Transition-LORA` 会输出一条 `missing 1084/1660, applied 576` 的摘要，而不是逐层 warning。
+- 当前精度对齐判断: `92%`。one-stage 的 T2V 路径和官方 native 已经对齐到可接受范围；还需要补 two-stage 对拍，确认 stage2 路径也没有偏移。
+
+## 2026-04-15（第五次更新）
+
+- 基线 git hash: `ec902788ebe49b664ed3e4e1fd2ca8b147106a88`
+- 进展: 已在同一台 H200 机器上补完 `LTX2TwoStagePipeline` 对拍；官方 native 输出为 `/tmp/ltx23_native_runs/official_two_stage_33f.mp4`，`SGLang` 输出为 `/tmp/ltx23_native_runs/sglang_two_stage_33f.mp4`。
+- 验证: 两边视频元信息同样完全一致，都是 `768x512 / 33 frames / 24 fps / 1.375s`。
+- 验证: two-stage 逐帧比较结果为 `mean_mae=5.5512`、`mean_psnr=28.3202 dB`；比 one-stage 松一些，但仍然明显处于“同一 pipeline 语义、内容接近”的区间，不像是 stage2 路径错接或 LoRA 没有生效。
+- 验证: `SGLang` two-stage 日志确认走到了 `LTX2UpsampleStage -> LTX2LoRASwitchStage -> LTX2RefinementStage -> LTX2AVDecodingStage`，并且 stage2 切换后仍然只输出一条 `Transition-LORA` 的 missing-layer 摘要。
+- 当前精度对齐判断: `95%`。`valiantcat/LTX-2.3-Transition-LORA` 在 native one-stage / two-stage 上都已跑通，`SGLang` 与官方 native 的 T2V 结果基本对齐；若还要继续追，就该下钻到 `prompt embeds / one-step noise_pred / stage2 refine inputs` 的中间张量级对拍。
