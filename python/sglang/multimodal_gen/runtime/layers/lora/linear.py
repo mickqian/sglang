@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 # Code adapted from SGLang https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/lora/layers.py
-
+import os
 
 import torch
 from torch import nn
@@ -193,6 +193,9 @@ class BaseLayerWithLoRA(nn.Module):
             tuple[torch.nn.Parameter, torch.nn.Parameter, str | None, float]
         ],
     ) -> bool:
+        # Default off for safety; enable explicitly during precision debugging.
+        if os.getenv("SGLANG_DIFFUSION_LORA_MERGE_FP32", "0") != "1":
+            return False
         # Distilled LoRA in LTX2 two-stage is tuned for current low-precision merge path.
         # Keep original merge precision for it to avoid stage-2 quality regression.
         for _, _, lora_path, _ in lora_list:
