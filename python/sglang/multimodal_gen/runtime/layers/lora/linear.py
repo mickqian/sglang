@@ -444,9 +444,10 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 input_, num_partitions=self.base_layer.tp_size
             )
             input_parallel = splitted_input[tp_rank].contiguous()
+        tp_rank = get_tp_rank()
         bias_ = (
             None
-            if (self.base_layer.tp_rank > 0 or self.base_layer.skip_bias_add)
+            if (tp_rank > 0 or self.base_layer.skip_bias_add)
             else self.base_layer.bias
         )
         output_parallel = self.base_layer.quant_method.apply(
