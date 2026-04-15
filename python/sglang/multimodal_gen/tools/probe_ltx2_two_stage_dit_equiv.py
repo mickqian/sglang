@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import traceback
 
 import torch
 
@@ -10,6 +11,9 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
     LTX2DenoisingContext,
     LTX2DenoisingStage,
+)
+from sglang.multimodal_gen.runtime.scheduler.scheduler_client import (
+    sync_scheduler_client,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -203,35 +207,53 @@ def main() -> None:
     handles = _install_probe_hooks()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    generator = DiffGenerator.from_pretrained(
-        model_path=args.model_path,
-        pipeline_class_name=args.pipeline_class_name,
-        num_gpus=args.num_gpus,
-        log_level=args.log_level,
-        attention_backend=args.attention_backend,
-        port=args.port,
-        scheduler_port=args.scheduler_port,
-        master_port=args.master_port,
-    )
-
-    sampling_params = _build_sampling_params(args, generator.server_args)
-    req = prepare_request(server_args=generator.server_args, sampling_params=sampling_params)
-
+    generator = None
     try:
-        generator._send_to_scheduler_and_wait_for_response([req])
-    except ProbeComplete:
-        pass
+        generator = DiffGenerator.from_pretrained(
+            model_path=args.model_path,
+            pipeline_class_name=args.pipeline_class_name,
+            num_gpus=args.num_gpus,
+            log_level=args.log_level,
+            attention_backend=args.attention_backend,
+            port=args.port,
+            scheduler_port=args.scheduler_port,
+            master_port=args.master_port,
+        )
+
+        sampling_params = _build_sampling_params(args, generator.server_args)
+        req = prepare_request(
+            server_args=generator.server_args, sampling_params=sampling_params
+        )
+
+        try:
+            generator._send_to_scheduler_and_wait_for_response([req])
+        except ProbeComplete:
+            pass
+
+        state = handles["state"]
+        if state["cfg"] is None:
+            raise RuntimeError("probe did not capture stage1 cfg outputs")
+        output_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(json.dumps(state, ensure_ascii=False, indent=2), flush=True)
+    except Exception:
+        traceback.print_exc()
+        raise
     finally:
         _restore_probe_hooks(handles)
-
-    state = handles["state"]
-    if state["cfg"] is None:
-        raise RuntimeError("probe did not capture stage1 cfg outputs")
-    output_path.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    print(json.dumps(state, ensure_ascii=False, indent=2))
+        if generator is not None:
+            if generator.local_scheduler_process:
+                for process in generator.local_scheduler_process:
+                    process.terminate()
+                    process.join(timeout=5)
+                generator.local_scheduler_process = None
+            if getattr(generator, "owns_scheduler_client", False):
+                try:
+                    sync_scheduler_client.close()
+                except Exception:
+                    pass
+                generator.owns_scheduler_client = False
 
 
 if __name__ == "__main__":
