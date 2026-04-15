@@ -493,14 +493,24 @@ class LTX2DenoisingStage(DenoisingStage):
 
         uncond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 0, 1)
         cond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 1, 2)
+        probe_block_index = self._ltx2_probe_block_index()
+        if not (0 <= probe_block_index < len(step.current_model.transformer_blocks)):
+            raise ValueError(
+                f"Invalid SGLANG_LTX2_PROBE_BLOCK_INDEX={probe_block_index}, "
+                f"num_blocks={len(step.current_model.transformer_blocks)}."
+            )
+        probe_block = step.current_model.transformer_blocks[probe_block_index]
+        batched_actual_block_trace = getattr(probe_block, "_ltx2_probe_stage_trace", None)
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             ref_video_uncond, ref_audio_uncond = step.current_model(**uncond_kwargs)
+        ref_actual_block_trace_uncond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
+        ref_actual_block_trace_cond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
@@ -873,6 +883,45 @@ class LTX2DenoisingStage(DenoisingStage):
                 batched_temb_ca_audio_gate[1:2].float(),
             ),
         )
+        if (
+            batched_actual_block_trace is not None
+            and ref_actual_block_trace_uncond is not None
+            and ref_actual_block_trace_cond is not None
+        ):
+            actual_block_key = f"actual_block{probe_block_index}"
+            for trace_key, trace_name in (
+                ("before_block", f"{actual_block_key}_before_block"),
+                ("after_self_attn", f"{actual_block_key}_after_self_attn"),
+                (
+                    "after_prompt_cross_attn",
+                    f"{actual_block_key}_after_prompt_cross_attn",
+                ),
+                ("after_av_cross_attn", f"{actual_block_key}_after_av_cross_attn"),
+                ("after_ff", f"{actual_block_key}_after_ff"),
+            ):
+                batched_video_stage, batched_audio_stage = batched_actual_block_trace[
+                    trace_key
+                ]
+                ref_video_stage_uncond, ref_audio_stage_uncond = (
+                    ref_actual_block_trace_uncond[trace_key]
+                )
+                ref_video_stage_cond, ref_audio_stage_cond = (
+                    ref_actual_block_trace_cond[trace_key]
+                )
+                pretrace[trace_name] = self._ltx2_probe_cfg_report(
+                    (
+                        ref_video_stage_uncond.float(),
+                        ref_video_stage_cond.float(),
+                        ref_audio_stage_uncond.float(),
+                        ref_audio_stage_cond.float(),
+                    ),
+                    (
+                        batched_video_stage[0:1].float(),
+                        batched_video_stage[1:2].float(),
+                        batched_audio_stage[0:1].float(),
+                        batched_audio_stage[1:2].float(),
+                    ),
+                )
 
         if (
             "num_frames" in model_kwargs
