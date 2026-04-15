@@ -118,6 +118,7 @@ def _install_probe_hooks() -> dict[str, object]:
         "official_cfg": None,
         "current_stage": None,
         "in_model_forward_probe": False,
+        "model_forward_calls": [],
     }
     orig_cfg_batched = LTX2DenoisingStage._run_ltx2_cfg_batched_forward
     orig_cfg_seq = LTX2DenoisingStage._run_ltx2_cfg_sequential_forward
@@ -189,14 +190,37 @@ def _install_probe_hooks() -> dict[str, object]:
 
     def patched_model_forward(self, *, step, model_kwargs):
         candidate = orig_model_forward(step=step, model_kwargs=model_kwargs)
+        hidden_states = model_kwargs.get("hidden_states")
+        encoder_hidden_states = model_kwargs.get("encoder_hidden_states")
+        if len(state["model_forward_calls"]) < 16:
+            state["model_forward_calls"].append(
+                {
+                    "stage": state["current_stage"],
+                    "step_index": int(step.step_index),
+                    "hidden_states_shape": (
+                        list(hidden_states.shape)
+                        if isinstance(hidden_states, torch.Tensor)
+                        else None
+                    ),
+                    "encoder_hidden_states_shape": (
+                        list(encoder_hidden_states.shape)
+                        if isinstance(encoder_hidden_states, torch.Tensor)
+                        else None
+                    ),
+                    "has_perturbation_configs": model_kwargs.get(
+                        "perturbation_configs"
+                    )
+                    is not None,
+                }
+            )
         should_probe_official_cfg = (
             state["current_stage"] == "stage1"
             and state["official_cfg"] is None
             and not state["in_model_forward_probe"]
-            and isinstance(model_kwargs.get("hidden_states"), torch.Tensor)
-            and isinstance(model_kwargs.get("encoder_hidden_states"), torch.Tensor)
-            and model_kwargs["hidden_states"].shape[0] == 2
-            and model_kwargs["encoder_hidden_states"].shape[0] == 2
+            and isinstance(hidden_states, torch.Tensor)
+            and isinstance(encoder_hidden_states, torch.Tensor)
+            and hidden_states.shape[0] == 2
+            and encoder_hidden_states.shape[0] == 2
             and model_kwargs.get("perturbation_configs") is None
         )
         if not should_probe_official_cfg:
@@ -295,12 +319,12 @@ def main() -> None:
             pass
 
         state = handles["state"]
-        if state["cfg"] is None and state["official_cfg"] is None:
-            raise RuntimeError("probe did not capture stage1 cfg outputs")
         output_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         print(json.dumps(state, ensure_ascii=False, indent=2), flush=True)
+        if state["cfg"] is None and state["official_cfg"] is None:
+            raise RuntimeError("probe did not capture stage1 cfg outputs")
     except Exception:
         traceback.print_exc()
         raise
