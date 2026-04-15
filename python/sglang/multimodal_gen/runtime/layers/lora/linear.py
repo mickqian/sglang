@@ -222,10 +222,15 @@ class BaseLayerWithLoRA(nn.Module):
             data = self.base_layer.weight.data.to(
                 get_local_torch_device()
             ).full_tensor()
+            target_dtype = data.dtype
+            if data.is_floating_point() and data.dtype != torch.float32:
+                data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
 
-            unsharded_base_layer.weight = nn.Parameter(data.to(current_device))
+            unsharded_base_layer.weight = nn.Parameter(
+                data.to(current_device, dtype=target_dtype)
+            )
             if isinstance(getattr(self.base_layer, "bias", None), DTensor):
                 unsharded_base_layer.bias = nn.Parameter(
                     self.base_layer.bias.to(get_local_torch_device(), non_blocking=True)
@@ -247,10 +252,15 @@ class BaseLayerWithLoRA(nn.Module):
         else:
             current_device = self.base_layer.weight.data.device
             data = self.base_layer.weight.data.to(get_local_torch_device())
+            target_dtype = data.dtype
+            if data.is_floating_point() and data.dtype != torch.float32:
+                data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
 
-            self.base_layer.weight.data = data.to(current_device, non_blocking=True)
+            self.base_layer.weight.data = data.to(
+                current_device, dtype=target_dtype, non_blocking=True
+            )
 
         self.merged = True
 
