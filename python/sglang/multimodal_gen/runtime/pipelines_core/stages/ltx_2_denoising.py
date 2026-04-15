@@ -568,23 +568,37 @@ class LTX2DenoisingStage(DenoisingStage):
         batched_temb, _ = model.adaln_single(
             model_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
         )
+        batched_temb = batched_temb.view(2, -1, batched_temb.size(-1))
         batched_temb_audio, _ = model.audio_adaln_single(
             model_kwargs["audio_timestep"].flatten(),
             hidden_dtype=batched_patchify_audio.dtype,
         )
+        batched_temb_audio = batched_temb_audio.view(
+            2, -1, batched_temb_audio.size(-1)
+        )
         ref_temb_uncond, _ = model.adaln_single(
             uncond_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
+        )
+        ref_temb_uncond = ref_temb_uncond.view(
+            1, -1, ref_temb_uncond.size(-1)
         )
         ref_temb_cond, _ = model.adaln_single(
             cond_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
         )
+        ref_temb_cond = ref_temb_cond.view(1, -1, ref_temb_cond.size(-1))
         ref_temb_audio_uncond, _ = model.audio_adaln_single(
             uncond_kwargs["audio_timestep"].flatten(),
             hidden_dtype=batched_patchify_audio.dtype,
         )
+        ref_temb_audio_uncond = ref_temb_audio_uncond.view(
+            1, -1, ref_temb_audio_uncond.size(-1)
+        )
         ref_temb_audio_cond, _ = model.audio_adaln_single(
             cond_kwargs["audio_timestep"].flatten(),
             hidden_dtype=batched_patchify_audio.dtype,
+        )
+        ref_temb_audio_cond = ref_temb_audio_cond.view(
+            1, -1, ref_temb_audio_cond.size(-1)
         )
         pretrace["adaln_single"] = self._ltx2_probe_cfg_report(
             (
