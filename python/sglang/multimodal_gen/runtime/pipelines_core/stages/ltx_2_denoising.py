@@ -5,6 +5,7 @@ import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
 
 import av
 import numpy as np
@@ -350,7 +351,182 @@ class LTX2DenoisingStage(DenoisingStage):
         return kwargs
 
     @staticmethod
+    def _ltx2_probe_tensor_report(
+        reference: torch.Tensor, candidate: torch.Tensor
+    ) -> dict[str, object]:
+        reference = reference.detach().float().cpu()
+        candidate = candidate.detach().float().cpu()
+        diff = candidate - reference
+        mse = torch.mean(diff.square()).item()
+        cosine = torch.nn.functional.cosine_similarity(
+            reference.reshape(1, -1), candidate.reshape(1, -1), dim=1
+        ).item()
+        return {
+            "shape": list(reference.shape),
+            "bit_exact": bool(torch.equal(reference, candidate)),
+            "max_abs_diff": float(diff.abs().max().item()),
+            "mean_abs_diff": float(diff.abs().mean().item()),
+            "rmse": float(mse**0.5),
+            "cosine": float(cosine),
+        }
+
+    @classmethod
+    def _ltx2_probe_cfg_report(
+        cls,
+        reference: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        candidate: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> dict[str, object]:
+        return {
+            "video_uncond": cls._ltx2_probe_tensor_report(
+                reference[0], candidate[0]
+            ),
+            "video_cond": cls._ltx2_probe_tensor_report(reference[1], candidate[1]),
+            "audio_uncond": cls._ltx2_probe_tensor_report(
+                reference[2], candidate[2]
+            ),
+            "audio_cond": cls._ltx2_probe_tensor_report(reference[3], candidate[3]),
+        }
+
+    @staticmethod
+    def _ltx2_probe_slice_model_kwargs(
+        model_kwargs: dict[str, object], start: int, end: int
+    ) -> dict[str, object]:
+        sliced: dict[str, object] = {}
+        for key, value in model_kwargs.items():
+            if (
+                isinstance(value, torch.Tensor)
+                and value.ndim > 0
+                and value.shape[0] >= end
+            ):
+                sliced[key] = value[start:end]
+            elif isinstance(value, tuple) and value and len(value) >= end:
+                sliced[key] = value[start:end]
+            else:
+                sliced[key] = value
+        return sliced
+
+    def _ltx2_probe_output_path(self) -> str | None:
+        return os.getenv("SGLANG_LTX2_PROBE_OUTPUT")
+
+    def _record_ltx2_probe_model_call(
+        self, *, step: DenoisingStepState, model_kwargs: dict[str, object]
+    ) -> None:
+        if self._ltx2_probe_output_path() is None:
+            return
+        calls = getattr(self, "_ltx2_probe_model_forward_calls", [])
+        if len(calls) >= 16:
+            return
+        hidden_states = model_kwargs.get("hidden_states")
+        encoder_hidden_states = model_kwargs.get("encoder_hidden_states")
+        calls.append(
+            {
+                "stage": getattr(self, "_ltx2_probe_current_stage", None),
+                "step_index": int(step.step_index),
+                "hidden_states_shape": (
+                    list(hidden_states.shape)
+                    if isinstance(hidden_states, torch.Tensor)
+                    else None
+                ),
+                "encoder_hidden_states_shape": (
+                    list(encoder_hidden_states.shape)
+                    if isinstance(encoder_hidden_states, torch.Tensor)
+                    else None
+                ),
+                "has_perturbation_configs": model_kwargs.get("perturbation_configs")
+                is not None,
+            }
+        )
+        self._ltx2_probe_model_forward_calls = calls
+
+    def _write_ltx2_probe_state(self, payload: dict[str, object]) -> None:
+        output_path = self._ltx2_probe_output_path()
+        if output_path is None or getattr(self, "_ltx2_probe_written", False):
+            return
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "cfg": None,
+            "aux": None,
+            "official_cfg": None,
+            "model_forward_calls": getattr(
+                self, "_ltx2_probe_model_forward_calls", []
+            ),
+        }
+        state.update(payload)
+        Path(output_path).write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._ltx2_probe_written = True
+
+    def _maybe_probe_ltx2_official_cfg_forward(
+        self,
+        *,
+        step: DenoisingStepState,
+        model_kwargs: dict[str, object],
+        out_video: torch.Tensor,
+        out_audio: torch.Tensor,
+    ) -> None:
+        if (
+            self._ltx2_probe_output_path() is None
+            or getattr(self, "_ltx2_probe_written", False)
+            or getattr(self, "_ltx2_probe_current_stage", None) != "stage1"
+        ):
+            return
+        hidden_states = model_kwargs.get("hidden_states")
+        encoder_hidden_states = model_kwargs.get("encoder_hidden_states")
+        if not (
+            isinstance(hidden_states, torch.Tensor)
+            and isinstance(encoder_hidden_states, torch.Tensor)
+            and hidden_states.shape[0] == 2
+            and encoder_hidden_states.shape[0] == 2
+            and model_kwargs.get("perturbation_configs") is None
+        ):
+            return
+
+        uncond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 0, 1)
+        cond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 1, 2)
+        with set_forward_context(
+            current_timestep=step.step_index, attn_metadata=step.attn_metadata
+        ):
+            ref_video_uncond, ref_audio_uncond = step.current_model(**uncond_kwargs)
+        with set_forward_context(
+            current_timestep=step.step_index, attn_metadata=step.attn_metadata
+        ):
+            ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
+
+        self._write_ltx2_probe_state(
+            {
+                "official_cfg": self._ltx2_probe_cfg_report(
+                    (
+                        ref_video_uncond.float(),
+                        ref_video_cond.float(),
+                        ref_audio_uncond.float(),
+                        ref_audio_cond.float(),
+                    ),
+                    (
+                        out_video[0:1].float(),
+                        out_video[1:2].float(),
+                        out_audio[0:1].float(),
+                        out_audio[1:2].float(),
+                    ),
+                )
+            }
+        )
+
+    def _maybe_finalize_ltx2_probe_state(
+        self, *, ctx: LTX2DenoisingContext, step: DenoisingStepState
+    ) -> None:
+        if (
+            self._ltx2_probe_output_path() is None
+            or getattr(self, "_ltx2_probe_written", False)
+            or ctx.stage != "stage1"
+            or int(step.step_index) != 0
+        ):
+            return
+        self._write_ltx2_probe_state({})
+
     def _run_ltx2_model_forward(
+        self,
         *,
         step: DenoisingStepState,
         model_kwargs: dict[str, object],
@@ -359,7 +535,16 @@ class LTX2DenoisingStage(DenoisingStage):
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             out_video, out_audio = step.current_model(**model_kwargs)
-        return out_video.float(), out_audio.float()
+        out_video = out_video.float()
+        out_audio = out_audio.float()
+        self._record_ltx2_probe_model_call(step=step, model_kwargs=model_kwargs)
+        self._maybe_probe_ltx2_official_cfg_forward(
+            step=step,
+            model_kwargs=model_kwargs,
+            out_video=out_video,
+            out_audio=out_audio,
+        )
+        return out_video, out_audio
 
     def _run_ltx2_stage1_aux_forward(
         self,
@@ -1139,6 +1324,7 @@ class LTX2DenoisingStage(DenoisingStage):
         server_args: ServerArgs,
     ) -> None:
         """Run one joint video/audio denoising step with LTX-2-specific guidance."""
+        self._ltx2_probe_current_stage = ctx.stage
         if ctx.audio_latents is None:
             raise ValueError("LTX-2 requires audio latents for denoising.")
         if ctx.audio_scheduler is None:
@@ -1442,6 +1628,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 ctx.latents = self.post_forward_for_ti2v_task(
                     batch, server_args, ctx.reserved_frames_mask, ctx.latents, ctx.z
                 )
+                self._maybe_finalize_ltx2_probe_state(ctx=ctx, step=step)
             return
 
         encoder_hidden_states = batch.prompt_embeds[0]
@@ -1791,6 +1978,7 @@ class LTX2DenoisingStage(DenoisingStage):
         ctx.latents = self.post_forward_for_ti2v_task(
             batch, server_args, ctx.reserved_frames_mask, ctx.latents, ctx.z
         )
+        self._maybe_finalize_ltx2_probe_state(ctx=ctx, step=step)
 
     def _record_trajectory(
         self,

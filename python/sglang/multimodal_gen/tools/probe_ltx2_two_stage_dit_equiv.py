@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 import traceback
 
@@ -292,9 +293,9 @@ def _restore_probe_hooks(handles: dict[str, object]) -> None:
 
 def main() -> None:
     args = _parse_args()
-    handles = _install_probe_hooks()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    os.environ["SGLANG_LTX2_PROBE_OUTPUT"] = str(output_path)
     generator = None
     try:
         generator = DiffGenerator.from_pretrained(
@@ -318,18 +319,14 @@ def main() -> None:
         except ProbeComplete:
             pass
 
-        state = handles["state"]
-        output_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        print(json.dumps(state, ensure_ascii=False, indent=2), flush=True)
-        if state["cfg"] is None and state["official_cfg"] is None:
-            raise RuntimeError("probe did not capture stage1 cfg outputs")
+        if not output_path.exists():
+            raise RuntimeError("probe did not produce runtime output")
+        print(output_path.read_text(encoding="utf-8"), end="", flush=True)
     except Exception:
         traceback.print_exc()
         raise
     finally:
-        _restore_probe_hooks(handles)
+        os.environ.pop("SGLANG_LTX2_PROBE_OUTPUT", None)
         if generator is not None:
             if generator.local_scheduler_process:
                 for process in generator.local_scheduler_process:
