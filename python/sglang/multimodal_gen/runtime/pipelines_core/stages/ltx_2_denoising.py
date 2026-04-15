@@ -1180,6 +1180,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 and ref_block_trace_cond is not None
             ):
                 for trace_key, trace_name in (
+                    ("before_block", f"{block_key}_before_block"),
                     ("after_self_attn", f"{block_key}_after_self_attn"),
                     ("after_prompt_cross_attn", f"{block_key}_after_prompt_cross_attn"),
                     ("after_av_cross_attn", f"{block_key}_after_av_cross_attn"),

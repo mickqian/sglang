@@ -996,6 +996,11 @@ class LTX2TransformerBlock(nn.Module):
             and self.idx == _ltx2_probe_block_index()
         )
         probe_stage_trace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        if capture_probe_trace:
+            probe_stage_trace["before_block"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
