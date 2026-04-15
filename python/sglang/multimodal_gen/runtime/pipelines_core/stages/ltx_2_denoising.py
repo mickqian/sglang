@@ -502,6 +502,105 @@ class LTX2DenoisingStage(DenoisingStage):
         ):
             ref2_video_cond, ref2_audio_cond = step.current_model(**cond_kwargs)
 
+        model = step.current_model
+        pretrace: dict[str, object] = {}
+        batched_patchify_video, _ = model.patchify_proj(model_kwargs["hidden_states"])
+        batched_patchify_audio, _ = model.audio_patchify_proj(
+            model_kwargs["audio_hidden_states"]
+        )
+        ref_patchify_video_uncond, _ = model.patchify_proj(uncond_kwargs["hidden_states"])
+        ref_patchify_video_cond, _ = model.patchify_proj(cond_kwargs["hidden_states"])
+        ref_patchify_audio_uncond, _ = model.audio_patchify_proj(
+            uncond_kwargs["audio_hidden_states"]
+        )
+        ref_patchify_audio_cond, _ = model.audio_patchify_proj(
+            cond_kwargs["audio_hidden_states"]
+        )
+        pretrace["patchify"] = self._ltx2_probe_cfg_report(
+            (
+                ref_patchify_video_uncond.float(),
+                ref_patchify_video_cond.float(),
+                ref_patchify_audio_uncond.float(),
+                ref_patchify_audio_cond.float(),
+            ),
+            (
+                batched_patchify_video[0:1].float(),
+                batched_patchify_video[1:2].float(),
+                batched_patchify_audio[0:1].float(),
+                batched_patchify_audio[1:2].float(),
+            ),
+        )
+
+        if model.caption_projection is not None:
+            batched_caption_video = model.caption_projection(
+                model_kwargs["encoder_hidden_states"]
+            )
+            batched_caption_audio = model.audio_caption_projection(
+                model_kwargs["audio_encoder_hidden_states"]
+            )
+            ref_caption_video_uncond = model.caption_projection(
+                uncond_kwargs["encoder_hidden_states"]
+            )
+            ref_caption_video_cond = model.caption_projection(
+                cond_kwargs["encoder_hidden_states"]
+            )
+            ref_caption_audio_uncond = model.audio_caption_projection(
+                uncond_kwargs["audio_encoder_hidden_states"]
+            )
+            ref_caption_audio_cond = model.audio_caption_projection(
+                cond_kwargs["audio_encoder_hidden_states"]
+            )
+            pretrace["caption_projection"] = self._ltx2_probe_cfg_report(
+                (
+                    ref_caption_video_uncond.float(),
+                    ref_caption_video_cond.float(),
+                    ref_caption_audio_uncond.float(),
+                    ref_caption_audio_cond.float(),
+                ),
+                (
+                    batched_caption_video[0:1].float(),
+                    batched_caption_video[1:2].float(),
+                    batched_caption_audio[0:1].float(),
+                    batched_caption_audio[1:2].float(),
+                ),
+            )
+
+        batched_temb, _ = model.adaln_single(
+            model_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
+        )
+        batched_temb_audio, _ = model.audio_adaln_single(
+            model_kwargs["audio_timestep"].flatten(),
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        ref_temb_uncond, _ = model.adaln_single(
+            uncond_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
+        )
+        ref_temb_cond, _ = model.adaln_single(
+            cond_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
+        )
+        ref_temb_audio_uncond, _ = model.audio_adaln_single(
+            uncond_kwargs["audio_timestep"].flatten(),
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        ref_temb_audio_cond, _ = model.audio_adaln_single(
+            cond_kwargs["audio_timestep"].flatten(),
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        pretrace["adaln_single"] = self._ltx2_probe_cfg_report(
+            (
+                ref_temb_uncond.float(),
+                ref_temb_cond.float(),
+                ref_temb_audio_uncond.float(),
+                ref_temb_audio_cond.float(),
+            ),
+            (
+                batched_temb[0:1].float(),
+                batched_temb[1:2].float(),
+                batched_temb_audio[0:1].float(),
+                batched_temb_audio[1:2].float(),
+            ),
+        )
+
         self._write_ltx2_probe_state(
             {
                 "official_cfg": self._ltx2_probe_cfg_report(
@@ -532,6 +631,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         ref2_audio_cond.float(),
                     ),
                 ),
+                "official_cfg_pretrace": pretrace,
             }
         )
 
