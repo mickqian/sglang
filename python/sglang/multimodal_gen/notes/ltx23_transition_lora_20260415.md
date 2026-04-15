@@ -70,3 +70,14 @@
 - 发现: 将官方导出的 `prompt_embeds / negative_prompt_embeds / audio_prompt_embeds` 直接覆盖到 `SGLang` probe 后，no-LoRA 的 `trajectory_video` 会从 `0.04216` 降到 `0.03755`，同时 audio 侧 first-step `x0` 误差也会进一步下降。这说明 text path 的小偏差会被长视频 denoise 轨迹持续放大。
 - 试验失败点: 我尝试把 `LTX2TextConnectorStage` 的 additive mask 改成官方同款的 `4D + -finfo(dtype).max`，但数值结果完全不变；这条改动已验证无效，并已回滚，不保留在当前分支。
 - 当前精度对齐判断: `93.5%`。目前已能确定剩余误差主要分成两块：`(1) text path` 的小偏差；`(2) native DiT/base model forward` 的固有偏差。下一步更值得下钻的是官方 `Gemma -> feature extractor / connector input` 和 `SGLang` 对应阶段，而不是继续猜 scheduler 或 attention mask。
+
+## 2026-04-15（第九次更新）
+
+- 基线 git hash: `47d685dfa`
+- 进展: 我补了 `text-only probe`，把官方 native 和 `SGLang` 的 text path 按相同中间层对拍到 `input_ids / attention_mask / packed_features / aggregate features / final prompt embeds`。
+- 发现: `input_ids` 和原始 `attention_mask` 是完全一致的；`prompt_packed_features` 的 `MAE` 只有 `0.000321`，`negative_prompt_packed_features` 也只有 `0.000331`。这说明 tokenizer 和 `FeatureExtractorV2` 的 RMSNorm+flatten 语义基本没跑偏。
+- 发现: 误差在 `aggregate_embed` 后会被放大，`prompt_video_features MAE=0.003878`、`prompt_audio_features MAE=0.002863`；到 final connector 输出时又回落到 `prompt_embeds_video MAE=0.001241`、`prompt_embeds_audio MAE=0.001387`。
+- 发现: 把官方导出的 `packed_features` 直接覆盖给 `SGLang` connector 后，final prompt embed 还能进一步缩小到 `prompt_embeds_video MAE=0.000662`、`prompt_embeds_audio MAE=0.001065`。这说明 text path 里的偏差大约一半来自 `Gemma hidden_states -> packed_features` 之前，剩下一半来自 `aggregate_embed / connector` 路径的细小数值差异。
+- 发现: 如果直接看整条 `1024` token 序列，`hidden_state_1` 会显得非常离谱（`MAE` 约 `1.5`），但这是被 left padding token 放大的假象。按 `attention_mask` 只看有效 token 后，`prompt_hidden_state_1 MAE` 只有 `0.00116`、`negative_prompt_hidden_state_1 MAE` 只有 `0.00125`；到第 `8` 层和 final norm (`48`) 才逐层积累到 `0.0247 ~ 0.0280`。
+- 结论: 这轮可以明确排除 tokenizer 问题；`hidden_state_0` 完全一致，说明 embedding 层没问题。真正的 text path 漂移是自研 `Gemma3` attention/decoder 路径里对有效 token 的小偏差逐层累积；而整序列上看见的巨大 hidden-state diff，大部分只是 padding query 的噪音，不是主语义 token 已经炸掉。
+- 当前精度对齐判断: `93.8%`。text path 的主要矛盾已经从“可能哪里都不对”收敛到“自研 `Gemma3` 有效 token attention 数值路径上的小偏差”；下一步更值得直接核对 `Gemma3Attention` 的 valid-token mask / sliding layer 语义，而不是继续在 tokenizer 或 connector 上兜圈子。
