@@ -12,9 +12,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import 
     LTX2DenoisingContext,
     LTX2DenoisingStage,
 )
-from sglang.multimodal_gen.runtime.scheduler.scheduler_client import (
-    sync_scheduler_client,
-)
+from sglang.multimodal_gen.runtime.scheduler_client import sync_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
