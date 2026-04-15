@@ -493,6 +493,14 @@ class LTX2DenoisingStage(DenoisingStage):
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
+        with set_forward_context(
+            current_timestep=step.step_index, attn_metadata=step.attn_metadata
+        ):
+            ref2_video_uncond, ref2_audio_uncond = step.current_model(**uncond_kwargs)
+        with set_forward_context(
+            current_timestep=step.step_index, attn_metadata=step.attn_metadata
+        ):
+            ref2_video_cond, ref2_audio_cond = step.current_model(**cond_kwargs)
 
         self._write_ltx2_probe_state(
             {
@@ -509,7 +517,21 @@ class LTX2DenoisingStage(DenoisingStage):
                         out_audio[0:1].float(),
                         out_audio[1:2].float(),
                     ),
-                )
+                ),
+                "official_cfg_reference_repeat": self._ltx2_probe_cfg_report(
+                    (
+                        ref_video_uncond.float(),
+                        ref_video_cond.float(),
+                        ref_audio_uncond.float(),
+                        ref_audio_cond.float(),
+                    ),
+                    (
+                        ref2_video_uncond.float(),
+                        ref2_video_cond.float(),
+                        ref2_audio_uncond.float(),
+                        ref2_audio_cond.float(),
+                    ),
+                ),
             }
         )
 
