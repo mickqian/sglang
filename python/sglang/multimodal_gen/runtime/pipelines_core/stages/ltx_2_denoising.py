@@ -678,6 +678,8 @@ class LTX2DenoisingStage(DenoisingStage):
         ctx: LTX2DenoisingContext,
         batch: Req,
     ) -> bool:
+        if os.getenv("SGLANG_LTX2_FORCE_SEQUENTIAL_FORWARD", "0") == "1":
+            return False
         return bool(
             server_args.num_gpus == 1
             and get_sp_world_size() == 1
