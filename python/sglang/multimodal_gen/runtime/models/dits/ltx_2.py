@@ -97,6 +97,16 @@ def _ltx2_batched_perturbation_mask(
     return mask.view(mask.numel(), *([1] * (values.ndim - 1))), False
 
 
+def _ltx2_probe_slice_batch_arg(
+    value: torch.Tensor | None, idx: int, batch_size: int
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if value.ndim > 0 and value.shape[0] == batch_size:
+        return value[idx : idx + 1]
+    return value
+
+
 def apply_interleaved_rotary_emb(
     x: torch.Tensor, freqs: Tuple[torch.Tensor, torch.Tensor]
 ) -> torch.Tensor:
@@ -1043,11 +1053,29 @@ class LTX2TransformerBlock(nn.Module):
             mod_encoder_hidden_states = (
                 encoder_hidden_states * (1 + v_prompt_scale) + v_prompt_shift
             )
-            attn_hidden_states = self.attn2(
-                norm_hidden_states,
-                context=mod_encoder_hidden_states,
-                mask=encoder_attention_mask,
-            )
+            if (
+                os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+                and batch_size > 1
+            ):
+                attn_hidden_states = torch.cat(
+                    [
+                        self.attn2(
+                            norm_hidden_states[idx : idx + 1],
+                            context=mod_encoder_hidden_states[idx : idx + 1],
+                            mask=_ltx2_probe_slice_batch_arg(
+                                encoder_attention_mask, idx, batch_size
+                            ),
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                attn_hidden_states = self.attn2(
+                    norm_hidden_states,
+                    context=mod_encoder_hidden_states,
+                    mask=encoder_attention_mask,
+                )
             hidden_states = hidden_states + attn_hidden_states * vgate_q
 
             ashift_q, ascale_q, agate_q = self.get_ada_values(
@@ -1065,11 +1093,29 @@ class LTX2TransformerBlock(nn.Module):
             mod_audio_encoder_hidden_states = (
                 audio_encoder_hidden_states * (1 + a_prompt_scale) + a_prompt_shift
             )
-            attn_audio_hidden_states = self.audio_attn2(
-                norm_audio_hidden_states,
-                context=mod_audio_encoder_hidden_states,
-                mask=audio_encoder_attention_mask,
-            )
+            if (
+                os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+                and batch_size > 1
+            ):
+                attn_audio_hidden_states = torch.cat(
+                    [
+                        self.audio_attn2(
+                            norm_audio_hidden_states[idx : idx + 1],
+                            context=mod_audio_encoder_hidden_states[idx : idx + 1],
+                            mask=_ltx2_probe_slice_batch_arg(
+                                audio_encoder_attention_mask, idx, batch_size
+                            ),
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                attn_audio_hidden_states = self.audio_attn2(
+                    norm_audio_hidden_states,
+                    context=mod_audio_encoder_hidden_states,
+                    mask=audio_encoder_attention_mask,
+                )
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
             )
