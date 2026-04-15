@@ -615,6 +615,511 @@ class LTX2DenoisingStage(DenoisingStage):
             ),
         )
 
+        batched_caption_video = model_kwargs["encoder_hidden_states"]
+        batched_caption_audio = model_kwargs["audio_encoder_hidden_states"]
+        ref_caption_video_uncond = uncond_kwargs["encoder_hidden_states"]
+        ref_caption_video_cond = cond_kwargs["encoder_hidden_states"]
+        ref_caption_audio_uncond = uncond_kwargs["audio_encoder_hidden_states"]
+        ref_caption_audio_cond = cond_kwargs["audio_encoder_hidden_states"]
+
+        batched_temb_prompt = None
+        batched_temb_audio_prompt = None
+        ref_temb_prompt_uncond = None
+        ref_temb_prompt_cond = None
+        ref_temb_audio_prompt_uncond = None
+        ref_temb_audio_prompt_cond = None
+        if model.prompt_adaln_single is not None:
+            prompt_timestep = model_kwargs.get("prompt_timestep")
+            if prompt_timestep is None:
+                prompt_timestep = model._collapse_prompt_timestep(
+                    model_kwargs["timestep"]
+                )
+            batched_temb_prompt, _ = model.prompt_adaln_single(
+                prompt_timestep.flatten(), hidden_dtype=batched_patchify_video.dtype
+            )
+            batched_temb_prompt = batched_temb_prompt.view(
+                2, -1, batched_temb_prompt.size(-1)
+            )
+
+            prompt_timestep_uncond = uncond_kwargs.get("prompt_timestep")
+            if prompt_timestep_uncond is None:
+                prompt_timestep_uncond = model._collapse_prompt_timestep(
+                    uncond_kwargs["timestep"]
+                )
+            ref_temb_prompt_uncond, _ = model.prompt_adaln_single(
+                prompt_timestep_uncond.flatten(),
+                hidden_dtype=batched_patchify_video.dtype,
+            )
+            ref_temb_prompt_uncond = ref_temb_prompt_uncond.view(
+                1, -1, ref_temb_prompt_uncond.size(-1)
+            )
+
+            prompt_timestep_cond = cond_kwargs.get("prompt_timestep")
+            if prompt_timestep_cond is None:
+                prompt_timestep_cond = model._collapse_prompt_timestep(
+                    cond_kwargs["timestep"]
+                )
+            ref_temb_prompt_cond, _ = model.prompt_adaln_single(
+                prompt_timestep_cond.flatten(), hidden_dtype=batched_patchify_video.dtype
+            )
+            ref_temb_prompt_cond = ref_temb_prompt_cond.view(
+                1, -1, ref_temb_prompt_cond.size(-1)
+            )
+
+            audio_prompt_timestep = model_kwargs.get("audio_prompt_timestep")
+            if audio_prompt_timestep is None:
+                audio_prompt_timestep = model._collapse_prompt_timestep(
+                    model_kwargs["audio_timestep"]
+                )
+            batched_temb_audio_prompt, _ = model.audio_prompt_adaln_single(
+                audio_prompt_timestep.flatten(),
+                hidden_dtype=batched_patchify_audio.dtype,
+            )
+            batched_temb_audio_prompt = batched_temb_audio_prompt.view(
+                2, -1, batched_temb_audio_prompt.size(-1)
+            )
+
+            audio_prompt_timestep_uncond = uncond_kwargs.get("audio_prompt_timestep")
+            if audio_prompt_timestep_uncond is None:
+                audio_prompt_timestep_uncond = model._collapse_prompt_timestep(
+                    uncond_kwargs["audio_timestep"]
+                )
+            ref_temb_audio_prompt_uncond, _ = model.audio_prompt_adaln_single(
+                audio_prompt_timestep_uncond.flatten(),
+                hidden_dtype=batched_patchify_audio.dtype,
+            )
+            ref_temb_audio_prompt_uncond = ref_temb_audio_prompt_uncond.view(
+                1, -1, ref_temb_audio_prompt_uncond.size(-1)
+            )
+
+            audio_prompt_timestep_cond = cond_kwargs.get("audio_prompt_timestep")
+            if audio_prompt_timestep_cond is None:
+                audio_prompt_timestep_cond = model._collapse_prompt_timestep(
+                    cond_kwargs["audio_timestep"]
+                )
+            ref_temb_audio_prompt_cond, _ = model.audio_prompt_adaln_single(
+                audio_prompt_timestep_cond.flatten(),
+                hidden_dtype=batched_patchify_audio.dtype,
+            )
+            ref_temb_audio_prompt_cond = ref_temb_audio_prompt_cond.view(
+                1, -1, ref_temb_audio_prompt_cond.size(-1)
+            )
+
+            pretrace["prompt_adaln"] = self._ltx2_probe_cfg_report(
+                (
+                    ref_temb_prompt_uncond.float(),
+                    ref_temb_prompt_cond.float(),
+                    ref_temb_audio_prompt_uncond.float(),
+                    ref_temb_audio_prompt_cond.float(),
+                ),
+                (
+                    batched_temb_prompt[0:1].float(),
+                    batched_temb_prompt[1:2].float(),
+                    batched_temb_audio_prompt[0:1].float(),
+                    batched_temb_audio_prompt[1:2].float(),
+                ),
+            )
+
+        av_ca_video_timestep, av_ca_audio_timestep = model._get_av_ca_timesteps(
+            model_kwargs["timestep"],
+            model_kwargs["audio_timestep"],
+            model_kwargs.get("prompt_timestep"),
+            model_kwargs.get("audio_prompt_timestep"),
+        )
+        batched_temb_ca_scale_shift, _ = model.av_ca_video_scale_shift_adaln_single(
+            av_ca_video_timestep.flatten(), hidden_dtype=batched_patchify_video.dtype
+        )
+        batched_temb_ca_scale_shift = batched_temb_ca_scale_shift.view(
+            2, -1, batched_temb_ca_scale_shift.size(-1)
+        )
+        av_ca_gate_factor = model._get_av_ca_gate_timestep_factor()
+        batched_temb_ca_gate, _ = model.av_ca_a2v_gate_adaln_single(
+            av_ca_video_timestep.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_video.dtype,
+        )
+        batched_temb_ca_gate = batched_temb_ca_gate.view(
+            2, -1, batched_temb_ca_gate.size(-1)
+        )
+
+        batched_temb_ca_audio_scale_shift, _ = (
+            model.av_ca_audio_scale_shift_adaln_single(
+                av_ca_audio_timestep.flatten(), hidden_dtype=batched_patchify_audio.dtype
+            )
+        )
+        batched_temb_ca_audio_scale_shift = batched_temb_ca_audio_scale_shift.view(
+            2, -1, batched_temb_ca_audio_scale_shift.size(-1)
+        )
+        batched_temb_ca_audio_gate, _ = model.av_ca_v2a_gate_adaln_single(
+            av_ca_audio_timestep.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        batched_temb_ca_audio_gate = batched_temb_ca_audio_gate.view(
+            2, -1, batched_temb_ca_audio_gate.size(-1)
+        )
+
+        ref_av_ca_video_timestep_uncond, ref_av_ca_audio_timestep_uncond = (
+            model._get_av_ca_timesteps(
+                uncond_kwargs["timestep"],
+                uncond_kwargs["audio_timestep"],
+                uncond_kwargs.get("prompt_timestep"),
+                uncond_kwargs.get("audio_prompt_timestep"),
+            )
+        )
+        ref_temb_ca_scale_shift_uncond, _ = model.av_ca_video_scale_shift_adaln_single(
+            ref_av_ca_video_timestep_uncond.flatten(),
+            hidden_dtype=batched_patchify_video.dtype,
+        )
+        ref_temb_ca_scale_shift_uncond = ref_temb_ca_scale_shift_uncond.view(
+            1, -1, ref_temb_ca_scale_shift_uncond.size(-1)
+        )
+        ref_temb_ca_gate_uncond, _ = model.av_ca_a2v_gate_adaln_single(
+            ref_av_ca_video_timestep_uncond.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_video.dtype,
+        )
+        ref_temb_ca_gate_uncond = ref_temb_ca_gate_uncond.view(
+            1, -1, ref_temb_ca_gate_uncond.size(-1)
+        )
+        ref_temb_ca_audio_scale_shift_uncond, _ = (
+            model.av_ca_audio_scale_shift_adaln_single(
+                ref_av_ca_audio_timestep_uncond.flatten(),
+                hidden_dtype=batched_patchify_audio.dtype,
+            )
+        )
+        ref_temb_ca_audio_scale_shift_uncond = (
+            ref_temb_ca_audio_scale_shift_uncond.view(
+                1, -1, ref_temb_ca_audio_scale_shift_uncond.size(-1)
+            )
+        )
+        ref_temb_ca_audio_gate_uncond, _ = model.av_ca_v2a_gate_adaln_single(
+            ref_av_ca_audio_timestep_uncond.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        ref_temb_ca_audio_gate_uncond = ref_temb_ca_audio_gate_uncond.view(
+            1, -1, ref_temb_ca_audio_gate_uncond.size(-1)
+        )
+
+        ref_av_ca_video_timestep_cond, ref_av_ca_audio_timestep_cond = (
+            model._get_av_ca_timesteps(
+                cond_kwargs["timestep"],
+                cond_kwargs["audio_timestep"],
+                cond_kwargs.get("prompt_timestep"),
+                cond_kwargs.get("audio_prompt_timestep"),
+            )
+        )
+        ref_temb_ca_scale_shift_cond, _ = model.av_ca_video_scale_shift_adaln_single(
+            ref_av_ca_video_timestep_cond.flatten(),
+            hidden_dtype=batched_patchify_video.dtype,
+        )
+        ref_temb_ca_scale_shift_cond = ref_temb_ca_scale_shift_cond.view(
+            1, -1, ref_temb_ca_scale_shift_cond.size(-1)
+        )
+        ref_temb_ca_gate_cond, _ = model.av_ca_a2v_gate_adaln_single(
+            ref_av_ca_video_timestep_cond.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_video.dtype,
+        )
+        ref_temb_ca_gate_cond = ref_temb_ca_gate_cond.view(
+            1, -1, ref_temb_ca_gate_cond.size(-1)
+        )
+        ref_temb_ca_audio_scale_shift_cond, _ = (
+            model.av_ca_audio_scale_shift_adaln_single(
+                ref_av_ca_audio_timestep_cond.flatten(),
+                hidden_dtype=batched_patchify_audio.dtype,
+            )
+        )
+        ref_temb_ca_audio_scale_shift_cond = ref_temb_ca_audio_scale_shift_cond.view(
+            1, -1, ref_temb_ca_audio_scale_shift_cond.size(-1)
+        )
+        ref_temb_ca_audio_gate_cond, _ = model.av_ca_v2a_gate_adaln_single(
+            ref_av_ca_audio_timestep_cond.flatten() * av_ca_gate_factor,
+            hidden_dtype=batched_patchify_audio.dtype,
+        )
+        ref_temb_ca_audio_gate_cond = ref_temb_ca_audio_gate_cond.view(
+            1, -1, ref_temb_ca_audio_gate_cond.size(-1)
+        )
+
+        pretrace["av_ca_scale_shift"] = self._ltx2_probe_cfg_report(
+            (
+                ref_temb_ca_scale_shift_uncond.float(),
+                ref_temb_ca_scale_shift_cond.float(),
+                ref_temb_ca_audio_scale_shift_uncond.float(),
+                ref_temb_ca_audio_scale_shift_cond.float(),
+            ),
+            (
+                batched_temb_ca_scale_shift[0:1].float(),
+                batched_temb_ca_scale_shift[1:2].float(),
+                batched_temb_ca_audio_scale_shift[0:1].float(),
+                batched_temb_ca_audio_scale_shift[1:2].float(),
+            ),
+        )
+        pretrace["av_ca_gate"] = self._ltx2_probe_cfg_report(
+            (
+                ref_temb_ca_gate_uncond.float(),
+                ref_temb_ca_gate_cond.float(),
+                ref_temb_ca_audio_gate_uncond.float(),
+                ref_temb_ca_audio_gate_cond.float(),
+            ),
+            (
+                batched_temb_ca_gate[0:1].float(),
+                batched_temb_ca_gate[1:2].float(),
+                batched_temb_ca_audio_gate[0:1].float(),
+                batched_temb_ca_audio_gate[1:2].float(),
+            ),
+        )
+
+        if (
+            "num_frames" in model_kwargs
+            and "height" in model_kwargs
+            and "width" in model_kwargs
+            and "audio_num_frames" in model_kwargs
+            and len(model.transformer_blocks) > 0
+        ):
+            fps = float(model_kwargs.get("fps", 24.0))
+            batched_video_coords = model_kwargs.get("video_coords")
+            if batched_video_coords is None:
+                batched_video_coords = model.rope.prepare_video_coords(
+                    batch_size=2,
+                    num_frames=int(model_kwargs["num_frames"]),
+                    height=int(model_kwargs["height"]),
+                    width=int(model_kwargs["width"]),
+                    device=model_kwargs["hidden_states"].device,
+                    fps=fps,
+                    start_frame=0,
+                )
+            batched_audio_coords = model_kwargs.get("audio_coords")
+            if batched_audio_coords is None:
+                batched_audio_coords = model.audio_rope.prepare_audio_coords(
+                    batch_size=2,
+                    num_frames=int(model_kwargs["audio_num_frames"]),
+                    device=model_kwargs["audio_hidden_states"].device,
+                )
+
+            batched_video_coords = model._maybe_quantize_video_rope_coords(
+                batched_video_coords,
+                model_kwargs["hidden_states"].device,
+                model_kwargs["hidden_states"].dtype,
+            )
+            batched_audio_coords = batched_audio_coords.to(
+                device=model_kwargs["audio_hidden_states"].device
+            )
+
+            batched_video_rotary_emb = model.rope(
+                batched_video_coords,
+                device=model_kwargs["hidden_states"].device,
+                out_dtype=model_kwargs["hidden_states"].dtype,
+            )
+            batched_audio_rotary_emb = model.audio_rope(
+                batched_audio_coords,
+                device=model_kwargs["audio_hidden_states"].device,
+                out_dtype=model_kwargs["audio_hidden_states"].dtype,
+            )
+            batched_ca_video_rotary_emb = model.cross_attn_rope(
+                batched_video_coords[:, 0:1, :],
+                device=model_kwargs["hidden_states"].device,
+                out_dtype=model_kwargs["hidden_states"].dtype,
+            )
+            batched_ca_audio_rotary_emb = model.cross_attn_audio_rope(
+                batched_audio_coords[:, 0:1, :],
+                device=model_kwargs["audio_hidden_states"].device,
+                out_dtype=model_kwargs["audio_hidden_states"].dtype,
+            )
+
+            ref_video_coords_uncond = uncond_kwargs.get("video_coords")
+            if ref_video_coords_uncond is None:
+                ref_video_coords_uncond = model.rope.prepare_video_coords(
+                    batch_size=1,
+                    num_frames=int(uncond_kwargs["num_frames"]),
+                    height=int(uncond_kwargs["height"]),
+                    width=int(uncond_kwargs["width"]),
+                    device=uncond_kwargs["hidden_states"].device,
+                    fps=float(uncond_kwargs.get("fps", 24.0)),
+                    start_frame=0,
+                )
+            ref_audio_coords_uncond = uncond_kwargs.get("audio_coords")
+            if ref_audio_coords_uncond is None:
+                ref_audio_coords_uncond = model.audio_rope.prepare_audio_coords(
+                    batch_size=1,
+                    num_frames=int(uncond_kwargs["audio_num_frames"]),
+                    device=uncond_kwargs["audio_hidden_states"].device,
+                )
+            ref_video_coords_uncond = model._maybe_quantize_video_rope_coords(
+                ref_video_coords_uncond,
+                uncond_kwargs["hidden_states"].device,
+                uncond_kwargs["hidden_states"].dtype,
+            )
+            ref_audio_coords_uncond = ref_audio_coords_uncond.to(
+                device=uncond_kwargs["audio_hidden_states"].device
+            )
+            ref_video_rotary_emb_uncond = model.rope(
+                ref_video_coords_uncond,
+                device=uncond_kwargs["hidden_states"].device,
+                out_dtype=uncond_kwargs["hidden_states"].dtype,
+            )
+            ref_audio_rotary_emb_uncond = model.audio_rope(
+                ref_audio_coords_uncond,
+                device=uncond_kwargs["audio_hidden_states"].device,
+                out_dtype=uncond_kwargs["audio_hidden_states"].dtype,
+            )
+            ref_ca_video_rotary_emb_uncond = model.cross_attn_rope(
+                ref_video_coords_uncond[:, 0:1, :],
+                device=uncond_kwargs["hidden_states"].device,
+                out_dtype=uncond_kwargs["hidden_states"].dtype,
+            )
+            ref_ca_audio_rotary_emb_uncond = model.cross_attn_audio_rope(
+                ref_audio_coords_uncond[:, 0:1, :],
+                device=uncond_kwargs["audio_hidden_states"].device,
+                out_dtype=uncond_kwargs["audio_hidden_states"].dtype,
+            )
+
+            ref_video_coords_cond = cond_kwargs.get("video_coords")
+            if ref_video_coords_cond is None:
+                ref_video_coords_cond = model.rope.prepare_video_coords(
+                    batch_size=1,
+                    num_frames=int(cond_kwargs["num_frames"]),
+                    height=int(cond_kwargs["height"]),
+                    width=int(cond_kwargs["width"]),
+                    device=cond_kwargs["hidden_states"].device,
+                    fps=float(cond_kwargs.get("fps", 24.0)),
+                    start_frame=0,
+                )
+            ref_audio_coords_cond = cond_kwargs.get("audio_coords")
+            if ref_audio_coords_cond is None:
+                ref_audio_coords_cond = model.audio_rope.prepare_audio_coords(
+                    batch_size=1,
+                    num_frames=int(cond_kwargs["audio_num_frames"]),
+                    device=cond_kwargs["audio_hidden_states"].device,
+                )
+            ref_video_coords_cond = model._maybe_quantize_video_rope_coords(
+                ref_video_coords_cond,
+                cond_kwargs["hidden_states"].device,
+                cond_kwargs["hidden_states"].dtype,
+            )
+            ref_audio_coords_cond = ref_audio_coords_cond.to(
+                device=cond_kwargs["audio_hidden_states"].device
+            )
+            ref_video_rotary_emb_cond = model.rope(
+                ref_video_coords_cond,
+                device=cond_kwargs["hidden_states"].device,
+                out_dtype=cond_kwargs["hidden_states"].dtype,
+            )
+            ref_audio_rotary_emb_cond = model.audio_rope(
+                ref_audio_coords_cond,
+                device=cond_kwargs["audio_hidden_states"].device,
+                out_dtype=cond_kwargs["audio_hidden_states"].dtype,
+            )
+            ref_ca_video_rotary_emb_cond = model.cross_attn_rope(
+                ref_video_coords_cond[:, 0:1, :],
+                device=cond_kwargs["hidden_states"].device,
+                out_dtype=cond_kwargs["hidden_states"].dtype,
+            )
+            ref_ca_audio_rotary_emb_cond = model.cross_attn_audio_rope(
+                ref_audio_coords_cond[:, 0:1, :],
+                device=cond_kwargs["audio_hidden_states"].device,
+                out_dtype=cond_kwargs["audio_hidden_states"].dtype,
+            )
+
+            block0 = model.transformer_blocks[0]
+            batched_block_video, batched_block_audio = block0(
+                batched_patchify_video,
+                batched_patchify_audio,
+                batched_caption_video,
+                batched_caption_audio,
+                temb=batched_temb,
+                temb_audio=batched_temb_audio,
+                temb_prompt=batched_temb_prompt,
+                temb_audio_prompt=batched_temb_audio_prompt,
+                temb_ca_scale_shift=batched_temb_ca_scale_shift,
+                temb_ca_audio_scale_shift=batched_temb_ca_audio_scale_shift,
+                temb_ca_gate=batched_temb_ca_gate,
+                temb_ca_audio_gate=batched_temb_ca_audio_gate,
+                video_rotary_emb=batched_video_rotary_emb,
+                audio_rotary_emb=batched_audio_rotary_emb,
+                ca_video_rotary_emb=batched_ca_video_rotary_emb,
+                ca_audio_rotary_emb=batched_ca_audio_rotary_emb,
+                encoder_attention_mask=model_kwargs.get("encoder_attention_mask"),
+                audio_encoder_attention_mask=model_kwargs.get(
+                    "audio_encoder_attention_mask"
+                ),
+                video_self_attention_mask=model_kwargs.get("video_self_attention_mask"),
+                audio_self_attention_mask=model_kwargs.get("audio_self_attention_mask"),
+                a2v_cross_attention_mask=model_kwargs.get("a2v_cross_attention_mask"),
+                v2a_cross_attention_mask=model_kwargs.get("v2a_cross_attention_mask"),
+                audio_replicated_for_sp=bool(
+                    model_kwargs.get("audio_replicated_for_sp", False)
+                ),
+            )
+            ref_block_video_uncond, ref_block_audio_uncond = block0(
+                ref_patchify_video_uncond,
+                ref_patchify_audio_uncond,
+                ref_caption_video_uncond,
+                ref_caption_audio_uncond,
+                temb=ref_temb_uncond,
+                temb_audio=ref_temb_audio_uncond,
+                temb_prompt=ref_temb_prompt_uncond,
+                temb_audio_prompt=ref_temb_audio_prompt_uncond,
+                temb_ca_scale_shift=ref_temb_ca_scale_shift_uncond,
+                temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_uncond,
+                temb_ca_gate=ref_temb_ca_gate_uncond,
+                temb_ca_audio_gate=ref_temb_ca_audio_gate_uncond,
+                video_rotary_emb=ref_video_rotary_emb_uncond,
+                audio_rotary_emb=ref_audio_rotary_emb_uncond,
+                ca_video_rotary_emb=ref_ca_video_rotary_emb_uncond,
+                ca_audio_rotary_emb=ref_ca_audio_rotary_emb_uncond,
+                encoder_attention_mask=uncond_kwargs.get("encoder_attention_mask"),
+                audio_encoder_attention_mask=uncond_kwargs.get(
+                    "audio_encoder_attention_mask"
+                ),
+                video_self_attention_mask=uncond_kwargs.get("video_self_attention_mask"),
+                audio_self_attention_mask=uncond_kwargs.get("audio_self_attention_mask"),
+                a2v_cross_attention_mask=uncond_kwargs.get("a2v_cross_attention_mask"),
+                v2a_cross_attention_mask=uncond_kwargs.get("v2a_cross_attention_mask"),
+                audio_replicated_for_sp=bool(
+                    uncond_kwargs.get("audio_replicated_for_sp", False)
+                ),
+            )
+            ref_block_video_cond, ref_block_audio_cond = block0(
+                ref_patchify_video_cond,
+                ref_patchify_audio_cond,
+                ref_caption_video_cond,
+                ref_caption_audio_cond,
+                temb=ref_temb_cond,
+                temb_audio=ref_temb_audio_cond,
+                temb_prompt=ref_temb_prompt_cond,
+                temb_audio_prompt=ref_temb_audio_prompt_cond,
+                temb_ca_scale_shift=ref_temb_ca_scale_shift_cond,
+                temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_cond,
+                temb_ca_gate=ref_temb_ca_gate_cond,
+                temb_ca_audio_gate=ref_temb_ca_audio_gate_cond,
+                video_rotary_emb=ref_video_rotary_emb_cond,
+                audio_rotary_emb=ref_audio_rotary_emb_cond,
+                ca_video_rotary_emb=ref_ca_video_rotary_emb_cond,
+                ca_audio_rotary_emb=ref_ca_audio_rotary_emb_cond,
+                encoder_attention_mask=cond_kwargs.get("encoder_attention_mask"),
+                audio_encoder_attention_mask=cond_kwargs.get(
+                    "audio_encoder_attention_mask"
+                ),
+                video_self_attention_mask=cond_kwargs.get("video_self_attention_mask"),
+                audio_self_attention_mask=cond_kwargs.get("audio_self_attention_mask"),
+                a2v_cross_attention_mask=cond_kwargs.get("a2v_cross_attention_mask"),
+                v2a_cross_attention_mask=cond_kwargs.get("v2a_cross_attention_mask"),
+                audio_replicated_for_sp=bool(
+                    cond_kwargs.get("audio_replicated_for_sp", False)
+                ),
+            )
+            pretrace["block0"] = self._ltx2_probe_cfg_report(
+                (
+                    ref_block_video_uncond.float(),
+                    ref_block_video_cond.float(),
+                    ref_block_audio_uncond.float(),
+                    ref_block_audio_cond.float(),
+                ),
+                (
+                    batched_block_video[0:1].float(),
+                    batched_block_video[1:2].float(),
+                    batched_block_audio[0:1].float(),
+                    batched_block_audio[1:2].float(),
+                ),
+            )
+
         self._write_ltx2_probe_state(
             {
                 "official_cfg": self._ltx2_probe_cfg_report(
