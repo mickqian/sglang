@@ -89,3 +89,14 @@
 - 验证: `text-only probe` 结果没有变好，反而略差。`prompt_embeds_video MAE` 从 `0.001241` 变成 `0.001204`（几乎不变），但 `prompt_embeds_audio MAE` 从 `0.001387` 变成 `0.001378`（也基本不变）；更关键的是 `prompt_packed_features / prompt_video_features / prompt_audio_features` 全部没有改善，`video_features MAE` 还从 `0.003878` 升到 `0.004494`。
 - 结论: “只把 text encoder attention kernel 从 SDPA 改成 eager-like 实现” 不是主要矛盾，至少不是一个能直接带来可见收益的最小 patch。这条改动已回滚，不保留在当前分支。
 - 当前精度对齐判断: `93.8%`。目前最可信的判断仍然是：有效 token 的小偏差主要来自自研 `Gemma3` attention 路径里更细的 mask / RoPE / layer pattern 语义，而不是单纯 `SDPA vs eager` 的 softmax 路径。
+
+## 2026-04-15（第十一次更新）
+
+- 基线 git hash: `9af0931fc`
+- 修复: `Gemma3` text encoder 的 sliding causal window 语义已纠正：不再把 `sliding_window` 错减 `1`，也不再错误地屏蔽“太远的未来 token”；现在会按 HF 语义屏蔽过旧的 past tokens。
+- 修复: `Gemma3` text encoder 的 SDPA mask 已从手工 `4D additive float mask` 改成与 HF 一致的 `4D bool allow-mask`。这让整条 `1024` token 序列上的 `hidden_state` 噪音显著下降，例如 `prompt_hidden_state_1/8/48 MAE` 从 `1.543 / 6.010 / 3.855` 降到 `0.000269 / 0.005728 / 0.006488`。
+- 结论: 这两条修复都是真 bug，但对当前 `spongebob` case 的主语义路径帮助有限。原因很明确：当前 prompt 的有效长度只有 `237`（negative 是 `250`），远低于 `sliding_window=1024`；而 `pack_text_embeds_v2` 会在 flatten 后把 padding token 全部清零，所以 padding-query 噪音不会继续泄漏到 `packed_features`。
+- 验证: 修复后 `prompt_packed_features / prompt_embeds_video / prompt_embeds_audio` 仍然分别停在 `0.000321 / 0.001241 / 0.001387`，和修复前几乎完全一致；说明当前 text path 剩余误差依旧集中在有效 token 本身，而不是 padding 或 sliding。
+- 验证: 我顺手核了现成的 backend A/B。`sglang_spongebob_241f_nolora.pt`（`fa`）对官方的 `trajectory_video MAE=0.04216`，而 `sglang_spongebob_241f_nolora_sdpa.pt`（`torch_sdpa`）是 `0.04280`，略差；仍然是“覆盖官方 prompt embeds”那条最好，`trajectory_video MAE=0.03755`。
+- 结论: 目前可以排除“把 DiT attention backend 从 `fa` 切到 `torch_sdpa` 就会更准”这条思路；下一步更值得追的是 `(1) Gemma 有效 token path` 的细粒度语义，或 `(2) base DiT forward` 本身的数值差异。
+- 当前精度对齐判断: `93.8%`。这轮把两个真实语义 bug 修掉了，也明确排除了 `torch_sdpa` backend 这条分支；但 `LTX-2.3 Transition LoRA` 的主误差来源仍未转移。
