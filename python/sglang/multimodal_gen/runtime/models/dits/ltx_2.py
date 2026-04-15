@@ -1216,7 +1216,19 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
-        audio_ff_output = self.audio_ff(norm_audio_hidden_states)
+        if (
+            os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_SEQUENTIAL") == "1"
+            and batch_size > 1
+        ):
+            audio_ff_output = torch.cat(
+                [
+                    self.audio_ff(norm_audio_hidden_states[idx : idx + 1])
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
         if capture_probe_trace:
             probe_stage_trace["after_ff"] = (
