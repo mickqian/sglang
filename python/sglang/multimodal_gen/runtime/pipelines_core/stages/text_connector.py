@@ -54,21 +54,10 @@ class LTX2TextConnectorStage(PipelineStage):
                 [neg_prompt_attention_mask, prompt_attention_mask], dim=0
             )
 
-        # Match native LTX embeddings processor mask semantics exactly.
+        # Prepare additive mask for connectors (as per Diffusers implementation)
         dtype = prompt_embeds.dtype
-        additive_attention_mask = (
-            (prompt_attention_mask.to(torch.int64) - 1)
-            .to(dtype)
-            .reshape(
-                (
-                    prompt_attention_mask.shape[0],
-                    1,
-                    -1,
-                    prompt_attention_mask.shape[-1],
-                )
-            )
-            * torch.finfo(dtype).max
-        )
+
+        additive_attention_mask = (1 - prompt_attention_mask.to(dtype)) * -1000000.0
 
         # Call connectors
         # Expects: prompt_embeds, attention_mask, additive_mask=True
