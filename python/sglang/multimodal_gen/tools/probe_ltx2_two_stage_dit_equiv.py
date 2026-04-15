@@ -79,7 +79,6 @@ def _build_sampling_params(args: argparse.Namespace, server_args: ServerArgs) ->
         seed=args.seed,
         save_output=False,
         return_frames=False,
-        seconds=args.seconds,
     )
 
 
