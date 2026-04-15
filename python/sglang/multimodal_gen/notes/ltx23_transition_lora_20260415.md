@@ -60,3 +60,13 @@
 - 验证: 修正后 `audio_latent_0 / video_latent_0` 已与官方完全一致；`video_latent_1` 的 `MAE` 降到 `0.000108`。`trajectory_video` 整体 `MAE` 从 `0.05866` 降到 `0.03810`，step 29 的单步 `MAE` 从 `0.2855` 降到 `0.1958`。
 - 验证: 最终成片对拍也同步改善。`official_one_stage_241f_spongebob.mp4` 对 `sglang_one_stage_241f_spongebob_after_bf16.mp4` 的逐帧比较结果为 `mean_mae=7.5984`、`mean_psnr=25.5048 dB`；相比修正前的 `11.2966 / 22.1348 dB` 有明显提升。
 - 当前精度对齐判断: `93%`。`LTX-2.3 Transition LoRA` 的 native one-stage 长视频精度已经实质收敛；剩余漂移更像是 scheduler / denoise 内部数值路径上的细部差异，而不是 LoRA、prompt、或 condition 语义没对上。
+
+## 2026-04-15（第八次更新）
+
+- 基线 git hash: `83c2561cc`
+- 进展: 已把 `spongebob 241f` 的 first-step 四个 guider pass (`cond / uncond / ptb / mod`) 都抓出来，分别对拍官方 native 与 `SGLang` native。
+- 发现: 不带 LoRA 时，`SGLang` 的 first-step `video_x0_*` 仍然和官方有稳定差距，`MAE` 大约在 `0.00396 ~ 0.00471`；`trajectory_video` 整体 `MAE=0.04216`。这说明剩余误差不是 LoRA 专属问题，base model forward 本身就还有一层偏差。
+- 发现: 带 `Transition-LORA` 时，first-step `video_x0_cond_0` 的 `MAE` 会从 no-LoRA 的 `0.00443` 增加到 `0.00603`，`video_x0_mod_0` 也会从 `0.00471` 增加到 `0.00732`。LoRA 会额外放大一部分误差，但不是主要来源。
+- 发现: 将官方导出的 `prompt_embeds / negative_prompt_embeds / audio_prompt_embeds` 直接覆盖到 `SGLang` probe 后，no-LoRA 的 `trajectory_video` 会从 `0.04216` 降到 `0.03755`，同时 audio 侧 first-step `x0` 误差也会进一步下降。这说明 text path 的小偏差会被长视频 denoise 轨迹持续放大。
+- 试验失败点: 我尝试把 `LTX2TextConnectorStage` 的 additive mask 改成官方同款的 `4D + -finfo(dtype).max`，但数值结果完全不变；这条改动已验证无效，并已回滚，不保留在当前分支。
+- 当前精度对齐判断: `93.5%`。目前已能确定剩余误差主要分成两块：`(1) text path` 的小偏差；`(2) native DiT/base model forward` 的固有偏差。下一步更值得下钻的是官方 `Gemma -> feature extractor / connector input` 和 `SGLang` 对应阶段，而不是继续猜 scheduler 或 attention mask。
