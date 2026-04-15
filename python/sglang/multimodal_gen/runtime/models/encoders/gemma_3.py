@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_attention_sliding_window_size(config):
-    return config.sliding_window - 1
+    return int(config.sliding_window)
 
 
 class Gemma3RMSNorm(nn.Module):
@@ -306,8 +306,8 @@ class Gemma3Attention(nn.Module):
         if self.is_sliding and self.sliding_window is not None:
             idx = torch.arange(seq_len, device=hidden_states.device)
             dist = idx[None, :] - idx[:, None]
-            too_far = dist > self.sliding_window
-            attn_mask = attn_mask.masked_fill(too_far, min_val)
+            too_old = dist <= -self.sliding_window
+            attn_mask = attn_mask.masked_fill(too_old, min_val)
 
         key_pad = ~attention_mask.to(torch.bool)
         attn_mask = attn_mask[None, None, :, :].expand(batch_size, 1, seq_len, seq_len)
@@ -1221,7 +1221,7 @@ class Gemma3ForConditionalGeneration(nn.Module):
             sliding_window = getattr(self.config, "sliding_window", None)
         if sliding_window is None:
             return None
-        return int(sliding_window) - 1
+        return int(sliding_window)
 
 
 EntryClass = Gemma3ForConditionalGeneration
