@@ -1048,80 +1048,11 @@ class LTX2DenoisingStage(DenoisingStage):
                 return None
             return self._repeat_batch_dim(tensor, target_batch_size)
 
-        cfg_batch_size = batch_size * 2
-        batched_encoder_hidden_states = torch.cat(
-            [negative_encoder_hidden_states, encoder_hidden_states], dim=0
-        )
-        batched_audio_encoder_hidden_states = torch.cat(
-            [
-                negative_audio_encoder_hidden_states,
-                audio_encoder_hidden_states,
-            ],
-            dim=0,
-        )
-        batched_encoder_attention_mask = None
-        if encoder_attention_mask is not None:
-            batched_encoder_attention_mask = torch.cat(
-                [negative_encoder_attention_mask, encoder_attention_mask], dim=0
-            )
-        with set_forward_context(
-            current_timestep=step.step_index, attn_metadata=step.attn_metadata
-        ):
-            batched_cfg_video, batched_cfg_audio = step.current_model(
-                hidden_states=self._repeat_batch_dim(latent_model_input, cfg_batch_size),
-                audio_hidden_states=self._repeat_batch_dim(
-                    audio_latent_model_input, cfg_batch_size
-                ),
-                encoder_hidden_states=batched_encoder_hidden_states,
-                audio_encoder_hidden_states=batched_audio_encoder_hidden_states,
-                timestep=self._repeat_batch_dim(timestep_video, cfg_batch_size),
-                audio_timestep=self._repeat_batch_dim(timestep_audio, cfg_batch_size),
-                prompt_timestep=repeat_or_none(prompt_timestep_video, cfg_batch_size),
-                audio_prompt_timestep=repeat_or_none(
-                    prompt_timestep_audio, cfg_batch_size
-                ),
-                encoder_attention_mask=batched_encoder_attention_mask,
-                audio_encoder_attention_mask=batched_encoder_attention_mask,
-                num_frames=ctx.latent_num_frames_for_model,
-                height=ctx.latent_height,
-                width=ctx.latent_width,
-                fps=batch.fps,
-                audio_num_frames=audio_num_frames_latent,
-                video_coords=video_coords,
-                audio_coords=audio_coords,
-                video_self_attention_mask=repeat_or_none(
-                    video_self_attention_mask, cfg_batch_size
-                ),
-                audio_self_attention_mask=repeat_or_none(
-                    audio_self_attention_mask, cfg_batch_size
-                ),
-                a2v_cross_attention_mask=repeat_or_none(
-                    a2v_cross_attention_mask, cfg_batch_size
-                ),
-                v2a_cross_attention_mask=repeat_or_none(
-                    v2a_cross_attention_mask, cfg_batch_size
-                ),
-                audio_replicated_for_sp=ctx.replicate_audio_for_sp,
-                return_latents=False,
-                return_dict=False,
-            )
-        batched_cfg_video = batched_cfg_video.float()
-        batched_cfg_audio = batched_cfg_audio.float()
-        if batched_cfg_video.shape[0] != cfg_batch_size:
-            raise ValueError(
-                "Batched CFG video output batch size mismatch: "
-                f"{batched_cfg_video.shape[0]} != {cfg_batch_size}."
-            )
-        if batched_cfg_audio.shape[0] != cfg_batch_size:
-            raise ValueError(
-                "Batched CFG audio output batch size mismatch: "
-                f"{batched_cfg_audio.shape[0]} != {cfg_batch_size}."
-            )
-        v_neg, v_pos = batched_cfg_video.chunk(2, dim=0)
-        a_v_neg, a_v_pos = batched_cfg_audio.chunk(2, dim=0)
-
         def run_stage1_aux_forward(
             *,
+            encoder_hidden_states_arg: torch.Tensor | None = None,
+            audio_encoder_hidden_states_arg: torch.Tensor | None = None,
+            encoder_attention_mask_arg: torch.Tensor | None = None,
             skip_video_self_attn_blocks: tuple[int, ...] | None = None,
             skip_audio_self_attn_blocks: tuple[int, ...] | None = None,
             disable_a2v_cross_attn: bool = False,
@@ -1132,9 +1063,21 @@ class LTX2DenoisingStage(DenoisingStage):
             ):
                 out_video, out_audio = step.current_model(
                     **build_model_kwargs(
-                        encoder_hidden_states=encoder_hidden_states,
-                        audio_encoder_hidden_states=audio_encoder_hidden_states,
-                        encoder_attention_mask=encoder_attention_mask,
+                        encoder_hidden_states=(
+                            encoder_hidden_states
+                            if encoder_hidden_states_arg is None
+                            else encoder_hidden_states_arg
+                        ),
+                        audio_encoder_hidden_states=(
+                            audio_encoder_hidden_states
+                            if audio_encoder_hidden_states_arg is None
+                            else audio_encoder_hidden_states_arg
+                        ),
+                        encoder_attention_mask=(
+                            encoder_attention_mask
+                            if encoder_attention_mask_arg is None
+                            else encoder_attention_mask_arg
+                        ),
                         skip_video_self_attn_blocks=skip_video_self_attn_blocks,
                         skip_audio_self_attn_blocks=skip_audio_self_attn_blocks,
                         disable_a2v_cross_attn=disable_a2v_cross_attn,
@@ -1142,6 +1085,92 @@ class LTX2DenoisingStage(DenoisingStage):
                     )
                 )
             return out_video.float(), out_audio.float()
+
+        if get_sp_world_size() > 1:
+            v_pos, a_v_pos = run_stage1_aux_forward()
+            v_neg, a_v_neg = run_stage1_aux_forward(
+                encoder_hidden_states_arg=negative_encoder_hidden_states,
+                audio_encoder_hidden_states_arg=negative_audio_encoder_hidden_states,
+                encoder_attention_mask_arg=negative_encoder_attention_mask,
+            )
+        else:
+            cfg_batch_size = batch_size * 2
+            batched_encoder_hidden_states = torch.cat(
+                [negative_encoder_hidden_states, encoder_hidden_states], dim=0
+            )
+            batched_audio_encoder_hidden_states = torch.cat(
+                [
+                    negative_audio_encoder_hidden_states,
+                    audio_encoder_hidden_states,
+                ],
+                dim=0,
+            )
+            batched_encoder_attention_mask = None
+            if encoder_attention_mask is not None:
+                batched_encoder_attention_mask = torch.cat(
+                    [negative_encoder_attention_mask, encoder_attention_mask], dim=0
+                )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                batched_cfg_video, batched_cfg_audio = step.current_model(
+                    hidden_states=self._repeat_batch_dim(
+                        latent_model_input, cfg_batch_size
+                    ),
+                    audio_hidden_states=self._repeat_batch_dim(
+                        audio_latent_model_input, cfg_batch_size
+                    ),
+                    encoder_hidden_states=batched_encoder_hidden_states,
+                    audio_encoder_hidden_states=batched_audio_encoder_hidden_states,
+                    timestep=self._repeat_batch_dim(timestep_video, cfg_batch_size),
+                    audio_timestep=self._repeat_batch_dim(
+                        timestep_audio, cfg_batch_size
+                    ),
+                    prompt_timestep=repeat_or_none(
+                        prompt_timestep_video, cfg_batch_size
+                    ),
+                    audio_prompt_timestep=repeat_or_none(
+                        prompt_timestep_audio, cfg_batch_size
+                    ),
+                    encoder_attention_mask=batched_encoder_attention_mask,
+                    audio_encoder_attention_mask=batched_encoder_attention_mask,
+                    num_frames=ctx.latent_num_frames_for_model,
+                    height=ctx.latent_height,
+                    width=ctx.latent_width,
+                    fps=batch.fps,
+                    audio_num_frames=audio_num_frames_latent,
+                    video_coords=video_coords,
+                    audio_coords=audio_coords,
+                    video_self_attention_mask=repeat_or_none(
+                        video_self_attention_mask, cfg_batch_size
+                    ),
+                    audio_self_attention_mask=repeat_or_none(
+                        audio_self_attention_mask, cfg_batch_size
+                    ),
+                    a2v_cross_attention_mask=repeat_or_none(
+                        a2v_cross_attention_mask, cfg_batch_size
+                    ),
+                    v2a_cross_attention_mask=repeat_or_none(
+                        v2a_cross_attention_mask, cfg_batch_size
+                    ),
+                    audio_replicated_for_sp=ctx.replicate_audio_for_sp,
+                    return_latents=False,
+                    return_dict=False,
+                )
+            batched_cfg_video = batched_cfg_video.float()
+            batched_cfg_audio = batched_cfg_audio.float()
+            if batched_cfg_video.shape[0] != cfg_batch_size:
+                raise ValueError(
+                    "Batched CFG video output batch size mismatch: "
+                    f"{batched_cfg_video.shape[0]} != {cfg_batch_size}."
+                )
+            if batched_cfg_audio.shape[0] != cfg_batch_size:
+                raise ValueError(
+                    "Batched CFG audio output batch size mismatch: "
+                    f"{batched_cfg_audio.shape[0]} != {cfg_batch_size}."
+                )
+            v_neg, v_pos = batched_cfg_video.chunk(2, dim=0)
+            a_v_neg, a_v_pos = batched_cfg_audio.chunk(2, dim=0)
 
         v_ptb = None
         a_v_ptb = None
