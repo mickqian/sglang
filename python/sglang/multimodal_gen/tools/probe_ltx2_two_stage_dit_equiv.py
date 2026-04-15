@@ -296,6 +296,11 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     os.environ["SGLANG_LTX2_PROBE_OUTPUT"] = str(output_path)
+    if os.getenv("SGLANG_LTX2_PROBE_DISABLE_BF16_REDUCTION", "0") == "1":
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    if os.getenv("SGLANG_LTX2_PROBE_DISABLE_TF32", "0") == "1":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     generator = None
     try:
         generator = DiffGenerator.from_pretrained(
