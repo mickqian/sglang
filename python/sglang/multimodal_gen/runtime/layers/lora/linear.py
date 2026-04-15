@@ -187,6 +187,19 @@ class BaseLayerWithLoRA(nn.Module):
                 lora_delta = lora_delta.reshape(-1, lora_delta.shape[-1])
             data += lora_strength * lora_delta
 
+    def _should_merge_in_fp32(
+        self,
+        lora_list: list[
+            tuple[torch.nn.Parameter, torch.nn.Parameter, str | None, float]
+        ],
+    ) -> bool:
+        # Distilled LoRA in LTX2 two-stage is tuned for current low-precision merge path.
+        # Keep original merge precision for it to avoid stage-2 quality regression.
+        for _, _, lora_path, _ in lora_list:
+            if lora_path and "distilled-lora" in lora_path.lower():
+                return False
+        return True
+
     @torch.no_grad()
     def merge_lora_weights(self, strength: float | None = None) -> None:
         if strength is not None:
@@ -206,6 +219,8 @@ class BaseLayerWithLoRA(nn.Module):
         if not lora_list:
             raise ValueError("LoRA weights not set. Please set them first.")
 
+        merge_in_fp32 = self._should_merge_in_fp32(lora_list)
+
         if isinstance(self.base_layer.weight, DTensor):
             mesh = self.base_layer.weight.data.device_mesh
             unsharded_base_layer = ReplicatedLinear(
@@ -223,7 +238,11 @@ class BaseLayerWithLoRA(nn.Module):
                 get_local_torch_device()
             ).full_tensor()
             target_dtype = data.dtype
-            if data.is_floating_point() and data.dtype != torch.float32:
+            if (
+                merge_in_fp32
+                and data.is_floating_point()
+                and data.dtype != torch.float32
+            ):
                 data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
@@ -253,7 +272,11 @@ class BaseLayerWithLoRA(nn.Module):
             current_device = self.base_layer.weight.data.device
             data = self.base_layer.weight.data.to(get_local_torch_device())
             target_dtype = data.dtype
-            if data.is_floating_point() and data.dtype != torch.float32:
+            if (
+                merge_in_fp32
+                and data.is_floating_point()
+                and data.dtype != torch.float32
+            ):
                 data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
