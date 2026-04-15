@@ -81,3 +81,11 @@
 - 发现: 如果直接看整条 `1024` token 序列，`hidden_state_1` 会显得非常离谱（`MAE` 约 `1.5`），但这是被 left padding token 放大的假象。按 `attention_mask` 只看有效 token 后，`prompt_hidden_state_1 MAE` 只有 `0.00116`、`negative_prompt_hidden_state_1 MAE` 只有 `0.00125`；到第 `8` 层和 final norm (`48`) 才逐层积累到 `0.0247 ~ 0.0280`。
 - 结论: 这轮可以明确排除 tokenizer 问题；`hidden_state_0` 完全一致，说明 embedding 层没问题。真正的 text path 漂移是自研 `Gemma3` attention/decoder 路径里对有效 token 的小偏差逐层累积；而整序列上看见的巨大 hidden-state diff，大部分只是 padding query 的噪音，不是主语义 token 已经炸掉。
 - 当前精度对齐判断: `93.8%`。text path 的主要矛盾已经从“可能哪里都不对”收敛到“自研 `Gemma3` 有效 token attention 数值路径上的小偏差”；下一步更值得直接核对 `Gemma3Attention` 的 valid-token mask / sliding layer 语义，而不是继续在 tokenizer 或 connector 上兜圈子。
+
+## 2026-04-15（第十次更新）
+
+- 基线 git hash: `3f92e2b26`
+- 试验: 我尝试把自研 `Gemma3Attention` 从 `torch.scaled_dot_product_attention(..., enable_gqa=True)` 改成更接近 HF `eager_attention_forward` 的实现（显式 `repeat_kv + fp32 softmax + matmul`），想验证是不是 attention kernel 语义本身导致了 text path 漂移。
+- 验证: `text-only probe` 结果没有变好，反而略差。`prompt_embeds_video MAE` 从 `0.001241` 变成 `0.001204`（几乎不变），但 `prompt_embeds_audio MAE` 从 `0.001387` 变成 `0.001378`（也基本不变）；更关键的是 `prompt_packed_features / prompt_video_features / prompt_audio_features` 全部没有改善，`video_features MAE` 还从 `0.003878` 升到 `0.004494`。
+- 结论: “只把 text encoder attention kernel 从 SDPA 改成 eager-like 实现” 不是主要矛盾，至少不是一个能直接带来可见收益的最小 patch。这条改动已回滚，不保留在当前分支。
+- 当前精度对齐判断: `93.8%`。目前最可信的判断仍然是：有效 token 的小偏差主要来自自研 `Gemma3` attention 路径里更细的 mask / RoPE / layer pattern 语义，而不是单纯 `SDPA vs eager` 的 softmax 路径。
