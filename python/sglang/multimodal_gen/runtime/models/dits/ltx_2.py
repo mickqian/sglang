@@ -43,6 +43,13 @@ ADALN_NUM_BASE_PARAMS = 6
 ADALN_NUM_CROSS_ATTN_PARAMS = 3
 
 
+def _ltx2_probe_block_index() -> int:
+    value = os.getenv("SGLANG_LTX2_PROBE_BLOCK_INDEX")
+    if value is None:
+        return 0
+    return int(value)
+
+
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
     return ADALN_NUM_BASE_PARAMS + (
         ADALN_NUM_CROSS_ATTN_PARAMS if cross_attention_adaln else 0
@@ -975,7 +982,8 @@ class LTX2TransformerBlock(nn.Module):
 
         batch_size = hidden_states.size(0)
         capture_probe_trace = (
-            os.getenv("SGLANG_LTX2_PROBE_OUTPUT") is not None and self.idx == 0
+            os.getenv("SGLANG_LTX2_PROBE_OUTPUT") is not None
+            and self.idx == _ltx2_probe_block_index()
         )
         probe_stage_trace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 

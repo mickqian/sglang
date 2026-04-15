@@ -408,6 +408,13 @@ class LTX2DenoisingStage(DenoisingStage):
     def _ltx2_probe_output_path(self) -> str | None:
         return os.getenv("SGLANG_LTX2_PROBE_OUTPUT")
 
+    @staticmethod
+    def _ltx2_probe_block_index() -> int:
+        value = os.getenv("SGLANG_LTX2_PROBE_BLOCK_INDEX")
+        if value is None:
+            return 0
+        return int(value)
+
     def _record_ltx2_probe_model_call(
         self, *, step: DenoisingStepState, model_kwargs: dict[str, object]
     ) -> None:
@@ -447,6 +454,7 @@ class LTX2DenoisingStage(DenoisingStage):
             "cfg": None,
             "aux": None,
             "official_cfg": None,
+            "probe_block_index": self._ltx2_probe_block_index(),
             "model_forward_calls": getattr(
                 self, "_ltx2_probe_model_forward_calls", []
             ),
@@ -873,6 +881,12 @@ class LTX2DenoisingStage(DenoisingStage):
             and "audio_num_frames" in model_kwargs
             and len(model.transformer_blocks) > 0
         ):
+            probe_block_index = self._ltx2_probe_block_index()
+            if not (0 <= probe_block_index < len(model.transformer_blocks)):
+                raise ValueError(
+                    f"Invalid SGLANG_LTX2_PROBE_BLOCK_INDEX={probe_block_index}, "
+                    f"num_blocks={len(model.transformer_blocks)}."
+                )
             fps = float(model_kwargs.get("fps", 24.0))
             batched_video_coords = model_kwargs.get("video_coords")
             if batched_video_coords is None:
@@ -1017,11 +1031,11 @@ class LTX2DenoisingStage(DenoisingStage):
                 out_dtype=cond_kwargs["audio_hidden_states"].dtype,
             )
 
-            block0 = model.transformer_blocks[0]
+            probe_block = model.transformer_blocks[probe_block_index]
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
-                batched_block_video, batched_block_audio = block0(
+                batched_block_video, batched_block_audio = probe_block(
                     batched_patchify_video,
                     batched_patchify_audio,
                     batched_caption_video,
@@ -1058,11 +1072,11 @@ class LTX2DenoisingStage(DenoisingStage):
                         model_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
-            batched_block_trace = getattr(block0, "_ltx2_probe_stage_trace", None)
+            batched_block_trace = getattr(probe_block, "_ltx2_probe_stage_trace", None)
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
-                ref_block_video_uncond, ref_block_audio_uncond = block0(
+                ref_block_video_uncond, ref_block_audio_uncond = probe_block(
                     ref_patchify_video_uncond,
                     ref_patchify_audio_uncond,
                     ref_caption_video_uncond,
@@ -1101,11 +1115,13 @@ class LTX2DenoisingStage(DenoisingStage):
                         uncond_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
-            ref_block_trace_uncond = getattr(block0, "_ltx2_probe_stage_trace", None)
+            ref_block_trace_uncond = getattr(
+                probe_block, "_ltx2_probe_stage_trace", None
+            )
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
-                ref_block_video_cond, ref_block_audio_cond = block0(
+                ref_block_video_cond, ref_block_audio_cond = probe_block(
                     ref_patchify_video_cond,
                     ref_patchify_audio_cond,
                     ref_caption_video_cond,
@@ -1142,8 +1158,9 @@ class LTX2DenoisingStage(DenoisingStage):
                         cond_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
-            ref_block_trace_cond = getattr(block0, "_ltx2_probe_stage_trace", None)
-            pretrace["block0"] = self._ltx2_probe_cfg_report(
+            ref_block_trace_cond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
+            block_key = f"block{probe_block_index}"
+            pretrace[block_key] = self._ltx2_probe_cfg_report(
                 (
                     ref_block_video_uncond.float(),
                     ref_block_video_cond.float(),
@@ -1163,10 +1180,10 @@ class LTX2DenoisingStage(DenoisingStage):
                 and ref_block_trace_cond is not None
             ):
                 for trace_key, trace_name in (
-                    ("after_self_attn", "block0_after_self_attn"),
-                    ("after_prompt_cross_attn", "block0_after_prompt_cross_attn"),
-                    ("after_av_cross_attn", "block0_after_av_cross_attn"),
-                    ("after_ff", "block0_after_ff"),
+                    ("after_self_attn", f"{block_key}_after_self_attn"),
+                    ("after_prompt_cross_attn", f"{block_key}_after_prompt_cross_attn"),
+                    ("after_av_cross_attn", f"{block_key}_after_av_cross_attn"),
+                    ("after_ff", f"{block_key}_after_ff"),
                 ):
                     batched_video_stage, batched_audio_stage = batched_block_trace[
                         trace_key
