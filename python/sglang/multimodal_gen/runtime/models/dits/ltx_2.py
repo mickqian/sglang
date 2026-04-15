@@ -107,6 +107,17 @@ def _ltx2_probe_slice_batch_arg(
     return value
 
 
+def _ltx2_probe_slice_pe(
+    value: tuple[torch.Tensor, torch.Tensor] | None, idx: int, batch_size: int
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if value is None:
+        return None
+    first, second = value
+    if first.ndim > 0 and first.shape[0] == batch_size:
+        return first[idx : idx + 1], second[idx : idx + 1]
+    return value
+
+
 def apply_interleaved_rotary_emb(
     x: torch.Tensor, freqs: Tuple[torch.Tensor, torch.Tensor]
 ) -> torch.Tensor:
@@ -1009,14 +1020,37 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
-        attn_hidden_states = self.attn1(
-            norm_hidden_states,
-            mask=video_self_attention_mask,
-            pe=video_rotary_emb,
-            perturbation_mask=video_self_attn_perturbation_mask,
-            all_perturbed=skip_video_self_attn,
-            gather_context_kv_for_sp=audio_replicated_for_sp,
-        )
+        if (
+            os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+            and batch_size > 1
+        ):
+            attn_hidden_states = torch.cat(
+                [
+                    self.attn1(
+                        norm_hidden_states[idx : idx + 1],
+                        mask=_ltx2_probe_slice_batch_arg(
+                            video_self_attention_mask, idx, batch_size
+                        ),
+                        pe=_ltx2_probe_slice_pe(video_rotary_emb, idx, batch_size),
+                        perturbation_mask=_ltx2_probe_slice_batch_arg(
+                            video_self_attn_perturbation_mask, idx, batch_size
+                        ),
+                        all_perturbed=skip_video_self_attn,
+                        gather_context_kv_for_sp=audio_replicated_for_sp,
+                    )
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            attn_hidden_states = self.attn1(
+                norm_hidden_states,
+                mask=video_self_attention_mask,
+                pe=video_rotary_emb,
+                perturbation_mask=video_self_attn_perturbation_mask,
+                all_perturbed=skip_video_self_attn,
+                gather_context_kv_for_sp=audio_replicated_for_sp,
+            )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
@@ -1025,14 +1059,37 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
-        attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states,
-            mask=audio_self_attention_mask,
-            pe=audio_rotary_emb,
-            perturbation_mask=audio_self_attn_perturbation_mask,
-            all_perturbed=skip_audio_self_attn,
-            skip_sequence_parallel_override=audio_replicated_for_sp,
-        )
+        if (
+            os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+            and batch_size > 1
+        ):
+            attn_audio_hidden_states = torch.cat(
+                [
+                    self.audio_attn1(
+                        norm_audio_hidden_states[idx : idx + 1],
+                        mask=_ltx2_probe_slice_batch_arg(
+                            audio_self_attention_mask, idx, batch_size
+                        ),
+                        pe=_ltx2_probe_slice_pe(audio_rotary_emb, idx, batch_size),
+                        perturbation_mask=_ltx2_probe_slice_batch_arg(
+                            audio_self_attn_perturbation_mask, idx, batch_size
+                        ),
+                        all_perturbed=skip_audio_self_attn,
+                        skip_sequence_parallel_override=audio_replicated_for_sp,
+                    )
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            attn_audio_hidden_states = self.audio_attn1(
+                norm_audio_hidden_states,
+                mask=audio_self_attention_mask,
+                pe=audio_rotary_emb,
+                perturbation_mask=audio_self_attn_perturbation_mask,
+                all_perturbed=skip_audio_self_attn,
+                skip_sequence_parallel_override=audio_replicated_for_sp,
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
         if capture_probe_trace:
             probe_stage_trace["after_self_attn"] = (
