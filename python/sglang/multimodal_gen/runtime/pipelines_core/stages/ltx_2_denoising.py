@@ -1048,6 +1048,13 @@ class LTX2DenoisingStage(DenoisingStage):
                 return None
             return self._repeat_batch_dim(tensor, target_batch_size)
 
+        def cat_pair_or_none(
+            lhs: torch.Tensor | None, rhs: torch.Tensor | None
+        ) -> torch.Tensor | None:
+            if lhs is None:
+                return None
+            return torch.cat([lhs, rhs], dim=0)
+
         cfg_batch_size = batch_size * 2
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
@@ -1073,11 +1080,11 @@ class LTX2DenoisingStage(DenoisingStage):
                 audio_prompt_timestep=repeat_or_none(
                     prompt_timestep_audio, cfg_batch_size
                 ),
-                encoder_attention_mask=torch.cat(
-                    [encoder_attention_mask, negative_encoder_attention_mask], dim=0
+                encoder_attention_mask=cat_pair_or_none(
+                    encoder_attention_mask, negative_encoder_attention_mask
                 ),
-                audio_encoder_attention_mask=torch.cat(
-                    [encoder_attention_mask, negative_encoder_attention_mask], dim=0
+                audio_encoder_attention_mask=cat_pair_or_none(
+                    encoder_attention_mask, negative_encoder_attention_mask
                 ),
                 num_frames=ctx.latent_num_frames_for_model,
                 height=ctx.latent_height,
