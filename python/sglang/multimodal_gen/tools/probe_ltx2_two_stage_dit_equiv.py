@@ -112,12 +112,32 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _install_probe_hooks() -> dict[str, object]:
-    state: dict[str, object] = {"cfg": None, "aux": None}
+    state: dict[str, object] = {
+        "cfg": None,
+        "aux": None,
+        "official_cfg": None,
+        "current_stage": None,
+        "in_model_forward_probe": False,
+    }
     orig_cfg_batched = LTX2DenoisingStage._run_ltx2_cfg_batched_forward
     orig_cfg_seq = LTX2DenoisingStage._run_ltx2_cfg_sequential_forward
     orig_aux_batched = LTX2DenoisingStage._run_ltx2_stage1_batched_aux_forward
     orig_aux_seq = LTX2DenoisingStage._run_ltx2_stage1_aux_forward
+    orig_model_forward = LTX2DenoisingStage._run_ltx2_model_forward
     orig_step = LTX2DenoisingStage._run_denoising_step
+
+    def _slice_model_kwargs(
+        model_kwargs: dict[str, object], start: int, end: int
+    ) -> dict[str, object]:
+        sliced: dict[str, object] = {}
+        for key, value in model_kwargs.items():
+            if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] >= end:
+                sliced[key] = value[start:end]
+            elif isinstance(value, tuple) and value and len(value) >= end:
+                sliced[key] = value[start:end]
+            else:
+                sliced[key] = value
+        return sliced
 
     def patched_cfg_batched(self, **kwargs):
         candidate = orig_cfg_batched(self, **kwargs)
@@ -167,6 +187,45 @@ def _install_probe_hooks() -> dict[str, object]:
         state["aux"] = _aux_report(reference, candidate)
         return candidate
 
+    def patched_model_forward(self, *, step, model_kwargs):
+        candidate = orig_model_forward(step=step, model_kwargs=model_kwargs)
+        should_probe_official_cfg = (
+            state["current_stage"] == "stage1"
+            and state["official_cfg"] is None
+            and not state["in_model_forward_probe"]
+            and isinstance(model_kwargs.get("hidden_states"), torch.Tensor)
+            and isinstance(model_kwargs.get("encoder_hidden_states"), torch.Tensor)
+            and model_kwargs["hidden_states"].shape[0] == 2
+            and model_kwargs["encoder_hidden_states"].shape[0] == 2
+            and model_kwargs.get("perturbation_configs") is None
+        )
+        if not should_probe_official_cfg:
+            return candidate
+
+        state["in_model_forward_probe"] = True
+        try:
+            uncond = orig_model_forward(
+                step=step,
+                model_kwargs=_slice_model_kwargs(model_kwargs, 0, 1),
+            )
+            cond = orig_model_forward(
+                step=step,
+                model_kwargs=_slice_model_kwargs(model_kwargs, 1, 2),
+            )
+        finally:
+            state["in_model_forward_probe"] = False
+
+        state["official_cfg"] = _cfg_report(
+            (uncond[0], cond[0], uncond[1], cond[1]),
+            (
+                candidate[0][0:1],
+                candidate[0][1:2],
+                candidate[1][0:1],
+                candidate[1][1:2],
+            ),
+        )
+        return candidate
+
     def patched_run_step(
         self,
         ctx: LTX2DenoisingContext,
@@ -174,19 +233,26 @@ def _install_probe_hooks() -> dict[str, object]:
         batch,
         server_args,
     ):
-        result = orig_step(self, ctx, step, batch, server_args)
-        if ctx.stage == "stage1" and int(step.step_index) == 0 and state["cfg"] is not None:
-            raise ProbeComplete
+        state["current_stage"] = ctx.stage
+        try:
+            result = orig_step(self, ctx, step, batch, server_args)
+        finally:
+            state["current_stage"] = None
+        if ctx.stage == "stage1" and int(step.step_index) == 0:
+            if state["cfg"] is not None or state["official_cfg"] is not None:
+                raise ProbeComplete
         return result
 
     LTX2DenoisingStage._run_ltx2_cfg_batched_forward = patched_cfg_batched
     LTX2DenoisingStage._run_ltx2_stage1_batched_aux_forward = patched_aux_batched
+    LTX2DenoisingStage._run_ltx2_model_forward = patched_model_forward
     LTX2DenoisingStage._run_denoising_step = patched_run_step
 
     return {
         "state": state,
         "orig_cfg_batched": orig_cfg_batched,
         "orig_aux_batched": orig_aux_batched,
+        "orig_model_forward": orig_model_forward,
         "orig_step": orig_step,
     }
 
@@ -196,6 +262,7 @@ def _restore_probe_hooks(handles: dict[str, object]) -> None:
     LTX2DenoisingStage._run_ltx2_stage1_batched_aux_forward = handles[
         "orig_aux_batched"
     ]
+    LTX2DenoisingStage._run_ltx2_model_forward = handles["orig_model_forward"]
     LTX2DenoisingStage._run_denoising_step = handles["orig_step"]
 
 
@@ -228,7 +295,7 @@ def main() -> None:
             pass
 
         state = handles["state"]
-        if state["cfg"] is None:
+        if state["cfg"] is None and state["official_cfg"] is None:
             raise RuntimeError("probe did not capture stage1 cfg outputs")
         output_path.write_text(
             json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
