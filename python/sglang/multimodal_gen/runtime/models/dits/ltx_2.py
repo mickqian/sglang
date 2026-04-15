@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -973,6 +974,10 @@ class LTX2TransformerBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
+        capture_probe_trace = (
+            os.getenv("SGLANG_LTX2_PROBE_OUTPUT") is not None and self.idx == 0
+        )
+        probe_stage_trace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
@@ -1006,6 +1011,11 @@ class LTX2TransformerBlock(nn.Module):
             skip_sequence_parallel_override=audio_replicated_for_sp,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        if capture_probe_trace:
+            probe_stage_trace["after_self_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
         # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
             # LTX2.3
@@ -1071,6 +1081,11 @@ class LTX2TransformerBlock(nn.Module):
                 mask=audio_encoder_attention_mask,
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+        if capture_probe_trace:
+            probe_stage_trace["after_prompt_cross_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -1180,6 +1195,11 @@ class LTX2TransformerBlock(nn.Module):
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
             )
+        if capture_probe_trace:
+            probe_stage_trace["after_av_cross_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
         # 4. Feedforward
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(3, 6)
@@ -1198,6 +1218,12 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        if capture_probe_trace:
+            probe_stage_trace["after_ff"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
+            self._ltx2_probe_stage_trace = probe_stage_trace
         return hidden_states, audio_hidden_states
 
 

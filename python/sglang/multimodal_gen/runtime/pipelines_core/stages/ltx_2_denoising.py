@@ -1058,6 +1058,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         model_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
+            batched_block_trace = getattr(block0, "_ltx2_probe_stage_trace", None)
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
@@ -1100,6 +1101,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         uncond_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
+            ref_block_trace_uncond = getattr(block0, "_ltx2_probe_stage_trace", None)
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
@@ -1140,6 +1142,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         cond_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
+            ref_block_trace_cond = getattr(block0, "_ltx2_probe_stage_trace", None)
             pretrace["block0"] = self._ltx2_probe_cfg_report(
                 (
                     ref_block_video_uncond.float(),
@@ -1154,6 +1157,40 @@ class LTX2DenoisingStage(DenoisingStage):
                     batched_block_audio[1:2].float(),
                 ),
             )
+            if (
+                batched_block_trace is not None
+                and ref_block_trace_uncond is not None
+                and ref_block_trace_cond is not None
+            ):
+                for trace_key, trace_name in (
+                    ("after_self_attn", "block0_after_self_attn"),
+                    ("after_prompt_cross_attn", "block0_after_prompt_cross_attn"),
+                    ("after_av_cross_attn", "block0_after_av_cross_attn"),
+                    ("after_ff", "block0_after_ff"),
+                ):
+                    batched_video_stage, batched_audio_stage = batched_block_trace[
+                        trace_key
+                    ]
+                    ref_video_stage_uncond, ref_audio_stage_uncond = (
+                        ref_block_trace_uncond[trace_key]
+                    )
+                    ref_video_stage_cond, ref_audio_stage_cond = (
+                        ref_block_trace_cond[trace_key]
+                    )
+                    pretrace[trace_name] = self._ltx2_probe_cfg_report(
+                        (
+                            ref_video_stage_uncond.float(),
+                            ref_video_stage_cond.float(),
+                            ref_audio_stage_uncond.float(),
+                            ref_audio_stage_cond.float(),
+                        ),
+                        (
+                            batched_video_stage[0:1].float(),
+                            batched_video_stage[1:2].float(),
+                            batched_audio_stage[0:1].float(),
+                            batched_audio_stage[1:2].float(),
+                        ),
+                    )
 
         self._write_ltx2_probe_state(
             {
