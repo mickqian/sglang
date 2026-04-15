@@ -1018,93 +1018,128 @@ class LTX2DenoisingStage(DenoisingStage):
             )
 
             block0 = model.transformer_blocks[0]
-            batched_block_video, batched_block_audio = block0(
-                batched_patchify_video,
-                batched_patchify_audio,
-                batched_caption_video,
-                batched_caption_audio,
-                temb=batched_temb,
-                temb_audio=batched_temb_audio,
-                temb_prompt=batched_temb_prompt,
-                temb_audio_prompt=batched_temb_audio_prompt,
-                temb_ca_scale_shift=batched_temb_ca_scale_shift,
-                temb_ca_audio_scale_shift=batched_temb_ca_audio_scale_shift,
-                temb_ca_gate=batched_temb_ca_gate,
-                temb_ca_audio_gate=batched_temb_ca_audio_gate,
-                video_rotary_emb=batched_video_rotary_emb,
-                audio_rotary_emb=batched_audio_rotary_emb,
-                ca_video_rotary_emb=batched_ca_video_rotary_emb,
-                ca_audio_rotary_emb=batched_ca_audio_rotary_emb,
-                encoder_attention_mask=model_kwargs.get("encoder_attention_mask"),
-                audio_encoder_attention_mask=model_kwargs.get(
-                    "audio_encoder_attention_mask"
-                ),
-                video_self_attention_mask=model_kwargs.get("video_self_attention_mask"),
-                audio_self_attention_mask=model_kwargs.get("audio_self_attention_mask"),
-                a2v_cross_attention_mask=model_kwargs.get("a2v_cross_attention_mask"),
-                v2a_cross_attention_mask=model_kwargs.get("v2a_cross_attention_mask"),
-                audio_replicated_for_sp=bool(
-                    model_kwargs.get("audio_replicated_for_sp", False)
-                ),
-            )
-            ref_block_video_uncond, ref_block_audio_uncond = block0(
-                ref_patchify_video_uncond,
-                ref_patchify_audio_uncond,
-                ref_caption_video_uncond,
-                ref_caption_audio_uncond,
-                temb=ref_temb_uncond,
-                temb_audio=ref_temb_audio_uncond,
-                temb_prompt=ref_temb_prompt_uncond,
-                temb_audio_prompt=ref_temb_audio_prompt_uncond,
-                temb_ca_scale_shift=ref_temb_ca_scale_shift_uncond,
-                temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_uncond,
-                temb_ca_gate=ref_temb_ca_gate_uncond,
-                temb_ca_audio_gate=ref_temb_ca_audio_gate_uncond,
-                video_rotary_emb=ref_video_rotary_emb_uncond,
-                audio_rotary_emb=ref_audio_rotary_emb_uncond,
-                ca_video_rotary_emb=ref_ca_video_rotary_emb_uncond,
-                ca_audio_rotary_emb=ref_ca_audio_rotary_emb_uncond,
-                encoder_attention_mask=uncond_kwargs.get("encoder_attention_mask"),
-                audio_encoder_attention_mask=uncond_kwargs.get(
-                    "audio_encoder_attention_mask"
-                ),
-                video_self_attention_mask=uncond_kwargs.get("video_self_attention_mask"),
-                audio_self_attention_mask=uncond_kwargs.get("audio_self_attention_mask"),
-                a2v_cross_attention_mask=uncond_kwargs.get("a2v_cross_attention_mask"),
-                v2a_cross_attention_mask=uncond_kwargs.get("v2a_cross_attention_mask"),
-                audio_replicated_for_sp=bool(
-                    uncond_kwargs.get("audio_replicated_for_sp", False)
-                ),
-            )
-            ref_block_video_cond, ref_block_audio_cond = block0(
-                ref_patchify_video_cond,
-                ref_patchify_audio_cond,
-                ref_caption_video_cond,
-                ref_caption_audio_cond,
-                temb=ref_temb_cond,
-                temb_audio=ref_temb_audio_cond,
-                temb_prompt=ref_temb_prompt_cond,
-                temb_audio_prompt=ref_temb_audio_prompt_cond,
-                temb_ca_scale_shift=ref_temb_ca_scale_shift_cond,
-                temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_cond,
-                temb_ca_gate=ref_temb_ca_gate_cond,
-                temb_ca_audio_gate=ref_temb_ca_audio_gate_cond,
-                video_rotary_emb=ref_video_rotary_emb_cond,
-                audio_rotary_emb=ref_audio_rotary_emb_cond,
-                ca_video_rotary_emb=ref_ca_video_rotary_emb_cond,
-                ca_audio_rotary_emb=ref_ca_audio_rotary_emb_cond,
-                encoder_attention_mask=cond_kwargs.get("encoder_attention_mask"),
-                audio_encoder_attention_mask=cond_kwargs.get(
-                    "audio_encoder_attention_mask"
-                ),
-                video_self_attention_mask=cond_kwargs.get("video_self_attention_mask"),
-                audio_self_attention_mask=cond_kwargs.get("audio_self_attention_mask"),
-                a2v_cross_attention_mask=cond_kwargs.get("a2v_cross_attention_mask"),
-                v2a_cross_attention_mask=cond_kwargs.get("v2a_cross_attention_mask"),
-                audio_replicated_for_sp=bool(
-                    cond_kwargs.get("audio_replicated_for_sp", False)
-                ),
-            )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                batched_block_video, batched_block_audio = block0(
+                    batched_patchify_video,
+                    batched_patchify_audio,
+                    batched_caption_video,
+                    batched_caption_audio,
+                    temb=batched_temb,
+                    temb_audio=batched_temb_audio,
+                    temb_prompt=batched_temb_prompt,
+                    temb_audio_prompt=batched_temb_audio_prompt,
+                    temb_ca_scale_shift=batched_temb_ca_scale_shift,
+                    temb_ca_audio_scale_shift=batched_temb_ca_audio_scale_shift,
+                    temb_ca_gate=batched_temb_ca_gate,
+                    temb_ca_audio_gate=batched_temb_ca_audio_gate,
+                    video_rotary_emb=batched_video_rotary_emb,
+                    audio_rotary_emb=batched_audio_rotary_emb,
+                    ca_video_rotary_emb=batched_ca_video_rotary_emb,
+                    ca_audio_rotary_emb=batched_ca_audio_rotary_emb,
+                    encoder_attention_mask=model_kwargs.get("encoder_attention_mask"),
+                    audio_encoder_attention_mask=model_kwargs.get(
+                        "audio_encoder_attention_mask"
+                    ),
+                    video_self_attention_mask=model_kwargs.get(
+                        "video_self_attention_mask"
+                    ),
+                    audio_self_attention_mask=model_kwargs.get(
+                        "audio_self_attention_mask"
+                    ),
+                    a2v_cross_attention_mask=model_kwargs.get(
+                        "a2v_cross_attention_mask"
+                    ),
+                    v2a_cross_attention_mask=model_kwargs.get(
+                        "v2a_cross_attention_mask"
+                    ),
+                    audio_replicated_for_sp=bool(
+                        model_kwargs.get("audio_replicated_for_sp", False)
+                    ),
+                )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                ref_block_video_uncond, ref_block_audio_uncond = block0(
+                    ref_patchify_video_uncond,
+                    ref_patchify_audio_uncond,
+                    ref_caption_video_uncond,
+                    ref_caption_audio_uncond,
+                    temb=ref_temb_uncond,
+                    temb_audio=ref_temb_audio_uncond,
+                    temb_prompt=ref_temb_prompt_uncond,
+                    temb_audio_prompt=ref_temb_audio_prompt_uncond,
+                    temb_ca_scale_shift=ref_temb_ca_scale_shift_uncond,
+                    temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_uncond,
+                    temb_ca_gate=ref_temb_ca_gate_uncond,
+                    temb_ca_audio_gate=ref_temb_ca_audio_gate_uncond,
+                    video_rotary_emb=ref_video_rotary_emb_uncond,
+                    audio_rotary_emb=ref_audio_rotary_emb_uncond,
+                    ca_video_rotary_emb=ref_ca_video_rotary_emb_uncond,
+                    ca_audio_rotary_emb=ref_ca_audio_rotary_emb_uncond,
+                    encoder_attention_mask=uncond_kwargs.get(
+                        "encoder_attention_mask"
+                    ),
+                    audio_encoder_attention_mask=uncond_kwargs.get(
+                        "audio_encoder_attention_mask"
+                    ),
+                    video_self_attention_mask=uncond_kwargs.get(
+                        "video_self_attention_mask"
+                    ),
+                    audio_self_attention_mask=uncond_kwargs.get(
+                        "audio_self_attention_mask"
+                    ),
+                    a2v_cross_attention_mask=uncond_kwargs.get(
+                        "a2v_cross_attention_mask"
+                    ),
+                    v2a_cross_attention_mask=uncond_kwargs.get(
+                        "v2a_cross_attention_mask"
+                    ),
+                    audio_replicated_for_sp=bool(
+                        uncond_kwargs.get("audio_replicated_for_sp", False)
+                    ),
+                )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                ref_block_video_cond, ref_block_audio_cond = block0(
+                    ref_patchify_video_cond,
+                    ref_patchify_audio_cond,
+                    ref_caption_video_cond,
+                    ref_caption_audio_cond,
+                    temb=ref_temb_cond,
+                    temb_audio=ref_temb_audio_cond,
+                    temb_prompt=ref_temb_prompt_cond,
+                    temb_audio_prompt=ref_temb_audio_prompt_cond,
+                    temb_ca_scale_shift=ref_temb_ca_scale_shift_cond,
+                    temb_ca_audio_scale_shift=ref_temb_ca_audio_scale_shift_cond,
+                    temb_ca_gate=ref_temb_ca_gate_cond,
+                    temb_ca_audio_gate=ref_temb_ca_audio_gate_cond,
+                    video_rotary_emb=ref_video_rotary_emb_cond,
+                    audio_rotary_emb=ref_audio_rotary_emb_cond,
+                    ca_video_rotary_emb=ref_ca_video_rotary_emb_cond,
+                    ca_audio_rotary_emb=ref_ca_audio_rotary_emb_cond,
+                    encoder_attention_mask=cond_kwargs.get("encoder_attention_mask"),
+                    audio_encoder_attention_mask=cond_kwargs.get(
+                        "audio_encoder_attention_mask"
+                    ),
+                    video_self_attention_mask=cond_kwargs.get(
+                        "video_self_attention_mask"
+                    ),
+                    audio_self_attention_mask=cond_kwargs.get(
+                        "audio_self_attention_mask"
+                    ),
+                    a2v_cross_attention_mask=cond_kwargs.get(
+                        "a2v_cross_attention_mask"
+                    ),
+                    v2a_cross_attention_mask=cond_kwargs.get(
+                        "v2a_cross_attention_mask"
+                    ),
+                    audio_replicated_for_sp=bool(
+                        cond_kwargs.get("audio_replicated_for_sp", False)
+                    ),
+                )
             pretrace["block0"] = self._ltx2_probe_cfg_report(
                 (
                     ref_block_video_uncond.float(),
