@@ -93,7 +93,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pipeline-class-name", default="LTX2TwoStagePipeline")
     parser.add_argument("--num-gpus", type=int, default=1)
     parser.add_argument("--prompt", default="A curious raccoon")
-    parser.add_argument("--negative-prompt", default=None)
+    parser.add_argument("--negative-prompt", default="")
     parser.add_argument("--image-path", default=None)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=768)
