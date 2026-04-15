@@ -385,9 +385,9 @@ class ServerArgs:
                 and self.ring_degree == 1
                 and self._is_ltx23_model_path(self.model_path)
             ):
-                self.attention_backend = "fa"
+                self.attention_backend = "torch_sdpa"
                 logger.info(
-                    "Automatically set attention_backend=fa for LTX-2.3 one-stage on 1 GPU to preserve precision"
+                    "Automatically set attention_backend=torch_sdpa for LTX-2.3 one-stage on 1 GPU to preserve precision"
                 )
                 return
             self._set_default_attention_backend()
