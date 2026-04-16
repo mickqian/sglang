@@ -51,7 +51,7 @@ class LTX2DenoisingContext(DenoisingContext):
     audio_latents: torch.Tensor | None = None
     audio_scheduler: object | None = None
     is_ltx23_variant: bool = False
-    use_ltx23_legacy_one_stage: bool = False
+    use_ltx23_native_one_stage_semantics: bool = False
     replicate_audio_for_sp: bool = False
     stage: str = "one_stage"
     latent_num_frames_for_model: int = 0
@@ -255,7 +255,7 @@ class LTX2DenoisingStage(DenoisingStage):
         )
 
     @classmethod
-    def _should_use_ltx23_legacy_one_stage(
+    def _should_use_ltx23_native_one_stage_semantics(
         cls,
         server_args: ServerArgs,
         pipeline_name: str | None,
@@ -267,23 +267,6 @@ class LTX2DenoisingStage(DenoisingStage):
         if server_args.pipeline_class_name == "LTX2TwoStagePipeline":
             return False
         return pipeline_name != "LTX2TwoStagePipeline"
-
-    @classmethod
-    def _should_shard_ltx23_legacy_one_stage_audio_latents(
-        cls,
-        batch: Req,
-        server_args: ServerArgs,
-    ) -> bool:
-        return bool(
-            get_sp_world_size() > 1
-            and is_ltx23_native_variant(
-                server_args.pipeline_config.vae_config.arch_config
-            )
-            and cls._should_use_ltx23_legacy_one_stage(server_args, None)
-            and server_args.pipeline_config.can_shard_audio_latents_for_sp(
-                batch.audio_latents
-            )
-        )
 
     @classmethod
     def _ltx2_calculate_guided_x0(
@@ -590,13 +573,19 @@ class LTX2DenoisingStage(DenoisingStage):
         phase = batch.extra.get("ltx2_phase")
         pipeline = self.pipeline() if self.pipeline else None
         pipeline_name = pipeline.pipeline_name if pipeline is not None else None
-        ctx.use_ltx23_legacy_one_stage = self._should_use_ltx23_legacy_one_stage(
+        ctx.use_ltx23_native_one_stage_semantics = (
+            self._should_use_ltx23_native_one_stage_semantics(
             server_args, pipeline_name
+            )
         )
         ctx.stage = (
             phase
             if phase is not None
-            else ("stage1" if ctx.use_ltx23_legacy_one_stage else "one_stage")
+            else (
+                "stage1"
+                if ctx.use_ltx23_native_one_stage_semantics
+                else "one_stage"
+            )
         )
         ctx.audio_latents = batch.audio_latents
         # Video and audio keep separate scheduler state throughout the denoising loop.
@@ -606,7 +595,7 @@ class LTX2DenoisingStage(DenoisingStage):
         self._prepare_ltx2_image_latent(batch, server_args)
         do_ti2v = self._should_apply_ltx2_ti2v(batch)
 
-        if ctx.use_ltx23_legacy_one_stage:
+        if ctx.use_ltx23_native_one_stage_semantics:
             batch.ltx23_audio_replicated_for_sp = False
             batch.did_sp_shard_audio_latents = False
         else:
@@ -738,7 +727,7 @@ class LTX2DenoisingStage(DenoisingStage):
         # 3. Prepare any LTX-specific RoPE coordinates and timestep layouts.
         video_coords = None
         audio_coords = None
-        if not ctx.use_ltx23_legacy_one_stage:
+        if not ctx.use_ltx23_native_one_stage_semantics:
             video_coords = server_args.pipeline_config.prepare_video_rope_coords_for_sp(
                 step.current_model,
                 batch,
@@ -758,7 +747,10 @@ class LTX2DenoisingStage(DenoisingStage):
         timestep = step.t_device.expand(batch_size)
         if ctx.denoise_mask is not None:
             timestep_video = timestep.unsqueeze(-1) * ctx.denoise_mask.squeeze(-1)
-        elif ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage:
+        elif (
+            ctx.is_ltx23_variant
+            and not ctx.use_ltx23_native_one_stage_semantics
+        ):
             timestep_video = timestep.view(batch_size, 1).expand(
                 batch_size, int(latent_model_input.shape[1])
             )
@@ -767,7 +759,7 @@ class LTX2DenoisingStage(DenoisingStage):
 
         if (
             ctx.is_ltx23_variant
-            and not ctx.use_ltx23_legacy_one_stage
+            and not ctx.use_ltx23_native_one_stage_semantics
             and audio_latent_model_input.ndim == 3
         ):
             timestep_audio = timestep.view(batch_size, 1).expand(
@@ -778,7 +770,7 @@ class LTX2DenoisingStage(DenoisingStage):
 
         prompt_timestep_video = None
         prompt_timestep_audio = None
-        if ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage:
+        if ctx.is_ltx23_variant and not ctx.use_ltx23_native_one_stage_semantics:
             timestep_scale_multiplier = float(
                 getattr(step.current_model, "timestep_scale_multiplier", 1000)
             )
@@ -792,7 +784,7 @@ class LTX2DenoisingStage(DenoisingStage):
             ).expand(batch_size)
 
         # 4. Build attention masks that account for SP padding and replicated audio.
-        if ctx.use_ltx23_legacy_one_stage:
+        if ctx.use_ltx23_native_one_stage_semantics:
             video_self_attention_mask = None
             audio_self_attention_mask = None
             a2v_cross_attention_mask = None
@@ -844,7 +836,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 "return_latents": False,
                 "return_dict": False,
             }
-            if not ctx.use_ltx23_legacy_one_stage:
+            if not ctx.use_ltx23_native_one_stage_semantics:
                 kwargs.update(
                     {
                         "prompt_timestep": prompt_timestep_video,
@@ -854,7 +846,6 @@ class LTX2DenoisingStage(DenoisingStage):
                         "a2v_cross_attention_mask": a2v_cross_attention_mask,
                         "v2a_cross_attention_mask": v2a_cross_attention_mask,
                         "audio_replicated_for_sp": ctx.replicate_audio_for_sp,
-                        "legacy_ltx23_one_stage_semantics": False,
                     }
                 )
             if skip_video_self_attn_blocks is not None:
@@ -871,7 +862,8 @@ class LTX2DenoisingStage(DenoisingStage):
         prompt_attention_mask = self._get_ltx_prompt_attention_mask(
             batch,
             is_ltx23_variant=(
-                ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage
+                ctx.is_ltx23_variant
+                and not ctx.use_ltx23_native_one_stage_semantics
             ),
         )
         use_official_cfg_path = stage1_guider_params is None
@@ -901,7 +893,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 batch,
                                 is_ltx23_variant=(
                                     ctx.is_ltx23_variant
-                                    and not ctx.use_ltx23_legacy_one_stage
+                                    and not ctx.use_ltx23_native_one_stage_semantics
                                 ),
                                 negative=True,
                             ),
@@ -984,7 +976,8 @@ class LTX2DenoisingStage(DenoisingStage):
         negative_encoder_attention_mask = self._get_ltx_prompt_attention_mask(
             batch,
             is_ltx23_variant=(
-                ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage
+                ctx.is_ltx23_variant
+                and not ctx.use_ltx23_native_one_stage_semantics
             ),
             negative=True,
         )
@@ -1004,7 +997,7 @@ class LTX2DenoisingStage(DenoisingStage):
             or float(stage1_guider_params["audio_modality_scale"]) != 1.0
         )
 
-        if ctx.use_ltx23_legacy_one_stage:
+        if ctx.use_ltx23_native_one_stage_semantics:
             with set_forward_context(
                 current_timestep=step.step_index, attn_metadata=step.attn_metadata
             ):
