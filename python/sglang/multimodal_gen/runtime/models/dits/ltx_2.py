@@ -801,10 +801,17 @@ class LTX2FeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.proj_in(x)
-        x = self.act(x)
-        x, _ = self.proj_out(x)
-        return x
+        trace_ff = os.getenv("SGLANG_LTX2_PROBE_FF_INTERNAL_TRACE") == "1"
+        proj_in_out, _ = self.proj_in(x)
+        act_out = self.act(proj_in_out)
+        proj_out, _ = self.proj_out(act_out)
+        if trace_ff:
+            self._ltx2_probe_ff_trace = {
+                "proj_in": proj_in_out.detach().clone(),
+                "act": act_out.detach().clone(),
+                "proj_out": proj_out.detach().clone(),
+            }
+        return proj_out
 
 
 class LTX2TransformerBlock(nn.Module):

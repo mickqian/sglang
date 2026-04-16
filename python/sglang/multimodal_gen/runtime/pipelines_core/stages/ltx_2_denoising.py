@@ -387,6 +387,17 @@ class LTX2DenoisingStage(DenoisingStage):
             "audio_cond": cls._ltx2_probe_tensor_report(reference[3], candidate[3]),
         }
 
+    @classmethod
+    def _ltx2_probe_cond_pair_report(
+        cls,
+        reference: tuple[torch.Tensor, torch.Tensor],
+        candidate: tuple[torch.Tensor, torch.Tensor],
+    ) -> dict[str, object]:
+        return {
+            "uncond": cls._ltx2_probe_tensor_report(reference[0], candidate[0]),
+            "cond": cls._ltx2_probe_tensor_report(reference[1], candidate[1]),
+        }
+
     @staticmethod
     def _ltx2_probe_slice_model_kwargs(
         model_kwargs: dict[str, object], start: int, end: int
@@ -501,16 +512,25 @@ class LTX2DenoisingStage(DenoisingStage):
             )
         probe_block = step.current_model.transformer_blocks[probe_block_index]
         batched_actual_block_trace = getattr(probe_block, "_ltx2_probe_stage_trace", None)
+        batched_actual_audio_ff_trace = getattr(
+            probe_block.audio_ff, "_ltx2_probe_ff_trace", None
+        )
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             ref_video_uncond, ref_audio_uncond = step.current_model(**uncond_kwargs)
         ref_actual_block_trace_uncond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
+        ref_audio_ff_trace_uncond = getattr(
+            probe_block.audio_ff, "_ltx2_probe_ff_trace", None
+        )
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
             ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
         ref_actual_block_trace_cond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
+        ref_audio_ff_trace_cond = getattr(
+            probe_block.audio_ff, "_ltx2_probe_ff_trace", None
+        )
         with set_forward_context(
             current_timestep=step.step_index, attn_metadata=step.attn_metadata
         ):
@@ -922,6 +942,24 @@ class LTX2DenoisingStage(DenoisingStage):
                         batched_audio_stage[1:2].float(),
                     ),
                 )
+            if (
+                batched_actual_audio_ff_trace is not None
+                and ref_audio_ff_trace_uncond is not None
+                and ref_audio_ff_trace_cond is not None
+            ):
+                for ff_key in ("proj_in", "act", "proj_out"):
+                    pretrace[f"{actual_block_key}_audio_ff_{ff_key}"] = (
+                        self._ltx2_probe_cond_pair_report(
+                            (
+                                ref_audio_ff_trace_uncond[ff_key].float(),
+                                ref_audio_ff_trace_cond[ff_key].float(),
+                            ),
+                            (
+                                batched_actual_audio_ff_trace[ff_key][0:1].float(),
+                                batched_actual_audio_ff_trace[ff_key][1:2].float(),
+                            ),
+                        )
+                    )
 
         if (
             "num_frames" in model_kwargs
