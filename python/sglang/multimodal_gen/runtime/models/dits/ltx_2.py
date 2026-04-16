@@ -1280,14 +1280,39 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         if not skip_a2v_cross_attn:
-            a2v_attn_hidden_states = self.audio_to_video_attn(
-                mod_norm_hidden_states,
-                context=mod_norm_audio_hidden_states,
-                pe=ca_video_rotary_emb,
-                k_pe=ca_audio_rotary_emb,
-                mask=a2v_cross_attention_mask,
-                skip_sequence_parallel_override=audio_replicated_for_sp,
-            )
+            if (
+                os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+                and batch_size > 1
+            ):
+                a2v_attn_hidden_states = torch.cat(
+                    [
+                        self.audio_to_video_attn(
+                            mod_norm_hidden_states[idx : idx + 1],
+                            context=mod_norm_audio_hidden_states[idx : idx + 1],
+                            pe=_ltx2_probe_slice_pe(
+                                ca_video_rotary_emb, idx, batch_size
+                            ),
+                            k_pe=_ltx2_probe_slice_pe(
+                                ca_audio_rotary_emb, idx, batch_size
+                            ),
+                            mask=_ltx2_probe_slice_batch_arg(
+                                a2v_cross_attention_mask, idx, batch_size
+                            ),
+                            skip_sequence_parallel_override=audio_replicated_for_sp,
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                a2v_attn_hidden_states = self.audio_to_video_attn(
+                    mod_norm_hidden_states,
+                    context=mod_norm_audio_hidden_states,
+                    pe=ca_video_rotary_emb,
+                    k_pe=ca_audio_rotary_emb,
+                    mask=a2v_cross_attention_mask,
+                    skip_sequence_parallel_override=audio_replicated_for_sp,
+                )
             if a2v_cross_attn_perturbation_mask is not None:
                 a2v_attn_hidden_states = (
                     a2v_attn_hidden_states * a2v_cross_attn_perturbation_mask
@@ -1303,14 +1328,39 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         if not skip_v2a_cross_attn:
-            v2a_attn_hidden_states = self.video_to_audio_attn(
-                mod_norm_audio_hidden_states,
-                context=mod_norm_hidden_states,
-                pe=ca_audio_rotary_emb,
-                k_pe=ca_video_rotary_emb,
-                mask=v2a_cross_attention_mask,
-                gather_context_kv_for_sp=audio_replicated_for_sp,
-            )
+            if (
+                os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+                and batch_size > 1
+            ):
+                v2a_attn_hidden_states = torch.cat(
+                    [
+                        self.video_to_audio_attn(
+                            mod_norm_audio_hidden_states[idx : idx + 1],
+                            context=mod_norm_hidden_states[idx : idx + 1],
+                            pe=_ltx2_probe_slice_pe(
+                                ca_audio_rotary_emb, idx, batch_size
+                            ),
+                            k_pe=_ltx2_probe_slice_pe(
+                                ca_video_rotary_emb, idx, batch_size
+                            ),
+                            mask=_ltx2_probe_slice_batch_arg(
+                                v2a_cross_attention_mask, idx, batch_size
+                            ),
+                            gather_context_kv_for_sp=audio_replicated_for_sp,
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                v2a_attn_hidden_states = self.video_to_audio_attn(
+                    mod_norm_audio_hidden_states,
+                    context=mod_norm_hidden_states,
+                    pe=ca_audio_rotary_emb,
+                    k_pe=ca_video_rotary_emb,
+                    mask=v2a_cross_attention_mask,
+                    gather_context_kv_for_sp=audio_replicated_for_sp,
+                )
             if v2a_cross_attn_perturbation_mask is not None:
                 v2a_attn_hidden_states = (
                     v2a_attn_hidden_states * v2a_cross_attn_perturbation_mask
