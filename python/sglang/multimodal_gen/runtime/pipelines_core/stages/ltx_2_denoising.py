@@ -302,7 +302,7 @@ class LTX2DenoisingStage(DenoisingStage):
         *,
         step: object,
         pass_specs: list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor | None, object]],
-        selected_pass_names: list[str],
+        selected_pass_specs: list[tuple[str, str]],
         batch_size: int,
         batched_hidden_states: torch.Tensor,
         batched_audio_hidden_states: torch.Tensor,
@@ -330,10 +330,12 @@ class LTX2DenoisingStage(DenoisingStage):
         audio_num_frames_latent: int,
         replicate_audio_for_sp: bool,
     ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        pass_name_to_index = {
+            pass_name: idx for idx, (pass_name, *_rest) in enumerate(pass_specs)
+        }
         selected_pass_indices = [
-            idx
-            for idx, (pass_name, *_rest) in enumerate(pass_specs)
-            if pass_name in set(selected_pass_names)
+            pass_name_to_index[source_pass_name]
+            for _, source_pass_name in selected_pass_specs
         ]
         with set_forward_context(
             current_timestep=current_timestep,
@@ -437,11 +439,11 @@ class LTX2DenoisingStage(DenoisingStage):
         selected_video = selected_video.float()
         selected_audio = selected_audio.float()
         return {
-            pass_name: (video_chunk, audio_chunk)
-            for pass_name, video_chunk, audio_chunk in zip(
-                selected_pass_names,
-                selected_video.chunk(len(selected_pass_names), dim=0),
-                selected_audio.chunk(len(selected_pass_names), dim=0),
+            alias_name: (video_chunk, audio_chunk)
+            for (alias_name, _), video_chunk, audio_chunk in zip(
+                selected_pass_specs,
+                selected_video.chunk(len(selected_pass_specs), dim=0),
+                selected_audio.chunk(len(selected_pass_specs), dim=0),
                 strict=True,
             )
         }
@@ -2018,19 +2020,56 @@ class LTX2DenoisingStage(DenoisingStage):
                             return_latents=False,
                             return_dict=False,
                         )
-                    for probe_name, selected_pass_names in (
-                        ("cfg_only", ["cond", "neg"]),
-                        ("stg_only", ["cond", "perturbed"]),
-                        ("modality_only", ["cond", "modality"]),
-                        ("cfg_stg", ["cond", "neg", "perturbed"]),
-                        ("cfg_modality", ["cond", "neg", "modality"]),
-                        ("stg_modality", ["cond", "perturbed", "modality"]),
+                    for probe_name, selected_pass_specs in (
+                        ("cfg_only", [("cond", "cond"), ("neg", "neg")]),
+                        ("stg_only", [("cond", "cond"), ("perturbed", "perturbed")]),
+                        ("modality_only", [("cond", "cond"), ("modality", "modality")]),
+                        (
+                            "cfg_stg",
+                            [
+                                ("cond", "cond"),
+                                ("neg", "neg"),
+                                ("perturbed", "perturbed"),
+                            ],
+                        ),
+                        (
+                            "cfg_modality",
+                            [
+                                ("cond", "cond"),
+                                ("neg", "neg"),
+                                ("modality", "modality"),
+                            ],
+                        ),
+                        (
+                            "stg_modality",
+                            [
+                                ("cond", "cond"),
+                                ("perturbed", "perturbed"),
+                                ("modality", "modality"),
+                            ],
+                        ),
+                        (
+                            "cfg_dup_cond",
+                            [
+                                ("cond", "cond"),
+                                ("neg", "neg"),
+                                ("cond_dup", "cond"),
+                            ],
+                        ),
+                        (
+                            "cfg_dup_neg",
+                            [
+                                ("cond", "cond"),
+                                ("neg", "neg"),
+                                ("neg_dup", "neg"),
+                            ],
+                        ),
                     ):
                         probe_subset_pass_outputs[probe_name] = (
                             self._run_ltx2_probe_selected_batched_forward(
                                 step=step,
                                 pass_specs=pass_specs,
-                                selected_pass_names=selected_pass_names,
+                                selected_pass_specs=selected_pass_specs,
                                 batch_size=batch_size,
                                 batched_hidden_states=batched_hidden_states,
                                 batched_audio_hidden_states=batched_audio_hidden_states,
@@ -2316,7 +2355,13 @@ class LTX2DenoisingStage(DenoisingStage):
             subset_probe_reports: dict[str, object] = {}
             for probe_name, candidate_pass_outputs in probe_subset_pass_outputs.items():
                 reference_pass_outputs = {
-                    pass_name: pass_outputs[pass_name]
+                    pass_name: (
+                        pass_outputs["cond"]
+                        if pass_name == "cond_dup"
+                        else pass_outputs["neg"]
+                        if pass_name == "neg_dup"
+                        else pass_outputs[pass_name]
+                    )
                     for pass_name in candidate_pass_outputs.keys()
                 }
                 subset_probe_reports[probe_name] = (
