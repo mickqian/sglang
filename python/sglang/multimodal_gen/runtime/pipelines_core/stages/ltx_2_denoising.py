@@ -339,15 +339,16 @@ class LTX2DenoisingStage(DenoisingStage):
                 }
             )
             if (
-                ctx.stage == "stage1"
-                and perturbation_configs is None
-                and batch.do_classifier_free_guidance
+                batch.do_classifier_free_guidance
                 and int(latent_model_input.shape[0]) > 1
             ):
-                # Sequential attention per batch item for CFG B=2.
-                # Although single-step probe shows only ~1 ULP drift with FA,
-                # over 30 denoising steps this accumulates to ~22 dB PSNR
-                # difference (visually significant) due to iterative scheduler.
+                # Sequential attention per batch item for batched forwards.
+                # FA attention kernels produce different results at B>1 vs B=1
+                # due to tiling/accumulation differences. Over 30 denoising
+                # steps this compounds to visible artifacts (~22 dB PSNR).
+                # Sequential alignment makes each item's attention independent,
+                # giving B-invariant results while still batching non-attention
+                # ops (patchify, adaln, FFN, projections).
                 kwargs["ltx2_align_all_self_attn"] = True
                 kwargs["ltx2_align_all_prompt_cross_attn"] = True
                 kwargs["ltx2_align_all_av_cross_attn"] = True
@@ -2701,32 +2702,102 @@ class LTX2DenoisingStage(DenoisingStage):
             or float(stage1_guider_params["audio_modality_scale"]) != 1.0
         )
 
+        # Build all-batched guider forward: combine CFG + aux passes in a
+        # single forward call. With sequential attention alignment enabled
+        # (for batch_size > 1), each item's attention is computed independently
+        # while non-attention ops (patchify, adaln, FFN) benefit from batching.
+        _no_perturbation = {
+            "skip_video_self_attn_blocks": (),
+            "skip_audio_self_attn_blocks": (),
+            "skip_a2v_cross_attn": False,
+            "skip_v2a_cross_attn": False,
+        }
+        pass_specs: list[tuple[str, dict, torch.Tensor, torch.Tensor, torch.Tensor | None]] = [
+            ("neg", _no_perturbation, negative_encoder_hidden_states, negative_audio_encoder_hidden_states, negative_encoder_attention_mask),
+            ("pos", _no_perturbation, encoder_hidden_states, audio_encoder_hidden_states, encoder_attention_mask),
+        ]
+        if need_perturbed:
+            pass_specs.append((
+                "perturbed",
+                {
+                    "skip_video_self_attn_blocks": tuple(stage1_guider_params["video_stg_blocks"]),
+                    "skip_audio_self_attn_blocks": tuple(stage1_guider_params["audio_stg_blocks"]),
+                    "skip_a2v_cross_attn": False,
+                    "skip_v2a_cross_attn": False,
+                },
+                encoder_hidden_states, audio_encoder_hidden_states, encoder_attention_mask,
+            ))
+        if need_modality:
+            pass_specs.append((
+                "modality",
+                {
+                    "skip_video_self_attn_blocks": (),
+                    "skip_audio_self_attn_blocks": (),
+                    "skip_a2v_cross_attn": True,
+                    "skip_v2a_cross_attn": True,
+                },
+                encoder_hidden_states, audio_encoder_hidden_states, encoder_attention_mask,
+            ))
+
         if use_single_gpu_batched_forward:
-            v_neg, v_pos, a_v_neg, a_v_pos = self._run_ltx2_cfg_batched_forward(
-                step=step,
-                latent_model_input=latent_model_input,
-                audio_latent_model_input=audio_latent_model_input,
-                encoder_hidden_states=encoder_hidden_states,
-                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                negative_encoder_hidden_states=negative_encoder_hidden_states,
-                negative_audio_encoder_hidden_states=negative_audio_encoder_hidden_states,
-                timestep_video=timestep_video,
-                timestep_audio=timestep_audio,
-                encoder_attention_mask=encoder_attention_mask,
-                negative_encoder_attention_mask=negative_encoder_attention_mask,
+            num_passes = len(pass_specs)
+            all_batch_size = batch_size * num_passes
+            perturbation_configs = tuple(
+                cfg for _, cfg, _, _, _ in pass_specs
+                for _ in range(batch_size)
+            )
+            batched_encoder_hs = torch.cat([hs for _, _, hs, _, _ in pass_specs], dim=0)
+            batched_audio_encoder_hs = torch.cat([ahs for _, _, _, ahs, _ in pass_specs], dim=0)
+            batched_encoder_mask = None
+            if any(m is not None for _, _, _, _, m in pass_specs):
+                batched_encoder_mask = torch.cat(
+                    [m for _, _, _, _, m in pass_specs if m is not None], dim=0
+                )
+            model_kwargs = self._build_ltx2_model_kwargs(
+                latent_model_input=self._repeat_batch_dim(
+                    latent_model_input, all_batch_size
+                ),
+                audio_latent_model_input=self._repeat_batch_dim(
+                    audio_latent_model_input, all_batch_size
+                ),
+                encoder_hidden_states=batched_encoder_hs,
+                audio_encoder_hidden_states=batched_audio_encoder_hs,
+                timestep_video=self._repeat_batch_dim(timestep_video, all_batch_size),
+                timestep_audio=self._repeat_batch_dim(timestep_audio, all_batch_size),
+                encoder_attention_mask=batched_encoder_mask,
                 ctx=ctx,
                 batch=batch,
-                batch_size=batch_size,
                 audio_num_frames_latent=audio_num_frames_latent,
                 video_coords=video_coords,
                 audio_coords=audio_coords,
-                prompt_timestep_video=prompt_timestep_video,
-                prompt_timestep_audio=prompt_timestep_audio,
-                video_self_attention_mask=video_self_attention_mask,
-                audio_self_attention_mask=audio_self_attention_mask,
-                a2v_cross_attention_mask=a2v_cross_attention_mask,
-                v2a_cross_attention_mask=v2a_cross_attention_mask,
+                prompt_timestep_video=self._repeat_batch_dim_or_none(
+                    prompt_timestep_video, all_batch_size
+                ),
+                prompt_timestep_audio=self._repeat_batch_dim_or_none(
+                    prompt_timestep_audio, all_batch_size
+                ),
+                video_self_attention_mask=self._repeat_batch_dim_or_none(
+                    video_self_attention_mask, all_batch_size
+                ),
+                audio_self_attention_mask=self._repeat_batch_dim_or_none(
+                    audio_self_attention_mask, all_batch_size
+                ),
+                a2v_cross_attention_mask=self._repeat_batch_dim_or_none(
+                    a2v_cross_attention_mask, all_batch_size
+                ),
+                v2a_cross_attention_mask=self._repeat_batch_dim_or_none(
+                    v2a_cross_attention_mask, all_batch_size
+                ),
+                perturbation_configs=perturbation_configs,
             )
+            batched_video, batched_audio = self._run_ltx2_model_forward(
+                step=step, model_kwargs=model_kwargs
+            )
+            video_chunks = batched_video.chunk(num_passes, dim=0)
+            audio_chunks = batched_audio.chunk(num_passes, dim=0)
+            outputs = {name: (vc, ac) for (name, _, _, _, _), vc, ac in zip(pass_specs, video_chunks, audio_chunks)}
+            v_neg, a_v_neg = outputs["neg"]
+            v_pos, a_v_pos = outputs["pos"]
         else:
             v_pos, a_v_pos = self._run_ltx2_stage1_aux_forward(
                 step=step,
@@ -2775,8 +2846,13 @@ class LTX2DenoisingStage(DenoisingStage):
         a_v_ptb = None
         v_mod = None
         a_v_mod = None
-        if need_perturbed:
-            if not use_single_gpu_batched_forward:
+        if use_single_gpu_batched_forward:
+            if need_perturbed:
+                v_ptb, a_v_ptb = outputs["perturbed"]
+            if need_modality:
+                v_mod, a_v_mod = outputs["modality"]
+        else:
+            if need_perturbed:
                 v_ptb, a_v_ptb = self._run_ltx2_stage1_aux_forward(
                     step=step,
                     latent_model_input=latent_model_input,
@@ -2804,36 +2880,8 @@ class LTX2DenoisingStage(DenoisingStage):
                         stage1_guider_params["audio_stg_blocks"]
                     ),
                 )
-                if need_modality:
-                    v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
-                        step=step,
-                        latent_model_input=latent_model_input,
-                        audio_latent_model_input=audio_latent_model_input,
-                        encoder_hidden_states=encoder_hidden_states,
-                        audio_encoder_hidden_states=audio_encoder_hidden_states,
-                        timestep_video=timestep_video,
-                        timestep_audio=timestep_audio,
-                        encoder_attention_mask=encoder_attention_mask,
-                        ctx=ctx,
-                        batch=batch,
-                        audio_num_frames_latent=audio_num_frames_latent,
-                        video_coords=video_coords,
-                        audio_coords=audio_coords,
-                        prompt_timestep_video=prompt_timestep_video,
-                        prompt_timestep_audio=prompt_timestep_audio,
-                        video_self_attention_mask=video_self_attention_mask,
-                        audio_self_attention_mask=audio_self_attention_mask,
-                        a2v_cross_attention_mask=a2v_cross_attention_mask,
-                        v2a_cross_attention_mask=v2a_cross_attention_mask,
-                        disable_a2v_cross_attn=True,
-                        disable_v2a_cross_attn=True,
-                    )
-            else:
-                # Sequential aux forward for each pass to avoid heterogeneous
-                # perturbation_configs batching drift. Batching perturbed+modality
-                # as B=2 with different perturbation_configs causes 22 dB PSNR
-                # degradation over 30 denoising steps.
-                v_ptb, a_v_ptb = self._run_ltx2_stage1_aux_forward(
+            if need_modality:
+                v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
                     step=step,
                     latent_model_input=latent_model_input,
                     audio_latent_model_input=audio_latent_model_input,
@@ -2853,61 +2901,9 @@ class LTX2DenoisingStage(DenoisingStage):
                     audio_self_attention_mask=audio_self_attention_mask,
                     a2v_cross_attention_mask=a2v_cross_attention_mask,
                     v2a_cross_attention_mask=v2a_cross_attention_mask,
-                    skip_video_self_attn_blocks=tuple(
-                        stage1_guider_params["video_stg_blocks"]
-                    ),
-                    skip_audio_self_attn_blocks=tuple(
-                        stage1_guider_params["audio_stg_blocks"]
-                    ),
+                    disable_a2v_cross_attn=True,
+                    disable_v2a_cross_attn=True,
                 )
-                if need_modality:
-                    v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
-                        step=step,
-                        latent_model_input=latent_model_input,
-                        audio_latent_model_input=audio_latent_model_input,
-                        encoder_hidden_states=encoder_hidden_states,
-                        audio_encoder_hidden_states=audio_encoder_hidden_states,
-                        timestep_video=timestep_video,
-                        timestep_audio=timestep_audio,
-                        encoder_attention_mask=encoder_attention_mask,
-                        ctx=ctx,
-                        batch=batch,
-                        audio_num_frames_latent=audio_num_frames_latent,
-                        video_coords=video_coords,
-                        audio_coords=audio_coords,
-                        prompt_timestep_video=prompt_timestep_video,
-                        prompt_timestep_audio=prompt_timestep_audio,
-                        video_self_attention_mask=video_self_attention_mask,
-                        audio_self_attention_mask=audio_self_attention_mask,
-                        a2v_cross_attention_mask=a2v_cross_attention_mask,
-                        v2a_cross_attention_mask=v2a_cross_attention_mask,
-                        disable_a2v_cross_attn=True,
-                        disable_v2a_cross_attn=True,
-                    )
-        elif need_modality:
-            v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
-                step=step,
-                latent_model_input=latent_model_input,
-                audio_latent_model_input=audio_latent_model_input,
-                encoder_hidden_states=encoder_hidden_states,
-                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                timestep_video=timestep_video,
-                timestep_audio=timestep_audio,
-                encoder_attention_mask=encoder_attention_mask,
-                ctx=ctx,
-                batch=batch,
-                audio_num_frames_latent=audio_num_frames_latent,
-                video_coords=video_coords,
-                audio_coords=audio_coords,
-                prompt_timestep_video=prompt_timestep_video,
-                prompt_timestep_audio=prompt_timestep_audio,
-                video_self_attention_mask=video_self_attention_mask,
-                audio_self_attention_mask=audio_self_attention_mask,
-                a2v_cross_attention_mask=a2v_cross_attention_mask,
-                v2a_cross_attention_mask=v2a_cross_attention_mask,
-                disable_a2v_cross_attn=True,
-                disable_v2a_cross_attn=True,
-            )
 
         sigma_val = float(sigma.item())
         video_sigma_for_x0: float | torch.Tensor = sigma_val
