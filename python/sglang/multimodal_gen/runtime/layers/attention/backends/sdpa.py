@@ -85,5 +85,5 @@ class SDPAImpl(AttentionImpl):
             output = torch.nn.functional.scaled_dot_product_attention(
                 query, key, value, **attn_kwargs
             )
-        output = output.transpose(1, 2)
+        output = output.transpose(1, 2).contiguous()
         return output
