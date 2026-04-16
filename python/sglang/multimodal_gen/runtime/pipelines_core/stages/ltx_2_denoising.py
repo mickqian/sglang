@@ -519,33 +519,29 @@ class LTX2DenoisingStage(DenoisingStage):
 
     @staticmethod
     def _ltx2_probe_merge_model_kwargs(
-        first: dict[str, object], second: dict[str, object]
+        *items: dict[str, object],
     ) -> dict[str, object]:
+        if len(items) < 2:
+            raise ValueError("Need at least 2 kwargs dicts to merge")
         merged: dict[str, object] = {}
-        for key in first.keys() | second.keys():
-            first_value = first.get(key)
-            second_value = second.get(key)
-            if (
-                isinstance(first_value, torch.Tensor)
-                and isinstance(second_value, torch.Tensor)
-                and first_value.ndim > 0
-                and second_value.ndim > 0
-                and first_value.shape[1:] == second_value.shape[1:]
-            ):
-                merged[key] = torch.cat([first_value, second_value], dim=0)
-            elif (
-                isinstance(first_value, tuple)
-                and isinstance(second_value, tuple)
-                and len(first_value) == len(second_value)
-            ):
+        all_keys: set[str] = set()
+        for d in items:
+            all_keys |= d.keys()
+        for key in all_keys:
+            values = [d.get(key) for d in items]
+            if all(
+                isinstance(v, torch.Tensor) and v.ndim > 0 for v in values
+            ) and len({v.shape[1:] for v in values}) == 1:
+                merged[key] = torch.cat(values, dim=0)
+            elif all(isinstance(v, tuple) for v in values) and len({len(v) for v in values}) == 1:
                 merged[key] = tuple(
-                    first_item + second_item
-                    if isinstance(first_item, tuple) and isinstance(second_item, tuple)
-                    else first_item
-                    for first_item, second_item in zip(first_value, second_value)
+                    sum(sub_items[1:], sub_items[0])
+                    if all(isinstance(si, tuple) for si in sub_items)
+                    else sub_items[0]
+                    for sub_items in zip(*values)
                 )
             else:
-                merged[key] = first_value
+                merged[key] = values[0]
         return merged
 
     def _ltx2_probe_output_path(self) -> str | None:
@@ -1419,6 +1415,55 @@ class LTX2DenoisingStage(DenoisingStage):
                         )
                     )
 
+        # B=3 test: batch [uncond, cond, uncond_dup] and compare each item
+        # against the B=1 reference to measure batch-size-dependent drift.
+        b3_test: dict[str, object] | None = None
+        if not is_sp_pair_probe:
+            uncond_kwargs_dup = self._ltx2_probe_clone_model_kwargs(uncond_kwargs)
+            b3_kwargs = self._ltx2_probe_merge_model_kwargs(
+                uncond_kwargs, cond_kwargs, uncond_kwargs_dup
+            )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                b3_video, b3_audio = step.current_model(**b3_kwargs)
+            b3_video = b3_video.float()
+            b3_audio = b3_audio.float()
+            b3_test = {
+                "item0_vs_ref_uncond": {
+                    "video": self._ltx2_probe_tensor_report(
+                        ref_video_uncond.float(), b3_video[0:1]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        ref_audio_uncond.float(), b3_audio[0:1]
+                    ),
+                },
+                "item1_vs_ref_cond": {
+                    "video": self._ltx2_probe_tensor_report(
+                        ref_video_cond.float(), b3_video[1:2]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        ref_audio_cond.float(), b3_audio[1:2]
+                    ),
+                },
+                "item2_vs_ref_uncond_dup": {
+                    "video": self._ltx2_probe_tensor_report(
+                        ref_video_uncond.float(), b3_video[2:3]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        ref_audio_uncond.float(), b3_audio[2:3]
+                    ),
+                },
+                "item0_vs_item2_self_consistency": {
+                    "video": self._ltx2_probe_tensor_report(
+                        b3_video[0:1], b3_video[2:3]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        b3_audio[0:1], b3_audio[2:3]
+                    ),
+                },
+            }
+
         self._write_ltx2_probe_state(
             {
                 "official_cfg": self._ltx2_probe_cfg_report_from_batched_tensors(
@@ -1444,6 +1489,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     ),
                 ),
                 "official_cfg_pretrace": pretrace,
+                "b3_test": b3_test,
             }
         )
 

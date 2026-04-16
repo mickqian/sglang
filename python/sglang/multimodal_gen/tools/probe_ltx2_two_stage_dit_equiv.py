@@ -84,22 +84,23 @@ def _build_sampling_params(args: argparse.Namespace, server_args: ServerArgs) ->
 
 
 def _merge_model_kwargs(
-    first: dict[str, object], second: dict[str, object]
+    *items: dict[str, object],
 ) -> dict[str, object]:
+    if len(items) < 2:
+        raise ValueError("Need at least 2 kwargs dicts to merge")
     merged: dict[str, object] = {}
-    for key in first.keys() | second.keys():
-        first_value = first.get(key)
-        second_value = second.get(key)
-        if (
-            isinstance(first_value, torch.Tensor)
-            and isinstance(second_value, torch.Tensor)
-            and first_value.ndim > 0
-            and second_value.ndim > 0
-            and first_value.shape[1:] == second_value.shape[1:]
-        ):
-            merged[key] = torch.cat([first_value, second_value], dim=0)
+    all_keys = set()
+    for d in items:
+        all_keys |= d.keys()
+    for key in all_keys:
+        values = [d.get(key) for d in items]
+        if all(
+            isinstance(v, torch.Tensor) and v.ndim > 0
+            for v in values
+        ) and len({v.shape[1:] for v in values}) == 1:
+            merged[key] = torch.cat(values, dim=0)
             continue
-        merged[key] = first_value
+        merged[key] = values[0]
     return merged
 
 
@@ -296,15 +297,17 @@ def _install_probe_hooks() -> dict[str, object]:
         if not (hidden_states.shape[0] == 2 and encoder_hidden_states.shape[0] == 2):
             return candidate
 
+        uncond_kwargs = _slice_model_kwargs(model_kwargs, 0, 1)
+        cond_kwargs = _slice_model_kwargs(model_kwargs, 1, 2)
         state["in_model_forward_probe"] = True
         try:
             uncond = orig_model_forward(
                 step=step,
-                model_kwargs=_slice_model_kwargs(model_kwargs, 0, 1),
+                model_kwargs=uncond_kwargs,
             )
             cond = orig_model_forward(
                 step=step,
-                model_kwargs=_slice_model_kwargs(model_kwargs, 1, 2),
+                model_kwargs=cond_kwargs,
             )
         finally:
             state["in_model_forward_probe"] = False
@@ -318,6 +321,38 @@ def _install_probe_hooks() -> dict[str, object]:
                 candidate[1][1:2],
             ),
         )
+
+        # B=3 test: batch [uncond, cond, uncond_dup] and compare each
+        # item against individual B=1 references.
+        uncond_kwargs_clone = {
+            k: v.detach().clone() if isinstance(v, torch.Tensor) else v
+            for k, v in uncond_kwargs.items()
+        }
+        b3_kwargs = _merge_model_kwargs(uncond_kwargs, cond_kwargs, uncond_kwargs_clone)
+        state["in_model_forward_probe"] = True
+        try:
+            b3_out = orig_model_forward(step=step, model_kwargs=b3_kwargs)
+        finally:
+            state["in_model_forward_probe"] = False
+        state["b3_test"] = {
+            "item0_vs_ref_uncond": {
+                "video": _tensor_report(uncond[0], b3_out[0][0:1]),
+                "audio": _tensor_report(uncond[1], b3_out[1][0:1]),
+            },
+            "item1_vs_ref_cond": {
+                "video": _tensor_report(cond[0], b3_out[0][1:2]),
+                "audio": _tensor_report(cond[1], b3_out[1][1:2]),
+            },
+            "item2_vs_ref_uncond_dup": {
+                "video": _tensor_report(uncond[0], b3_out[0][2:3]),
+                "audio": _tensor_report(uncond[1], b3_out[1][2:3]),
+            },
+            "item0_vs_item2_self_consistency": {
+                "video": _tensor_report(b3_out[0][0:1], b3_out[0][2:3]),
+                "audio": _tensor_report(b3_out[1][0:1], b3_out[1][2:3]),
+            },
+        }
+
         return candidate
 
     def patched_run_step(
