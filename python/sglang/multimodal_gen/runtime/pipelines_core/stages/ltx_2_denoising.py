@@ -668,6 +668,40 @@ class LTX2DenoisingStage(DenoisingStage):
             ),
         }
 
+    @staticmethod
+    def _ltx2_probe_delta_relation_report(
+        lhs_reference: torch.Tensor,
+        lhs_candidate: torch.Tensor,
+        rhs_reference: torch.Tensor,
+        rhs_candidate: torch.Tensor,
+    ) -> dict[str, object]:
+        lhs_error = (lhs_candidate.detach().float() - lhs_reference.detach().float()).cpu()
+        rhs_error = (rhs_candidate.detach().float() - rhs_reference.detach().float()).cpu()
+        delta_error = lhs_error - rhs_error
+        lhs_error_flat = lhs_error.reshape(1, -1)
+        rhs_error_flat = rhs_error.reshape(1, -1)
+        lhs_mean_abs = float(lhs_error.abs().mean().item())
+        rhs_mean_abs = float(rhs_error.abs().mean().item())
+        delta_mean_abs = float(delta_error.abs().mean().item())
+        return {
+            "lhs_error_mean_abs": lhs_mean_abs,
+            "rhs_error_mean_abs": rhs_mean_abs,
+            "delta_error_mean_abs": delta_mean_abs,
+            "delta_vs_lhs_ratio": float(
+                delta_mean_abs / lhs_mean_abs if lhs_mean_abs > 0.0 else 0.0
+            ),
+            "delta_vs_rhs_ratio": float(
+                delta_mean_abs / rhs_mean_abs if rhs_mean_abs > 0.0 else 0.0
+            ),
+            "error_cosine": float(
+                torch.nn.functional.cosine_similarity(
+                    lhs_error_flat,
+                    rhs_error_flat,
+                    dim=1,
+                ).item()
+            ),
+        }
+
     @classmethod
     def _ltx2_probe_guidance_components_report(
         cls,
@@ -702,6 +736,12 @@ class LTX2DenoisingStage(DenoisingStage):
                 (cfg_scale - 1.0) * text_delta_reference,
                 (cfg_scale - 1.0) * text_delta_candidate,
             ),
+            "cfg_relation": cls._ltx2_probe_delta_relation_report(
+                cond_reference,
+                cond_candidate,
+                uncond_text_reference,
+                uncond_text_candidate,
+            ),
         }
 
         pred_reference = cond_reference + (cfg_scale - 1.0) * text_delta_reference
@@ -723,6 +763,12 @@ class LTX2DenoisingStage(DenoisingStage):
                 stg_scale * perturbed_delta_reference,
                 stg_scale * perturbed_delta_candidate,
             )
+            report["stg_relation"] = cls._ltx2_probe_delta_relation_report(
+                cond_reference,
+                cond_candidate,
+                uncond_perturbed_reference,
+                uncond_perturbed_candidate,
+            )
             pred_reference = pred_reference + stg_scale * perturbed_delta_reference
             pred_candidate = pred_candidate + stg_scale * perturbed_delta_candidate
 
@@ -741,6 +787,12 @@ class LTX2DenoisingStage(DenoisingStage):
             report["modality_term"] = cls._ltx2_probe_tensor_report(
                 (modality_scale - 1.0) * modality_delta_reference,
                 (modality_scale - 1.0) * modality_delta_candidate,
+            )
+            report["modality_relation"] = cls._ltx2_probe_delta_relation_report(
+                cond_reference,
+                cond_candidate,
+                uncond_modality_reference,
+                uncond_modality_candidate,
             )
             pred_reference = pred_reference + (
                 modality_scale - 1.0

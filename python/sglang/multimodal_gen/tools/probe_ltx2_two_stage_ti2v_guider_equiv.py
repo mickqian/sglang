@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import traceback
 from pathlib import Path
@@ -104,7 +105,28 @@ def main() -> None:
         generator._send_to_scheduler_and_wait_for_response([req])
         if not output_path.exists():
             raise RuntimeError("split/batched probe did not produce runtime output")
-        print(output_path.read_text(encoding="utf-8"), end="", flush=True)
+        output_text = output_path.read_text(encoding="utf-8")
+        print(output_text, end="", flush=True)
+        try:
+            payload = json.loads(output_text)
+            components = payload.get("guidance_components", {})
+            guided = payload.get("guided_x0", {})
+            for modality in ("video", "audio"):
+                modality_guided = guided.get(modality, {})
+                modality_components = components.get(modality, {})
+                cfg_term = modality_components.get("cfg_term", {})
+                cfg_relation = modality_components.get("cfg_relation", {})
+                print(
+                    (
+                        f"\n[{modality}] guided_mean_abs={modality_guided.get('mean_abs_diff')} "
+                        f"cfg_mean_abs={cfg_term.get('mean_abs_diff')} "
+                        f"cfg_delta_mean_abs={cfg_relation.get('delta_error_mean_abs')} "
+                        f"cfg_error_cosine={cfg_relation.get('error_cosine')}"
+                    ),
+                    flush=True,
+                )
+        except Exception:
+            pass
     except Exception:
         traceback.print_exc()
         raise
