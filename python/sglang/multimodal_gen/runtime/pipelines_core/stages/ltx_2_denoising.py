@@ -1475,6 +1475,55 @@ class LTX2DenoisingStage(DenoisingStage):
                 },
             }
 
+        # B=4 test: batch [uncond, cond, uncond_dup, cond_dup]
+        b4_test: dict[str, object] | None = None
+        if not is_sp_pair_probe:
+            cond_kwargs_dup = self._ltx2_probe_clone_model_kwargs(cond_kwargs)
+            uncond_kwargs_dup2 = self._ltx2_probe_clone_model_kwargs(uncond_kwargs)
+            b4_kwargs = self._ltx2_probe_merge_model_kwargs(
+                uncond_kwargs, cond_kwargs, uncond_kwargs_dup2, cond_kwargs_dup
+            )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                b4_video, b4_audio = step.current_model(**b4_kwargs)
+            b4_video = b4_video.float()
+            b4_audio = b4_audio.float()
+            b4_test = {
+                "item0_vs_ref_uncond": {
+                    "video": self._ltx2_probe_tensor_report(
+                        ref_video_uncond.float(), b4_video[0:1]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        ref_audio_uncond.float(), b4_audio[0:1]
+                    ),
+                },
+                "item1_vs_ref_cond": {
+                    "video": self._ltx2_probe_tensor_report(
+                        ref_video_cond.float(), b4_video[1:2]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        ref_audio_cond.float(), b4_audio[1:2]
+                    ),
+                },
+                "item0_vs_item2_self_consistency": {
+                    "video": self._ltx2_probe_tensor_report(
+                        b4_video[0:1], b4_video[2:3]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        b4_audio[0:1], b4_audio[2:3]
+                    ),
+                },
+                "item1_vs_item3_self_consistency": {
+                    "video": self._ltx2_probe_tensor_report(
+                        b4_video[1:2], b4_video[3:4]
+                    ),
+                    "audio": self._ltx2_probe_tensor_report(
+                        b4_audio[1:2], b4_audio[3:4]
+                    ),
+                },
+            }
+
         self._write_ltx2_probe_state(
             {
                 "official_cfg": self._ltx2_probe_cfg_report_from_batched_tensors(
@@ -1501,6 +1550,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 ),
                 "official_cfg_pretrace": pretrace,
                 "b3_test": b3_test,
+                "b4_test": b4_test,
             }
         )
 
