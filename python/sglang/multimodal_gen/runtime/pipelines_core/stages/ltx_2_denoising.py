@@ -2022,6 +2022,9 @@ class LTX2DenoisingStage(DenoisingStage):
                         ("cfg_only", ["cond", "neg"]),
                         ("stg_only", ["cond", "perturbed"]),
                         ("modality_only", ["cond", "modality"]),
+                        ("cfg_stg", ["cond", "neg", "perturbed"]),
+                        ("cfg_modality", ["cond", "neg", "modality"]),
+                        ("stg_modality", ["cond", "perturbed", "modality"]),
                     ):
                         probe_subset_pass_outputs[probe_name] = (
                             self._run_ltx2_probe_selected_batched_forward(
