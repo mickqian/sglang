@@ -2779,34 +2779,11 @@ class LTX2DenoisingStage(DenoisingStage):
                         disable_v2a_cross_attn=True,
                     )
             else:
-                pass_specs = [
-                    (
-                        "perturbed",
-                        {
-                            "skip_video_self_attn_blocks": tuple(
-                                stage1_guider_params["video_stg_blocks"]
-                            ),
-                            "skip_audio_self_attn_blocks": tuple(
-                                stage1_guider_params["audio_stg_blocks"]
-                            ),
-                            "skip_a2v_cross_attn": False,
-                            "skip_v2a_cross_attn": False,
-                        },
-                    )
-                ]
-                if need_modality:
-                    pass_specs.append(
-                        (
-                            "modality",
-                            {
-                                "skip_video_self_attn_blocks": (),
-                                "skip_audio_self_attn_blocks": (),
-                                "skip_a2v_cross_attn": True,
-                                "skip_v2a_cross_attn": True,
-                            },
-                        )
-                    )
-                aux_outputs = self._run_ltx2_stage1_batched_aux_forward(
+                # Sequential aux forward for each pass to avoid heterogeneous
+                # perturbation_configs batching drift. Batching perturbed+modality
+                # as B=2 with different perturbation_configs causes 22 dB PSNR
+                # degradation over 30 denoising steps.
+                v_ptb, a_v_ptb = self._run_ltx2_stage1_aux_forward(
                     step=step,
                     latent_model_input=latent_model_input,
                     audio_latent_model_input=audio_latent_model_input,
@@ -2817,7 +2794,6 @@ class LTX2DenoisingStage(DenoisingStage):
                     encoder_attention_mask=encoder_attention_mask,
                     ctx=ctx,
                     batch=batch,
-                    batch_size=batch_size,
                     audio_num_frames_latent=audio_num_frames_latent,
                     video_coords=video_coords,
                     audio_coords=audio_coords,
@@ -2827,10 +2803,37 @@ class LTX2DenoisingStage(DenoisingStage):
                     audio_self_attention_mask=audio_self_attention_mask,
                     a2v_cross_attention_mask=a2v_cross_attention_mask,
                     v2a_cross_attention_mask=v2a_cross_attention_mask,
-                    pass_specs=pass_specs,
+                    skip_video_self_attn_blocks=tuple(
+                        stage1_guider_params["video_stg_blocks"]
+                    ),
+                    skip_audio_self_attn_blocks=tuple(
+                        stage1_guider_params["audio_stg_blocks"]
+                    ),
                 )
-                v_ptb, a_v_ptb = aux_outputs["perturbed"]
-                v_mod, a_v_mod = aux_outputs.get("modality", (None, None))
+                if need_modality:
+                    v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
+                        step=step,
+                        latent_model_input=latent_model_input,
+                        audio_latent_model_input=audio_latent_model_input,
+                        encoder_hidden_states=encoder_hidden_states,
+                        audio_encoder_hidden_states=audio_encoder_hidden_states,
+                        timestep_video=timestep_video,
+                        timestep_audio=timestep_audio,
+                        encoder_attention_mask=encoder_attention_mask,
+                        ctx=ctx,
+                        batch=batch,
+                        audio_num_frames_latent=audio_num_frames_latent,
+                        video_coords=video_coords,
+                        audio_coords=audio_coords,
+                        prompt_timestep_video=prompt_timestep_video,
+                        prompt_timestep_audio=prompt_timestep_audio,
+                        video_self_attention_mask=video_self_attention_mask,
+                        audio_self_attention_mask=audio_self_attention_mask,
+                        a2v_cross_attention_mask=a2v_cross_attention_mask,
+                        v2a_cross_attention_mask=v2a_cross_attention_mask,
+                        disable_a2v_cross_attn=True,
+                        disable_v2a_cross_attn=True,
+                    )
         elif need_modality:
             v_mod, a_v_mod = self._run_ltx2_stage1_aux_forward(
                 step=step,
