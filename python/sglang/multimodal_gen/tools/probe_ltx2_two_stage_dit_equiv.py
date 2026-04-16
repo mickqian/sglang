@@ -83,6 +83,26 @@ def _build_sampling_params(args: argparse.Namespace, server_args: ServerArgs) ->
     )
 
 
+def _merge_model_kwargs(
+    first: dict[str, object], second: dict[str, object]
+) -> dict[str, object]:
+    merged: dict[str, object] = {}
+    for key in first.keys() | second.keys():
+        first_value = first.get(key)
+        second_value = second.get(key)
+        if (
+            isinstance(first_value, torch.Tensor)
+            and isinstance(second_value, torch.Tensor)
+            and first_value.ndim > 0
+            and second_value.ndim > 0
+            and first_value.shape[1:] == second_value.shape[1:]
+        ):
+            merged[key] = torch.cat([first_value, second_value], dim=0)
+            continue
+        merged[key] = first_value
+    return merged
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -109,6 +129,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-port", type=int, default=5861)
     parser.add_argument("--master-port", type=int, default=32221)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--force-sdpa-math",
+        action="store_true",
+        help="Force SDPA math backend to test if kernel selection causes B=3 drift",
+    )
     return parser.parse_args()
 
 
@@ -120,6 +145,7 @@ def _install_probe_hooks() -> dict[str, object]:
         "current_stage": None,
         "in_model_forward_probe": False,
         "model_forward_calls": [],
+        "sequential_pair": [],
     }
     orig_cfg_batched = LTX2DenoisingStage._run_ltx2_cfg_batched_forward
     orig_cfg_seq = LTX2DenoisingStage._run_ltx2_cfg_sequential_forward
@@ -220,11 +246,54 @@ def _install_probe_hooks() -> dict[str, object]:
             and not state["in_model_forward_probe"]
             and isinstance(hidden_states, torch.Tensor)
             and isinstance(encoder_hidden_states, torch.Tensor)
-            and hidden_states.shape[0] == 2
-            and encoder_hidden_states.shape[0] == 2
             and model_kwargs.get("perturbation_configs") is None
         )
         if not should_probe_official_cfg:
+            return candidate
+
+        if hidden_states.shape[0] == 1 and encoder_hidden_states.shape[0] == 1:
+            sequential_pair: list[tuple[dict[str, object], tuple[torch.Tensor, torch.Tensor]]] = state["sequential_pair"]  # type: ignore[assignment]
+            sequential_pair.append(
+                (
+                    {
+                        key: value.detach().clone()
+                        if isinstance(value, torch.Tensor)
+                        else value
+                        for key, value in model_kwargs.items()
+                    },
+                    (candidate[0].detach().clone(), candidate[1].detach().clone()),
+                )
+            )
+            if len(sequential_pair) < 2:
+                return candidate
+            first_kwargs, first_outputs = sequential_pair[0]
+            second_kwargs, second_outputs = sequential_pair[1]
+            batched_kwargs = _merge_model_kwargs(first_kwargs, second_kwargs)
+            state["in_model_forward_probe"] = True
+            try:
+                batched_outputs = orig_model_forward(
+                    step=step,
+                    model_kwargs=batched_kwargs,
+                )
+            finally:
+                state["in_model_forward_probe"] = False
+            state["official_cfg"] = _cfg_report(
+                (
+                    first_outputs[0],
+                    second_outputs[0],
+                    first_outputs[1],
+                    second_outputs[1],
+                ),
+                (
+                    batched_outputs[0][0:1],
+                    batched_outputs[0][1:2],
+                    batched_outputs[1][0:1],
+                    batched_outputs[1][1:2],
+                ),
+            )
+            return candidate
+
+        if not (hidden_states.shape[0] == 2 and encoder_hidden_states.shape[0] == 2):
             return candidate
 
         state["in_model_forward_probe"] = True
@@ -296,6 +365,8 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     os.environ["SGLANG_LTX2_PROBE_OUTPUT"] = str(output_path)
+    if args.force_sdpa_math:
+        os.environ["SGLANG_FORCE_SDPA_MATH"] = "1"
     if os.getenv("SGLANG_LTX2_PROBE_DISABLE_BF16_REDUCTION", "0") == "1":
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     if os.getenv("SGLANG_LTX2_PROBE_DISABLE_TF32", "0") == "1":

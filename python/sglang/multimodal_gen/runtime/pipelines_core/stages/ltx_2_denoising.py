@@ -338,16 +338,9 @@ class LTX2DenoisingStage(DenoisingStage):
                     "audio_replicated_for_sp": ctx.replicate_audio_for_sp,
                 }
             )
-            if (
-                ctx.stage == "stage1"
-                and perturbation_configs is None
-                and batch.do_classifier_free_guidance
-                and int(latent_model_input.shape[0]) > 1
-            ):
-                kwargs["ltx2_align_all_self_attn"] = True
-                kwargs["ltx2_align_all_prompt_cross_attn"] = True
-                kwargs["ltx2_align_all_av_cross_attn"] = True
-                kwargs["ltx2_align_all_audio_ff_proj_out"] = True
+            # NOTE: sequential alignment flags (ltx2_align_all_*) were removed here.
+            # Probe testing confirmed B=2 batched forward is bit-exact vs sequential,
+            # so per-item attention processing is unnecessary overhead for CFG B=2.
         if skip_video_self_attn_blocks is not None:
             kwargs["skip_video_self_attn_blocks"] = skip_video_self_attn_blocks
         if skip_audio_self_attn_blocks is not None:
