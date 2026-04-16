@@ -1349,6 +1349,25 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
         if (
+            os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_PROJ_OUT_SEQUENTIAL") == "1"
+            and batch_size > 1
+        ):
+            audio_ff_proj_in, _ = self.audio_ff.proj_in(norm_audio_hidden_states)
+            audio_ff_act = self.audio_ff.act(audio_ff_proj_in)
+            audio_ff_output = torch.cat(
+                [
+                    self.audio_ff.proj_out(audio_ff_act[idx : idx + 1])[0]
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+            if os.getenv("SGLANG_LTX2_PROBE_FF_INTERNAL_TRACE") == "1":
+                self.audio_ff._ltx2_probe_ff_trace = {
+                    "proj_in": audio_ff_proj_in.detach().clone(),
+                    "act": audio_ff_act.detach().clone(),
+                    "proj_out": audio_ff_output.detach().clone(),
+                }
+        elif (
             os.getenv("SGLANG_LTX2_PROBE_FF_SEQUENTIAL") == "1"
             or os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_SEQUENTIAL") == "1"
         ) and batch_size > 1:
