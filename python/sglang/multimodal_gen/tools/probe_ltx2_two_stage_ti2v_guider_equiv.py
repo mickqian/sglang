@@ -125,6 +125,16 @@ def main() -> None:
                     ),
                     flush=True,
                 )
+            for subset_name, subset_payload in payload.get("subset_probes", {}).items():
+                subset_guided = subset_payload.get("guided_x0", {})
+                print(
+                    (
+                        f"[subset:{subset_name}] "
+                        f"video_guided_mean_abs={subset_guided.get('video', {}).get('mean_abs_diff')} "
+                        f"audio_guided_mean_abs={subset_guided.get('audio', {}).get('mean_abs_diff')}"
+                    ),
+                    flush=True,
+                )
         except Exception:
             pass
     except Exception:
