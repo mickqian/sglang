@@ -118,6 +118,16 @@ def _ltx2_probe_slice_pe(
     return value
 
 
+def _ltx2_alignment_enabled_for_block(
+    alignment_plan: dict[str, tuple[int, ...]] | None,
+    key: str,
+    block_idx: int,
+) -> bool:
+    if alignment_plan is None:
+        return False
+    return block_idx in alignment_plan.get(key, ())
+
+
 def apply_interleaved_rotary_emb(
     x: torch.Tensor, freqs: Tuple[torch.Tensor, torch.Tensor]
 ) -> torch.Tensor:
@@ -1006,6 +1016,10 @@ class LTX2TransformerBlock(nn.Module):
         a2v_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         v2a_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         audio_replicated_for_sp: bool = False,
+        sequential_self_attn: bool = False,
+        sequential_prompt_cross_attn: bool = False,
+        sequential_av_cross_attn: bool = False,
+        sequential_audio_ff_proj_out: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
@@ -1028,9 +1042,9 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
         if (
-            os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
-            and batch_size > 1
-        ):
+            sequential_self_attn
+            or os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
             attn_hidden_states = torch.cat(
                 [
                     self.attn1(
@@ -1067,9 +1081,9 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
         if (
-            os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
-            and batch_size > 1
-        ):
+            sequential_self_attn
+            or os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
             attn_audio_hidden_states = torch.cat(
                 [
                     self.audio_attn1(
@@ -1123,9 +1137,9 @@ class LTX2TransformerBlock(nn.Module):
                 encoder_hidden_states * (1 + v_prompt_scale) + v_prompt_shift
             )
             if (
-                os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
-                and batch_size > 1
-            ):
+                sequential_prompt_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
                 attn_hidden_states = torch.cat(
                     [
                         self.attn2(
@@ -1163,9 +1177,9 @@ class LTX2TransformerBlock(nn.Module):
                 audio_encoder_hidden_states * (1 + a_prompt_scale) + a_prompt_shift
             )
             if (
-                os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
-                and batch_size > 1
-            ):
+                sequential_prompt_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
                 attn_audio_hidden_states = torch.cat(
                     [
                         self.audio_attn2(
@@ -1281,9 +1295,9 @@ class LTX2TransformerBlock(nn.Module):
 
         if not skip_a2v_cross_attn:
             if (
-                os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
-                and batch_size > 1
-            ):
+                sequential_av_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
                 a2v_attn_hidden_states = torch.cat(
                     [
                         self.audio_to_video_attn(
@@ -1329,9 +1343,9 @@ class LTX2TransformerBlock(nn.Module):
 
         if not skip_v2a_cross_attn:
             if (
-                os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
-                and batch_size > 1
-            ):
+                sequential_av_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
                 v2a_attn_hidden_states = torch.cat(
                     [
                         self.video_to_audio_attn(
@@ -1399,9 +1413,9 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
         if (
-            os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_PROJ_OUT_SEQUENTIAL") == "1"
-            and batch_size > 1
-        ):
+            sequential_audio_ff_proj_out
+            or os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_PROJ_OUT_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
             audio_ff_proj_in, _ = self.audio_ff.proj_in(norm_audio_hidden_states)
             audio_ff_act = self.audio_ff.act(audio_ff_proj_in)
             audio_ff_output = torch.cat(
@@ -1833,6 +1847,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "audio_num_frames must be provided for RoPE coordinate generation."
             )
         perturbation_configs = kwargs.get("perturbation_configs")
+        ltx2_batched_alignment_plan = kwargs.get("ltx2_batched_alignment_plan")
         if perturbation_configs is not None and len(perturbation_configs) != batch_size:
             raise ValueError(
                 "perturbation_configs length must match batch size, got "
@@ -2073,6 +2088,22 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 a2v_cross_attn_perturbation_mask=a2v_cross_attn_perturbation_mask,
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
+                sequential_self_attn=_ltx2_alignment_enabled_for_block(
+                    ltx2_batched_alignment_plan, "self_attn_blocks", block.idx
+                ),
+                sequential_prompt_cross_attn=_ltx2_alignment_enabled_for_block(
+                    ltx2_batched_alignment_plan,
+                    "prompt_cross_attn_blocks",
+                    block.idx,
+                ),
+                sequential_av_cross_attn=_ltx2_alignment_enabled_for_block(
+                    ltx2_batched_alignment_plan, "av_cross_attn_blocks", block.idx
+                ),
+                sequential_audio_ff_proj_out=_ltx2_alignment_enabled_for_block(
+                    ltx2_batched_alignment_plan,
+                    "audio_ff_proj_out_blocks",
+                    block.idx,
+                ),
             )
 
         # 6. Output layers

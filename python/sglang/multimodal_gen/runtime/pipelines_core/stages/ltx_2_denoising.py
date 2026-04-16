@@ -67,6 +67,14 @@ class LTX2DenoisingContext(DenoisingContext):
     trajectory_audio_latents: list[torch.Tensor] = field(default_factory=list)
 
 
+_LTX2_STAGE1_BATCHED_ALIGNMENT_PLAN = {
+    "audio_ff_proj_out_blocks": (0,),
+    "self_attn_blocks": (2,),
+    "prompt_cross_attn_blocks": (3,),
+    "av_cross_attn_blocks": (3,),
+}
+
+
 class LTX2DenoisingStage(DenoisingStage):
     """
     LTX-2 specific denoising stage that handles joint video and audio generation.
@@ -338,6 +346,15 @@ class LTX2DenoisingStage(DenoisingStage):
                     "audio_replicated_for_sp": ctx.replicate_audio_for_sp,
                 }
             )
+            if (
+                ctx.stage == "stage1"
+                and perturbation_configs is None
+                and batch.do_classifier_free_guidance
+                and int(latent_model_input.shape[0]) > 1
+            ):
+                kwargs["ltx2_batched_alignment_plan"] = (
+                    _LTX2_STAGE1_BATCHED_ALIGNMENT_PLAN
+                )
         if skip_video_self_attn_blocks is not None:
             kwargs["skip_video_self_attn_blocks"] = skip_video_self_attn_blocks
         if skip_audio_self_attn_blocks is not None:
