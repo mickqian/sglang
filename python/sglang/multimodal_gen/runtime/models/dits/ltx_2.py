@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -40,6 +41,13 @@ logger = init_logger(__name__)
 
 ADALN_NUM_BASE_PARAMS = 6
 ADALN_NUM_CROSS_ATTN_PARAMS = 3
+
+
+def _ltx2_probe_block_index() -> int:
+    value = os.getenv("SGLANG_LTX2_PROBE_BLOCK_INDEX")
+    if value is None:
+        return 0
+    return int(value)
 
 
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
@@ -87,6 +95,27 @@ def _ltx2_batched_perturbation_mask(
     if all_perturbed:
         return None, True
     return mask.view(mask.numel(), *([1] * (values.ndim - 1))), False
+
+
+def _ltx2_probe_slice_batch_arg(
+    value: torch.Tensor | None, idx: int, batch_size: int
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if value.ndim > 0 and value.shape[0] == batch_size:
+        return value[idx : idx + 1]
+    return value
+
+
+def _ltx2_probe_slice_pe(
+    value: tuple[torch.Tensor, torch.Tensor] | None, idx: int, batch_size: int
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if value is None:
+        return None
+    first, second = value
+    if first.ndim > 0 and first.shape[0] == batch_size:
+        return first[idx : idx + 1], second[idx : idx + 1]
+    return value
 
 
 def apply_interleaved_rotary_emb(
@@ -697,7 +726,7 @@ class LTX2Attention(nn.Module):
                     skip_sequence_parallel_override=skip_sequence_parallel_override,
                 )
 
-            if perturbation_mask is not None:
+            if perturbation_mask is not None and not torch.all(perturbation_mask == 1):
                 if perturbation_mask.ndim == out.ndim - 1:
                     perturbation_mask = perturbation_mask.unsqueeze(-1)
                 out = out * perturbation_mask + v * (1 - perturbation_mask)
@@ -772,10 +801,17 @@ class LTX2FeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.proj_in(x)
-        x = self.act(x)
-        x, _ = self.proj_out(x)
-        return x
+        trace_ff = os.getenv("SGLANG_LTX2_PROBE_FF_INTERNAL_TRACE") == "1"
+        proj_in_out, _ = self.proj_in(x)
+        act_out = self.act(proj_in_out)
+        proj_out, _ = self.proj_out(act_out)
+        if trace_ff:
+            self._ltx2_probe_ff_trace = {
+                "proj_in": proj_in_out.detach().clone(),
+                "act": act_out.detach().clone(),
+                "proj_out": proj_out.detach().clone(),
+            }
+        return proj_out
 
 
 class LTX2TransformerBlock(nn.Module):
@@ -970,9 +1006,23 @@ class LTX2TransformerBlock(nn.Module):
         a2v_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         v2a_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         audio_replicated_for_sp: bool = False,
+        sequential_self_attn: bool = False,
+        sequential_prompt_cross_attn: bool = False,
+        sequential_av_cross_attn: bool = False,
+        sequential_audio_ff_proj_out: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
+        capture_probe_trace = (
+            os.getenv("SGLANG_LTX2_PROBE_OUTPUT") is not None
+            and self.idx == _ltx2_probe_block_index()
+        )
+        probe_stage_trace: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        if capture_probe_trace:
+            probe_stage_trace["before_block"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
@@ -981,14 +1031,37 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
-        attn_hidden_states = self.attn1(
-            norm_hidden_states,
-            mask=video_self_attention_mask,
-            pe=video_rotary_emb,
-            perturbation_mask=video_self_attn_perturbation_mask,
-            all_perturbed=skip_video_self_attn,
-            gather_context_kv_for_sp=audio_replicated_for_sp,
-        )
+        if (
+            sequential_self_attn
+            or os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
+            attn_hidden_states = torch.cat(
+                [
+                    self.attn1(
+                        norm_hidden_states[idx : idx + 1],
+                        mask=_ltx2_probe_slice_batch_arg(
+                            video_self_attention_mask, idx, batch_size
+                        ),
+                        pe=_ltx2_probe_slice_pe(video_rotary_emb, idx, batch_size),
+                        perturbation_mask=_ltx2_probe_slice_batch_arg(
+                            video_self_attn_perturbation_mask, idx, batch_size
+                        ),
+                        all_perturbed=skip_video_self_attn,
+                        gather_context_kv_for_sp=audio_replicated_for_sp,
+                    )
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            attn_hidden_states = self.attn1(
+                norm_hidden_states,
+                mask=video_self_attention_mask,
+                pe=video_rotary_emb,
+                perturbation_mask=video_self_attn_perturbation_mask,
+                all_perturbed=skip_video_self_attn,
+                gather_context_kv_for_sp=audio_replicated_for_sp,
+            )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
@@ -997,15 +1070,43 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
-        attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states,
-            mask=audio_self_attention_mask,
-            pe=audio_rotary_emb,
-            perturbation_mask=audio_self_attn_perturbation_mask,
-            all_perturbed=skip_audio_self_attn,
-            skip_sequence_parallel_override=audio_replicated_for_sp,
-        )
+        if (
+            sequential_self_attn
+            or os.getenv("SGLANG_LTX2_PROBE_SELF_ATTN_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
+            attn_audio_hidden_states = torch.cat(
+                [
+                    self.audio_attn1(
+                        norm_audio_hidden_states[idx : idx + 1],
+                        mask=_ltx2_probe_slice_batch_arg(
+                            audio_self_attention_mask, idx, batch_size
+                        ),
+                        pe=_ltx2_probe_slice_pe(audio_rotary_emb, idx, batch_size),
+                        perturbation_mask=_ltx2_probe_slice_batch_arg(
+                            audio_self_attn_perturbation_mask, idx, batch_size
+                        ),
+                        all_perturbed=skip_audio_self_attn,
+                        skip_sequence_parallel_override=audio_replicated_for_sp,
+                    )
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            attn_audio_hidden_states = self.audio_attn1(
+                norm_audio_hidden_states,
+                mask=audio_self_attention_mask,
+                pe=audio_rotary_emb,
+                perturbation_mask=audio_self_attn_perturbation_mask,
+                all_perturbed=skip_audio_self_attn,
+                skip_sequence_parallel_override=audio_replicated_for_sp,
+            )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        if capture_probe_trace:
+            probe_stage_trace["after_self_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
         # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
             # LTX2.3
@@ -1025,11 +1126,29 @@ class LTX2TransformerBlock(nn.Module):
             mod_encoder_hidden_states = (
                 encoder_hidden_states * (1 + v_prompt_scale) + v_prompt_shift
             )
-            attn_hidden_states = self.attn2(
-                norm_hidden_states,
-                context=mod_encoder_hidden_states,
-                mask=encoder_attention_mask,
-            )
+            if (
+                sequential_prompt_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
+                attn_hidden_states = torch.cat(
+                    [
+                        self.attn2(
+                            norm_hidden_states[idx : idx + 1],
+                            context=mod_encoder_hidden_states[idx : idx + 1],
+                            mask=_ltx2_probe_slice_batch_arg(
+                                encoder_attention_mask, idx, batch_size
+                            ),
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                attn_hidden_states = self.attn2(
+                    norm_hidden_states,
+                    context=mod_encoder_hidden_states,
+                    mask=encoder_attention_mask,
+                )
             hidden_states = hidden_states + attn_hidden_states * vgate_q
 
             ashift_q, ascale_q, agate_q = self.get_ada_values(
@@ -1047,11 +1166,29 @@ class LTX2TransformerBlock(nn.Module):
             mod_audio_encoder_hidden_states = (
                 audio_encoder_hidden_states * (1 + a_prompt_scale) + a_prompt_shift
             )
-            attn_audio_hidden_states = self.audio_attn2(
-                norm_audio_hidden_states,
-                context=mod_audio_encoder_hidden_states,
-                mask=audio_encoder_attention_mask,
-            )
+            if (
+                sequential_prompt_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_PROMPT_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
+                attn_audio_hidden_states = torch.cat(
+                    [
+                        self.audio_attn2(
+                            norm_audio_hidden_states[idx : idx + 1],
+                            context=mod_audio_encoder_hidden_states[idx : idx + 1],
+                            mask=_ltx2_probe_slice_batch_arg(
+                                audio_encoder_attention_mask, idx, batch_size
+                            ),
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                attn_audio_hidden_states = self.audio_attn2(
+                    norm_audio_hidden_states,
+                    context=mod_audio_encoder_hidden_states,
+                    mask=audio_encoder_attention_mask,
+                )
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
             )
@@ -1071,6 +1208,11 @@ class LTX2TransformerBlock(nn.Module):
                 mask=audio_encoder_attention_mask,
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+        if capture_probe_trace:
+            probe_stage_trace["after_prompt_cross_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -1142,15 +1284,42 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         if not skip_a2v_cross_attn:
-            a2v_attn_hidden_states = self.audio_to_video_attn(
-                mod_norm_hidden_states,
-                context=mod_norm_audio_hidden_states,
-                pe=ca_video_rotary_emb,
-                k_pe=ca_audio_rotary_emb,
-                mask=a2v_cross_attention_mask,
-                skip_sequence_parallel_override=audio_replicated_for_sp,
-            )
-            if a2v_cross_attn_perturbation_mask is not None:
+            if (
+                sequential_av_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
+                a2v_attn_hidden_states = torch.cat(
+                    [
+                        self.audio_to_video_attn(
+                            mod_norm_hidden_states[idx : idx + 1],
+                            context=mod_norm_audio_hidden_states[idx : idx + 1],
+                            pe=_ltx2_probe_slice_pe(
+                                ca_video_rotary_emb, idx, batch_size
+                            ),
+                            k_pe=_ltx2_probe_slice_pe(
+                                ca_audio_rotary_emb, idx, batch_size
+                            ),
+                            mask=_ltx2_probe_slice_batch_arg(
+                                a2v_cross_attention_mask, idx, batch_size
+                            ),
+                            skip_sequence_parallel_override=audio_replicated_for_sp,
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                a2v_attn_hidden_states = self.audio_to_video_attn(
+                    mod_norm_hidden_states,
+                    context=mod_norm_audio_hidden_states,
+                    pe=ca_video_rotary_emb,
+                    k_pe=ca_audio_rotary_emb,
+                    mask=a2v_cross_attention_mask,
+                    skip_sequence_parallel_override=audio_replicated_for_sp,
+                )
+            if a2v_cross_attn_perturbation_mask is not None and not torch.all(
+                a2v_cross_attn_perturbation_mask == 1
+            ):
                 a2v_attn_hidden_states = (
                     a2v_attn_hidden_states * a2v_cross_attn_perturbation_mask
                 )
@@ -1165,20 +1334,52 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         if not skip_v2a_cross_attn:
-            v2a_attn_hidden_states = self.video_to_audio_attn(
-                mod_norm_audio_hidden_states,
-                context=mod_norm_hidden_states,
-                pe=ca_audio_rotary_emb,
-                k_pe=ca_video_rotary_emb,
-                mask=v2a_cross_attention_mask,
-                gather_context_kv_for_sp=audio_replicated_for_sp,
-            )
-            if v2a_cross_attn_perturbation_mask is not None:
+            if (
+                sequential_av_cross_attn
+                or os.getenv("SGLANG_LTX2_PROBE_AV_CA_SEQUENTIAL") == "1"
+            ) and batch_size > 1:
+                v2a_attn_hidden_states = torch.cat(
+                    [
+                        self.video_to_audio_attn(
+                            mod_norm_audio_hidden_states[idx : idx + 1],
+                            context=mod_norm_hidden_states[idx : idx + 1],
+                            pe=_ltx2_probe_slice_pe(
+                                ca_audio_rotary_emb, idx, batch_size
+                            ),
+                            k_pe=_ltx2_probe_slice_pe(
+                                ca_video_rotary_emb, idx, batch_size
+                            ),
+                            mask=_ltx2_probe_slice_batch_arg(
+                                v2a_cross_attention_mask, idx, batch_size
+                            ),
+                            gather_context_kv_for_sp=audio_replicated_for_sp,
+                        )
+                        for idx in range(batch_size)
+                    ],
+                    dim=0,
+                )
+            else:
+                v2a_attn_hidden_states = self.video_to_audio_attn(
+                    mod_norm_audio_hidden_states,
+                    context=mod_norm_hidden_states,
+                    pe=ca_audio_rotary_emb,
+                    k_pe=ca_video_rotary_emb,
+                    mask=v2a_cross_attention_mask,
+                    gather_context_kv_for_sp=audio_replicated_for_sp,
+                )
+            if v2a_cross_attn_perturbation_mask is not None and not torch.all(
+                v2a_cross_attn_perturbation_mask == 1
+            ):
                 v2a_attn_hidden_states = (
                     v2a_attn_hidden_states * v2a_cross_attn_perturbation_mask
                 )
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
+            )
+        if capture_probe_trace:
+            probe_stage_trace["after_av_cross_attn"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
             )
         # 4. Feedforward
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
@@ -1187,7 +1388,16 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
         )
-        ff_output = self.ff(norm_hidden_states)
+        if os.getenv("SGLANG_LTX2_PROBE_FF_SEQUENTIAL") == "1" and batch_size > 1:
+            ff_output = torch.cat(
+                [
+                    self.ff(norm_hidden_states[idx : idx + 1])
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            ff_output = self.ff(norm_hidden_states)
         hidden_states = hidden_states + ff_output * vgate_mlp
 
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
@@ -1196,8 +1406,45 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
-        audio_ff_output = self.audio_ff(norm_audio_hidden_states)
+        if (
+            sequential_audio_ff_proj_out
+            or os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_PROJ_OUT_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
+            audio_ff_proj_in, _ = self.audio_ff.proj_in(norm_audio_hidden_states)
+            audio_ff_act = self.audio_ff.act(audio_ff_proj_in)
+            audio_ff_output = torch.cat(
+                [
+                    self.audio_ff.proj_out(audio_ff_act[idx : idx + 1])[0]
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+            if os.getenv("SGLANG_LTX2_PROBE_FF_INTERNAL_TRACE") == "1":
+                self.audio_ff._ltx2_probe_ff_trace = {
+                    "proj_in": audio_ff_proj_in.detach().clone(),
+                    "act": audio_ff_act.detach().clone(),
+                    "proj_out": audio_ff_output.detach().clone(),
+                }
+        elif (
+            os.getenv("SGLANG_LTX2_PROBE_FF_SEQUENTIAL") == "1"
+            or os.getenv("SGLANG_LTX2_PROBE_AUDIO_FF_SEQUENTIAL") == "1"
+        ) and batch_size > 1:
+            audio_ff_output = torch.cat(
+                [
+                    self.audio_ff(norm_audio_hidden_states[idx : idx + 1])
+                    for idx in range(batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        if capture_probe_trace:
+            probe_stage_trace["after_ff"] = (
+                hidden_states.detach().clone(),
+                audio_hidden_states.detach().clone(),
+            )
+            self._ltx2_probe_stage_trace = probe_stage_trace
         return hidden_states, audio_hidden_states
 
 
@@ -1594,6 +1841,14 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "audio_num_frames must be provided for RoPE coordinate generation."
             )
         perturbation_configs = kwargs.get("perturbation_configs")
+        ltx2_align_all_self_attn = bool(kwargs.get("ltx2_align_all_self_attn"))
+        ltx2_align_all_prompt_cross_attn = bool(
+            kwargs.get("ltx2_align_all_prompt_cross_attn")
+        )
+        ltx2_align_all_av_cross_attn = bool(kwargs.get("ltx2_align_all_av_cross_attn"))
+        ltx2_align_all_audio_ff_proj_out = bool(
+            kwargs.get("ltx2_align_all_audio_ff_proj_out")
+        )
         if perturbation_configs is not None and len(perturbation_configs) != batch_size:
             raise ValueError(
                 "perturbation_configs length must match batch size, got "
@@ -1834,6 +2089,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 a2v_cross_attn_perturbation_mask=a2v_cross_attn_perturbation_mask,
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
+                sequential_self_attn=ltx2_align_all_self_attn,
+                sequential_prompt_cross_attn=ltx2_align_all_prompt_cross_attn,
+                sequential_av_cross_attn=ltx2_align_all_av_cross_attn,
+                sequential_audio_ff_proj_out=ltx2_align_all_audio_ff_proj_out,
             )
 
         # 6. Output layers

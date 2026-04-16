@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+from contextlib import nullcontext
+
 import torch
 
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (  # FlashAttentionMetadata,
@@ -13,6 +16,8 @@ from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+_FORCE_SDPA_MATH = os.getenv("SGLANG_FORCE_SDPA_MATH", "0") == "1"
 
 
 class SDPABackend(AttentionBackend):
@@ -71,8 +76,14 @@ class SDPAImpl(AttentionImpl):
         }
         if query.shape[1] != key.shape[1]:
             attn_kwargs["enable_gqa"] = True
-        output = torch.nn.functional.scaled_dot_product_attention(
-            query, key, value, **attn_kwargs
+        ctx = (
+            torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH)
+            if _FORCE_SDPA_MATH
+            else nullcontext()
         )
-        output = output.transpose(1, 2)
+        with ctx:
+            output = torch.nn.functional.scaled_dot_product_attention(
+                query, key, value, **attn_kwargs
+            )
+        output = output.transpose(1, 2).contiguous()
         return output
