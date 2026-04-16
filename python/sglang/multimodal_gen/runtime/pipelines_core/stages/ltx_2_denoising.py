@@ -300,7 +300,7 @@ class LTX2DenoisingStage(DenoisingStage):
     def _run_ltx2_probe_selected_batched_forward(
         self,
         *,
-        step: DenoisingStep,
+        step: object,
         pass_specs: list[tuple[str, torch.Tensor, torch.Tensor, torch.Tensor | None, object]],
         selected_pass_names: list[str],
         batch_size: int,
