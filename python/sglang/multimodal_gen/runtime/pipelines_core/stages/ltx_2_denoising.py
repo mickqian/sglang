@@ -272,6 +272,32 @@ class LTX2DenoisingStage(DenoisingStage):
         return list(tensor.split(split_sizes, dim=0))
 
     @staticmethod
+    def _select_batched_pass_groups(
+        tensor: torch.Tensor | None,
+        *,
+        batch_size: int,
+        pass_indices: list[int],
+    ) -> torch.Tensor | None:
+        if tensor is None:
+            return None
+        chunks = tensor.split(int(batch_size), dim=0)
+        return torch.cat([chunks[idx] for idx in pass_indices], dim=0)
+
+    @staticmethod
+    def _select_batched_perturbation_configs(
+        perturbation_configs: list[object],
+        *,
+        batch_size: int,
+        pass_indices: list[int],
+    ) -> list[object]:
+        selected: list[object] = []
+        for idx in pass_indices:
+            start = int(idx) * int(batch_size)
+            end = start + int(batch_size)
+            selected.extend(perturbation_configs[start:end])
+        return selected
+
+    @staticmethod
     def _get_ltx_prompt_attention_mask(
         batch: Req,
         *,
@@ -1655,6 +1681,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 batched_video = torch.cat(batched_video_chunks, dim=0)
                 batched_audio = torch.cat(batched_audio_chunks, dim=0)
                 if probe_split_batched_guider:
+                    probe_cfg_pair_pass_outputs = None
                     with set_forward_context(
                         current_timestep=step.step_index,
                         attn_metadata=step.attn_metadata,
@@ -1686,6 +1713,106 @@ class LTX2DenoisingStage(DenoisingStage):
                             return_latents=False,
                             return_dict=False,
                         )
+                        cfg_pair_indices = [
+                            idx
+                            for idx, (pass_name, *_rest) in enumerate(pass_specs)
+                            if pass_name in {"cond", "neg"}
+                        ]
+                        probe_cfg_pair_video, probe_cfg_pair_audio = step.current_model(
+                            hidden_states=self._select_batched_pass_groups(
+                                batched_hidden_states,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_hidden_states=self._select_batched_pass_groups(
+                                batched_audio_hidden_states,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            encoder_hidden_states=self._select_batched_pass_groups(
+                                batched_encoder_hidden_states,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_encoder_hidden_states=self._select_batched_pass_groups(
+                                batched_audio_encoder_hidden_states,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            timestep=self._select_batched_pass_groups(
+                                batched_timestep_video,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_timestep=self._select_batched_pass_groups(
+                                batched_timestep_audio,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            prompt_timestep=self._select_batched_pass_groups(
+                                batched_prompt_timestep_video,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_prompt_timestep=self._select_batched_pass_groups(
+                                batched_prompt_timestep_audio,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            encoder_attention_mask=self._select_batched_pass_groups(
+                                batched_encoder_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_encoder_attention_mask=self._select_batched_pass_groups(
+                                batched_audio_encoder_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            num_frames=ctx.latent_num_frames_for_model,
+                            height=ctx.latent_height,
+                            width=ctx.latent_width,
+                            fps=batch.fps,
+                            audio_num_frames=audio_num_frames_latent,
+                            video_coords=self._select_batched_pass_groups(
+                                batched_video_coords,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_coords=self._select_batched_pass_groups(
+                                batched_audio_coords,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            video_self_attention_mask=self._select_batched_pass_groups(
+                                batched_video_self_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_self_attention_mask=self._select_batched_pass_groups(
+                                batched_audio_self_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            a2v_cross_attention_mask=self._select_batched_pass_groups(
+                                batched_a2v_cross_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            v2a_cross_attention_mask=self._select_batched_pass_groups(
+                                batched_v2a_cross_attention_mask,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            audio_replicated_for_sp=ctx.replicate_audio_for_sp,
+                            perturbation_configs=self._select_batched_perturbation_configs(
+                                perturbation_configs,
+                                batch_size=batch_size,
+                                pass_indices=cfg_pair_indices,
+                            ),
+                            return_latents=False,
+                            return_dict=False,
+                        )
                     probe_batched_video = probe_batched_video.float()
                     probe_batched_audio = probe_batched_audio.float()
                     probe_batched_pass_outputs = {
@@ -1694,6 +1821,17 @@ class LTX2DenoisingStage(DenoisingStage):
                             pass_specs,
                             probe_batched_video.chunk(num_passes, dim=0),
                             probe_batched_audio.chunk(num_passes, dim=0),
+                            strict=True,
+                        )
+                    }
+                    probe_cfg_pair_video = probe_cfg_pair_video.float()
+                    probe_cfg_pair_audio = probe_cfg_pair_audio.float()
+                    probe_cfg_pair_pass_outputs = {
+                        pass_name: (video_chunk, audio_chunk)
+                        for pass_name, video_chunk, audio_chunk in zip(
+                            ["cond", "neg"],
+                            probe_cfg_pair_video.chunk(2, dim=0),
+                            probe_cfg_pair_audio.chunk(2, dim=0),
                             strict=True,
                         )
                     }
@@ -1940,6 +2078,156 @@ class LTX2DenoisingStage(DenoisingStage):
                     + ctx.clean_latent.float() * (1.0 - ctx.denoise_mask)
                 ).to(probe_denoised_video.dtype)
 
+            cfg_pair_probe_report = None
+            if probe_cfg_pair_pass_outputs is not None:
+                probe_cfg_pair_video_pos, probe_cfg_pair_audio_pos = (
+                    probe_cfg_pair_pass_outputs["cond"]
+                )
+                probe_cfg_pair_video_neg, probe_cfg_pair_audio_neg = (
+                    probe_cfg_pair_pass_outputs["neg"]
+                )
+                cfg_pair_probe_report = {
+                    "pass_outputs": self._ltx2_probe_pass_outputs_report(
+                        {
+                            "cond": pass_outputs["cond"],
+                            "neg": pass_outputs["neg"],
+                        },
+                        probe_cfg_pair_pass_outputs,
+                    ),
+                    "guidance_components": {
+                        "video": self._ltx2_probe_guidance_components_report(
+                            cond_reference=self._ltx2_velocity_to_x0(
+                                ctx.latents, v_pos, video_sigma_for_x0
+                            ),
+                            cond_candidate=self._ltx2_velocity_to_x0(
+                                ctx.latents,
+                                probe_cfg_pair_video_pos,
+                                video_sigma_for_x0,
+                            ),
+                            uncond_text_reference=self._ltx2_velocity_to_x0(
+                                ctx.latents, v_neg, video_sigma_for_x0
+                            ),
+                            uncond_text_candidate=self._ltx2_velocity_to_x0(
+                                ctx.latents,
+                                probe_cfg_pair_video_neg,
+                                video_sigma_for_x0,
+                            ),
+                            uncond_perturbed_reference=None,
+                            uncond_perturbed_candidate=None,
+                            uncond_modality_reference=None,
+                            uncond_modality_candidate=None,
+                            cfg_scale=float(stage1_guider_params["video_cfg_scale"]),
+                            stg_scale=0.0,
+                            modality_scale=1.0,
+                            final_reference=self._ltx2_calculate_guided_x0(
+                                cond=self._ltx2_velocity_to_x0(
+                                    ctx.latents, v_pos, video_sigma_for_x0
+                                ),
+                                uncond_text=self._ltx2_velocity_to_x0(
+                                    ctx.latents, v_neg, video_sigma_for_x0
+                                ),
+                                uncond_perturbed=0.0,
+                                uncond_modality=0.0,
+                                cfg_scale=float(
+                                    stage1_guider_params["video_cfg_scale"]
+                                ),
+                                stg_scale=0.0,
+                                rescale_scale=float(
+                                    stage1_guider_params["video_rescale_scale"]
+                                ),
+                                modality_scale=1.0,
+                            ),
+                            final_candidate=self._ltx2_calculate_guided_x0(
+                                cond=self._ltx2_velocity_to_x0(
+                                    ctx.latents,
+                                    probe_cfg_pair_video_pos,
+                                    video_sigma_for_x0,
+                                ),
+                                uncond_text=self._ltx2_velocity_to_x0(
+                                    ctx.latents,
+                                    probe_cfg_pair_video_neg,
+                                    video_sigma_for_x0,
+                                ),
+                                uncond_perturbed=0.0,
+                                uncond_modality=0.0,
+                                cfg_scale=float(
+                                    stage1_guider_params["video_cfg_scale"]
+                                ),
+                                stg_scale=0.0,
+                                rescale_scale=float(
+                                    stage1_guider_params["video_rescale_scale"]
+                                ),
+                                modality_scale=1.0,
+                            ),
+                        ),
+                        "audio": self._ltx2_probe_guidance_components_report(
+                            cond_reference=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, a_v_pos, sigma_val
+                            ),
+                            cond_candidate=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents,
+                                probe_cfg_pair_audio_pos,
+                                sigma_val,
+                            ),
+                            uncond_text_reference=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, a_v_neg, sigma_val
+                            ),
+                            uncond_text_candidate=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents,
+                                probe_cfg_pair_audio_neg,
+                                sigma_val,
+                            ),
+                            uncond_perturbed_reference=None,
+                            uncond_perturbed_candidate=None,
+                            uncond_modality_reference=None,
+                            uncond_modality_candidate=None,
+                            cfg_scale=float(stage1_guider_params["audio_cfg_scale"]),
+                            stg_scale=0.0,
+                            modality_scale=1.0,
+                            final_reference=self._ltx2_calculate_guided_x0(
+                                cond=self._ltx2_velocity_to_x0(
+                                    ctx.audio_latents, a_v_pos, sigma_val
+                                ),
+                                uncond_text=self._ltx2_velocity_to_x0(
+                                    ctx.audio_latents, a_v_neg, sigma_val
+                                ),
+                                uncond_perturbed=0.0,
+                                uncond_modality=0.0,
+                                cfg_scale=float(
+                                    stage1_guider_params["audio_cfg_scale"]
+                                ),
+                                stg_scale=0.0,
+                                rescale_scale=float(
+                                    stage1_guider_params["audio_rescale_scale"]
+                                ),
+                                modality_scale=1.0,
+                            ),
+                            final_candidate=self._ltx2_calculate_guided_x0(
+                                cond=self._ltx2_velocity_to_x0(
+                                    ctx.audio_latents,
+                                    probe_cfg_pair_audio_pos,
+                                    sigma_val,
+                                ),
+                                uncond_text=self._ltx2_velocity_to_x0(
+                                    ctx.audio_latents,
+                                    probe_cfg_pair_audio_neg,
+                                    sigma_val,
+                                ),
+                                uncond_perturbed=0.0,
+                                uncond_modality=0.0,
+                                cfg_scale=float(
+                                    stage1_guider_params["audio_cfg_scale"]
+                                ),
+                                stg_scale=0.0,
+                                rescale_scale=float(
+                                    stage1_guider_params["audio_rescale_scale"]
+                                ),
+                                modality_scale=1.0,
+                            ),
+                        ),
+                    },
+                }
+
             self._write_ltx2_split_batched_probe_state(
                 {
                     "kind": "ltx2_two_stage_ti2v_split_vs_batched_guider",
@@ -2008,6 +2296,9 @@ class LTX2DenoisingStage(DenoisingStage):
                             final_reference=denoised_audio,
                             final_candidate=probe_denoised_audio,
                         ),
+                    },
+                    "pair_probes": {
+                        "cfg_only": cfg_pair_probe_report,
                     },
                 }
             )
