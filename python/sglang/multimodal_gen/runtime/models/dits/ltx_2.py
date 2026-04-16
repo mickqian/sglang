@@ -118,16 +118,6 @@ def _ltx2_probe_slice_pe(
     return value
 
 
-def _ltx2_alignment_enabled_for_block(
-    alignment_plan: dict[str, tuple[int, ...]] | None,
-    key: str,
-    block_idx: int,
-) -> bool:
-    if alignment_plan is None:
-        return False
-    return block_idx in alignment_plan.get(key, ())
-
-
 def apply_interleaved_rotary_emb(
     x: torch.Tensor, freqs: Tuple[torch.Tensor, torch.Tensor]
 ) -> torch.Tensor:
@@ -1847,7 +1837,16 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "audio_num_frames must be provided for RoPE coordinate generation."
             )
         perturbation_configs = kwargs.get("perturbation_configs")
-        ltx2_batched_alignment_plan = kwargs.get("ltx2_batched_alignment_plan")
+        ltx2_align_all_self_attn = bool(kwargs.get("ltx2_align_all_self_attn"))
+        ltx2_align_all_prompt_cross_attn = bool(
+            kwargs.get("ltx2_align_all_prompt_cross_attn")
+        )
+        ltx2_align_all_av_cross_attn = bool(
+            kwargs.get("ltx2_align_all_av_cross_attn")
+        )
+        ltx2_align_all_audio_ff_proj_out = bool(
+            kwargs.get("ltx2_align_all_audio_ff_proj_out")
+        )
         if perturbation_configs is not None and len(perturbation_configs) != batch_size:
             raise ValueError(
                 "perturbation_configs length must match batch size, got "
@@ -2088,22 +2087,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 a2v_cross_attn_perturbation_mask=a2v_cross_attn_perturbation_mask,
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
-                sequential_self_attn=_ltx2_alignment_enabled_for_block(
-                    ltx2_batched_alignment_plan, "self_attn_blocks", block.idx
-                ),
-                sequential_prompt_cross_attn=_ltx2_alignment_enabled_for_block(
-                    ltx2_batched_alignment_plan,
-                    "prompt_cross_attn_blocks",
-                    block.idx,
-                ),
-                sequential_av_cross_attn=_ltx2_alignment_enabled_for_block(
-                    ltx2_batched_alignment_plan, "av_cross_attn_blocks", block.idx
-                ),
-                sequential_audio_ff_proj_out=_ltx2_alignment_enabled_for_block(
-                    ltx2_batched_alignment_plan,
-                    "audio_ff_proj_out_blocks",
-                    block.idx,
-                ),
+                sequential_self_attn=ltx2_align_all_self_attn,
+                sequential_prompt_cross_attn=ltx2_align_all_prompt_cross_attn,
+                sequential_av_cross_attn=ltx2_align_all_av_cross_attn,
+                sequential_audio_ff_proj_out=ltx2_align_all_audio_ff_proj_out,
             )
 
         # 6. Output layers
