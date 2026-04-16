@@ -668,6 +668,95 @@ class LTX2DenoisingStage(DenoisingStage):
             ),
         }
 
+    @classmethod
+    def _ltx2_probe_guidance_components_report(
+        cls,
+        *,
+        cond_reference: torch.Tensor,
+        cond_candidate: torch.Tensor,
+        uncond_text_reference: torch.Tensor,
+        uncond_text_candidate: torch.Tensor,
+        uncond_perturbed_reference: torch.Tensor | None,
+        uncond_perturbed_candidate: torch.Tensor | None,
+        uncond_modality_reference: torch.Tensor | None,
+        uncond_modality_candidate: torch.Tensor | None,
+        cfg_scale: float,
+        stg_scale: float,
+        modality_scale: float,
+        final_reference: torch.Tensor,
+        final_candidate: torch.Tensor,
+    ) -> dict[str, object]:
+        text_delta_reference = cond_reference - uncond_text_reference
+        text_delta_candidate = cond_candidate - uncond_text_candidate
+        report: dict[str, object] = {
+            "cond": cls._ltx2_probe_tensor_report(
+                cond_reference, cond_candidate
+            ),
+            "uncond_text": cls._ltx2_probe_tensor_report(
+                uncond_text_reference, uncond_text_candidate
+            ),
+            "text_delta": cls._ltx2_probe_tensor_report(
+                text_delta_reference, text_delta_candidate
+            ),
+            "cfg_term": cls._ltx2_probe_tensor_report(
+                (cfg_scale - 1.0) * text_delta_reference,
+                (cfg_scale - 1.0) * text_delta_candidate,
+            ),
+        }
+
+        pred_reference = cond_reference + (cfg_scale - 1.0) * text_delta_reference
+        pred_candidate = cond_candidate + (cfg_scale - 1.0) * text_delta_candidate
+
+        if (
+            uncond_perturbed_reference is not None
+            and uncond_perturbed_candidate is not None
+        ):
+            perturbed_delta_reference = cond_reference - uncond_perturbed_reference
+            perturbed_delta_candidate = cond_candidate - uncond_perturbed_candidate
+            report["uncond_perturbed"] = cls._ltx2_probe_tensor_report(
+                uncond_perturbed_reference, uncond_perturbed_candidate
+            )
+            report["perturbed_delta"] = cls._ltx2_probe_tensor_report(
+                perturbed_delta_reference, perturbed_delta_candidate
+            )
+            report["stg_term"] = cls._ltx2_probe_tensor_report(
+                stg_scale * perturbed_delta_reference,
+                stg_scale * perturbed_delta_candidate,
+            )
+            pred_reference = pred_reference + stg_scale * perturbed_delta_reference
+            pred_candidate = pred_candidate + stg_scale * perturbed_delta_candidate
+
+        if (
+            uncond_modality_reference is not None
+            and uncond_modality_candidate is not None
+        ):
+            modality_delta_reference = cond_reference - uncond_modality_reference
+            modality_delta_candidate = cond_candidate - uncond_modality_candidate
+            report["uncond_modality"] = cls._ltx2_probe_tensor_report(
+                uncond_modality_reference, uncond_modality_candidate
+            )
+            report["modality_delta"] = cls._ltx2_probe_tensor_report(
+                modality_delta_reference, modality_delta_candidate
+            )
+            report["modality_term"] = cls._ltx2_probe_tensor_report(
+                (modality_scale - 1.0) * modality_delta_reference,
+                (modality_scale - 1.0) * modality_delta_candidate,
+            )
+            pred_reference = pred_reference + (
+                modality_scale - 1.0
+            ) * modality_delta_reference
+            pred_candidate = pred_candidate + (
+                modality_scale - 1.0
+            ) * modality_delta_candidate
+
+        report["pre_rescale_pred"] = cls._ltx2_probe_tensor_report(
+            pred_reference, pred_candidate
+        )
+        report["final_guided_x0"] = cls._ltx2_probe_tensor_report(
+            final_reference, final_candidate
+        )
+        return report
+
     @staticmethod
     def _ltx2_split_batched_probe_output_path() -> str | None:
         return os.getenv("SGLANG_LTX2_SPLIT_BATCH_PROBE_OUTPUT")
@@ -1816,6 +1905,58 @@ class LTX2DenoisingStage(DenoisingStage):
                         reference_audio=denoised_audio,
                         candidate_audio=probe_denoised_audio,
                     ),
+                    "guidance_components": {
+                        "video": self._ltx2_probe_guidance_components_report(
+                            cond_reference=self._ltx2_velocity_to_x0(
+                                ctx.latents, v_pos, video_sigma_for_x0
+                            ),
+                            cond_candidate=self._ltx2_velocity_to_x0(
+                                ctx.latents, probe_v_pos, video_sigma_for_x0
+                            ),
+                            uncond_text_reference=self._ltx2_velocity_to_x0(
+                                ctx.latents, v_neg, video_sigma_for_x0
+                            ),
+                            uncond_text_candidate=self._ltx2_velocity_to_x0(
+                                ctx.latents, probe_v_neg, video_sigma_for_x0
+                            ),
+                            uncond_perturbed_reference=denoised_video_perturbed,
+                            uncond_perturbed_candidate=probe_denoised_video_perturbed,
+                            uncond_modality_reference=denoised_video_modality,
+                            uncond_modality_candidate=probe_denoised_video_modality,
+                            cfg_scale=float(stage1_guider_params["video_cfg_scale"]),
+                            stg_scale=float(stage1_guider_params["video_stg_scale"]),
+                            modality_scale=float(
+                                stage1_guider_params["video_modality_scale"]
+                            ),
+                            final_reference=denoised_video,
+                            final_candidate=probe_denoised_video,
+                        ),
+                        "audio": self._ltx2_probe_guidance_components_report(
+                            cond_reference=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, a_v_pos, sigma_val
+                            ),
+                            cond_candidate=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, probe_a_v_pos, sigma_val
+                            ),
+                            uncond_text_reference=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, a_v_neg, sigma_val
+                            ),
+                            uncond_text_candidate=self._ltx2_velocity_to_x0(
+                                ctx.audio_latents, probe_a_v_neg, sigma_val
+                            ),
+                            uncond_perturbed_reference=denoised_audio_perturbed,
+                            uncond_perturbed_candidate=probe_denoised_audio_perturbed,
+                            uncond_modality_reference=denoised_audio_modality,
+                            uncond_modality_candidate=probe_denoised_audio_modality,
+                            cfg_scale=float(stage1_guider_params["audio_cfg_scale"]),
+                            stg_scale=float(stage1_guider_params["audio_stg_scale"]),
+                            modality_scale=float(
+                                stage1_guider_params["audio_modality_scale"]
+                            ),
+                            final_reference=denoised_audio,
+                            final_candidate=probe_denoised_audio,
+                        ),
+                    },
                 }
             )
 
