@@ -397,6 +397,69 @@ class LTX2DenoisingStage(DenoisingStage):
             "audio_cond": cls._ltx2_probe_tensor_report(reference[3], candidate[3]),
         }
 
+    @staticmethod
+    def _ltx2_probe_split_candidate_cond_pair(
+        reference_uncond: torch.Tensor,
+        reference_cond: torch.Tensor,
+        candidate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if candidate.shape[0] == 2:
+            return candidate[0:1], candidate[1:2]
+        if (
+            candidate.shape[0] == 1
+            and reference_uncond.shape[0] == 1
+            and reference_cond.shape[0] == 1
+            and candidate.ndim >= 2
+            and candidate.shape[2:] == reference_uncond.shape[2:]
+            and candidate.shape[2:] == reference_cond.shape[2:]
+            and candidate.shape[1]
+            == reference_uncond.shape[1] + reference_cond.shape[1]
+        ):
+            split = reference_uncond.shape[1]
+            return candidate[:, :split], candidate[:, split:]
+        raise ValueError(
+            "Unable to split LTX2 probe candidate into uncond/cond pair: "
+            f"reference_uncond_shape={tuple(reference_uncond.shape)}, "
+            f"reference_cond_shape={tuple(reference_cond.shape)}, "
+            f"candidate_shape={tuple(candidate.shape)}"
+        )
+
+    @classmethod
+    def _ltx2_probe_cfg_report_from_batched_tensors(
+        cls,
+        *,
+        reference_video_uncond: torch.Tensor,
+        reference_video_cond: torch.Tensor,
+        reference_audio_uncond: torch.Tensor,
+        reference_audio_cond: torch.Tensor,
+        candidate_video: torch.Tensor,
+        candidate_audio: torch.Tensor,
+    ) -> dict[str, object]:
+        candidate_video_uncond, candidate_video_cond = (
+            cls._ltx2_probe_split_candidate_cond_pair(
+                reference_video_uncond, reference_video_cond, candidate_video
+            )
+        )
+        candidate_audio_uncond, candidate_audio_cond = (
+            cls._ltx2_probe_split_candidate_cond_pair(
+                reference_audio_uncond, reference_audio_cond, candidate_audio
+            )
+        )
+        return cls._ltx2_probe_cfg_report(
+            (
+                reference_video_uncond,
+                reference_video_cond,
+                reference_audio_uncond,
+                reference_audio_cond,
+            ),
+            (
+                candidate_video_uncond.float(),
+                candidate_video_cond.float(),
+                candidate_audio_uncond.float(),
+                candidate_audio_cond.float(),
+            ),
+        )
+
     @classmethod
     def _ltx2_probe_cond_pair_report(
         cls,
@@ -407,6 +470,22 @@ class LTX2DenoisingStage(DenoisingStage):
             "uncond": cls._ltx2_probe_tensor_report(reference[0], candidate[0]),
             "cond": cls._ltx2_probe_tensor_report(reference[1], candidate[1]),
         }
+
+    @classmethod
+    def _ltx2_probe_cond_pair_report_from_batched_tensor(
+        cls,
+        *,
+        reference_uncond: torch.Tensor,
+        reference_cond: torch.Tensor,
+        candidate: torch.Tensor,
+    ) -> dict[str, object]:
+        candidate_uncond, candidate_cond = cls._ltx2_probe_split_candidate_cond_pair(
+            reference_uncond, reference_cond, candidate
+        )
+        return cls._ltx2_probe_cond_pair_report(
+            (reference_uncond, reference_cond),
+            (candidate_uncond.float(), candidate_cond.float()),
+        )
 
     @staticmethod
     def _ltx2_probe_slice_model_kwargs(
@@ -425,6 +504,56 @@ class LTX2DenoisingStage(DenoisingStage):
             else:
                 sliced[key] = value
         return sliced
+
+    @classmethod
+    def _ltx2_probe_clone_value(cls, value: object) -> object:
+        if isinstance(value, torch.Tensor):
+            return value.detach().clone()
+        if isinstance(value, tuple):
+            return tuple(cls._ltx2_probe_clone_value(item) for item in value)
+        if isinstance(value, list):
+            return [cls._ltx2_probe_clone_value(item) for item in value]
+        return copy.deepcopy(value)
+
+    @classmethod
+    def _ltx2_probe_clone_model_kwargs(
+        cls, model_kwargs: dict[str, object]
+    ) -> dict[str, object]:
+        return {
+            key: cls._ltx2_probe_clone_value(value)
+            for key, value in model_kwargs.items()
+        }
+
+    @staticmethod
+    def _ltx2_probe_merge_model_kwargs(
+        first: dict[str, object], second: dict[str, object]
+    ) -> dict[str, object]:
+        merged: dict[str, object] = {}
+        for key in first.keys() | second.keys():
+            first_value = first.get(key)
+            second_value = second.get(key)
+            if (
+                isinstance(first_value, torch.Tensor)
+                and isinstance(second_value, torch.Tensor)
+                and first_value.ndim > 0
+                and second_value.ndim > 0
+                and first_value.shape[1:] == second_value.shape[1:]
+            ):
+                merged[key] = torch.cat([first_value, second_value], dim=0)
+            elif (
+                isinstance(first_value, tuple)
+                and isinstance(second_value, tuple)
+                and len(first_value) == len(second_value)
+            ):
+                merged[key] = tuple(
+                    first_item + second_item
+                    if isinstance(first_item, tuple) and isinstance(second_item, tuple)
+                    else first_item
+                    for first_item, second_item in zip(first_value, second_value)
+                )
+            else:
+                merged[key] = first_value
+        return merged
 
     def _ltx2_probe_output_path(self) -> str | None:
         return os.getenv("SGLANG_LTX2_PROBE_OUTPUT")
@@ -506,14 +635,50 @@ class LTX2DenoisingStage(DenoisingStage):
         if not (
             isinstance(hidden_states, torch.Tensor)
             and isinstance(encoder_hidden_states, torch.Tensor)
-            and hidden_states.shape[0] == 2
-            and encoder_hidden_states.shape[0] == 2
             and model_kwargs.get("perturbation_configs") is None
         ):
             return
+        if hidden_states.shape[0] == 2 and encoder_hidden_states.shape[0] == 2:
+            is_sp_pair_probe = False
+            batched_model_kwargs = model_kwargs
+            batched_out_video = out_video
+            batched_out_audio = out_audio
+            uncond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 0, 1)
+            cond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 1, 2)
+            ref_video_uncond = None
+            ref_audio_uncond = None
+            ref_video_cond = None
+            ref_audio_cond = None
+        elif hidden_states.shape[0] == 1 and encoder_hidden_states.shape[0] == 1:
+            is_sp_pair_probe = True
+            sequential_pair = getattr(self, "_ltx2_probe_sp_official_cfg_pair", [])
+            sequential_pair.append(
+                (
+                    self._ltx2_probe_clone_model_kwargs(model_kwargs),
+                    out_video.detach().clone(),
+                    out_audio.detach().clone(),
+                )
+            )
+            self._ltx2_probe_sp_official_cfg_pair = sequential_pair
+            if len(sequential_pair) < 2:
+                return
+            uncond_kwargs, ref_video_uncond, ref_audio_uncond = sequential_pair[0]
+            cond_kwargs, ref_video_cond, ref_audio_cond = sequential_pair[1]
+            batched_model_kwargs = self._ltx2_probe_merge_model_kwargs(
+                uncond_kwargs, cond_kwargs
+            )
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                batched_out_video, batched_out_audio = step.current_model(
+                    **batched_model_kwargs
+                )
+            batched_out_video = batched_out_video.float()
+            batched_out_audio = batched_out_audio.float()
+            self._ltx2_probe_sp_official_cfg_pair = []
+        else:
+            return
 
-        uncond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 0, 1)
-        cond_kwargs = self._ltx2_probe_slice_model_kwargs(model_kwargs, 1, 2)
         probe_block_index = self._ltx2_probe_block_index()
         if not (0 <= probe_block_index < len(step.current_model.transformer_blocks)):
             raise ValueError(
@@ -525,18 +690,20 @@ class LTX2DenoisingStage(DenoisingStage):
         batched_actual_audio_ff_trace = getattr(
             probe_block.audio_ff, "_ltx2_probe_ff_trace", None
         )
-        with set_forward_context(
-            current_timestep=step.step_index, attn_metadata=step.attn_metadata
-        ):
-            ref_video_uncond, ref_audio_uncond = step.current_model(**uncond_kwargs)
+        if ref_video_uncond is None or ref_audio_uncond is None:
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                ref_video_uncond, ref_audio_uncond = step.current_model(**uncond_kwargs)
         ref_actual_block_trace_uncond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
         ref_audio_ff_trace_uncond = getattr(
             probe_block.audio_ff, "_ltx2_probe_ff_trace", None
         )
-        with set_forward_context(
-            current_timestep=step.step_index, attn_metadata=step.attn_metadata
-        ):
-            ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
+        if ref_video_cond is None or ref_audio_cond is None:
+            with set_forward_context(
+                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            ):
+                ref_video_cond, ref_audio_cond = step.current_model(**cond_kwargs)
         ref_actual_block_trace_cond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
         ref_audio_ff_trace_cond = getattr(
             probe_block.audio_ff, "_ltx2_probe_ff_trace", None
@@ -552,9 +719,11 @@ class LTX2DenoisingStage(DenoisingStage):
 
         model = step.current_model
         pretrace: dict[str, object] = {}
-        batched_patchify_video, _ = model.patchify_proj(model_kwargs["hidden_states"])
+        batched_patchify_video, _ = model.patchify_proj(
+            batched_model_kwargs["hidden_states"]
+        )
         batched_patchify_audio, _ = model.audio_patchify_proj(
-            model_kwargs["audio_hidden_states"]
+            batched_model_kwargs["audio_hidden_states"]
         )
         ref_patchify_video_uncond, _ = model.patchify_proj(uncond_kwargs["hidden_states"])
         ref_patchify_video_cond, _ = model.patchify_proj(cond_kwargs["hidden_states"])
@@ -564,27 +733,21 @@ class LTX2DenoisingStage(DenoisingStage):
         ref_patchify_audio_cond, _ = model.audio_patchify_proj(
             cond_kwargs["audio_hidden_states"]
         )
-        pretrace["patchify"] = self._ltx2_probe_cfg_report(
-            (
-                ref_patchify_video_uncond.float(),
-                ref_patchify_video_cond.float(),
-                ref_patchify_audio_uncond.float(),
-                ref_patchify_audio_cond.float(),
-            ),
-            (
-                batched_patchify_video[0:1].float(),
-                batched_patchify_video[1:2].float(),
-                batched_patchify_audio[0:1].float(),
-                batched_patchify_audio[1:2].float(),
-            ),
+        pretrace["patchify"] = self._ltx2_probe_cfg_report_from_batched_tensors(
+            reference_video_uncond=ref_patchify_video_uncond.float(),
+            reference_video_cond=ref_patchify_video_cond.float(),
+            reference_audio_uncond=ref_patchify_audio_uncond.float(),
+            reference_audio_cond=ref_patchify_audio_cond.float(),
+            candidate_video=batched_patchify_video.float(),
+            candidate_audio=batched_patchify_audio.float(),
         )
 
         if model.caption_projection is not None:
             batched_caption_video = model.caption_projection(
-                model_kwargs["encoder_hidden_states"]
+                batched_model_kwargs["encoder_hidden_states"]
             )
             batched_caption_audio = model.audio_caption_projection(
-                model_kwargs["audio_encoder_hidden_states"]
+                batched_model_kwargs["audio_encoder_hidden_states"]
             )
             ref_caption_video_uncond = model.caption_projection(
                 uncond_kwargs["encoder_hidden_states"]
@@ -598,27 +761,24 @@ class LTX2DenoisingStage(DenoisingStage):
             ref_caption_audio_cond = model.audio_caption_projection(
                 cond_kwargs["audio_encoder_hidden_states"]
             )
-            pretrace["caption_projection"] = self._ltx2_probe_cfg_report(
-                (
-                    ref_caption_video_uncond.float(),
-                    ref_caption_video_cond.float(),
-                    ref_caption_audio_uncond.float(),
-                    ref_caption_audio_cond.float(),
-                ),
-                (
-                    batched_caption_video[0:1].float(),
-                    batched_caption_video[1:2].float(),
-                    batched_caption_audio[0:1].float(),
-                    batched_caption_audio[1:2].float(),
-                ),
+            pretrace["caption_projection"] = (
+                self._ltx2_probe_cfg_report_from_batched_tensors(
+                    reference_video_uncond=ref_caption_video_uncond.float(),
+                    reference_video_cond=ref_caption_video_cond.float(),
+                    reference_audio_uncond=ref_caption_audio_uncond.float(),
+                    reference_audio_cond=ref_caption_audio_cond.float(),
+                    candidate_video=batched_caption_video.float(),
+                    candidate_audio=batched_caption_audio.float(),
+                )
             )
 
         batched_temb, _ = model.adaln_single(
-            model_kwargs["timestep"].flatten(), hidden_dtype=batched_patchify_video.dtype
+            batched_model_kwargs["timestep"].flatten(),
+            hidden_dtype=batched_patchify_video.dtype,
         )
         batched_temb = batched_temb.view(2, -1, batched_temb.size(-1))
         batched_temb_audio, _ = model.audio_adaln_single(
-            model_kwargs["audio_timestep"].flatten(),
+            batched_model_kwargs["audio_timestep"].flatten(),
             hidden_dtype=batched_patchify_audio.dtype,
         )
         batched_temb_audio = batched_temb_audio.view(
@@ -648,23 +808,17 @@ class LTX2DenoisingStage(DenoisingStage):
         ref_temb_audio_cond = ref_temb_audio_cond.view(
             1, -1, ref_temb_audio_cond.size(-1)
         )
-        pretrace["adaln_single"] = self._ltx2_probe_cfg_report(
-            (
-                ref_temb_uncond.float(),
-                ref_temb_cond.float(),
-                ref_temb_audio_uncond.float(),
-                ref_temb_audio_cond.float(),
-            ),
-            (
-                batched_temb[0:1].float(),
-                batched_temb[1:2].float(),
-                batched_temb_audio[0:1].float(),
-                batched_temb_audio[1:2].float(),
-            ),
+        pretrace["adaln_single"] = self._ltx2_probe_cfg_report_from_batched_tensors(
+            reference_video_uncond=ref_temb_uncond.float(),
+            reference_video_cond=ref_temb_cond.float(),
+            reference_audio_uncond=ref_temb_audio_uncond.float(),
+            reference_audio_cond=ref_temb_audio_cond.float(),
+            candidate_video=batched_temb.float(),
+            candidate_audio=batched_temb_audio.float(),
         )
 
-        batched_caption_video = model_kwargs["encoder_hidden_states"]
-        batched_caption_audio = model_kwargs["audio_encoder_hidden_states"]
+        batched_caption_video = batched_model_kwargs["encoder_hidden_states"]
+        batched_caption_audio = batched_model_kwargs["audio_encoder_hidden_states"]
         ref_caption_video_uncond = uncond_kwargs["encoder_hidden_states"]
         ref_caption_video_cond = cond_kwargs["encoder_hidden_states"]
         ref_caption_audio_uncond = uncond_kwargs["audio_encoder_hidden_states"]
@@ -677,10 +831,10 @@ class LTX2DenoisingStage(DenoisingStage):
         ref_temb_audio_prompt_uncond = None
         ref_temb_audio_prompt_cond = None
         if model.prompt_adaln_single is not None:
-            prompt_timestep = model_kwargs.get("prompt_timestep")
+            prompt_timestep = batched_model_kwargs.get("prompt_timestep")
             if prompt_timestep is None:
                 prompt_timestep = model._collapse_prompt_timestep(
-                    model_kwargs["timestep"]
+                    batched_model_kwargs["timestep"]
                 )
             batched_temb_prompt, _ = model.prompt_adaln_single(
                 prompt_timestep.flatten(), hidden_dtype=batched_patchify_video.dtype
@@ -714,10 +868,10 @@ class LTX2DenoisingStage(DenoisingStage):
                 1, -1, ref_temb_prompt_cond.size(-1)
             )
 
-            audio_prompt_timestep = model_kwargs.get("audio_prompt_timestep")
+            audio_prompt_timestep = batched_model_kwargs.get("audio_prompt_timestep")
             if audio_prompt_timestep is None:
                 audio_prompt_timestep = model._collapse_prompt_timestep(
-                    model_kwargs["audio_timestep"]
+                    batched_model_kwargs["audio_timestep"]
                 )
             batched_temb_audio_prompt, _ = model.audio_prompt_adaln_single(
                 audio_prompt_timestep.flatten(),
@@ -753,26 +907,20 @@ class LTX2DenoisingStage(DenoisingStage):
                 1, -1, ref_temb_audio_prompt_cond.size(-1)
             )
 
-            pretrace["prompt_adaln"] = self._ltx2_probe_cfg_report(
-                (
-                    ref_temb_prompt_uncond.float(),
-                    ref_temb_prompt_cond.float(),
-                    ref_temb_audio_prompt_uncond.float(),
-                    ref_temb_audio_prompt_cond.float(),
-                ),
-                (
-                    batched_temb_prompt[0:1].float(),
-                    batched_temb_prompt[1:2].float(),
-                    batched_temb_audio_prompt[0:1].float(),
-                    batched_temb_audio_prompt[1:2].float(),
-                ),
+            pretrace["prompt_adaln"] = self._ltx2_probe_cfg_report_from_batched_tensors(
+                reference_video_uncond=ref_temb_prompt_uncond.float(),
+                reference_video_cond=ref_temb_prompt_cond.float(),
+                reference_audio_uncond=ref_temb_audio_prompt_uncond.float(),
+                reference_audio_cond=ref_temb_audio_prompt_cond.float(),
+                candidate_video=batched_temb_prompt.float(),
+                candidate_audio=batched_temb_audio_prompt.float(),
             )
 
         av_ca_video_timestep, av_ca_audio_timestep = model._get_av_ca_timesteps(
-            model_kwargs["timestep"],
-            model_kwargs["audio_timestep"],
-            model_kwargs.get("prompt_timestep"),
-            model_kwargs.get("audio_prompt_timestep"),
+            batched_model_kwargs["timestep"],
+            batched_model_kwargs["audio_timestep"],
+            batched_model_kwargs.get("prompt_timestep"),
+            batched_model_kwargs.get("audio_prompt_timestep"),
         )
         batched_temb_ca_scale_shift, _ = model.av_ca_video_scale_shift_adaln_single(
             av_ca_video_timestep.flatten(), hidden_dtype=batched_patchify_video.dtype
@@ -885,35 +1033,25 @@ class LTX2DenoisingStage(DenoisingStage):
             1, -1, ref_temb_ca_audio_gate_cond.size(-1)
         )
 
-        pretrace["av_ca_scale_shift"] = self._ltx2_probe_cfg_report(
-            (
-                ref_temb_ca_scale_shift_uncond.float(),
-                ref_temb_ca_scale_shift_cond.float(),
-                ref_temb_ca_audio_scale_shift_uncond.float(),
-                ref_temb_ca_audio_scale_shift_cond.float(),
-            ),
-            (
-                batched_temb_ca_scale_shift[0:1].float(),
-                batched_temb_ca_scale_shift[1:2].float(),
-                batched_temb_ca_audio_scale_shift[0:1].float(),
-                batched_temb_ca_audio_scale_shift[1:2].float(),
-            ),
+        pretrace["av_ca_scale_shift"] = self._ltx2_probe_cfg_report_from_batched_tensors(
+            reference_video_uncond=ref_temb_ca_scale_shift_uncond.float(),
+            reference_video_cond=ref_temb_ca_scale_shift_cond.float(),
+            reference_audio_uncond=ref_temb_ca_audio_scale_shift_uncond.float(),
+            reference_audio_cond=ref_temb_ca_audio_scale_shift_cond.float(),
+            candidate_video=batched_temb_ca_scale_shift.float(),
+            candidate_audio=batched_temb_ca_audio_scale_shift.float(),
         )
-        pretrace["av_ca_gate"] = self._ltx2_probe_cfg_report(
-            (
-                ref_temb_ca_gate_uncond.float(),
-                ref_temb_ca_gate_cond.float(),
-                ref_temb_ca_audio_gate_uncond.float(),
-                ref_temb_ca_audio_gate_cond.float(),
-            ),
-            (
-                batched_temb_ca_gate[0:1].float(),
-                batched_temb_ca_gate[1:2].float(),
-                batched_temb_ca_audio_gate[0:1].float(),
-                batched_temb_ca_audio_gate[1:2].float(),
-            ),
+        pretrace["av_ca_gate"] = self._ltx2_probe_cfg_report_from_batched_tensors(
+            reference_video_uncond=ref_temb_ca_gate_uncond.float(),
+            reference_video_cond=ref_temb_ca_gate_cond.float(),
+            reference_audio_uncond=ref_temb_ca_audio_gate_uncond.float(),
+            reference_audio_cond=ref_temb_ca_audio_gate_cond.float(),
+            candidate_video=batched_temb_ca_gate.float(),
+            candidate_audio=batched_temb_ca_audio_gate.float(),
         )
         if (
+            not is_sp_pair_probe
+            and
             batched_actual_block_trace is not None
             and ref_actual_block_trace_uncond is not None
             and ref_actual_block_trace_cond is not None
@@ -938,19 +1076,13 @@ class LTX2DenoisingStage(DenoisingStage):
                 ref_video_stage_cond, ref_audio_stage_cond = (
                     ref_actual_block_trace_cond[trace_key]
                 )
-                pretrace[trace_name] = self._ltx2_probe_cfg_report(
-                    (
-                        ref_video_stage_uncond.float(),
-                        ref_video_stage_cond.float(),
-                        ref_audio_stage_uncond.float(),
-                        ref_audio_stage_cond.float(),
-                    ),
-                    (
-                        batched_video_stage[0:1].float(),
-                        batched_video_stage[1:2].float(),
-                        batched_audio_stage[0:1].float(),
-                        batched_audio_stage[1:2].float(),
-                    ),
+                pretrace[trace_name] = self._ltx2_probe_cfg_report_from_batched_tensors(
+                    reference_video_uncond=ref_video_stage_uncond.float(),
+                    reference_video_cond=ref_video_stage_cond.float(),
+                    reference_audio_uncond=ref_audio_stage_uncond.float(),
+                    reference_audio_cond=ref_audio_stage_cond.float(),
+                    candidate_video=batched_video_stage.float(),
+                    candidate_audio=batched_audio_stage.float(),
                 )
             if (
                 batched_actual_audio_ff_trace is not None
@@ -959,23 +1091,20 @@ class LTX2DenoisingStage(DenoisingStage):
             ):
                 for ff_key in ("proj_in", "act", "proj_out"):
                     pretrace[f"{actual_block_key}_audio_ff_{ff_key}"] = (
-                        self._ltx2_probe_cond_pair_report(
-                            (
-                                ref_audio_ff_trace_uncond[ff_key].float(),
-                                ref_audio_ff_trace_cond[ff_key].float(),
-                            ),
-                            (
-                                batched_actual_audio_ff_trace[ff_key][0:1].float(),
-                                batched_actual_audio_ff_trace[ff_key][1:2].float(),
-                            ),
+                        self._ltx2_probe_cond_pair_report_from_batched_tensor(
+                            reference_uncond=ref_audio_ff_trace_uncond[ff_key].float(),
+                            reference_cond=ref_audio_ff_trace_cond[ff_key].float(),
+                            candidate=batched_actual_audio_ff_trace[ff_key].float(),
                         )
                     )
 
         if (
-            "num_frames" in model_kwargs
-            and "height" in model_kwargs
-            and "width" in model_kwargs
-            and "audio_num_frames" in model_kwargs
+            not is_sp_pair_probe
+            and
+            "num_frames" in batched_model_kwargs
+            and "height" in batched_model_kwargs
+            and "width" in batched_model_kwargs
+            and "audio_num_frames" in batched_model_kwargs
             and len(model.transformer_blocks) > 0
         ):
             probe_block_index = self._ltx2_probe_block_index()
@@ -984,54 +1113,54 @@ class LTX2DenoisingStage(DenoisingStage):
                     f"Invalid SGLANG_LTX2_PROBE_BLOCK_INDEX={probe_block_index}, "
                     f"num_blocks={len(model.transformer_blocks)}."
                 )
-            fps = float(model_kwargs.get("fps", 24.0))
-            batched_video_coords = model_kwargs.get("video_coords")
+            fps = float(batched_model_kwargs.get("fps", 24.0))
+            batched_video_coords = batched_model_kwargs.get("video_coords")
             if batched_video_coords is None:
                 batched_video_coords = model.rope.prepare_video_coords(
                     batch_size=2,
-                    num_frames=int(model_kwargs["num_frames"]),
-                    height=int(model_kwargs["height"]),
-                    width=int(model_kwargs["width"]),
-                    device=model_kwargs["hidden_states"].device,
+                    num_frames=int(batched_model_kwargs["num_frames"]),
+                    height=int(batched_model_kwargs["height"]),
+                    width=int(batched_model_kwargs["width"]),
+                    device=batched_model_kwargs["hidden_states"].device,
                     fps=fps,
                     start_frame=0,
                 )
-            batched_audio_coords = model_kwargs.get("audio_coords")
+            batched_audio_coords = batched_model_kwargs.get("audio_coords")
             if batched_audio_coords is None:
                 batched_audio_coords = model.audio_rope.prepare_audio_coords(
                     batch_size=2,
-                    num_frames=int(model_kwargs["audio_num_frames"]),
-                    device=model_kwargs["audio_hidden_states"].device,
+                    num_frames=int(batched_model_kwargs["audio_num_frames"]),
+                    device=batched_model_kwargs["audio_hidden_states"].device,
                 )
 
             batched_video_coords = model._maybe_quantize_video_rope_coords(
                 batched_video_coords,
-                model_kwargs["hidden_states"].device,
-                model_kwargs["hidden_states"].dtype,
+                batched_model_kwargs["hidden_states"].device,
+                batched_model_kwargs["hidden_states"].dtype,
             )
             batched_audio_coords = batched_audio_coords.to(
-                device=model_kwargs["audio_hidden_states"].device
+                device=batched_model_kwargs["audio_hidden_states"].device
             )
 
             batched_video_rotary_emb = model.rope(
                 batched_video_coords,
-                device=model_kwargs["hidden_states"].device,
-                out_dtype=model_kwargs["hidden_states"].dtype,
+                device=batched_model_kwargs["hidden_states"].device,
+                out_dtype=batched_model_kwargs["hidden_states"].dtype,
             )
             batched_audio_rotary_emb = model.audio_rope(
                 batched_audio_coords,
-                device=model_kwargs["audio_hidden_states"].device,
-                out_dtype=model_kwargs["audio_hidden_states"].dtype,
+                device=batched_model_kwargs["audio_hidden_states"].device,
+                out_dtype=batched_model_kwargs["audio_hidden_states"].dtype,
             )
             batched_ca_video_rotary_emb = model.cross_attn_rope(
                 batched_video_coords[:, 0:1, :],
-                device=model_kwargs["hidden_states"].device,
-                out_dtype=model_kwargs["hidden_states"].dtype,
+                device=batched_model_kwargs["hidden_states"].device,
+                out_dtype=batched_model_kwargs["hidden_states"].dtype,
             )
             batched_ca_audio_rotary_emb = model.cross_attn_audio_rope(
                 batched_audio_coords[:, 0:1, :],
-                device=model_kwargs["audio_hidden_states"].device,
-                out_dtype=model_kwargs["audio_hidden_states"].dtype,
+                device=batched_model_kwargs["audio_hidden_states"].device,
+                out_dtype=batched_model_kwargs["audio_hidden_states"].dtype,
             )
 
             ref_video_coords_uncond = uncond_kwargs.get("video_coords")
@@ -1149,24 +1278,24 @@ class LTX2DenoisingStage(DenoisingStage):
                     audio_rotary_emb=batched_audio_rotary_emb,
                     ca_video_rotary_emb=batched_ca_video_rotary_emb,
                     ca_audio_rotary_emb=batched_ca_audio_rotary_emb,
-                    encoder_attention_mask=model_kwargs.get("encoder_attention_mask"),
-                    audio_encoder_attention_mask=model_kwargs.get(
+                    encoder_attention_mask=batched_model_kwargs.get("encoder_attention_mask"),
+                    audio_encoder_attention_mask=batched_model_kwargs.get(
                         "audio_encoder_attention_mask"
                     ),
-                    video_self_attention_mask=model_kwargs.get(
+                    video_self_attention_mask=batched_model_kwargs.get(
                         "video_self_attention_mask"
                     ),
-                    audio_self_attention_mask=model_kwargs.get(
+                    audio_self_attention_mask=batched_model_kwargs.get(
                         "audio_self_attention_mask"
                     ),
-                    a2v_cross_attention_mask=model_kwargs.get(
+                    a2v_cross_attention_mask=batched_model_kwargs.get(
                         "a2v_cross_attention_mask"
                     ),
-                    v2a_cross_attention_mask=model_kwargs.get(
+                    v2a_cross_attention_mask=batched_model_kwargs.get(
                         "v2a_cross_attention_mask"
                     ),
                     audio_replicated_for_sp=bool(
-                        model_kwargs.get("audio_replicated_for_sp", False)
+                        batched_model_kwargs.get("audio_replicated_for_sp", False)
                     ),
                 )
             batched_block_trace = getattr(probe_block, "_ltx2_probe_stage_trace", None)
@@ -1257,19 +1386,13 @@ class LTX2DenoisingStage(DenoisingStage):
                 )
             ref_block_trace_cond = getattr(probe_block, "_ltx2_probe_stage_trace", None)
             block_key = f"block{probe_block_index}"
-            pretrace[block_key] = self._ltx2_probe_cfg_report(
-                (
-                    ref_block_video_uncond.float(),
-                    ref_block_video_cond.float(),
-                    ref_block_audio_uncond.float(),
-                    ref_block_audio_cond.float(),
-                ),
-                (
-                    batched_block_video[0:1].float(),
-                    batched_block_video[1:2].float(),
-                    batched_block_audio[0:1].float(),
-                    batched_block_audio[1:2].float(),
-                ),
+            pretrace[block_key] = self._ltx2_probe_cfg_report_from_batched_tensors(
+                reference_video_uncond=ref_block_video_uncond.float(),
+                reference_video_cond=ref_block_video_cond.float(),
+                reference_audio_uncond=ref_block_audio_uncond.float(),
+                reference_audio_cond=ref_block_audio_cond.float(),
+                candidate_video=batched_block_video.float(),
+                candidate_audio=batched_block_audio.float(),
             )
             if (
                 batched_block_trace is not None
@@ -1292,36 +1415,26 @@ class LTX2DenoisingStage(DenoisingStage):
                     ref_video_stage_cond, ref_audio_stage_cond = (
                         ref_block_trace_cond[trace_key]
                     )
-                    pretrace[trace_name] = self._ltx2_probe_cfg_report(
-                        (
-                            ref_video_stage_uncond.float(),
-                            ref_video_stage_cond.float(),
-                            ref_audio_stage_uncond.float(),
-                            ref_audio_stage_cond.float(),
-                        ),
-                        (
-                            batched_video_stage[0:1].float(),
-                            batched_video_stage[1:2].float(),
-                            batched_audio_stage[0:1].float(),
-                            batched_audio_stage[1:2].float(),
-                        ),
+                    pretrace[trace_name] = (
+                        self._ltx2_probe_cfg_report_from_batched_tensors(
+                            reference_video_uncond=ref_video_stage_uncond.float(),
+                            reference_video_cond=ref_video_stage_cond.float(),
+                            reference_audio_uncond=ref_audio_stage_uncond.float(),
+                            reference_audio_cond=ref_audio_stage_cond.float(),
+                            candidate_video=batched_video_stage.float(),
+                            candidate_audio=batched_audio_stage.float(),
+                        )
                     )
 
         self._write_ltx2_probe_state(
             {
-                "official_cfg": self._ltx2_probe_cfg_report(
-                    (
-                        ref_video_uncond.float(),
-                        ref_video_cond.float(),
-                        ref_audio_uncond.float(),
-                        ref_audio_cond.float(),
-                    ),
-                    (
-                        out_video[0:1].float(),
-                        out_video[1:2].float(),
-                        out_audio[0:1].float(),
-                        out_audio[1:2].float(),
-                    ),
+                "official_cfg": self._ltx2_probe_cfg_report_from_batched_tensors(
+                    reference_video_uncond=ref_video_uncond.float(),
+                    reference_video_cond=ref_video_cond.float(),
+                    reference_audio_uncond=ref_audio_uncond.float(),
+                    reference_audio_cond=ref_audio_cond.float(),
+                    candidate_video=batched_out_video.float(),
+                    candidate_audio=batched_out_audio.float(),
                 ),
                 "official_cfg_reference_repeat": self._ltx2_probe_cfg_report(
                     (
