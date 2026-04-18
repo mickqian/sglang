@@ -161,6 +161,7 @@ class LTX2PipelineConfig(PipelineConfig):
     vae_config: LTXVideoVAEConfig = field(default_factory=LTXVideoVAEConfig)
     audio_vae_config: LTXAudioVAEConfig = field(default_factory=LTXAudioVAEConfig)
     audio_vae_precision: str = "fp32"
+    ltx2_forward_impl_mode: str = "batched"
 
     @property
     def vae_scale_factor(self):
@@ -175,6 +176,16 @@ class LTX2PipelineConfig(PipelineConfig):
         height = batch.height // self.vae_scale_factor
         width = batch.width // self.vae_scale_factor
         return (batch_size, self.in_channels, num_frames, height, width)
+
+    def get_ltx2_forward_impl_mode(self) -> str:
+        """Return validated LTX2 forward implementation mode."""
+        mode = str(self.ltx2_forward_impl_mode).strip().lower()
+        if mode not in {"batched", "sequential"}:
+            raise ValueError(
+                "ltx2_forward_impl_mode must be either 'batched' or "
+                f"'sequential', got: {self.ltx2_forward_impl_mode!r}"
+            )
+        return mode
 
     def prepare_audio_latent_shape(self, batch, batch_size, num_frames):
         # Adapted from diffusers pipeline prepare_audio_latents
@@ -342,9 +353,10 @@ class LTX2PipelineConfig(PipelineConfig):
 
         sp_rank = get_sp_parallel_rank()
         seq_len = int(latents.shape[1])
-        latent_frames, tokens_per_frame = (
-            self._infer_video_latent_frames_and_tokens_per_frame(batch, seq_len)
-        )
+        (
+            latent_frames,
+            tokens_per_frame,
+        ) = self._infer_video_latent_frames_and_tokens_per_frame(batch, seq_len)
         orig_latent_frames = int(latent_frames)
 
         # Pad whole frames so `latent_frames` is divisible by `sp_world_size`.

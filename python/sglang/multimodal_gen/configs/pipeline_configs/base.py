@@ -208,9 +208,9 @@ class PipelineConfig:
     )
 
     # get prompt_embeds from encoder output
-    postprocess_text_funcs: tuple[Callable[[BaseEncoderOutput], torch.tensor], ...] = (
-        field(default_factory=lambda: (postprocess_text,))
-    )
+    postprocess_text_funcs: tuple[
+        Callable[[BaseEncoderOutput], torch.tensor], ...
+    ] = field(default_factory=lambda: (postprocess_text,))
 
     # STA (Sliding Tile Attention) parameters
     mask_strategy_file_path: str | None = None
@@ -400,6 +400,17 @@ class PipelineConfig:
     ):
         """Prepare model-side audio RoPE coordinates for the local SP shard when the pipeline requires them."""
         return None
+
+    def get_ltx2_forward_impl_mode(self) -> str:
+        """Return the LTX2 denoising forward implementation mode.
+
+        LTX2 stages use this hook to switch between:
+        - ``"batched"``: merge positive/negative branches into one model forward.
+        - ``"sequential"``: execute positive and negative forwards separately.
+
+        Non-LTX pipelines can keep the default.
+        """
+        return "batched"
 
     def gather_noise_pred_for_sp(self, batch, noise_pred):
         noise_pred = self.gather_latents_for_sp(noise_pred)
@@ -631,9 +642,10 @@ class PipelineConfig:
         model_path: str | None = kwargs.get(
             prefix_with_dot + "model_path", None
         ) or kwargs.get("model_path")
-        pipeline_config_or_path: str | PipelineConfig | dict[str, Any] | None = (
-            kwargs.get(prefix_with_dot + "pipeline_config", None)
-            or kwargs.get("pipeline_config")
+        pipeline_config_or_path: str | PipelineConfig | dict[
+            str, Any
+        ] | None = kwargs.get(prefix_with_dot + "pipeline_config", None) or kwargs.get(
+            "pipeline_config"
         )
         if model_path is None:
             raise ValueError("model_path is required in kwargs")

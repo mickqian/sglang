@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImagePipelineConfig,
 )
@@ -120,6 +121,21 @@ class TestComponentPathParsing(unittest.TestCase):
             },
         )
         self.assertEqual(remaining, [])
+
+
+class TestLTX2ForwardImplMode(unittest.TestCase):
+    def test_ltx2_forward_impl_mode_default_is_batched(self):
+        cfg = LTX2PipelineConfig()
+        self.assertEqual(cfg.get_ltx2_forward_impl_mode(), "batched")
+
+    def test_ltx2_forward_impl_mode_sequential(self):
+        cfg = LTX2PipelineConfig(ltx2_forward_impl_mode="sequential")
+        self.assertEqual(cfg.get_ltx2_forward_impl_mode(), "sequential")
+
+    def test_ltx2_forward_impl_mode_rejects_invalid_value(self):
+        cfg = LTX2PipelineConfig(ltx2_forward_impl_mode="invalid")
+        with self.assertRaises(ValueError):
+            cfg.get_ltx2_forward_impl_mode()
 
 
 if __name__ == "__main__":

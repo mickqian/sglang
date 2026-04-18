@@ -187,6 +187,15 @@ def summarize_output_frame_metrics(
     mid_metrics = compute_uint8_frame_metrics(
         ref_stack[mid_index], cand_stack[mid_index]
     )
+    last_index = len(reference_frames) - 1
+    last_metrics = compute_uint8_frame_metrics(
+        ref_stack[last_index], cand_stack[last_index]
+    )
+    keyframe_metrics = [
+        {"frame_index": 0, **frame0_metrics},
+        {"frame_index": mid_index, **mid_metrics},
+        {"frame_index": last_index, **last_metrics},
+    ]
     all_metrics = compute_uint8_frame_metrics(ref_stack, cand_stack)
 
     return {
@@ -194,6 +203,10 @@ def summarize_output_frame_metrics(
         "frame0_metrics": frame0_metrics,
         "mid_frame_index": mid_index,
         "mid_frame_metrics": mid_metrics,
+        "last_frame_index": last_index,
+        "last_frame_metrics": last_metrics,
+        "keyframe_metrics": keyframe_metrics,
+        "min_keyframe_psnr_db": min(m["psnr_db"] for m in keyframe_metrics),
         "all_frames_metrics": all_metrics,
     }
 
@@ -247,11 +260,45 @@ def extract_result_frames(result: Any) -> list[np.ndarray]:
     return [frame for frame in array]
 
 
+def load_frames_from_path(path: str | Path) -> list[np.ndarray]:
+    output_path = Path(path).expanduser().resolve()
+    if not output_path.exists():
+        raise FileNotFoundError(f"Frame source does not exist: {output_path}")
+    if output_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+        return [np.asarray(iio.imread(output_path))]
+    return [np.asarray(frame) for frame in iio.imiter(output_path)]
+
+
+def summarize_psnr_delta_against_official(
+    reference_frames: Sequence[Any],
+    candidate_frames: Sequence[Any],
+    official_frames: Sequence[Any],
+) -> dict[str, Any]:
+    ref_vs_official = summarize_output_frame_metrics(reference_frames, official_frames)
+    cand_vs_official = summarize_output_frame_metrics(candidate_frames, official_frames)
+
+    key_names = ("frame0_metrics", "mid_frame_metrics", "last_frame_metrics")
+    keyframe_delta_psnr_db = {
+        key.replace("_metrics", ""): abs(
+            ref_vs_official[key]["psnr_db"] - cand_vs_official[key]["psnr_db"]
+        )
+        for key in key_names
+    }
+    max_delta = max(keyframe_delta_psnr_db.values())
+    return {
+        "reference_vs_official": ref_vs_official,
+        "candidate_vs_official": cand_vs_official,
+        "keyframe_delta_psnr_db": keyframe_delta_psnr_db,
+        "max_keyframe_delta_psnr_db": max_delta,
+    }
+
+
 def build_server_kwargs(args: argparse.Namespace, *, variant: str) -> dict[str, Any]:
     component_paths = parse_component_overrides(
         getattr(args, f"{variant}_component_path") or []
     )
     transformer_path = getattr(args, f"{variant}_transformer_path")
+    forward_impl_mode = getattr(args, f"{variant}_ltx2_forward_impl_mode")
 
     kwargs: dict[str, Any] = {
         "model_path": args.model_path,
@@ -272,6 +319,8 @@ def build_server_kwargs(args: argparse.Namespace, *, variant: str) -> dict[str, 
         kwargs["transformer_weights_path"] = transformer_path
     if component_paths:
         kwargs["component_paths"] = component_paths
+    if forward_impl_mode is not None:
+        kwargs["pipeline_config"] = {"ltx2_forward_impl_mode": forward_impl_mode}
     return kwargs
 
 
@@ -365,7 +414,48 @@ def main() -> None:
         default=[],
         help="Repeatable component override in the form component=path.",
     )
+    parser.add_argument(
+        "--reference-ltx2-forward-impl-mode",
+        choices=["batched", "sequential"],
+        default=None,
+        help=(
+            "Override reference LTX2 forward implementation mode via pipeline config."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-ltx2-forward-impl-mode",
+        choices=["batched", "sequential"],
+        default=None,
+        help=(
+            "Override candidate LTX2 forward implementation mode via pipeline config."
+        ),
+    )
     parser.add_argument("--save-output-dir")
+    parser.add_argument(
+        "--official-video-path",
+        help="Optional official output video/image path used to compute PSNR deltas.",
+    )
+    parser.add_argument(
+        "--min-keyframe-psnr-db",
+        type=float,
+        default=32.0,
+        help="Pass threshold for min keyframe PSNR between reference and candidate.",
+    )
+    parser.add_argument(
+        "--max-official-psnr-delta-db",
+        type=float,
+        default=1.0,
+        help=(
+            "Pass threshold for max keyframe PSNR delta between "
+            "(reference vs official) and (candidate vs official)."
+        ),
+    )
+    parser.add_argument(
+        "--enforce-gates",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exit with non-zero status when PSNR gates fail.",
+    )
     parser.add_argument(
         "--return-trajectory-decoded",
         action=argparse.BooleanOptionalAction,
@@ -431,6 +521,40 @@ def main() -> None:
         server_kwargs=cand_server_kwargs,
         sampling_kwargs=cand_sampling_kwargs,
     )
+    reference_frames = extract_result_frames(reference)
+    candidate_frames = extract_result_frames(candidate)
+    output_metrics = summarize_output_frame_metrics(reference_frames, candidate_frames)
+
+    gates: dict[str, Any] = {
+        "min_keyframe_psnr_db_threshold": args.min_keyframe_psnr_db,
+        "min_keyframe_psnr_db_actual": output_metrics["min_keyframe_psnr_db"],
+        "min_keyframe_psnr_db_passed": (
+            output_metrics["min_keyframe_psnr_db"] >= args.min_keyframe_psnr_db
+        ),
+        "max_official_psnr_delta_db_threshold": args.max_official_psnr_delta_db,
+    }
+
+    official_metrics: dict[str, Any] | None = None
+    if args.official_video_path is not None:
+        official_frames = load_frames_from_path(args.official_video_path)
+        official_metrics = summarize_psnr_delta_against_official(
+            reference_frames, candidate_frames, official_frames
+        )
+        gates["max_official_psnr_delta_db_actual"] = official_metrics[
+            "max_keyframe_delta_psnr_db"
+        ]
+        gates["max_official_psnr_delta_db_passed"] = (
+            official_metrics["max_keyframe_delta_psnr_db"]
+            <= args.max_official_psnr_delta_db
+        )
+    else:
+        gates["max_official_psnr_delta_db_actual"] = None
+        gates["max_official_psnr_delta_db_passed"] = True
+
+    gates["passed"] = bool(
+        gates["min_keyframe_psnr_db_passed"]
+        and gates["max_official_psnr_delta_db_passed"]
+    )
 
     result = {
         "model_path": args.model_path,
@@ -465,15 +589,23 @@ def main() -> None:
             candidate_timesteps=candidate.trajectory_timesteps,
             step_index=args.trajectory_step_index,
         ),
-        "output_metrics": summarize_output_frame_metrics(
-            extract_result_frames(reference),
-            extract_result_frames(candidate),
-        ),
+        "output_metrics": output_metrics,
+        "official_metrics": official_metrics,
+        "gates": gates,
     }
 
     output_json.write_text(
         json.dumps(_to_jsonable(result), indent=2, sort_keys=True), encoding="utf-8"
     )
+
+    if args.enforce_gates and not gates["passed"]:
+        raise SystemExit(
+            "PSNR gates failed: "
+            f"min_keyframe_psnr_db={gates['min_keyframe_psnr_db_actual']:.4f} "
+            f"(threshold={gates['min_keyframe_psnr_db_threshold']:.4f}), "
+            f"max_official_psnr_delta_db={gates['max_official_psnr_delta_db_actual']} "
+            f"(threshold={gates['max_official_psnr_delta_db_threshold']:.4f})"
+        )
 
     selected = result["trajectory_metrics"]["selected_step_metrics"]
     frame0 = result["output_metrics"]["frame0_metrics"]
@@ -488,6 +620,10 @@ def main() -> None:
                 "trajectory_mae": selected["mae"],
                 "frame0_psnr_db": frame0["psnr_db"],
                 "frame0_mae": frame0["mae"],
+                "min_keyframe_psnr_db": result["output_metrics"][
+                    "min_keyframe_psnr_db"
+                ],
+                "gates_passed": gates["passed"],
             },
             indent=2,
         )
