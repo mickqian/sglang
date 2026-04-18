@@ -1687,7 +1687,13 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                 or batch.do_classifier_free_guidance
                             )
                             use_batched_pos_neg = (
-                                need_negative and ltx2_forward_impl_mode == "batched"
+                                need_negative
+                                and ltx2_forward_impl_mode == "batched"
+                                # Keep stage1 guider path strictly sequential for now.
+                                # Two-stage LTX2.3 uses guider-driven perturb/modality branches;
+                                # forcing pos/neg into a single batched call causes measurable
+                                # drift against the sequential reference.
+                                and stage1_guider_params is None
                             )
 
                             if use_batched_pos_neg:
