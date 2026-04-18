@@ -313,8 +313,12 @@ def build_server_kwargs(args: argparse.Namespace, *, variant: str) -> dict[str, 
         "enable_cfg_parallel": args.enable_cfg_parallel,
         "ulysses_degree": args.ulysses_degree,
     }
+    if args.tp_size is not None:
+        kwargs["tp_size"] = args.tp_size
     if args.sp_degree is not None:
         kwargs["sp_degree"] = args.sp_degree
+    if args.pipeline_class_name is not None:
+        kwargs["pipeline_class_name"] = args.pipeline_class_name
     if transformer_path is not None:
         kwargs["transformer_weights_path"] = transformer_path
     if component_paths:
@@ -403,8 +407,10 @@ def main() -> None:
     parser.add_argument("--guidance-scale-2", type=float)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument("--tp-size", type=int)
     parser.add_argument("--ulysses-degree", type=int, default=1)
     parser.add_argument("--sp-degree", type=int)
+    parser.add_argument("--pipeline-class-name")
     parser.add_argument("--trajectory-step-index", type=int, default=-1)
     parser.add_argument("--reference-transformer-path")
     parser.add_argument("--candidate-transformer-path")
