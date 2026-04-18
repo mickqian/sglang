@@ -345,6 +345,8 @@ def build_sampling_kwargs(
         kwargs["num_frames"] = args.num_frames
     if args.guidance_scale_2 is not None:
         kwargs["guidance_scale_2"] = args.guidance_scale_2
+    if args.image_path is not None:
+        kwargs["image_path"] = args.image_path
     return kwargs
 
 
@@ -388,6 +390,10 @@ def main() -> None:
     )
     parser.add_argument("--backend", default="sglang")
     parser.add_argument("--prompt", required=True)
+    parser.add_argument(
+        "--image-path",
+        help="Optional conditioning image path/URL for I2V/TI2V scenarios.",
+    )
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
