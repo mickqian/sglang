@@ -222,14 +222,17 @@ def apply_exact_row_parallel_linear(
     input_parallel: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    base_layer = getattr(layer, "base_layer", layer)
     input_full = input_parallel
-    weight_full = layer.weight
-    if layer.tp_size > 1:
+    weight_full = base_layer.weight
+    if bias is None and not getattr(base_layer, "skip_bias_add", False):
+        bias = base_layer.bias
+    if base_layer.tp_size > 1:
         input_full = tensor_model_parallel_all_gather(
-            input_parallel.contiguous(), dim=-1, tp_group=layer.tp_group
+            input_parallel.contiguous(), dim=-1, tp_group=base_layer.tp_group
         )
         weight_full = tensor_model_parallel_all_gather(
-            layer.weight.contiguous(), dim=-1, tp_group=layer.tp_group
+            base_layer.weight.contiguous(), dim=-1, tp_group=base_layer.tp_group
         )
 
     compute_dtype = (
@@ -274,19 +277,22 @@ def apply_exact_column_parallel_linear(
     input_: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    weight_full = layer.weight
+    base_layer = getattr(layer, "base_layer", layer)
+    weight_full = base_layer.weight
     bias_full = bias
-    if layer.tp_size > 1:
+    if bias_full is None and not getattr(base_layer, "skip_bias_add", False):
+        bias_full = base_layer.bias
+    if base_layer.tp_size > 1:
         weight_full = tensor_model_parallel_all_gather(
-            layer.weight.contiguous(), dim=0, tp_group=layer.tp_group
+            base_layer.weight.contiguous(), dim=0, tp_group=base_layer.tp_group
         )
-        if bias is not None:
+        if bias_full is not None:
             bias_full = tensor_model_parallel_all_gather(
-                bias.contiguous(), dim=0, tp_group=layer.tp_group
+                bias_full.contiguous(), dim=0, tp_group=base_layer.tp_group
             )
 
     use_fp32_column_parallel_accum = should_use_fp32_column_parallel_accum(
-        layer, input_
+        base_layer, input_
     )
     compute_dtype = torch.float32 if use_fp32_column_parallel_accum else input_.dtype
     output = F.linear(
