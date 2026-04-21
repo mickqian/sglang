@@ -46,6 +46,7 @@ logger = init_logger(__name__)
 LTX2_BLOCK_TRACE_BLOCKS_ENV = "SGLANG_LTX2_BLOCK_TRACE_BLOCKS"
 LTX2_BLOCK_TRACE_PHASES_ENV = "SGLANG_LTX2_BLOCK_TRACE_PHASES"
 LTX2_BLOCK_TRACE_MODULES_ENV = "SGLANG_LTX2_BLOCK_TRACE_MODULES"
+LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV = "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR"
 
 LTX2_DEFAULT_BLOCK_TRACE_MODULES = frozenset(
     {
@@ -91,6 +92,15 @@ def _get_ltx2_block_trace_config() -> dict[str, set[int] | set[str]] | None:
         "block_indexes": block_indexes,
         "phases": phases,
         "modules": modules,
+    }
+
+
+def _use_ltx2_exact_attention_to_out() -> bool:
+    return os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -879,16 +889,22 @@ class LTX2Attention(nn.Module):
         out_flat = out.flatten(2)
         maybe_trace("pre_to_out", out_flat)
         to_out_layer = self.to_out[0]
-        if trace_hook is not None and trace_prefix is not None:
+        use_exact_to_out = _use_ltx2_exact_attention_to_out()
+        reconstructed_out = None
+        if use_exact_to_out or (trace_hook is not None and trace_prefix is not None):
             reconstructed_out = apply_exact_row_parallel_linear(
                 to_out_layer, out_flat
             )
+        if trace_hook is not None and trace_prefix is not None:
             maybe_trace(
                 "to_out_reconstructed_full",
                 reconstructed_out,
                 gather_for_tp=False,
             )
-        out_proj, _ = to_out_layer(out_flat)
+        if use_exact_to_out:
+            out_proj = reconstructed_out
+        else:
+            out_proj, _ = to_out_layer(out_flat)
 
         return out_proj
 
