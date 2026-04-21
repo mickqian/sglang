@@ -1628,7 +1628,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             self.hidden_size,
             bias=True,
             gather_output=True,
-            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.audio_patchify_proj = ColumnParallelLinear(
@@ -1636,7 +1635,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             self.audio_hidden_size,
             bias=True,
             gather_output=True,
-            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 
@@ -2020,6 +2018,16 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
 
         # 2. Patchify input projections
         patchify_proj_input = hidden_states
+        if (
+            ltx2_phase == "stage2"
+            and str(getattr(self.config.arch_config, "ltx_variant", "ltx_2"))
+            == "ltx_2_3"
+            and hidden_states.ndim == 3
+            and hidden_states.is_contiguous()
+        ):
+            patchify_proj_input = (
+                hidden_states.transpose(1, 2).contiguous().transpose(1, 2)
+            )
         maybe_record_model_trace("video_patchify_input", patchify_proj_input)
         hidden_states, _ = self.patchify_proj(patchify_proj_input)
         maybe_record_model_trace("video_patchify_proj", hidden_states)
