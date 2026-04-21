@@ -23,12 +23,12 @@ from sglang.multimodal_gen.runtime.distributed import (
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
 )
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
+    apply_exact_row_parallel_linear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -580,13 +580,30 @@ class LTX2TPRMSNormAcrossHeads(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if get_tp_world_size() == 1:
-            return F.rms_norm(x, (self.full_hidden_size,), self.weight, self.eps)
+            x_full = x
+            weight_full = self.weight
+            output_start = 0
+            output_width = self.full_hidden_size
+        else:
+            x_full = tensor_model_parallel_all_gather(x.contiguous(), dim=-1)
+            weight_full = tensor_model_parallel_all_gather(
+                self.weight.contiguous(), dim=0
+            )
+            output_start = self.tp_rank * self.local_hidden_size
+            output_width = self.local_hidden_size
 
-        x_full = tensor_model_parallel_all_gather(x.contiguous(), dim=-1)
-        weight_full = tensor_model_parallel_all_gather(self.weight.contiguous(), dim=0)
-        y_full = F.rms_norm(x_full, (self.full_hidden_size,), weight_full, self.eps)
-        start = self.tp_rank * self.local_hidden_size
-        return y_full.narrow(-1, start, self.local_hidden_size)
+        y_fp32 = (
+            F.rms_norm(
+                x_full.float(),
+                (self.full_hidden_size,),
+                None,
+                self.eps,
+            )
+            * weight_full.float()
+        )
+        if output_width != self.full_hidden_size:
+            y_fp32 = y_fp32.narrow(-1, output_start, output_width)
+        return y_fp32.to(dtype=x.dtype)
 
 
 class LTX2Attention(nn.Module):
@@ -638,6 +655,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_k = ColumnParallelLinear(
@@ -645,6 +663,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_v = ColumnParallelLinear(
@@ -652,6 +671,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_gate_logits: ColumnParallelLinear | None = None
@@ -661,6 +681,7 @@ class LTX2Attention(nn.Module):
                 self.heads,
                 bias=True,
                 gather_output=False,
+                accumulate_in_fp32=True,
                 quant_config=quant_config,
             )
 
@@ -840,6 +861,15 @@ class LTX2Attention(nn.Module):
         out_flat = out.flatten(2)
         maybe_trace("pre_to_out", out_flat)
         to_out_layer = self.to_out[0]
+        if trace_hook is not None and trace_prefix is not None:
+            reconstructed_out = apply_exact_row_parallel_linear(
+                to_out_layer, out_flat
+            )
+            maybe_trace(
+                "to_out_reconstructed_full",
+                reconstructed_out,
+                gather_for_tp=False,
+            )
         out_proj, _ = to_out_layer(out_flat)
 
         return out_proj
@@ -896,7 +926,6 @@ class LTX2FeedForward(nn.Module):
         if dim_out is None:
             dim_out = dim
         inner_dim = int(dim * mult)
-
         self.proj_in = ColumnParallelLinear(
             dim, inner_dim, bias=True, gather_output=False, quant_config=quant_config
         )
@@ -1224,6 +1253,10 @@ class LTX2TransformerBlock(nn.Module):
         if trace_active:
             self._ltx2_record_trace(ltx2_phase, "video_attn1", attn_hidden_states)
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
+        if trace_active:
+            self._ltx2_record_trace(
+                ltx2_phase, "video_post_attn1_hidden_states", hidden_states
+            )
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
@@ -1269,6 +1302,10 @@ class LTX2TransformerBlock(nn.Module):
             if trace_active:
                 self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
             hidden_states = hidden_states + attn_hidden_states * vgate_q
+            if trace_active:
+                self._ltx2_record_trace(
+                    ltx2_phase, "video_post_attn2_hidden_states", hidden_states
+                )
 
             ashift_q, ascale_q, agate_q = self.get_ada_values(
                 self.audio_scale_shift_table, batch_size, temb_audio, slice(6, 9)
@@ -1305,6 +1342,10 @@ class LTX2TransformerBlock(nn.Module):
             if trace_active:
                 self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
             hidden_states = hidden_states + attn_hidden_states
+            if trace_active:
+                self._ltx2_record_trace(
+                    ltx2_phase, "video_post_attn2_hidden_states", hidden_states
+                )
 
             norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
             attn_audio_hidden_states = self.audio_attn2(
@@ -1768,6 +1809,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             arch.out_channels,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 
@@ -1779,6 +1821,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             arch.audio_out_channels,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 
@@ -2166,8 +2209,11 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
         with torch.autocast(device_type=hidden_states.device.type, enabled=False):
             hidden_states = self.norm_out(hidden_states)
+        maybe_record_model_trace("video_norm_out", hidden_states)
         hidden_states = hidden_states * (1 + scale) + shift
+        maybe_record_model_trace("video_proj_out_input", hidden_states)
         hidden_states, _ = self.proj_out(hidden_states)
+        maybe_record_model_trace("video_proj_out", hidden_states)
 
         # Audio
         audio_scale_shift_values = self.audio_scale_shift_table[None, None].to(

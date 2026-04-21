@@ -169,6 +169,26 @@ def test_ltx2_adaln_single_uses_fp32_column_parallel_accumulation():
     assert linear_keywords["accumulate_in_fp32"] is True
 
 
+def test_ltx2_final_output_heads_use_fp32_column_parallel_accumulation():
+    source_path = (
+        Path(__file__).resolve().parents[1] / "runtime" / "models" / "dits" / "ltx_2.py"
+    )
+
+    proj_out_func, proj_out_keywords = _get_self_call_keywords(
+        source_path, "LTX2VideoTransformer3DModel", "proj_out"
+    )
+    audio_proj_out_func, audio_proj_out_keywords = _get_self_call_keywords(
+        source_path, "LTX2VideoTransformer3DModel", "audio_proj_out"
+    )
+
+    assert proj_out_func == "ColumnParallelLinear"
+    assert proj_out_keywords["gather_output"] is True
+    assert proj_out_keywords["accumulate_in_fp32"] is True
+    assert audio_proj_out_func == "ColumnParallelLinear"
+    assert audio_proj_out_keywords["gather_output"] is True
+    assert audio_proj_out_keywords["accumulate_in_fp32"] is True
+
+
 def test_ltx2_attention_output_projection_uses_fp32_row_parallel_accumulation():
     source_path = (
         Path(__file__).resolve().parents[1] / "runtime" / "models" / "dits" / "ltx_2.py"
@@ -183,10 +203,13 @@ def test_ltx2_attention_output_projection_uses_fp32_row_parallel_accumulation():
 
     assert to_q_func == "ColumnParallelLinear"
     assert to_q_keywords["gather_output"] is False
+    assert to_q_keywords["accumulate_in_fp32"] is True
     assert to_k_func == "ColumnParallelLinear"
     assert to_k_keywords["gather_output"] is False
+    assert to_k_keywords["accumulate_in_fp32"] is True
     assert to_v_func == "ColumnParallelLinear"
     assert to_v_keywords["gather_output"] is False
+    assert to_v_keywords["accumulate_in_fp32"] is True
     assert to_out_func == "RowParallelLinear"
     assert to_out_keywords["input_is_parallel"] is True
     assert to_out_keywords["accumulate_in_fp32"] is True
@@ -262,6 +285,7 @@ def test_ltx2_attention_exposes_qk_norm_and_pre_to_out_trace_points():
         "k_norm",
         "gate_logits",
         "pre_to_out",
+        "to_out_reconstructed_full",
     } <= trace_names
 
 
@@ -307,6 +331,9 @@ def test_ltx2_model_forward_exposes_pre_block_trace_points():
         "video_embedded_timestep",
         "video_temb",
         "video_caption_projection",
+        "video_norm_out",
+        "video_proj_out_input",
+        "video_proj_out",
     } <= trace_names
 
 
@@ -334,6 +361,8 @@ def test_ltx2_transformer_block_exposes_video_attn1_modulation_trace_points():
         "video_attn1_shift",
         "video_attn1_scale",
         "video_attn1_gate",
+        "video_post_attn1_hidden_states",
+        "video_post_attn2_hidden_states",
     } <= trace_names
 
 

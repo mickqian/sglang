@@ -43,6 +43,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 ROW_PARALLEL_FP32_ACCUM_ENV = "SGLANG_ROW_PARALLEL_FP32_ACCUM"
+ROW_PARALLEL_EXACT_LINEAR_ENV = "SGLANG_ROW_PARALLEL_EXACT_LINEAR"
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
@@ -193,6 +194,55 @@ def apply_fp32_row_parallel_linear(
         layer.weight.float(),
         None if bias is None else bias.float(),
     )
+
+
+def should_use_exact_row_parallel_linear(
+    layer: "RowParallelLinear", input_parallel: torch.Tensor
+) -> bool:
+    enabled_via_env = os.getenv(ROW_PARALLEL_EXACT_LINEAR_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if (
+        not enabled_via_env
+        or layer.tp_size == 1
+        or not layer.reduce_results
+        or not isinstance(layer.quant_method, UnquantizedLinearMethod)
+    ):
+        return False
+    return input_parallel.dtype == torch.float32 or should_use_fp32_row_parallel_accum(
+        layer, input_parallel
+    )
+
+
+def apply_exact_row_parallel_linear(
+    layer: "RowParallelLinear",
+    input_parallel: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    input_full = input_parallel
+    weight_full = layer.weight
+    if layer.tp_size > 1:
+        input_full = tensor_model_parallel_all_gather(
+            input_parallel.contiguous(), dim=-1, tp_group=layer.tp_group
+        )
+        weight_full = tensor_model_parallel_all_gather(
+            layer.weight.contiguous(), dim=-1, tp_group=layer.tp_group
+        )
+
+    compute_dtype = (
+        torch.float32
+        if input_parallel.dtype in (torch.float16, torch.bfloat16)
+        else input_full.dtype
+    )
+    output = F.linear(
+        input_full.to(dtype=compute_dtype),
+        weight_full.to(dtype=compute_dtype),
+        None if bias is None else bias.to(dtype=compute_dtype),
+    )
+    return output.to(dtype=input_parallel.dtype)
 
 
 def should_use_fp32_column_parallel_accum(
@@ -1128,6 +1178,18 @@ class RowParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
+        use_exact_row_parallel_linear = should_use_exact_row_parallel_linear(
+            self, input_parallel
+        )
+        if use_exact_row_parallel_linear:
+            output = apply_exact_row_parallel_linear(
+                self,
+                input_parallel,
+                bias=None if self.skip_bias_add else self.bias,
+            )
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
