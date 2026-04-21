@@ -115,6 +115,8 @@ class GenerationResult:
     metrics: dict = field(default_factory=dict)
     trajectory_latents: Any = None
     trajectory_timesteps: Any = None
+    trajectory_audio_latents: Any = None
+    stage_trajectory_data: Any = None
     rollout_trajectory_data: Any = None
     trajectory_decoded: Any = None
     prompt_index: int = 0

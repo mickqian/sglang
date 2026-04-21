@@ -52,13 +52,62 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
         )
         latents = self._truncate_sp_padded_token_latents(batch, latents)
 
+        trajectory_timesteps_cpu = None
+        trajectory_tensor_cpu = None
         if trajectory_tensor is not None and trajectory_timesteps_tensor is not None:
-            batch.trajectory_timesteps = trajectory_timesteps_tensor.cpu()
-            batch.trajectory_latents = trajectory_tensor.cpu()
+            trajectory_timesteps_cpu = trajectory_timesteps_tensor.cpu()
+            trajectory_tensor_cpu = trajectory_tensor.cpu()
+            batch.trajectory_timesteps = trajectory_timesteps_cpu
+            batch.trajectory_latents = trajectory_tensor_cpu
 
+        trajectory_audio_tensor_cpu = None
         if trajectory_audio_latents:
             trajectory_audio_tensor = torch.stack(trajectory_audio_latents, dim=1)
-            batch.trajectory_audio_latents = trajectory_audio_tensor.cpu()
+            trajectory_audio_tensor_cpu = trajectory_audio_tensor.cpu()
+            batch.trajectory_audio_latents = trajectory_audio_tensor_cpu
+
+        current_phase = (
+            str(getattr(batch, "extra", {}).get("ltx2_phase", ""))
+            if hasattr(batch, "extra")
+            else ""
+        )
+        if current_phase in ("stage1", "stage2"):
+            stage_trajectory_data = batch.extra.setdefault("ltx2_stage_trajectory_data", {})
+            stage_payload: dict[str, object] = {}
+            if trajectory_timesteps_cpu is not None:
+                stage_payload["timesteps"] = trajectory_timesteps_cpu
+            if trajectory_tensor_cpu is not None:
+                stage_payload["video_latents"] = trajectory_tensor_cpu
+            if trajectory_audio_tensor_cpu is not None:
+                stage_payload["audio_latents"] = trajectory_audio_tensor_cpu
+            export_block_trace_data = getattr(
+                self.transformer, "export_ltx2_block_trace_data", None
+            )
+            if callable(export_block_trace_data):
+                block_trace_data = export_block_trace_data()
+                stage_payload["block_trace_export_phase_keys"] = sorted(
+                    block_trace_data.keys()
+                )
+                phase_block_trace = block_trace_data.get(current_phase)
+                if phase_block_trace:
+                    if "forward_count" in phase_block_trace:
+                        stage_payload["block_trace_forward_count"] = int(
+                            phase_block_trace["forward_count"]
+                        )
+                    stage_payload["block_trace_data"] = phase_block_trace
+            debug_tensors_by_phase = batch.extra.get("ltx2_debug_tensors")
+            if isinstance(debug_tensors_by_phase, dict):
+                phase_debug_tensors = debug_tensors_by_phase.pop(current_phase, None)
+                if isinstance(phase_debug_tensors, dict):
+                    for key, value in phase_debug_tensors.items():
+                        if isinstance(value, torch.Tensor):
+                            stage_payload[key] = value
+            if stage_payload:
+                stage_trajectory_data[current_phase] = stage_payload
+
+        reset_block_trace_data = getattr(self.transformer, "reset_ltx2_block_trace_data", None)
+        if callable(reset_block_trace_data):
+            reset_block_trace_data()
 
         audio_latents = batch.audio_latents
         if batch.did_sp_shard_audio_latents and isinstance(audio_latents, torch.Tensor):
@@ -83,11 +132,6 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
             batch.audio_latents = audio_latents
 
         pipeline = self.pipeline() if self.pipeline else None
-        current_phase = (
-            str(getattr(batch, "extra", {}).get("ltx2_phase", ""))
-            if hasattr(batch, "extra")
-            else ""
-        )
         if (
             pipeline is not None
             and getattr(pipeline, "_use_premerged_stage2_transformer", False)
@@ -176,16 +220,14 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
 
     @staticmethod
     def _should_reset_stage2_generators(server_args: ServerArgs) -> bool:
-        arch_config = getattr(
-            server_args.pipeline_config.vae_config, "arch_config", None
-        )
-        if arch_config is not None and is_ltx23_native_variant(arch_config):
-            return False
-        return "LTX-2.3" not in str(getattr(server_args, "model_path", ""))
+        return True
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Run the distilled refinement schedule on top of the shared AV denoiser."""
         batch.extra["ltx2_phase"] = "stage2"
+        stage2_debug_tensors = batch.extra.setdefault("ltx2_debug_tensors", {}).setdefault(
+            "stage2", {}
+        )
         original_clean_latent_background = getattr(
             batch, "ltx2_ti2v_clean_latent_background", None
         )
@@ -194,6 +236,14 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             and batch.image_path is not None
             and isinstance(batch.latents, torch.Tensor)
         )
+        if isinstance(batch.latents, torch.Tensor):
+            stage2_debug_tensors["video_latents_pre_renoise"] = (
+                batch.latents.detach().cpu()
+            )
+        if isinstance(batch.audio_latents, torch.Tensor):
+            stage2_debug_tensors["audio_latents_pre_renoise"] = (
+                batch.audio_latents.detach().cpu()
+            )
         if is_native_ti2v:
             # Official two-stage TI2V keeps the upsampled stage-2 latent as the
             # clean background and only overwrites the conditioned frame tokens.
@@ -249,6 +299,14 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 batch.audio_latents = batch.audio_latents.to(
                     device=batch.audio_latents.device, dtype=torch.float32
                 )
+        if isinstance(batch.latents, torch.Tensor):
+            stage2_debug_tensors["video_latents_post_renoise"] = (
+                batch.latents.detach().cpu()
+            )
+        if isinstance(batch.audio_latents, torch.Tensor):
+            stage2_debug_tensors["audio_latents_post_renoise"] = (
+                batch.audio_latents.detach().cpu()
+            )
 
         original_scheduler = self.scheduler
         original_batch_timesteps = batch.timesteps

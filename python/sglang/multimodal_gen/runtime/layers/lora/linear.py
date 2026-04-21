@@ -21,12 +21,14 @@ from sglang.multimodal_gen.runtime.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from sglang.multimodal_gen.runtime.layers.linear import (
+    apply_fp32_row_parallel_linear,
     ColumnParallelLinear,
     LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    should_use_fp32_row_parallel_accum,
 )
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
@@ -317,6 +319,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         super().__init__(base_layer, lora_rank, lora_alpha)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.merged or self.disable_lora:
+            return self.base_layer(input_)
+
         lora_A = self.lora_A
         lora_B = self.lora_B
         if isinstance(self.lora_B, DTensor):
@@ -430,6 +435,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         super().__init__(base_layer, lora_rank, lora_alpha)
 
     def forward(self, input_: torch.Tensor):
+        if self.merged or self.disable_lora:
+            return self.base_layer(input_)
+
         lora_A = self.lora_A
         lora_B = self.lora_B
         if isinstance(self.lora_B, DTensor):
@@ -444,17 +452,35 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 input_, num_partitions=self.base_layer.tp_size
             )
             input_parallel = splitted_input[tp_rank].contiguous()
-        output_parallel = self.base_layer.quant_method.apply(
+        use_fp32_row_parallel_accum = should_use_fp32_row_parallel_accum(
             self.base_layer, input_parallel
         )
+        if use_fp32_row_parallel_accum:
+            output_parallel = apply_fp32_row_parallel_linear(
+                self.base_layer, input_parallel
+            )
+        else:
+            output_parallel = self.base_layer.quant_method.apply(
+                self.base_layer, input_parallel
+            )
         if not self.merged and not self.disable_lora:
-            lora_dtype = lora_A.dtype
+            lora_dtype = (
+                torch.float32 if use_fp32_row_parallel_accum else lora_A.dtype
+            )
             input_parallel_lora = input_parallel.to(dtype=lora_dtype)
             lora_A_sliced = self.slice_lora_a_weights(
-                lora_A.to(device=input_parallel.device, non_blocking=True)
+                lora_A.to(
+                    device=input_parallel.device,
+                    dtype=lora_dtype,
+                    non_blocking=True,
+                )
             )
             lora_B_sliced = self.slice_lora_b_weights(
-                lora_B.to(device=input_parallel.device, non_blocking=True)
+                lora_B.to(
+                    device=input_parallel.device,
+                    dtype=lora_dtype,
+                    non_blocking=True,
+                )
             )
             delta_parallel = input_parallel_lora @ lora_A_sliced.T @ lora_B_sliced.T
             if self.lora_alpha != self.lora_rank:
@@ -467,9 +493,14 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             )
 
         if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
-            output_ = tensor_model_parallel_all_reduce(output_parallel)
+            output_ = tensor_model_parallel_all_reduce(
+                output_parallel, tp_group=self.base_layer.tp_group
+            )
         else:
             output_ = output_parallel
+
+        if use_fp32_row_parallel_accum:
+            output_ = output_.to(dtype=input_parallel.dtype)
 
         if not self.base_layer.skip_bias_add:
             output = (

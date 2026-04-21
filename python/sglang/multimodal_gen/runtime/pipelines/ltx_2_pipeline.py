@@ -646,6 +646,29 @@ class LTX2TwoStageDeviceManager:
             next(transformer.parameters(), None) if transformer is not None else None
         )
         if transformer is not None and param is not None and param.device.type == "cpu":
+            transformer_size_gb = (
+                sum(
+                    p.numel() * p.element_size() for p in transformer.parameters()
+                )
+                + sum(b.numel() * b.element_size() for b in transformer.buffers())
+            ) / BYTES_PER_GB
+            free_gpu_memory_gb = current_platform.get_available_gpu_memory(
+                empty_cache=False
+            )
+            pin_safety_margin_gb = 4.0
+            required_gpu_memory_gb = transformer_size_gb + pin_safety_margin_gb
+            if free_gpu_memory_gb < required_gpu_memory_gb:
+                logger.info(
+                    "Skipping stage1 transformer pin for LTX-2.3 two-stage startup: "
+                    "free GPU memory %.2f GiB < required %.2f GiB "
+                    "(transformer %.2f GiB + %.2f GiB safety margin)",
+                    free_gpu_memory_gb,
+                    required_gpu_memory_gb,
+                    transformer_size_gb,
+                    pin_safety_margin_gb,
+                )
+                self._active_phase = "stage1"
+                return
             transformer.to(get_local_torch_device(), non_blocking=True)
             logger.info(
                 "Pinned stage1 transformer on GPU for LTX-2.3 two-stage startup"

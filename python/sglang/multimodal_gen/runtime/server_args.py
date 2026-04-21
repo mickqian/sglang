@@ -84,6 +84,10 @@ def _normalize_ltx2_two_stage_device_mode(mode: str | None) -> str | None:
     return mode
 
 
+def is_ltx2_two_stage_pipeline_name(pipeline_name: str | None) -> bool:
+    return pipeline_name == "LTX2TwoStagePipeline"
+
+
 class Backend(str, Enum):
     """
     Enumeration for different model backends.

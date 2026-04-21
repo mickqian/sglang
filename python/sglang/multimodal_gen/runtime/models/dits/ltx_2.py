@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple, Union
+import os
+from functools import lru_cache
+from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -20,6 +22,7 @@ from sglang.multimodal_gen.runtime.distributed import (
 )
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
@@ -31,6 +34,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
     QuantizationConfig,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import timestep_embedding
+from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -38,8 +42,55 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+LTX2_BLOCK_TRACE_BLOCKS_ENV = "SGLANG_LTX2_BLOCK_TRACE_BLOCKS"
+LTX2_BLOCK_TRACE_PHASES_ENV = "SGLANG_LTX2_BLOCK_TRACE_PHASES"
+LTX2_BLOCK_TRACE_MODULES_ENV = "SGLANG_LTX2_BLOCK_TRACE_MODULES"
+
+LTX2_DEFAULT_BLOCK_TRACE_MODULES = frozenset(
+    {
+        "video_attn1",
+        "video_attn2",
+        "video_a2v",
+        "video_ff",
+        "video_hidden_states",
+    }
+)
+
 ADALN_NUM_BASE_PARAMS = 6
 ADALN_NUM_CROSS_ATTN_PARAMS = 3
+
+
+@lru_cache(maxsize=1)
+def _get_ltx2_block_trace_config() -> dict[str, set[int] | set[str]] | None:
+    raw_blocks = os.getenv(LTX2_BLOCK_TRACE_BLOCKS_ENV, "").strip()
+    if not raw_blocks:
+        return None
+
+    block_indexes = {
+        int(item.strip()) for item in raw_blocks.split(",") if item.strip()
+    }
+    if not block_indexes:
+        return None
+
+    raw_phases = os.getenv(LTX2_BLOCK_TRACE_PHASES_ENV, "").strip()
+    phases = (
+        {item.strip() for item in raw_phases.split(",") if item.strip()}
+        if raw_phases
+        else {"stage1", "stage2"}
+    )
+
+    raw_modules = os.getenv(LTX2_BLOCK_TRACE_MODULES_ENV, "").strip()
+    modules = (
+        {item.strip() for item in raw_modules.split(",") if item.strip()}
+        if raw_modules
+        else set(LTX2_DEFAULT_BLOCK_TRACE_MODULES)
+    )
+
+    return {
+        "block_indexes": block_indexes,
+        "phases": phases,
+        "modules": modules,
+    }
 
 
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
@@ -382,7 +433,11 @@ class LTX2TextProjection(nn.Module):
             out_features = hidden_size
 
         self.linear_1 = ColumnParallelLinear(
-            in_features, hidden_size, bias=True, gather_output=True
+            in_features,
+            hidden_size,
+            bias=True,
+            gather_output=False,
+            accumulate_in_fp32=True,
         )
         if act_fn == "gelu_tanh":
             self.act_1 = nn.GELU(approximate="tanh")
@@ -391,8 +446,12 @@ class LTX2TextProjection(nn.Module):
         else:
             raise ValueError(f"Unknown activation function: {act_fn}")
 
-        self.linear_2 = ColumnParallelLinear(
-            hidden_size, out_features, bias=True, gather_output=True
+        self.linear_2 = RowParallelLinear(
+            hidden_size,
+            out_features,
+            bias=True,
+            input_is_parallel=True,
+            accumulate_in_fp32=True,
         )
 
     def forward(self, caption: torch.Tensor) -> torch.Tensor:
@@ -406,15 +465,41 @@ class LTX2TimestepEmbedder(nn.Module):
     def __init__(self, embedding_dim: int, in_channels: int = 256) -> None:
         super().__init__()
         self.linear_1 = ColumnParallelLinear(
-            in_channels, embedding_dim, bias=True, gather_output=True
+            in_channels,
+            embedding_dim,
+            bias=True,
+            gather_output=True,
         )
         self.linear_2 = ColumnParallelLinear(
-            embedding_dim, embedding_dim, bias=True, gather_output=True
+            embedding_dim,
+            embedding_dim,
+            bias=True,
+            gather_output=True,
         )
 
-    def forward(self, t_emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        t_emb: torch.Tensor,
+        trace_hook: Callable[[str, torch.Tensor], None] | None = None,
+        trace_prefix: str | None = None,
+    ) -> torch.Tensor:
+        def maybe_trace(
+            name_suffix: str,
+            tensor: torch.Tensor,
+            *,
+            gather_for_tp: bool = False,
+        ) -> None:
+            if trace_hook is None or trace_prefix is None:
+                return
+            if gather_for_tp and get_tp_world_size() > 1 and tensor.ndim > 0:
+                tensor = tensor_model_parallel_all_gather(tensor.contiguous(), dim=-1)
+            trace_hook(f"{trace_prefix}_{name_suffix}", tensor)
+
+        maybe_trace("timestep_embedding", t_emb)
         x, _ = self.linear_1(t_emb)
+        maybe_trace("timestep_linear1", x)
         x = F.silu(x)
+        maybe_trace("timestep_act", x)
         x, _ = self.linear_2(x)
         return x
 
@@ -425,13 +510,23 @@ class LTX2PixArtAlphaCombinedTimestepSizeEmbeddings(nn.Module):
         self.timestep_embedder = LTX2TimestepEmbedder(embedding_dim, in_channels=256)
 
     def forward(
-        self, timestep: torch.Tensor, hidden_dtype: torch.dtype | None = None
+        self,
+        timestep: torch.Tensor,
+        hidden_dtype: torch.dtype | None = None,
+        trace_hook: Callable[[str, torch.Tensor], None] | None = None,
+        trace_prefix: str | None = None,
     ) -> torch.Tensor:
         t = timestep.reshape(-1).to(dtype=torch.float32)
+        if trace_hook is not None and trace_prefix is not None:
+            trace_hook(f"{trace_prefix}_timestep_input", t)
         t_emb = timestep_embedding(t, dim=256, max_period=10000, dtype=torch.float32)
         if hidden_dtype is not None:
             t_emb = t_emb.to(dtype=hidden_dtype)
-        return self.timestep_embedder(t_emb)
+        return self.timestep_embedder(
+            t_emb,
+            trace_hook=trace_hook,
+            trace_prefix=trace_prefix,
+        )
 
 
 class LTX2AdaLayerNormSingle(nn.Module):
@@ -444,14 +539,22 @@ class LTX2AdaLayerNormSingle(nn.Module):
             embedding_coefficient * embedding_dim,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
         )
 
     def forward(
-        self, timestep: torch.Tensor, hidden_dtype: torch.dtype | None = None
+        self,
+        timestep: torch.Tensor,
+        hidden_dtype: torch.dtype | None = None,
+        trace_hook: Callable[[str, torch.Tensor], None] | None = None,
+        trace_prefix: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embedded_timestep = self.emb(timestep, hidden_dtype=hidden_dtype).to(
-            dtype=self.linear.weight.dtype
-        )
+        embedded_timestep = self.emb(
+            timestep,
+            hidden_dtype=hidden_dtype,
+            trace_hook=trace_hook,
+            trace_prefix=trace_prefix,
+        ).to(dtype=self.linear.weight.dtype)
         out, _ = self.linear(self.silu(embedded_timestep))
         return out, embedded_timestep
 
@@ -465,31 +568,25 @@ class LTX2TPRMSNormAcrossHeads(nn.Module):
         self.local_hidden_size = local_hidden_size
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(local_hidden_size))
-
-        tp_rank = get_tp_rank()
+        self.tp_rank = get_tp_rank()
 
         def _weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
             shard = loaded_weight.narrow(
-                0, tp_rank * local_hidden_size, local_hidden_size
+                0, self.tp_rank * local_hidden_size, local_hidden_size
             )
             param.data.copy_(shard.to(dtype=param.dtype, device=param.device))
 
         setattr(self.weight, "weight_loader", _weight_loader)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Keep track of the original dtype. We do the statistics in fp32 for
-        # numerical stability, but cast the output back to the input dtype to
-        orig_dtype = x.dtype
         if get_tp_world_size() == 1:
-            var = x.float().pow(2).mean(dim=-1, keepdim=True)
-        else:
-            local_sumsq = x.float().pow(2).sum(dim=-1, keepdim=True)
-            global_sumsq = tensor_model_parallel_all_reduce(local_sumsq)
-            var = global_sumsq / float(self.full_hidden_size)
+            return F.rms_norm(x, (self.full_hidden_size,), self.weight, self.eps)
 
-        inv_rms_fp32 = torch.rsqrt(var + self.eps)
-        y = (x.float() * inv_rms_fp32).to(dtype=orig_dtype)
-        return y * self.weight.to(dtype=orig_dtype)
+        x_full = tensor_model_parallel_all_gather(x.contiguous(), dim=-1)
+        weight_full = tensor_model_parallel_all_gather(self.weight.contiguous(), dim=0)
+        y_full = F.rms_norm(x_full, (self.full_hidden_size,), weight_full, self.eps)
+        start = self.tp_rank * self.local_hidden_size
+        return y_full.narrow(-1, start, self.local_hidden_size)
 
 
 class LTX2Attention(nn.Module):
@@ -591,6 +688,7 @@ class LTX2Attention(nn.Module):
                 self.query_dim,
                 bias=True,
                 input_is_parallel=True,
+                accumulate_in_fp32=True,
                 quant_config=quant_config,
             ),
             nn.Identity(),
@@ -629,20 +727,44 @@ class LTX2Attention(nn.Module):
         all_perturbed: bool = False,
         skip_sequence_parallel_override: bool = False,
         gather_context_kv_for_sp: bool = False,
+        trace_prefix: str | None = None,
+        trace_hook: Callable[[str, torch.Tensor], None] | None = None,
     ) -> torch.Tensor:
+        def maybe_trace(
+            name_suffix: str,
+            tensor: torch.Tensor,
+            *,
+            gather_for_tp: bool = True,
+            gather_dim: int = -1,
+        ) -> None:
+            if trace_prefix is None or trace_hook is None:
+                return
+            trace_hook(
+                f"{trace_prefix}_{name_suffix}",
+                self._gather_trace_tensor_for_tp(tensor, dim=gather_dim)
+                if gather_for_tp
+                else tensor,
+            )
+
         gate_input = x
         context_ = x if context is None else context
+        maybe_trace("input", x, gather_for_tp=False)
         v, _ = self.to_v(context_)
+        maybe_trace("v_proj", v)
         use_attention = not all_perturbed
 
         if use_attention:
             q, _ = self.to_q(x)
             k, _ = self.to_k(context_)
+            maybe_trace("q_proj", q)
+            maybe_trace("k_proj", k)
 
             if self.qk_norm:
                 assert self.q_norm is not None and self.k_norm is not None
                 q = self.q_norm(q)
                 k = self.k_norm(k)
+                maybe_trace("q_norm", q)
+                maybe_trace("k_norm", k)
 
             if pe is not None:
                 cos, sin = pe
@@ -662,6 +784,8 @@ class LTX2Attention(nn.Module):
                 else:
                     q = apply_split_rotary_emb(q, (cos, sin))
                     k = apply_split_rotary_emb(k, (k_cos, k_sin))
+                maybe_trace("q_rope", q.flatten(2))
+                maybe_trace("k_rope", k.flatten(2))
 
         v = v.view(*v.shape[:-1], self.local_heads, self.dim_head)
         if use_attention:
@@ -695,6 +819,7 @@ class LTX2Attention(nn.Module):
                     attn_mask=mask,
                     skip_sequence_parallel_override=skip_sequence_parallel_override,
                 )
+            maybe_trace("attn_kernel_out", out.flatten(2))
 
             if perturbation_mask is not None:
                 if perturbation_mask.ndim == out.ndim - 1:
@@ -706,15 +831,25 @@ class LTX2Attention(nn.Module):
 
         if self.to_gate_logits is not None:
             gate_logits, _ = self.to_gate_logits(gate_input)
+            maybe_trace("gate_logits", gate_logits)
             b, t = out.shape[:2]
             out = out.view(b, t, self.local_heads, self.dim_head)
             out = out * (2.0 * torch.sigmoid(gate_logits).unsqueeze(-1))
             out = out.view(b, t, self.local_heads * self.dim_head)
 
         out_flat = out.flatten(2)
-        out_proj, _ = self.to_out[0](out_flat)
+        maybe_trace("pre_to_out", out_flat)
+        to_out_layer = self.to_out[0]
+        out_proj, _ = to_out_layer(out_flat)
 
         return out_proj
+
+    def _gather_trace_tensor_for_tp(
+        self, tensor: torch.Tensor, *, dim: int = -1
+    ) -> torch.Tensor:
+        if tensor.ndim == 0 or get_tp_world_size() == 1:
+            return tensor
+        return tensor_model_parallel_all_gather(tensor.contiguous(), dim=dim)
 
     def _slice_rope_for_tp(
         self,
@@ -763,11 +898,16 @@ class LTX2FeedForward(nn.Module):
         inner_dim = int(dim * mult)
 
         self.proj_in = ColumnParallelLinear(
-            dim, inner_dim, bias=True, gather_output=True, quant_config=quant_config
+            dim, inner_dim, bias=True, gather_output=False, quant_config=quant_config
         )
         self.act = nn.GELU(approximate="tanh")
-        self.proj_out = ColumnParallelLinear(
-            inner_dim, dim_out, bias=True, gather_output=True, quant_config=quant_config
+        self.proj_out = RowParallelLinear(
+            inner_dim,
+            dim_out,
+            bias=True,
+            input_is_parallel=True,
+            accumulate_in_fp32=True,
+            quant_config=quant_config,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -922,6 +1062,78 @@ class LTX2TransformerBlock(nn.Module):
             self.audio_prompt_scale_shift_table = nn.Parameter(
                 torch.randn(2, audio_dim)
             )
+        self._ltx2_block_trace_data: dict[str, dict[str, list[torch.Tensor]]] = {}
+        self._ltx2_block_trace_step_indices: dict[str, list[int]] = {}
+
+    def _ltx2_should_trace(self, phase: str | None, module_name: str) -> bool:
+        config = _get_ltx2_block_trace_config()
+        if config is None or phase is None:
+            return False
+        return (
+            self.idx in config["block_indexes"]
+            and phase in config["phases"]
+            and module_name in config["modules"]
+        )
+
+    def _ltx2_begin_trace_step(self, phase: str | None) -> bool:
+        config = _get_ltx2_block_trace_config()
+        if config is None or phase is None:
+            return False
+        if self.idx not in config["block_indexes"] or phase not in config["phases"]:
+            return False
+
+        step_index = int(get_forward_context().current_timestep)
+        self._ltx2_block_trace_step_indices.setdefault(phase, []).append(step_index)
+        return True
+
+    def _ltx2_record_trace(
+        self, phase: str | None, module_name: str, tensor: torch.Tensor
+    ) -> None:
+        if not self._ltx2_should_trace(phase, module_name):
+            return
+        phase_store = self._ltx2_block_trace_data.setdefault(phase, {})
+        phase_store.setdefault(module_name, []).append(tensor.detach().cpu())
+
+    def export_ltx2_block_trace_data(self) -> dict[str, dict[str, torch.Tensor]]:
+        exported: dict[str, dict[str, torch.Tensor]] = {}
+        for phase, phase_store in self._ltx2_block_trace_data.items():
+            phase_export: dict[str, torch.Tensor] = {}
+            step_indices = self._ltx2_block_trace_step_indices.get(phase)
+            selected_index_sets: list[set[int]] = []
+            for values in phase_store.values():
+                if not values:
+                    continue
+                target_batch = max(int(value.shape[0]) for value in values)
+                selected_index_sets.append(
+                    {
+                        index
+                        for index, value in enumerate(values)
+                        if int(value.shape[0]) == target_batch
+                    }
+                )
+            selected_indexes = (
+                sorted(set.intersection(*selected_index_sets))
+                if selected_index_sets
+                else []
+            )
+            if step_indices and selected_indexes:
+                phase_export["step_indices"] = torch.tensor(
+                    [step_indices[index] for index in selected_indexes],
+                    dtype=torch.int32,
+                )
+            for module_name, values in phase_store.items():
+                if not values:
+                    continue
+                selected_values = [values[index] for index in selected_indexes]
+                if selected_values:
+                    phase_export[module_name] = torch.stack(selected_values, dim=1)
+            if phase_export:
+                exported[phase] = phase_export
+        return exported
+
+    def reset_ltx2_block_trace_data(self) -> None:
+        self._ltx2_block_trace_data.clear()
+        self._ltx2_block_trace_step_indices.clear()
 
     def get_ada_values(
         self,
@@ -975,15 +1187,29 @@ class LTX2TransformerBlock(nn.Module):
         a2v_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         v2a_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         audio_replicated_for_sp: bool = False,
+        ltx2_phase: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = hidden_states.size(0)
+        trace_active = self._ltx2_begin_trace_step(ltx2_phase)
+
+        trace_hook = None
+        if trace_active:
+
+            def trace_hook(module_name: str, tensor: torch.Tensor) -> None:
+                self._ltx2_record_trace(ltx2_phase, module_name, tensor)
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(0, 3)
         )
+        video_rms_hidden_states = rms_norm(hidden_states, self.norm_eps)
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "video_attn1_rmsnorm", video_rms_hidden_states)
+            self._ltx2_record_trace(ltx2_phase, "video_attn1_shift", vshift_msa)
+            self._ltx2_record_trace(ltx2_phase, "video_attn1_scale", vscale_msa)
+            self._ltx2_record_trace(ltx2_phase, "video_attn1_gate", vgate_msa)
         norm_hidden_states = (
-            rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
+            video_rms_hidden_states * (1 + vscale_msa) + vshift_msa
         )
         attn_hidden_states = self.attn1(
             norm_hidden_states,
@@ -992,7 +1218,11 @@ class LTX2TransformerBlock(nn.Module):
             perturbation_mask=video_self_attn_perturbation_mask,
             all_perturbed=skip_video_self_attn,
             gather_context_kv_for_sp=audio_replicated_for_sp,
+            trace_prefix="video_attn1" if trace_active else None,
+            trace_hook=trace_hook,
         )
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "video_attn1", attn_hidden_states)
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
@@ -1033,7 +1263,11 @@ class LTX2TransformerBlock(nn.Module):
                 norm_hidden_states,
                 context=mod_encoder_hidden_states,
                 mask=encoder_attention_mask,
+                trace_prefix="video_attn2" if trace_active else None,
+                trace_hook=trace_hook,
             )
+            if trace_active:
+                self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
             hidden_states = hidden_states + attn_hidden_states * vgate_q
 
             ashift_q, ascale_q, agate_q = self.get_ada_values(
@@ -1065,7 +1299,11 @@ class LTX2TransformerBlock(nn.Module):
                 norm_hidden_states,
                 context=encoder_hidden_states,
                 mask=encoder_attention_mask,
+                trace_prefix="video_attn2" if trace_active else None,
+                trace_hook=trace_hook,
             )
+            if trace_active:
+                self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
             hidden_states = hidden_states + attn_hidden_states
 
             norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -1153,11 +1391,15 @@ class LTX2TransformerBlock(nn.Module):
                 k_pe=ca_audio_rotary_emb,
                 mask=a2v_cross_attention_mask,
                 skip_sequence_parallel_override=audio_replicated_for_sp,
+                trace_prefix="video_a2v" if trace_active else None,
+                trace_hook=trace_hook,
             )
             if a2v_cross_attn_perturbation_mask is not None:
                 a2v_attn_hidden_states = (
                     a2v_attn_hidden_states * a2v_cross_attn_perturbation_mask
                 )
+            if trace_active:
+                self._ltx2_record_trace(ltx2_phase, "video_a2v", a2v_attn_hidden_states)
             hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
 
         # V2A
@@ -1192,6 +1434,8 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
         )
         ff_output = self.ff(norm_hidden_states)
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "video_ff", ff_output)
         hidden_states = hidden_states + ff_output * vgate_mlp
 
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
@@ -1202,6 +1446,10 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        if trace_active:
+            self._ltx2_record_trace(
+                ltx2_phase, "video_hidden_states", hidden_states
+            )
         return hidden_states, audio_hidden_states
 
 
@@ -1268,6 +1516,33 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "audio_out_channels must be divisible by tp_size for TP-sharded output projection, got "
                 f"{arch.audio_out_channels=} {tp_size=}."
             )
+
+    def reset_ltx2_block_trace_data(self) -> None:
+        self._ltx2_forward_trace_counts.clear()
+        for block in self.transformer_blocks:
+            if hasattr(block, "reset_ltx2_block_trace_data"):
+                block.reset_ltx2_block_trace_data()
+
+    def export_ltx2_block_trace_data(self) -> dict[str, dict[str, Any]]:
+        exported: dict[str, dict[str, Any]] = {}
+        for phase, count in self._ltx2_forward_trace_counts.items():
+            exported.setdefault(phase, {})["forward_count"] = count
+        for block in self.transformer_blocks:
+            if not hasattr(block, "export_ltx2_block_trace_data"):
+                continue
+            block_data = block.export_ltx2_block_trace_data()
+            if not block_data:
+                continue
+            for phase, phase_payload in block_data.items():
+                phase_export = exported.setdefault(phase, {})
+                if "step_indices" in phase_payload and "step_indices" not in phase_export:
+                    phase_export["step_indices"] = phase_payload["step_indices"]
+                block_payload = {
+                    key: value for key, value in phase_payload.items() if key != "step_indices"
+                }
+                if block_payload:
+                    phase_export.setdefault("blocks", {})[str(block.idx)] = block_payload
+        return exported
 
     def __init__(
         self,
@@ -1515,6 +1790,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         self.av_ca_timestep_scale_multiplier = arch.av_ca_timestep_scale_multiplier
 
         self.layer_names = ["transformer_blocks"]
+        self._ltx2_forward_trace_counts: dict[str, int] = {}
 
     def _maybe_quantize_video_rope_coords(
         self,
@@ -1586,6 +1862,26 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         ltx2_phase = kwargs.get("ltx2_phase")
+        if _get_ltx2_block_trace_config() is not None and ltx2_phase is not None:
+            self._ltx2_forward_trace_counts[ltx2_phase] = (
+                self._ltx2_forward_trace_counts.get(ltx2_phase, 0) + 1
+            )
+
+        def maybe_record_model_trace(
+            module_name: str, tensor: torch.Tensor | None
+        ) -> None:
+            if tensor is None or ltx2_phase is None or not self.transformer_blocks:
+                return
+            config = _get_ltx2_block_trace_config()
+            if config is None:
+                return
+            if 0 not in config["block_indexes"] or ltx2_phase not in config["phases"]:
+                return
+            if module_name not in config["modules"]:
+                return
+            self.transformer_blocks[0]._ltx2_record_trace(
+                ltx2_phase, module_name, tensor.detach().cpu()
+            )
 
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
@@ -1671,18 +1967,24 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             patchify_proj_input = (
                 hidden_states.transpose(1, 2).contiguous().transpose(1, 2)
             )
+        maybe_record_model_trace("video_patchify_input", patchify_proj_input)
         hidden_states, _ = self.patchify_proj(patchify_proj_input)
+        maybe_record_model_trace("video_patchify_proj", hidden_states)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
         temb, embedded_timestep = self.adaln_single(
             timestep.flatten(),
             hidden_dtype=hidden_states.dtype,
+            trace_hook=maybe_record_model_trace,
+            trace_prefix="video",
         )
         temb = temb.view(batch_size, -1, temb.size(-1))
         embedded_timestep = embedded_timestep.view(
             batch_size, -1, embedded_timestep.size(-1)
         )
+        maybe_record_model_trace("video_embedded_timestep", embedded_timestep)
+        maybe_record_model_trace("video_temb", temb)
 
         temb_audio, audio_embedded_timestep = self.audio_adaln_single(
             audio_timestep.flatten(),
@@ -1758,6 +2060,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         # 4. Prepare prompt embeddings
         if self.caption_projection is not None:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
+            maybe_record_model_trace(
+                "video_caption_projection", encoder_hidden_states
+            )
         if self.audio_caption_projection is not None:
             audio_encoder_hidden_states = self.audio_caption_projection(
                 audio_encoder_hidden_states
@@ -1850,6 +2155,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 a2v_cross_attn_perturbation_mask=a2v_cross_attn_perturbation_mask,
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
+                ltx2_phase=ltx2_phase,
             )
 
         # 6. Output layers

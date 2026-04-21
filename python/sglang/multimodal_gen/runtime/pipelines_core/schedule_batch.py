@@ -344,6 +344,8 @@ class OutputBatch:
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None
     trajectory_latents: torch.Tensor | None = None
+    trajectory_audio_latents: torch.Tensor | None = None
+    stage_trajectory_data: dict[str, Any] | None = None
     rollout_trajectory_data: RolloutTrajectoryData | None = None
     trajectory_decoded: list[torch.Tensor] | None = None
     error: str | None = None

@@ -34,20 +34,26 @@ def _server_args_for_transformer_component(
     if component_name != "transformer_2":
         return server_args
 
-    if (
-        server_args.transformer_weights_path is None
-        and server_args.nunchaku_config is None
-    ):
-        return server_args
-
     component_server_args = copy.copy(server_args)
-    component_server_args.transformer_weights_path = None
-    component_server_args.nunchaku_config = None
-    logger.info(
-        "Ignoring global transformer_weights_path for %s; keep it on the base "
-        "checkpoint unless a per-component override path is provided.",
-        component_name,
-    )
+
+    if (
+        server_args.transformer_weights_path is not None
+        or server_args.nunchaku_config is not None
+    ):
+        component_server_args.transformer_weights_path = None
+        component_server_args.nunchaku_config = None
+        logger.info(
+            "Ignoring global transformer_weights_path for %s; keep it on the base "
+            "checkpoint unless a per-component override path is provided.",
+            component_name,
+        )
+
+    if server_args.ltx2_two_stage_device_mode == "snapshot":
+        # The premerged stage-2 DiT only needs to be materialized for phase switches.
+        # Loading it directly to CPU avoids an unnecessary second full-GPU residency
+        # spike during pipeline init on 80 GB cards.
+        component_server_args.dit_cpu_offload = True
+
     return component_server_args
 
 
