@@ -28,6 +28,7 @@ from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAt
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
+    apply_exact_column_parallel_linear,
     apply_exact_row_parallel_linear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
@@ -772,6 +773,12 @@ class LTX2Attention(nn.Module):
         maybe_trace("input", x, gather_for_tp=False)
         v, _ = self.to_v(context_)
         maybe_trace("v_proj", v)
+        if trace_hook is not None and trace_prefix is not None:
+            maybe_trace(
+                "v_proj_reconstructed_full",
+                apply_exact_column_parallel_linear(self.to_v, context_),
+                gather_for_tp=False,
+            )
         use_attention = not all_perturbed
 
         if use_attention:
@@ -779,6 +786,17 @@ class LTX2Attention(nn.Module):
             k, _ = self.to_k(context_)
             maybe_trace("q_proj", q)
             maybe_trace("k_proj", k)
+            if trace_hook is not None and trace_prefix is not None:
+                maybe_trace(
+                    "q_proj_reconstructed_full",
+                    apply_exact_column_parallel_linear(self.to_q, x),
+                    gather_for_tp=False,
+                )
+                maybe_trace(
+                    "k_proj_reconstructed_full",
+                    apply_exact_column_parallel_linear(self.to_k, context_),
+                    gather_for_tp=False,
+                )
 
             if self.qk_norm:
                 assert self.q_norm is not None and self.k_norm is not None
@@ -2005,6 +2023,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         maybe_record_model_trace("video_patchify_input", patchify_proj_input)
         hidden_states, _ = self.patchify_proj(patchify_proj_input)
         maybe_record_model_trace("video_patchify_proj", hidden_states)
+        maybe_record_model_trace(
+            "video_patchify_proj_reconstructed_full",
+            apply_exact_column_parallel_linear(self.patchify_proj, patchify_proj_input),
+        )
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters

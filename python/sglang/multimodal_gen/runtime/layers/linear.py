@@ -269,6 +269,36 @@ def apply_fp32_column_parallel_linear(
     )
 
 
+def apply_exact_column_parallel_linear(
+    layer: "ColumnParallelLinear",
+    input_: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    weight_full = layer.weight
+    bias_full = bias
+    if layer.tp_size > 1:
+        weight_full = tensor_model_parallel_all_gather(
+            layer.weight.contiguous(), dim=0, tp_group=layer.tp_group
+        )
+        if bias is not None:
+            bias_full = tensor_model_parallel_all_gather(
+                bias.contiguous(), dim=0, tp_group=layer.tp_group
+            )
+
+    use_fp32_column_parallel_accum = should_use_fp32_column_parallel_accum(
+        layer, input_
+    )
+    compute_dtype = torch.float32 if use_fp32_column_parallel_accum else input_.dtype
+    output = F.linear(
+        input_.to(dtype=compute_dtype),
+        weight_full.to(dtype=compute_dtype),
+        None if bias_full is None else bias_full.to(dtype=compute_dtype),
+    )
+    if use_fp32_column_parallel_accum:
+        output = output.to(dtype=input_.dtype)
+    return output
+
+
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 

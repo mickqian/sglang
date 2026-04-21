@@ -299,8 +299,11 @@ def test_ltx2_attention_exposes_qk_norm_and_pre_to_out_trace_points():
     assert {
         "input",
         "q_proj",
+        "q_proj_reconstructed_full",
         "k_proj",
+        "k_proj_reconstructed_full",
         "v_proj",
+        "v_proj_reconstructed_full",
         "q_norm",
         "k_norm",
         "gate_logits",
@@ -348,6 +351,7 @@ def test_ltx2_model_forward_exposes_pre_block_trace_points():
     assert {
         "video_patchify_input",
         "video_patchify_proj",
+        "video_patchify_proj_reconstructed_full",
         "video_embedded_timestep",
         "video_temb",
         "video_caption_projection",
