@@ -1610,6 +1610,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             self.hidden_size,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.audio_patchify_proj = ColumnParallelLinear(
@@ -1617,6 +1618,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             self.audio_hidden_size,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 

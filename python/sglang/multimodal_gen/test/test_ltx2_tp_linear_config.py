@@ -169,6 +169,26 @@ def test_ltx2_adaln_single_uses_fp32_column_parallel_accumulation():
     assert linear_keywords["accumulate_in_fp32"] is True
 
 
+def test_ltx2_patchify_heads_use_fp32_column_parallel_accumulation():
+    source_path = (
+        Path(__file__).resolve().parents[1] / "runtime" / "models" / "dits" / "ltx_2.py"
+    )
+
+    patchify_func, patchify_keywords = _get_self_call_keywords(
+        source_path, "LTX2VideoTransformer3DModel", "patchify_proj"
+    )
+    audio_patchify_func, audio_patchify_keywords = _get_self_call_keywords(
+        source_path, "LTX2VideoTransformer3DModel", "audio_patchify_proj"
+    )
+
+    assert patchify_func == "ColumnParallelLinear"
+    assert patchify_keywords["gather_output"] is True
+    assert patchify_keywords["accumulate_in_fp32"] is True
+    assert audio_patchify_func == "ColumnParallelLinear"
+    assert audio_patchify_keywords["gather_output"] is True
+    assert audio_patchify_keywords["accumulate_in_fp32"] is True
+
+
 def test_ltx2_final_output_heads_use_fp32_column_parallel_accumulation():
     source_path = (
         Path(__file__).resolve().parents[1] / "runtime" / "models" / "dits" / "ltx_2.py"
