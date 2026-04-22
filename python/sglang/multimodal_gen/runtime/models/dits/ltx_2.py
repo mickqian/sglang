@@ -1015,9 +1015,29 @@ class LTX2FeedForward(nn.Module):
             quant_config=quant_config,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        trace_hook: Callable[[str, torch.Tensor], None] | None = None,
+        trace_prefix: str | None = None,
+    ) -> torch.Tensor:
+        def maybe_trace(
+            name_suffix: str,
+            tensor: torch.Tensor,
+            *,
+            gather_for_tp: bool = False,
+        ) -> None:
+            if trace_hook is None or trace_prefix is None:
+                return
+            if gather_for_tp and get_tp_world_size() > 1 and tensor.ndim > 0:
+                tensor = tensor_model_parallel_all_gather(tensor.contiguous(), dim=-1)
+            trace_hook(f"{trace_prefix}_{name_suffix}", tensor)
+
+        maybe_trace("input", x)
         x, _ = self.proj_in(x)
+        maybe_trace("proj_in", x, gather_for_tp=True)
         x = self.act(x)
+        maybe_trace("act", x, gather_for_tp=True)
         x, _ = self.proj_out(x)
         return x
 
@@ -1590,7 +1610,11 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
         )
-        ff_output = self.ff(norm_hidden_states)
+        ff_output = self.ff(
+            norm_hidden_states,
+            trace_hook=trace_hook,
+            trace_prefix="video_ff" if trace_active else None,
+        )
         if trace_active:
             self._ltx2_record_trace(ltx2_phase, "video_ff", ff_output)
         hidden_states = hidden_states + ff_output * vgate_mlp
