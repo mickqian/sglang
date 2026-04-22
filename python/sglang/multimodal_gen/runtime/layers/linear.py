@@ -44,6 +44,7 @@ logger = init_logger(__name__)
 
 ROW_PARALLEL_FP32_ACCUM_ENV = "SGLANG_ROW_PARALLEL_FP32_ACCUM"
 ROW_PARALLEL_EXACT_LINEAR_ENV = "SGLANG_ROW_PARALLEL_EXACT_LINEAR"
+ROW_PARALLEL_BIAS_POST_REDUCE_ENV = "SGLANG_ROW_PARALLEL_BIAS_POST_REDUCE"
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
@@ -214,6 +215,22 @@ def should_use_exact_row_parallel_linear(
         return False
     return input_parallel.dtype == torch.float32 or should_use_fp32_row_parallel_accum(
         layer, input_parallel
+    )
+
+
+def should_add_row_parallel_bias_post_reduce(layer: "RowParallelLinear") -> bool:
+    enabled_via_env = os.getenv(ROW_PARALLEL_BIAS_POST_REDUCE_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return (
+        enabled_via_env
+        and layer.tp_size > 1
+        and layer.reduce_results
+        and layer.bias is not None
+        and not layer.skip_bias_add
     )
 
 
@@ -1228,7 +1245,10 @@ class RowParallelLinear(LinearBase):
 
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        add_bias_post_reduce = should_add_row_parallel_bias_post_reduce(self)
+        bias_ = None
+        if not (self.tp_rank > 0 or self.skip_bias_add or add_bias_post_reduce):
+            bias_ = self.bias
         use_fp32_row_parallel_accum = should_use_fp32_row_parallel_accum(
             self, input_parallel
         )
@@ -1244,6 +1264,12 @@ class RowParallelLinear(LinearBase):
             )
         else:
             output = output_parallel
+
+        if add_bias_post_reduce and self.bias is not None:
+            if use_fp32_row_parallel_accum:
+                output = output + self.bias.float()
+            else:
+                output = output + self.bias
 
         if use_fp32_row_parallel_accum:
             output = output.to(dtype=input_parallel.dtype)
