@@ -50,6 +50,9 @@ LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV = "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR"
 LTX2_ATTN_TO_OUT_EXACT_LINEAR_PHASES_ENV = (
     "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR_PHASES"
 )
+LTX2_ATTN_TO_OUT_EXACT_LINEAR_MODULES_ENV = (
+    "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR_MODULES"
+)
 
 LTX2_DEFAULT_BLOCK_TRACE_MODULES = frozenset(
     {
@@ -98,7 +101,10 @@ def _get_ltx2_block_trace_config() -> dict[str, set[int] | set[str]] | None:
     }
 
 
-def _use_ltx2_exact_attention_to_out(ltx2_phase: str | None = None) -> bool:
+def _use_ltx2_exact_attention_to_out(
+    ltx2_phase: str | None = None,
+    trace_prefix: str | None = None,
+) -> bool:
     if os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV, "").lower() not in {
         "1",
         "true",
@@ -117,8 +123,24 @@ def _use_ltx2_exact_attention_to_out(ltx2_phase: str | None = None) -> bool:
         item.strip() for item in raw_phases.split(",") if item.strip()
     }
     if not allowed_phases:
+        phase_allowed = True
+    else:
+        phase_allowed = ltx2_phase in allowed_phases
+    if not phase_allowed:
+        return False
+
+    raw_modules = os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_MODULES_ENV, "").strip()
+    if not raw_modules:
         return True
-    return ltx2_phase in allowed_phases
+    if trace_prefix is None:
+        return False
+
+    allowed_modules = {
+        item.strip() for item in raw_modules.split(",") if item.strip()
+    }
+    if not allowed_modules:
+        return True
+    return trace_prefix in allowed_modules
 
 
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
@@ -907,7 +929,9 @@ class LTX2Attention(nn.Module):
         out_flat = out.flatten(2)
         maybe_trace("pre_to_out", out_flat)
         to_out_layer = self.to_out[0]
-        use_exact_to_out = _use_ltx2_exact_attention_to_out(ltx2_phase)
+        use_exact_to_out = _use_ltx2_exact_attention_to_out(
+            ltx2_phase, trace_prefix
+        )
         reconstructed_out = None
         if use_exact_to_out or (trace_hook is not None and trace_prefix is not None):
             reconstructed_out = apply_exact_row_parallel_linear(
