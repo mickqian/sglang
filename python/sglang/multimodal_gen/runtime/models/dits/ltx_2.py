@@ -1057,9 +1057,7 @@ class LTX2FeedForward(nn.Module):
             proj_out_weight_sample = proj_out_layer.weight
             if get_tp_world_size() > 1:
                 proj_out_weight_sample = tensor_model_parallel_all_gather(
-                    proj_out_weight_sample.contiguous(),
-                    dim=-1,
-                    tp_group=proj_out_layer.tp_group,
+                    proj_out_weight_sample.contiguous(), dim=-1
                 )
             proj_out_weight_sample = proj_out_weight_sample.flatten()
             if proj_out_weight_sample.numel() > 0:
