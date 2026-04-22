@@ -1348,8 +1348,12 @@ class LTX2TransformerBlock(nn.Module):
             perturbation_mask=audio_self_attn_perturbation_mask,
             all_perturbed=skip_audio_self_attn,
             skip_sequence_parallel_override=audio_replicated_for_sp,
+            trace_prefix="audio_attn1" if trace_active else None,
+            trace_hook=trace_hook,
             ltx2_phase=ltx2_phase,
         )
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "audio_attn1", attn_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
         # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
@@ -1405,8 +1409,14 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=mod_audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                trace_prefix="audio_attn2" if trace_active else None,
+                trace_hook=trace_hook,
                 ltx2_phase=ltx2_phase,
             )
+            if trace_active:
+                self._ltx2_record_trace(
+                    ltx2_phase, "audio_attn2", attn_audio_hidden_states
+                )
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
             )
@@ -1433,8 +1443,14 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                trace_prefix="audio_attn2" if trace_active else None,
+                trace_hook=trace_hook,
                 ltx2_phase=ltx2_phase,
             )
+            if trace_active:
+                self._ltx2_record_trace(
+                    ltx2_phase, "audio_attn2", attn_audio_hidden_states
+                )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
