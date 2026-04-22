@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/distributed/device_communicators/cuda_communicator.py
 
+import os
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -12,6 +14,15 @@ from sglang.multimodal_gen.runtime.distributed.device_communicators.base_device_
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
+
+    @staticmethod
+    def _disable_pynccl_via_env() -> bool:
+        return os.getenv("SGLANG_DISABLE_PYNCCL", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def __init__(
         self,
@@ -32,6 +43,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+            if self._disable_pynccl_via_env():
+                self.pynccl_comm.disabled = True
 
     def all_reduce(self, input_, op: torch.distributed.ReduceOp | None = None):
         pynccl_comm = self.pynccl_comm
