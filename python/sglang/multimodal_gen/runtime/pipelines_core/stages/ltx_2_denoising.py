@@ -288,29 +288,6 @@ class LTX2DenoisingStage(DenoisingStage):
             return False
         return not is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
 
-    @staticmethod
-    def _should_use_ltx23_two_stage_cfg_pair_batch(
-        batch: Req,
-        ctx: LTX2DenoisingContext,
-        server_args: ServerArgs,
-    ) -> bool:
-        """Only batch cond/neg for native LTX-2.3 two-stage guider passes.
-
-        Batching perturbed/modality branches together with cond/neg changes stage-1
-        guider numerics enough to drift from the sequential reference. Keep CFG pair
-        batching, but run the extra guider branches as separate forwards so single-GPU
-        and TP follow the same semantics.
-        """
-        if not is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name):
-            return False
-        if not ctx.is_ltx23_variant or ctx.use_ltx23_legacy_one_stage:
-            return False
-        if int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0:
-            return False
-        if get_sp_world_size() != 1:
-            return False
-        return True
-
     @classmethod
     def _ltx2_calculate_guided_x0(
         cls,
@@ -954,11 +931,6 @@ class LTX2DenoisingStage(DenoisingStage):
                 is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
                 and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
             )
-            use_cfg_pair_batch = self._should_use_ltx23_two_stage_cfg_pair_batch(
-                batch=batch,
-                ctx=ctx,
-                server_args=server_args,
-            )
 
             pass_specs: list[LTX2GuidancePassSpec] = [
                 LTX2GuidancePassSpec(
@@ -974,7 +946,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     encoder_attention_mask=negative_encoder_attention_mask,
                 ),
             ]
-            if not use_cfg_pair_batch and need_perturbed:
+            if need_perturbed:
                 pass_specs.append(
                     LTX2GuidancePassSpec(
                         name="perturbed",
@@ -989,7 +961,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         ),
                     )
                 )
-            if not use_cfg_pair_batch and need_modality:
+            if need_modality:
                 pass_specs.append(
                     LTX2GuidancePassSpec(
                         name="modality",
@@ -1082,53 +1054,6 @@ class LTX2DenoisingStage(DenoisingStage):
             v_neg, a_v_neg = pass_outputs["neg"]
             v_ptb, a_v_ptb = pass_outputs.get("perturbed", (None, None))
             v_mod, a_v_mod = pass_outputs.get("modality", (None, None))
-
-            if use_cfg_pair_batch:
-                v_ptb = None
-                a_v_ptb = None
-                if need_perturbed:
-                    with set_forward_context(
-                        current_timestep=step.step_index,
-                        attn_metadata=step.attn_metadata,
-                    ):
-                        v_ptb, a_v_ptb = step.current_model(
-                            **self._build_ltx2_model_kwargs(
-                                ctx,
-                                base_model_kwargs,
-                                encoder_hidden_states=encoder_hidden_states,
-                                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                                encoder_attention_mask=encoder_attention_mask,
-                                skip_video_self_attn_blocks=tuple(
-                                    stage1_guider_params["video_stg_blocks"]
-                                ),
-                                skip_audio_self_attn_blocks=tuple(
-                                    stage1_guider_params["audio_stg_blocks"]
-                                ),
-                            )
-                        )
-                    v_ptb = v_ptb.float()
-                    a_v_ptb = a_v_ptb.float()
-
-                v_mod = None
-                a_v_mod = None
-                if need_modality:
-                    with set_forward_context(
-                        current_timestep=step.step_index,
-                        attn_metadata=step.attn_metadata,
-                    ):
-                        v_mod, a_v_mod = step.current_model(
-                            **self._build_ltx2_model_kwargs(
-                                ctx,
-                                base_model_kwargs,
-                                encoder_hidden_states=encoder_hidden_states,
-                                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                                encoder_attention_mask=encoder_attention_mask,
-                                disable_a2v_cross_attn=True,
-                                disable_v2a_cross_attn=True,
-                            )
-                        )
-                    v_mod = v_mod.float()
-                    a_v_mod = a_v_mod.float()
 
         sigma_val = float(sigma.item())
         video_sigma_for_x0: float | torch.Tensor = sigma_val
