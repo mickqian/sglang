@@ -2318,6 +2318,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         maybe_record_model_trace("video_norm_out", hidden_states)
         hidden_states = hidden_states * (1 + scale) + shift
         maybe_record_model_trace("video_proj_out_input", hidden_states)
+        maybe_record_model_trace(
+            "video_proj_out_reconstructed_full",
+            apply_exact_column_parallel_linear(self.proj_out, hidden_states),
+        )
         hidden_states, _ = self.proj_out(hidden_states)
         maybe_record_model_trace("video_proj_out", hidden_states)
 
