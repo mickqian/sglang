@@ -1557,11 +1557,15 @@ class LTX2TransformerBlock(nn.Module):
                 k_pe=ca_video_rotary_emb,
                 mask=v2a_cross_attention_mask,
                 gather_context_kv_for_sp=audio_replicated_for_sp,
+                trace_prefix="audio_v2a" if trace_active else None,
+                trace_hook=trace_hook,
             )
             if v2a_cross_attn_perturbation_mask is not None:
                 v2a_attn_hidden_states = (
                     v2a_attn_hidden_states * v2a_cross_attn_perturbation_mask
                 )
+            if trace_active:
+                self._ltx2_record_trace(ltx2_phase, "audio_v2a", v2a_attn_hidden_states)
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
             )
