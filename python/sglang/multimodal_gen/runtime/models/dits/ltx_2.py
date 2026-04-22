@@ -1040,7 +1040,8 @@ class LTX2FeedForward(nn.Module):
         x = self.act(x)
         maybe_trace("act", x, gather_for_tp=True)
         if trace_hook is not None and trace_prefix is not None:
-            proj_out_weight = self.proj_out.weight.float()
+            proj_out_layer = getattr(self.proj_out, "base_layer", self.proj_out)
+            proj_out_weight = proj_out_layer.weight.float()
             proj_out_weight_stats = torch.stack(
                 [
                     proj_out_weight.sum(),
@@ -1050,11 +1051,11 @@ class LTX2FeedForward(nn.Module):
             )
             if get_tp_world_size() > 1:
                 proj_out_weight_stats = tensor_model_parallel_all_reduce(
-                    proj_out_weight_stats, tp_group=self.proj_out.tp_group
+                    proj_out_weight_stats, tp_group=proj_out_layer.tp_group
                 )
             maybe_trace("proj_out_weight_stats", proj_out_weight_stats)
-            if self.proj_out.bias is not None:
-                proj_out_bias = self.proj_out.bias.float()
+            if proj_out_layer.bias is not None:
+                proj_out_bias = proj_out_layer.bias.float()
                 maybe_trace(
                     "proj_out_bias_stats",
                     torch.stack(
