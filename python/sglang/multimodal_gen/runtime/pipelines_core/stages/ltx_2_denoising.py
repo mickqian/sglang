@@ -294,15 +294,12 @@ class LTX2DenoisingStage(DenoisingStage):
         ctx: LTX2DenoisingContext,
         server_args: ServerArgs,
     ) -> bool:
-        """Only batch stage-1 guider passes whose execution graph is identical.
+        """Only batch cond/neg for native LTX-2.3 two-stage guider passes.
 
-        For native LTX-2.3 two-stage guider passes, `cond` and `neg` differ only in
-        text conditioning, so they can share one CFG pair batch. `perturbed` changes
-        the executed graph by skipping selected video/audio self-attention blocks, and
-        `modality` changes it by disabling A2V/V2A cross-attention. Those two passes
-        must remain separate forwards rather than being mixed into the same batch as
-        `cond`/`neg`, otherwise the stage-1 guider drifts from the sequential
-        reference.
+        Batching perturbed/modality branches together with cond/neg changes stage-1
+        guider numerics enough to drift from the sequential reference. Keep CFG pair
+        batching, but run the extra guider branches as separate forwards so single-GPU
+        and TP follow the same semantics.
         """
         if not is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name):
             return False
@@ -1033,7 +1030,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     [pass_spec.encoder_attention_mask for pass_spec in pass_specs]
                 ),
             )
-            if use_split_two_stage_ti2v_guider or not use_cfg_pair_batch:
+            if use_split_two_stage_ti2v_guider:
                 split_sizes = [1] * expanded_batch_size
                 batched_video_chunks = []
                 batched_audio_chunks = []
