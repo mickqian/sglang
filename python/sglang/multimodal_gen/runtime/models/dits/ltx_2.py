@@ -1365,6 +1365,10 @@ class LTX2TransformerBlock(nn.Module):
             vshift_q, vscale_q, vgate_q = self.get_ada_values(
                 self.scale_shift_table, batch_size, temb, slice(6, 9)
             )
+            if trace_active:
+                self._ltx2_record_trace(ltx2_phase, "video_attn2_shift", vshift_q)
+                self._ltx2_record_trace(ltx2_phase, "video_attn2_scale", vscale_q)
+                self._ltx2_record_trace(ltx2_phase, "video_attn2_gate", vgate_q)
             v_prompt_shift, v_prompt_scale = self.get_ada_values(
                 self.prompt_scale_shift_table, batch_size, temb_prompt, slice(None)
             )
@@ -1484,6 +1488,8 @@ class LTX2TransformerBlock(nn.Module):
             video_v2a_ca_shift,
         ) = [t.squeeze(2) for t in video_ca_scale_shift_table]
         a2v_gate = video_ca_gate[0].squeeze(2)
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "video_a2v_gate", a2v_gate)
 
         audio_per_layer_ca_scale_shift = self.audio_a2v_cross_attn_scale_shift_table[
             :4, :
@@ -1540,6 +1546,10 @@ class LTX2TransformerBlock(nn.Module):
             if trace_active:
                 self._ltx2_record_trace(ltx2_phase, "video_a2v", a2v_attn_hidden_states)
             hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
+            if trace_active:
+                self._ltx2_record_trace(
+                    ltx2_phase, "video_post_a2v_hidden_states", hidden_states
+                )
 
         # V2A
         mod_norm_hidden_states = (
@@ -1573,6 +1583,10 @@ class LTX2TransformerBlock(nn.Module):
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(3, 6)
         )
+        if trace_active:
+            self._ltx2_record_trace(ltx2_phase, "video_ff_shift", vshift_mlp)
+            self._ltx2_record_trace(ltx2_phase, "video_ff_scale", vscale_mlp)
+            self._ltx2_record_trace(ltx2_phase, "video_ff_gate", vgate_mlp)
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
         )
@@ -1580,6 +1594,10 @@ class LTX2TransformerBlock(nn.Module):
         if trace_active:
             self._ltx2_record_trace(ltx2_phase, "video_ff", ff_output)
         hidden_states = hidden_states + ff_output * vgate_mlp
+        if trace_active:
+            self._ltx2_record_trace(
+                ltx2_phase, "video_post_ff_hidden_states", hidden_states
+            )
 
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(3, 6)
