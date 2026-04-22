@@ -167,6 +167,7 @@ def should_use_fp32_row_parallel_accum(
 ) -> bool:
     return (
         bool(getattr(layer, "accumulate_in_fp32", False))
+        and int(getattr(layer, "tp_size", 1)) > 1
         and isinstance(layer.quant_method, UnquantizedLinearMethod)
         and input_parallel.dtype in (torch.float16, torch.bfloat16)
         and layer.weight.dtype == input_parallel.dtype
@@ -190,6 +191,7 @@ def should_use_fp32_column_parallel_accum(
 ) -> bool:
     return (
         bool(getattr(layer, "accumulate_in_fp32", False))
+        and int(getattr(layer, "tp_size", 1)) > 1
         and isinstance(layer.quant_method, UnquantizedLinearMethod)
         and input_.dtype in (torch.float16, torch.bfloat16)
         and layer.weight.dtype == input_.dtype
