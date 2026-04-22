@@ -47,6 +47,9 @@ LTX2_BLOCK_TRACE_BLOCKS_ENV = "SGLANG_LTX2_BLOCK_TRACE_BLOCKS"
 LTX2_BLOCK_TRACE_PHASES_ENV = "SGLANG_LTX2_BLOCK_TRACE_PHASES"
 LTX2_BLOCK_TRACE_MODULES_ENV = "SGLANG_LTX2_BLOCK_TRACE_MODULES"
 LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV = "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR"
+LTX2_ATTN_TO_OUT_EXACT_LINEAR_PHASES_ENV = (
+    "SGLANG_LTX2_ATTN_TO_OUT_EXACT_LINEAR_PHASES"
+)
 
 LTX2_DEFAULT_BLOCK_TRACE_MODULES = frozenset(
     {
@@ -95,13 +98,27 @@ def _get_ltx2_block_trace_config() -> dict[str, set[int] | set[str]] | None:
     }
 
 
-def _use_ltx2_exact_attention_to_out() -> bool:
-    return os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV, "").lower() in {
+def _use_ltx2_exact_attention_to_out(ltx2_phase: str | None = None) -> bool:
+    if os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_ENV, "").lower() not in {
         "1",
         "true",
         "yes",
         "on",
+    }:
+        return False
+
+    raw_phases = os.getenv(LTX2_ATTN_TO_OUT_EXACT_LINEAR_PHASES_ENV, "").strip()
+    if not raw_phases:
+        return True
+    if ltx2_phase is None:
+        return False
+
+    allowed_phases = {
+        item.strip() for item in raw_phases.split(",") if item.strip()
     }
+    if not allowed_phases:
+        return True
+    return ltx2_phase in allowed_phases
 
 
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
@@ -761,6 +778,7 @@ class LTX2Attention(nn.Module):
         gather_context_kv_for_sp: bool = False,
         trace_prefix: str | None = None,
         trace_hook: Callable[[str, torch.Tensor], None] | None = None,
+        ltx2_phase: str | None = None,
     ) -> torch.Tensor:
         def maybe_trace(
             name_suffix: str,
@@ -889,7 +907,7 @@ class LTX2Attention(nn.Module):
         out_flat = out.flatten(2)
         maybe_trace("pre_to_out", out_flat)
         to_out_layer = self.to_out[0]
-        use_exact_to_out = _use_ltx2_exact_attention_to_out()
+        use_exact_to_out = _use_ltx2_exact_attention_to_out(ltx2_phase)
         reconstructed_out = None
         if use_exact_to_out or (trace_hook is not None and trace_prefix is not None):
             reconstructed_out = apply_exact_row_parallel_linear(
@@ -1283,6 +1301,7 @@ class LTX2TransformerBlock(nn.Module):
             gather_context_kv_for_sp=audio_replicated_for_sp,
             trace_prefix="video_attn1" if trace_active else None,
             trace_hook=trace_hook,
+            ltx2_phase=ltx2_phase,
         )
         if trace_active:
             self._ltx2_record_trace(ltx2_phase, "video_attn1", attn_hidden_states)
@@ -1305,6 +1324,7 @@ class LTX2TransformerBlock(nn.Module):
             perturbation_mask=audio_self_attn_perturbation_mask,
             all_perturbed=skip_audio_self_attn,
             skip_sequence_parallel_override=audio_replicated_for_sp,
+            ltx2_phase=ltx2_phase,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
         # 2. Prompt Cross-Attention
@@ -1332,6 +1352,7 @@ class LTX2TransformerBlock(nn.Module):
                 mask=encoder_attention_mask,
                 trace_prefix="video_attn2" if trace_active else None,
                 trace_hook=trace_hook,
+                ltx2_phase=ltx2_phase,
             )
             if trace_active:
                 self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
@@ -1360,6 +1381,7 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=mod_audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                ltx2_phase=ltx2_phase,
             )
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
@@ -1372,6 +1394,7 @@ class LTX2TransformerBlock(nn.Module):
                 mask=encoder_attention_mask,
                 trace_prefix="video_attn2" if trace_active else None,
                 trace_hook=trace_hook,
+                ltx2_phase=ltx2_phase,
             )
             if trace_active:
                 self._ltx2_record_trace(ltx2_phase, "video_attn2", attn_hidden_states)
@@ -1386,6 +1409,7 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                ltx2_phase=ltx2_phase,
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
