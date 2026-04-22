@@ -1355,6 +1355,10 @@ class LTX2TransformerBlock(nn.Module):
             def trace_hook(module_name: str, tensor: torch.Tensor) -> None:
                 self._ltx2_record_trace(ltx2_phase, module_name, tensor)
 
+            self._ltx2_record_trace(
+                ltx2_phase, "video_block_input_hidden_states", hidden_states
+            )
+
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(0, 3)
