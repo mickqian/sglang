@@ -1054,6 +1054,24 @@ class LTX2FeedForward(nn.Module):
                     proj_out_weight_stats, tp_group=proj_out_layer.tp_group
                 )
             maybe_trace("proj_out_weight_stats", proj_out_weight_stats)
+            proj_out_weight_sample = proj_out_layer.weight
+            if get_tp_world_size() > 1:
+                proj_out_weight_sample = tensor_model_parallel_all_gather(
+                    proj_out_weight_sample.contiguous(), dim=-1
+                )
+            proj_out_weight_sample = proj_out_weight_sample.flatten()
+            if proj_out_weight_sample.numel() > 0:
+                sample_size = min(32, proj_out_weight_sample.numel())
+                sample_indices = torch.linspace(
+                    0,
+                    proj_out_weight_sample.numel() - 1,
+                    steps=sample_size,
+                    device=proj_out_weight_sample.device,
+                ).round().to(torch.long)
+                maybe_trace(
+                    "proj_out_weight_sample",
+                    proj_out_weight_sample.index_select(0, sample_indices),
+                )
             if proj_out_layer.bias is not None:
                 proj_out_bias = proj_out_layer.bias.float()
                 maybe_trace(
