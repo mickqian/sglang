@@ -1038,6 +1038,11 @@ class LTX2FeedForward(nn.Module):
         maybe_trace("proj_in", x, gather_for_tp=True)
         x = self.act(x)
         maybe_trace("act", x, gather_for_tp=True)
+        if trace_hook is not None and trace_prefix is not None:
+            maybe_trace(
+                "proj_out_reconstructed_full",
+                apply_exact_row_parallel_linear(self.proj_out, x),
+            )
         x, _ = self.proj_out(x)
         return x
 
