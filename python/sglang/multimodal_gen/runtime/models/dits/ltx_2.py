@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.distributed import (
 )
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
     tensor_model_parallel_all_gather,
 )
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
@@ -1039,6 +1040,31 @@ class LTX2FeedForward(nn.Module):
         x = self.act(x)
         maybe_trace("act", x, gather_for_tp=True)
         if trace_hook is not None and trace_prefix is not None:
+            proj_out_weight = self.proj_out.weight.float()
+            proj_out_weight_stats = torch.stack(
+                [
+                    proj_out_weight.sum(),
+                    proj_out_weight.abs().sum(),
+                    proj_out_weight.square().sum(),
+                ]
+            )
+            if get_tp_world_size() > 1:
+                proj_out_weight_stats = tensor_model_parallel_all_reduce(
+                    proj_out_weight_stats, tp_group=self.proj_out.tp_group
+                )
+            maybe_trace("proj_out_weight_stats", proj_out_weight_stats)
+            if self.proj_out.bias is not None:
+                proj_out_bias = self.proj_out.bias.float()
+                maybe_trace(
+                    "proj_out_bias_stats",
+                    torch.stack(
+                        [
+                            proj_out_bias.sum(),
+                            proj_out_bias.abs().sum(),
+                            proj_out_bias.square().sum(),
+                        ]
+                    ),
+                )
             maybe_trace(
                 "proj_out_reconstructed_full",
                 apply_exact_row_parallel_linear(self.proj_out, x),
