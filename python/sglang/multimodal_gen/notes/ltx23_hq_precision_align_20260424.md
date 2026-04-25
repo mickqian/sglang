@@ -396,3 +396,11 @@
 - official `modality_from_latent_state()` 固定 `context_mask=None`；native `_get_ltx_prompt_attention_mask()` 对 `ltx_2_3` two-stage/HQ 也返回 `None`，所以 text cross-attn mask 不是剩余差异。
 - official `GuidedDenoiser` pass 顺序是 `cond -> uncond -> ptb -> mod`，先 repeat state 再 cat context；native HQ split pass 顺序是 `cond -> neg -> perturbed -> modality`，`_repeat_ltx2_model_kwargs_batch()` 也是 pass-wise repeat，随后按 batch=1 split，语义匹配。
 - 当前结论: config、text context mask、stage1 guided pass order 继续降级；下一步应查 native `LatentState` 构造和 stage1/stage2 `positions/denoise_mask/attention_mask` 是否逐项等价，而不是回到 overlay 或 text mask。
+
+## 16:29 worktree import / pinned overlay 可信基线
+
+- git: `e54deec8f`。远端 `/tmp/ltx23-hq-precision-align-run` 之前直接跑 `sglang generate` 时实际 import `/sgl-workspace/sglang/python` stale package，registry 仍指向 overlay `main`，因此该路径得到的 `13.1039 dB` 是无效结果。
+- 正确命令必须显式设置 `PYTHONPATH=/tmp/ltx23-hq-precision-align-run/python:${PYTHONPATH:-}`，并使用 `SGLANG_DIFFUSION_CACHE_ROOT=/tmp/sgl_cache_ltx23_hf_overlay_pin0746` 命中内置 pin `MickJ/LTX-2.3-overlay@0746ea84e3b20d3a69b49662c76797ba2062718f`。
+- official connector runtime 复核: `LTXModelConfigurator` 从原始 `ltx-2.3-22b-dev.safetensors` 实例化出的 video/audio connector 都是 `rope_type=SPLIT`、`double_precision_rope=True`，并且 `caption_proj_before_connector=True`、`connector_apply_gated_attention=True`；排除“official 是 interleaved/float32 connector”的假设。
+- plain CLI light torch_sdpa 有效基线: `/tmp/ltx23_hq_current_e54_pypath_light_082535/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，`min_psnr=16.676200413488672`，`mean_mae=20.345458984375`，pixel generate time `106.64s`。
+- 当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。下一步继续 native/source 对齐，优先查 scheduler/sigma/upsampler 参数和 `LatentState` 输入，而不是 injection 或 stale overlay。
