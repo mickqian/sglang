@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Code adapted from SGLang https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/lora/layers.py
 import os
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -190,7 +191,7 @@ class BaseLayerWithLoRA(nn.Module):
             lora_list: List of (lora_A, lora_B, lora_path, lora_strength, rank, alpha) tuples
         """
         # Merge all LoRA adapters in order
-        for lora_A, lora_B, _, lora_strength, lora_rank, lora_alpha in lora_list:
+        for lora_A, lora_B, lora_path, lora_strength, lora_rank, lora_alpha in lora_list:
             lora_A_sliced = self.slice_lora_a_weights(lora_A.to(data))
             lora_B_sliced = self.slice_lora_b_weights(lora_B.to(data))
 
@@ -201,20 +202,26 @@ class BaseLayerWithLoRA(nn.Module):
                 and lora_alpha != lora_rank
             ):
                 scale *= lora_alpha / lora_rank
+            scale_before_matmul = self._should_scale_before_matmul(lora_path)
+            add_scale = 1.0 if scale_before_matmul else scale
 
             if not isinstance(lora_B_sliced, torch.Tensor):
+                if scale_before_matmul:
+                    lora_B_sliced = lora_B_sliced * scale
                 lora_delta = lora_B_sliced @ lora_A_sliced
                 if isinstance(lora_delta, torch.Tensor) and lora_delta.dim() > 2:
                     lora_delta = lora_delta.reshape(-1, lora_delta.shape[-1])
-                data.add_(lora_delta, alpha=scale)
+                data.add_(lora_delta, alpha=add_scale)
                 continue
 
             if lora_A_sliced.dim() > 2 or lora_B_sliced.dim() > 2:
+                if scale_before_matmul:
+                    lora_B_sliced = lora_B_sliced * scale
                 lora_delta = lora_B_sliced @ lora_A_sliced
                 if lora_delta.dim() > 2:
                     lora_delta = lora_delta.reshape(-1, lora_delta.shape[-1])
                 data_2d = data.reshape(-1, data.shape[-1]) if data.dim() > 2 else data
-                data_2d.add_(lora_delta, alpha=scale)
+                data_2d.add_(lora_delta, alpha=add_scale)
                 continue
 
             data_2d = data.reshape(-1, data.shape[-1]) if data.dim() > 2 else data
@@ -223,6 +230,8 @@ class BaseLayerWithLoRA(nn.Module):
                 if lora_B_sliced.dim() > 2
                 else lora_B_sliced
             )
+            if scale_before_matmul:
+                lora_B_2d = lora_B_2d * scale
 
             chunk_rows = max(
                 1,
@@ -232,7 +241,7 @@ class BaseLayerWithLoRA(nn.Module):
             for start in range(0, lora_B_2d.shape[0], chunk_rows):
                 end = min(start + chunk_rows, lora_B_2d.shape[0])
                 chunk_delta = lora_B_2d[start:end] @ lora_A_sliced
-                data_2d[start:end].add_(chunk_delta, alpha=scale)
+                data_2d[start:end].add_(chunk_delta, alpha=add_scale)
 
     def _should_merge_in_fp32(
         self,
@@ -244,6 +253,12 @@ class BaseLayerWithLoRA(nn.Module):
             if lora_path and "distilled-lora" in lora_path.lower():
                 return False
         return True
+
+    def _should_scale_before_matmul(self, lora_path: str | None) -> bool:
+        if lora_path is None:
+            return False
+        name = Path(lora_path).name.lower()
+        return name.startswith("ltx-") and "lora" in name
 
     @torch.no_grad()
     def merge_lora_weights(self, strength: float | None = None) -> None:
