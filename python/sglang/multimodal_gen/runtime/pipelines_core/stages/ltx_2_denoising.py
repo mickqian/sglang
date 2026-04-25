@@ -1118,17 +1118,6 @@ class LTX2DenoisingStage(DenoisingStage):
         finally:
             setattr(model, attr, previous)
 
-    @staticmethod
-    @contextmanager
-    def _temporary_ltx23_hq_reference_block_order(model, enabled: bool):
-        attr = "_sglang_use_ltx23_hq_reference_block_order"
-        previous = bool(getattr(model, attr, False))
-        setattr(model, attr, enabled)
-        try:
-            yield
-        finally:
-            setattr(model, attr, previous)
-
     @contextmanager
     def _ltx2_model_forward_context(
         self,
@@ -1141,14 +1130,10 @@ class LTX2DenoisingStage(DenoisingStage):
             with self._temporary_ltx23_hq_video_rope_coord_dtype(
                 step.current_model, ctx.use_ltx23_hq_timestep_semantics
             ):
-                with self._temporary_ltx23_hq_reference_block_order(
-                    step.current_model, ctx.use_ltx23_hq_timestep_semantics
+                with set_forward_context(
+                    current_timestep=step.step_index, attn_metadata=step.attn_metadata
                 ):
-                    with set_forward_context(
-                        current_timestep=step.step_index,
-                        attn_metadata=step.attn_metadata,
-                    ):
-                        yield
+                    yield
 
     def _prepare_denoising_loop(
         self,
