@@ -320,3 +320,13 @@
 - plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_rope_float64_3605035_30steps_pr23366_10s_cli/native_hq_rope_float64_3605035_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `146.13s`。
 - 结论: 当前 materialized config/arch 路径上该修复没有改变 SpongeBob 10s 输出；保留作为 official 语义修复，但不是主误差。下一步继续查 current config 实际命中的 DiT forward 分支，重点是 prompt cross-attn / AdaLN / attention mask 与 official `transformer.py` 的细微差异。
 - 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
+
+## 11:42 official reference / attention path 复核
+
+- git: `77924ea69`，当前分支 `ltx23-hq-precision-align`，worktree clean。
+- reference hygiene: `/tmp/ltx23_official_10s_v2/video.mp4` 来自 dirty `/tmp/LTX-2-official`；clean 59ca official `/tmp/ltx23_official_10s_clean59ca/video.mp4` 与它只有 `16.8585 dB`。后续区分 old reference 和 clean reference，不能把两者混用做 bisect。
+- current native 30-step SpongeBob vs old reference: `global_psnr=16.9311 dB`；vs clean 59ca reference: `global_psnr=16.2406 dB`。旧 notes 的 `20.71 dB` 历史点在当前 prompt/settings/reference 下不可复现，不再作为恢复目标。
+- materialized HQ config 已确认: connector `rope_type=split`、`rope_double_precision=true`、`connector_rope_base_seq_len=4096`；transformer `attention_type=default`、`force_sdpa_v2a_cross_attention=true`、`cross_attention_adaln=true`。connector RoPE base 和 type 与 checkpoint/official config 等价，不是当前主误差。
+- official `AttentionFunction.DEFAULT` 源码实际是 `xformers else PyTorch SDPA`，不是自动 FA3；安装了 `flash_attn_interface` 不代表 default 使用 FA3。native default 仍会按平台优先 FA，`--attention-backend torch_sdpa` 是更接近 official 的 debug path，但此前 10s old-reference 指标低 `0.73 dB`，不能直接作为 metric fix。
+- source audit: HQ guided stage1 在 official 通过 `BatchSplitAdapter(max_batch_size=1)` sequential 跑 cond/neg/modality；native HQ 已有 per-pass sequential 分支。prompt cross-attn AdaLN、AV CA gate timestep factor、res2s `0.0011 -> 0` tail、initial packed noise shape 当前源码都与 official 语义一致。
+- 下一步: 不再做 guided-x0 injection 扩展；优先用 plain CLI 或低扰动 activation 对拍验证 `force_sdpa_v2a_cross_attention`/native attention wrapper 是否是剩余可改的 source-level 差异。当前 10s old-reference 对齐百分比: `16.93 / 35 = 48.4%`。
