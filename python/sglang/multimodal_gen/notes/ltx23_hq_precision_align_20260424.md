@@ -330,3 +330,12 @@
 - official `AttentionFunction.DEFAULT` 源码实际是 `xformers else PyTorch SDPA`，不是自动 FA3；安装了 `flash_attn_interface` 不代表 default 使用 FA3。native default 仍会按平台优先 FA，`--attention-backend torch_sdpa` 是更接近 official 的 debug path，但此前 10s old-reference 指标低 `0.73 dB`，不能直接作为 metric fix。
 - source audit: HQ guided stage1 在 official 通过 `BatchSplitAdapter(max_batch_size=1)` sequential 跑 cond/neg/modality；native HQ 已有 per-pass sequential 分支。prompt cross-attn AdaLN、AV CA gate timestep factor、res2s `0.0011 -> 0` tail、initial packed noise shape 当前源码都与 official 语义一致。
 - 下一步: 不再做 guided-x0 injection 扩展；优先用 plain CLI 或低扰动 activation 对拍验证 `force_sdpa_v2a_cross_attention`/native attention wrapper 是否是剩余可改的 source-level 差异。当前 10s old-reference 对齐百分比: `16.93 / 35 = 48.4%`。
+
+## 12:21 attention backend clean-reference 排序
+
+- git: `fbe7638c3`。
+- plain CLI 实验: `--attention-backend fa` 会让 native 默认路径里原本被 `force_sdpa_v2a_cross_attention=true` 限制的 V2A 也走 FA；生成 `/tmp/ltx23_hq_fbe7638_fa_30steps_pr23366_10s_cli/native_fbe7638_fa_30steps_pr23366_10s.mp4`，pixel time `166.83s`。
+- 10s SpongeBob old reference 指标: default `16.9311 dB`，FA-only `16.4231 dB`，此前 torch_sdpa `16.1985 dB`。old reference 下 default 最优，但该 reference 来自 dirty official，不能作为唯一依据。
+- 10s SpongeBob clean 59ca reference 指标: torch_sdpa `16.8763 dB`，default `16.2406 dB`，FA-only `16.1768 dB`。clean official 下 torch_sdpa 最接近 official；FA-only 没有改善，`force_sdpa_v2a_cross_attention` 不是负向主因。
+- 结论: precision 对拍应固定 clean official reference，并用 `--attention-backend torch_sdpa` 作为 official-like debug path；默认/FA 路径保留给性能，不能因为单 case PSNR 较低就强制改默认 backend。
+- 当前 clean-reference debug 对齐百分比: `16.88 / 35 = 48.2%`。
