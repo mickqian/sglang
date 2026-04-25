@@ -415,7 +415,11 @@ def calculate_metrics(
     num_success = len(success_outputs)
     latencies = [o.latency for o in success_outputs]
     completed_outputs = sum(o.output_count for o in success_outputs)
-    peak_memories = [o.peak_memory_mb for o in success_outputs if o.peak_memory_mb > 0]
+    peak_memories = [
+        o.peak_memory_mb
+        for o in success_outputs
+        if o.peak_memory_mb is not None and o.peak_memory_mb > 0
+    ]
 
     metrics = {
         "duration": total_duration,
