@@ -382,3 +382,10 @@
 - 复核: patched materialized config `/tmp/sgl_cache_ltx23_hf_overlay_metadatafix/materialized_models/Lightricks__LTX-2.3-ead80821e004158f/transformer/config.json` 有 `apply_gated_attention=True`、`frequencies_precision=float64`、`double_precision_rope=True`、`av_ca_timestep_scale_multiplier=1000.0`。
 - plain CLI light torch_sdpa patched overlay: `/tmp/ltx23_hq_overlay_metadatafix_light_071851/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，pixel generate time `67.60s`。
 - 结论: overlay metadata 修复是正确的 source hygiene，但当前 baseline 完全持平；已有 materialized config 实际已经带 `apply_gated_attention=True`，主误差不在这个 overlay metadata 漏读点。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。
+
+## 15:43 pinned overlay 正常路径复核
+
+- git: `384eeffba`，远端 run repo 已同步到该 commit；不使用 `SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY` override，正常命中内置 pin `MickJ/LTX-2.3-overlay@0746ea84e3b20d3a69b49662c76797ba2062718f`。
+- materialized path: `/tmp/sgl_cache_ltx23_hf_overlay_pin0746/materialized_models/Lightricks__LTX-2.3-f8e08d59705c8338`；transformer config 确认 `apply_gated_attention=True`、`frequencies_precision=float64`、`double_precision_rope=True`、`av_ca_timestep_scale_multiplier=1000.0`。
+- plain CLI light torch_sdpa: `/tmp/ltx23_hq_pin0746_light_073721/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，pixel generate time `66.75s`。
+- 结论不变: overlay pin 已可换机复现，但不是当前 PSNR 主瓶颈。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。
