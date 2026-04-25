@@ -312,3 +312,11 @@
 - plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_rope_coord_dtype_65ec2e2_30steps_pr23366_10s_cli/native_hq_rope_coord_dtype_65ec2e2_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `120.60s`。
 - 结论: 这是 source-level semantic alignment，但当前 case 完全持平；video RoPE coords dtype 不是主误差。下一步继续查 transformer 内部 kernel/layout 差异，尤其 native parallel linear/attention wrapper 与 official `torch.nn.Linear`/official attention path 的差异。
 - 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
+
+## 11:05 HQ DiT RoPE frequency precision 复核
+
+- git: `36050355e`。
+- 源码差异: official `LTXModelConfigurator` 会把 `frequencies_precision == "float64"` 解释为 `double_precision_rope=True`；native 之前只读 `rope_double_precision`。已让 native DiT 在缺少 `rope_double_precision` 时 honor `frequencies_precision`，这是更贴近 official config 的语义。
+- plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_rope_float64_3605035_30steps_pr23366_10s_cli/native_hq_rope_float64_3605035_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `146.13s`。
+- 结论: 当前 materialized config/arch 路径上该修复没有改变 SpongeBob 10s 输出；保留作为 official 语义修复，但不是主误差。下一步继续查 current config 实际命中的 DiT forward 分支，重点是 prompt cross-attn / AdaLN / attention mask 与 official `transformer.py` 的细微差异。
+- 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
