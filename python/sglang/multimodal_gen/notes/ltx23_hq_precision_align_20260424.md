@@ -366,3 +366,11 @@
 - 实验只限定 LTX LoRA 文件名，避免影响 Z-Image 等其它 LoRA；plain CLI light torch_sdpa 输出 `/tmp/ltx23_lora_order_light_12e454680/native_lora_order_light.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，与基线完全一致。
 - LoRA stage 切换源码审计: `set_lora(... clear_existing=True)`，已 merged 时 `merge_lora_weights()` 会先 `unmerge_lora_weights()`，`cpu_weight` 是 wrapper 创建时 clone 的 base 权重；single-transformer original mode 没有 stage1+stage2 LoRA 叠加迹象。
 - 结论: LoRA scale 融合顺序和 stage 切换残留都不是当前主误差源。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。
+
+## 14:20 current branch 可信基线复核
+
+- git: `b770572a3`。
+- 远端 run repo 已同步到 `b770572a3`，并显式使用 `PYTHONPATH=$PWD/python`，确认不再 import `/sgl-workspace/sglang` stale package。
+- plain CLI light torch_sdpa: `/tmp/ltx23_hq_b770_light_cli_061412/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，pixel generate time `101.36s`。
+- 源码复核新增排除: official/native stage1 `GuidedDenoiser + BatchSplitAdapter(max_batch_size=1)` pass order、res2s bongmath、stage2 final denoise、text mask、initial packed noise order、upsampler normalize/un-normalize 都与当前 native 命中路径一致；这些方向暂不再重复排查。
+- 当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。下一步集中查 `TransformerArgsPreprocessor` 到 native block forward 的实际数值分支，尤其 AdaLN/attention/parallel-linear wrapper 中仍可能存在的 bf16 累计漂移。
