@@ -72,7 +72,7 @@ class TestMultiOutputGrouping(unittest.TestCase):
         )
 
     def test_split_batched_latents_uses_original_batched_tensor(self):
-        stage = LatentPreparationStage(scheduler=None, transformer=None)
+        stage = LatentPreparationStage.__new__(LatentPreparationStage)
         src = Req()
         dst = Req()
         src.latents = torch.tensor([[[1.0]], [[2.0]]])
