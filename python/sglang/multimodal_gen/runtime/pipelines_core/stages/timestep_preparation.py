@@ -152,13 +152,23 @@ class TimestepPreparationStage(PipelineStage):
             results[first_index] = first_result
 
             for index, batch in group[1:]:
-                batch.timesteps = first_result.timesteps
-                batch.sigmas = first_result.sigmas
+                batch.timesteps = self._copy_stage_value(first_result.timesteps)
+                batch.sigmas = self._copy_stage_value(first_result.sigmas)
                 if "mu" in first_result.extra:
-                    batch.extra["mu"] = first_result.extra["mu"]
+                    batch.extra["mu"] = self._copy_stage_value(first_result.extra["mu"])
                 results[index] = batch
 
         return [result for result in results if result is not None]
+
+    @classmethod
+    def _copy_stage_value(cls, value):
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        if isinstance(value, list):
+            return [cls._copy_stage_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._copy_stage_value(item) for item in value)
+        return value
 
     def get_dedup_key(self, batch: Req, server_args: ServerArgs):
         return (
