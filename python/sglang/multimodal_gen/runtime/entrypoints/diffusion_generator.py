@@ -303,9 +303,7 @@ class DiffGenerator:
                             enable_frame_interpolation=requests[
                                 0
                             ].enable_frame_interpolation,
-                            frame_interpolation_exp=requests[
-                                0
-                            ].frame_interpolation_exp,
+                            frame_interpolation_exp=requests[0].frame_interpolation_exp,
                             frame_interpolation_scale=requests[
                                 0
                             ].frame_interpolation_scale,

@@ -211,9 +211,7 @@ class Hunyuan3DShapeBeforeDenoisingStage(PipelineStage):
         if generator is None and batch.seed is not None:
             generator = torch.Generator(device=device).manual_seed(batch.seed)
 
-        latents = self._prepare_latents(
-            batch_size, dtype, device, generator, scheduler
-        )
+        latents = self._prepare_latents(batch_size, dtype, device, generator, scheduler)
 
         guidance = None
         if hasattr(self.model, "guidance_embed") and self.model.guidance_embed is True:

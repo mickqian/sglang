@@ -228,9 +228,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
                             noise_pred - noise_uncond
                         )
 
-                latents = scheduler.step(
-                    noise_pred, t, latents, return_dict=False
-                )[0]
+                latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
         return latents
 

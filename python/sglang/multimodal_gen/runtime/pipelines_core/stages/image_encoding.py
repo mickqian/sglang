@@ -54,7 +54,9 @@ def _image_value_dedup_key(value):
 def _image_source_dedup_key(batch: Req, *, prefer_vae_image: bool = False):
     if batch.image_path is not None:
         return ("path", PipelineStage._freeze_for_dedup_key(batch.image_path))
-    image = batch.vae_image if prefer_vae_image and batch.vae_image is not None else None
+    image = (
+        batch.vae_image if prefer_vae_image and batch.vae_image is not None else None
+    )
     if image is None:
         image = batch.condition_image
     return ("image", _image_value_dedup_key(image))

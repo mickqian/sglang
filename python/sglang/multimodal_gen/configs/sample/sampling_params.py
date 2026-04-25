@@ -324,8 +324,7 @@ class SamplingParams:
             or self.seed < 0
         ):
             raise ValueError(
-                "seed must be a non-negative int or list of ints, "
-                f"got {self.seed!r}"
+                "seed must be a non-negative int or list of ints, " f"got {self.seed!r}"
             )
 
         # Used by seconds() and video writer; fps <= 0 is always invalid.

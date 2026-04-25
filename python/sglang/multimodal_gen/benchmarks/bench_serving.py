@@ -656,9 +656,7 @@ async def benchmark(args):
         f"{metrics['completed_requests']}/{len(requests_list)}",
     )
     print_value_formatted("Completed outputs:", metrics["completed_outputs"])
-    print_value_formatted(
-        "Outputs per prompt:", metrics["num_outputs_per_prompt"]
-    )
+    print_value_formatted("Outputs per prompt:", metrics["num_outputs_per_prompt"])
 
     # Section 3: Performance Metrics
     print_divider(50)
