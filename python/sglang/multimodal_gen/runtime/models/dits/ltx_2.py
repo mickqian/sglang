@@ -974,9 +974,13 @@ class LTX2TransformerBlock(nn.Module):
         a2v_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         v2a_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         audio_replicated_for_sp: bool = False,
+        hq_reference_block_order: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
+        run_audio_self_before_text_cross_attn = (
+            hq_reference_block_order and self.cross_attention_adaln
+        )
 
         # 1. Video and Audio Self-Attention
         vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
@@ -994,6 +998,26 @@ class LTX2TransformerBlock(nn.Module):
             gather_context_kv_for_sp=audio_replicated_for_sp,
         )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
+
+        if run_audio_self_before_text_cross_attn:
+            ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+                self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
+            )
+            norm_audio_hidden_states = (
+                rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa)
+                + ashift_msa
+            )
+            attn_audio_hidden_states = self.audio_attn1(
+                norm_audio_hidden_states,
+                mask=audio_self_attention_mask,
+                pe=audio_rotary_emb,
+                perturbation_mask=audio_self_attn_perturbation_mask,
+                all_perturbed=skip_audio_self_attn,
+                skip_sequence_parallel_override=audio_replicated_for_sp,
+            )
+            audio_hidden_states = (
+                audio_hidden_states + attn_audio_hidden_states * agate_msa
+            )
 
         if self.cross_attention_adaln:
             if temb_prompt is None or temb_audio_prompt is None:
@@ -1019,21 +1043,26 @@ class LTX2TransformerBlock(nn.Module):
             )
             hidden_states = hidden_states + attn_hidden_states * vgate_q
 
-        ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
-            self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
-        )
-        norm_audio_hidden_states = (
-            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
-        )
-        attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states,
-            mask=audio_self_attention_mask,
-            pe=audio_rotary_emb,
-            perturbation_mask=audio_self_attn_perturbation_mask,
-            all_perturbed=skip_audio_self_attn,
-            skip_sequence_parallel_override=audio_replicated_for_sp,
-        )
-        audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        if not run_audio_self_before_text_cross_attn:
+            ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+                self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
+            )
+            norm_audio_hidden_states = (
+                rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa)
+                + ashift_msa
+            )
+            attn_audio_hidden_states = self.audio_attn1(
+                norm_audio_hidden_states,
+                mask=audio_self_attention_mask,
+                pe=audio_rotary_emb,
+                perturbation_mask=audio_self_attn_perturbation_mask,
+                all_perturbed=skip_audio_self_attn,
+                skip_sequence_parallel_override=audio_replicated_for_sp,
+            )
+            audio_hidden_states = (
+                audio_hidden_states + attn_audio_hidden_states * agate_msa
+            )
+
         # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
             ashift_q, ascale_q, agate_q = self.get_ada_values(
@@ -1864,6 +1893,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 a2v_cross_attn_perturbation_mask=a2v_cross_attn_perturbation_mask,
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
+                hq_reference_block_order=bool(
+                    getattr(self, "_sglang_use_ltx23_hq_reference_block_order", False)
+                ),
             )
 
         # 6. Output layers
