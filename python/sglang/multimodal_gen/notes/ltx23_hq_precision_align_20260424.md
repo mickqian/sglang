@@ -348,3 +348,13 @@
 - 同一参数 current HEAD 输出 `/tmp/ltx23_head_light_sdpa_recheck/native_head_light_sdpa.mp4`，pixel time `97.04s`；两者互比 `15.9609 dB`，说明 b479 到 current 的代码确实改变了输出。但原 lightweight official reference 已从 `/tmp` 清理，暂时不能判断哪一个更接近 clean official。
 - 观察到 b479 stage2 tqdm 为 `3`，current 为 `4`。源码复核后暂不改: official `res2s_audio_video_denoising_loop` 的 final denoise 不在 tqdm 内；native 当前把 `0.0011 -> 0` final denoise 作为最后一个 loop step 执行，输出语义应等价。不能仅凭 tqdm 计数回滚 stage2 final denoise。
 - 下一步若继续追 history delta，应重新生成 clean official lightweight reference，再按 commit 做 native CLI bisect；不要只对齐 b479 输出本身。当前可靠 clean 10s debug 指标仍是 `16.88 / 35 = 48.2%`。
+
+## 13:16 lightweight official reference 和 SDPA wrapper 负例
+
+- git: `7c7d00f38`（先做 `a12ab090e` direct SDPA 实验，确认无收益后 revert）。
+- 重新生成 lightweight official reference: `/tmp/ltx23_official_light_current/official_light.mp4`，dirty official runner，`384x256/49f/fps24/4steps/seed10/prompt="SpongeBob talking with Patrick"`。仅修 `/tmp/run_official_light_simple.py` 的 Gemma3 rotary meta buffer 兼容，不改 SGLang。
+- 用该 reference 复核历史方向: `b479fc09f` light torch_sdpa 为 `global_psnr=16.3604 dB`；当前 `b91790d7c` light torch_sdpa 为 `17.4163 dB`。结论: 当前实现比 b479 更接近 official，不能再以“恢复 b479 输出”为目标。
+- 同步远端 run repo 到 `b91790d7c` 后复跑: light torch_sdpa 仍为 `17.4163 dB`；旧 run repo 之前停在 `fbe7638c3`，后续远端指标必须先 `git fetch mick ltx23-hq-precision-align && git checkout FETCH_HEAD`。
+- attention source audit: dirty official env `AttentionFunction.DEFAULT.to_callable()` 实际是 `PytorchAttention`，不是 xformers/FA3。尝试在 native `--attention-backend torch_sdpa` 单卡单 SP 下绕过 Local/USP wrapper，直接按 official 形态调用 `F.scaled_dot_product_attention`，输出完全持平 `17.4163 dB`；已 revert。结论: 单卡 SDPA wrapper/call-shape 不是当前主误差。
+- 复核 stage2 final denoise: official 在 append `0.0011` 前计算 `n_full_steps`，最后单独 final denoise；native 虽然 tqdm 显示 4 步，但 `sigma_next==0` 时 `_ltx2_stage2_res2s_step` 直接返回 x0，不跑 RK/SDE，语义等价，暂不改。
+- 当前 lightweight 对齐百分比: `17.4163 / 35 = 49.8%`。下一步继续查 DiT preprocessor/weight layout/LoRA merge 是否有真正 semantic mismatch；attention wrapper 方向降级。
