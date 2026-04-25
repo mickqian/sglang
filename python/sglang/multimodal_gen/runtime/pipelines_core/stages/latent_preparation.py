@@ -5,6 +5,7 @@
 Latent preparation stage for diffusion pipelines.
 """
 
+import torch
 from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.distributed import (
@@ -114,6 +115,85 @@ class LatentPreparationStage(PipelineStage):
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
         return batch
+
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            indexed_batches = group
+            group_batches = [batch for _, batch in indexed_batches]
+            if len(group_batches) == 1 or any(
+                batch.latents is not None for batch in group_batches
+            ):
+                for index, batch in indexed_batches:
+                    results[index] = self(batch, server_args)
+                continue
+
+            first_index, first_batch = indexed_batches[0]
+            generators = [self._single_generator(batch) for batch in group_batches]
+            original_num_outputs = first_batch.num_outputs_per_prompt
+            original_generator = first_batch.generator
+
+            try:
+                first_batch.num_outputs_per_prompt = len(group_batches)
+                first_batch.generator = generators
+                first_result = self(first_batch, server_args)
+            finally:
+                first_batch.num_outputs_per_prompt = original_num_outputs
+                first_batch.generator = original_generator
+
+            self._split_batched_latents(first_result, group_batches)
+            results[first_index] = first_batch
+            for index, batch in indexed_batches[1:]:
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        prompt_dtype = (
+            batch.prompt_embeds[0].dtype
+            if isinstance(batch.prompt_embeds, list) and batch.prompt_embeds
+            else None
+        )
+        latent_num_frames = self.adjust_video_length(batch, server_args)
+        return (
+            batch.height,
+            batch.width,
+            batch.num_frames,
+            latent_num_frames,
+            prompt_dtype,
+            batch.generator_device,
+        )
+
+    @staticmethod
+    def _single_generator(batch: Req):
+        if isinstance(batch.generator, list):
+            assert len(batch.generator) == 1
+            return batch.generator[0]
+        return batch.generator
+
+    @staticmethod
+    def _slice_batch_tensor(tensor: torch.Tensor, index: int, total: int):
+        if tensor.shape[0] == total:
+            return tensor[index : index + 1].contiguous()
+        return tensor
+
+    def _split_batched_latents(self, src: Req, batches: list[Req]) -> None:
+        total = len(batches)
+        assert src.latents is not None
+        for index, batch in enumerate(batches):
+            batch.latents = self._slice_batch_tensor(src.latents, index, total)
+            batch.raw_latent_shape = batch.latents.shape
+            if src.latent_ids is not None:
+                batch.latent_ids = self._slice_batch_tensor(
+                    src.latent_ids, index, total
+                )
 
     def adjust_video_length(self, batch: Req, server_args: ServerArgs) -> int:
         """

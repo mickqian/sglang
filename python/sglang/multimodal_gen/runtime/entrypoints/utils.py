@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence, Union
 
@@ -119,6 +120,84 @@ class GenerationResult:
     trajectory_decoded: Any = None
     prompt_index: int = 0
     output_file_path: str | None = None
+
+
+def normalize_output_seeds(
+    seed: int | list[int],
+    *,
+    num_outputs_per_prompt: int,
+    num_prompts: int = 1,
+    prompt_index: int = 0,
+) -> list[int]:
+    if num_outputs_per_prompt <= 0:
+        raise ValueError(
+            f"num_outputs_per_prompt must be positive, got {num_outputs_per_prompt}"
+        )
+
+    if isinstance(seed, list):
+        seeds = [int(item) for item in seed]
+        total_outputs = num_outputs_per_prompt * num_prompts
+        if len(seeds) == num_outputs_per_prompt:
+            return seeds
+        if len(seeds) == total_outputs:
+            start = prompt_index * num_outputs_per_prompt
+            return seeds[start : start + num_outputs_per_prompt]
+        raise ValueError(
+            "seed list length must match num_outputs_per_prompt "
+            f"({num_outputs_per_prompt}) or total outputs ({total_outputs}), "
+            f"got {len(seeds)}"
+        )
+
+    base_seed = int(seed)
+    return [base_seed + i for i in range(num_outputs_per_prompt)]
+
+
+def _with_output_index_suffix(output_file_name: str, output_index: int) -> str:
+    base, ext = os.path.splitext(output_file_name)
+    return f"{base}_{output_index}{ext}"
+
+
+def expand_request_outputs(
+    req: Req,
+    *,
+    num_prompts: int = 1,
+    prompt_index: int = 0,
+) -> list[Req]:
+    num_outputs = int(req.num_outputs_per_prompt)
+    seeds = normalize_output_seeds(
+        req.seed,
+        num_outputs_per_prompt=num_outputs,
+        num_prompts=num_prompts,
+        prompt_index=prompt_index,
+    )
+
+    if num_outputs == 1:
+        req.seed = seeds[0]
+        req.seeds = None
+        req.generator = None
+        return [req]
+
+    expanded: list[Req] = []
+    for output_index, seed in enumerate(seeds):
+        output_req = deepcopy(req)
+        output_req.seed = seed
+        output_req.num_outputs_per_prompt = 1
+        output_req.seeds = None
+        output_req.generator = None
+        output_req.extra["parent_request_id"] = req.request_id
+        output_req.extra["output_index"] = output_index
+
+        if req.request_id is not None:
+            output_req.request_id = f"{req.request_id}:{output_index}"
+
+        if req.output_file_name:
+            output_req.output_file_name = _with_output_index_suffix(
+                req.output_file_name, output_index
+            )
+        output_req.validate()
+        expanded.append(output_req)
+
+    return expanded
 
 
 def _normalize_audio_to_numpy(audio: Any) -> np.ndarray | None:

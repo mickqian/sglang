@@ -50,3 +50,16 @@ class SyncExecutor(PipelineExecutor):
         batch = self.run_profile_all_stages(stages, batch, server_args)
 
         return batch
+
+    def execute_group(
+        self,
+        stages: List[PipelineStage],
+        batches: list[Req],
+        server_args: ServerArgs,
+    ):
+        for stage in stages:
+            batches = stage.run_grouped_requests(batches, server_args)
+            profiler = SGLDiffusionProfiler.get_instance()
+            if profiler:
+                profiler.step_stage()
+        return batches

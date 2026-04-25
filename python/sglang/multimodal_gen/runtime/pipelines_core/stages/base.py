@@ -10,6 +10,7 @@ composed to create complete diffusion pipelines.
 
 from abc import ABC, abstractmethod
 from enum import Enum, auto
+from typing import Any
 
 import torch
 
@@ -217,6 +218,97 @@ class PipelineStage(ABC):
             raise
 
         return result
+
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Any]:
+        """Run this stage for a group of independent requests.
+
+        A grouped request is still a list of normal ``Req`` objects. The group
+        boundary only gives a stage the opportunity to reduce duplicate work.
+        The default implementation preserves the single-request contract by
+        calling ``self(batch, server_args)`` for every request, so stages that do
+        not override this method keep exactly the same behavior as before.
+
+        Stage overrides may use ``get_dedup_key`` and
+        ``_group_requests_by_dedup_key`` to find requests whose stage-relevant
+        inputs are identical. They may compute that stage once, then copy or
+        split the resulting stage-local outputs back to every request. Overrides
+        must preserve input order and return one result per input request.
+
+        This hook is deliberately not a global cache: deduplication is local to
+        the current stage and current group. A dedup key must only contain
+        fields that can change this stage's outputs. Request metadata such as
+        request id, output path, or seed should be excluded unless this stage
+        actually reads it.
+        """
+        return [self(batch, server_args) for batch in batches]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs) -> Any:
+        """Return the stage-local equivalence key for grouped execution.
+
+        The key describes the inputs that determine this stage's output. Stages
+        that do not implement grouped dedup can ignore this method; the default
+        key is unique per request, which means "never merge by key".
+
+        When overriding, include every field that can affect this stage and
+        exclude fields that only matter to other stages. For tensor or nested
+        values, use ``_freeze_for_dedup_key`` so the key is hashable.
+        """
+        return id(batch)
+
+    @staticmethod
+    def _freeze_for_dedup_key(value: Any) -> Any:
+        """Convert common nested values into a hashable dedup-key fragment.
+
+        Small tensors include their values so scheduler/timestep overrides can
+        distinguish user-provided tensors. Larger tensors include shape, dtype,
+        and device only; they should not normally be part of a dedup key unless
+        the stage has a stronger equivalence guarantee.
+        """
+        if isinstance(value, torch.Tensor):
+            if value.numel() <= 256:
+                return (
+                    "tensor",
+                    tuple(value.shape),
+                    str(value.dtype),
+                    tuple(value.detach().cpu().reshape(-1).tolist()),
+                )
+            return ("tensor", tuple(value.shape), str(value.dtype), value.device.type)
+        if isinstance(value, dict):
+            return tuple(
+                sorted(
+                    (key, PipelineStage._freeze_for_dedup_key(item))
+                    for key, item in value.items()
+                )
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(PipelineStage._freeze_for_dedup_key(item) for item in value)
+        if isinstance(value, set):
+            return tuple(
+                sorted(PipelineStage._freeze_for_dedup_key(item) for item in value)
+            )
+        return value
+
+    @staticmethod
+    def _group_requests_by_dedup_key(
+        batches: list[Req],
+        key_fn,
+    ) -> list[tuple[Any, list[tuple[int, Req]]]]:
+        """Group requests by a stage-local dedup key while preserving order.
+
+        The return value is ``[(key, [(original_index, req), ...]), ...]``.
+        Group order follows the first appearance of each key, and requests
+        inside a group keep their original relative order. Callers can fill a
+        result list by ``original_index`` to preserve input/output ordering.
+        """
+        groups: dict[Any, list[tuple[int, Req]]] = {}
+        for index, batch in enumerate(batches):
+            key = key_fn(batch)
+            groups.setdefault(key, []).append((index, batch))
+        return list(groups.items())
 
     @abstractmethod
     def forward(

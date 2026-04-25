@@ -107,6 +107,59 @@ class TextEncodingStage(PipelineStage):
 
         return batch
 
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                self._copy_text_outputs(first_result, batch)
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        return (
+            self._freeze_for_dedup_key(batch.prompt),
+            self._freeze_for_dedup_key(batch.negative_prompt),
+            bool(batch.do_classifier_free_guidance),
+            self._freeze_for_dedup_key(batch.prompt_template),
+            batch.max_sequence_length,
+        )
+
+    @staticmethod
+    def _copy_text_outputs(src: Req, dst: Req) -> None:
+        dst.prompt_embeds = list(src.prompt_embeds)
+        dst.negative_prompt_embeds = (
+            list(src.negative_prompt_embeds)
+            if src.negative_prompt_embeds is not None
+            else None
+        )
+        dst.prompt_attention_mask = (
+            list(src.prompt_attention_mask)
+            if src.prompt_attention_mask is not None
+            else None
+        )
+        dst.negative_attention_mask = (
+            list(src.negative_attention_mask)
+            if src.negative_attention_mask is not None
+            else None
+        )
+        dst.pooled_embeds = list(src.pooled_embeds)
+        dst.neg_pooled_embeds = list(src.neg_pooled_embeds)
+        dst.clip_embedding_pos = src.clip_embedding_pos
+        dst.clip_embedding_neg = src.clip_embedding_neg
+        dst.is_prompt_processed = src.is_prompt_processed
+
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """Verify text encoding stage inputs."""
         result = VerificationResult()

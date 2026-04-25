@@ -100,3 +100,39 @@ class ParallelExecutor(PipelineExecutor):
     ) -> OutputBatch:
         batch = self._execute(stages, batch, server_args)
         return batch
+
+    def execute_group(
+        self,
+        stages: List[PipelineStage],
+        batches: list[Req],
+        server_args: ServerArgs,
+    ):
+        if server_args.enable_cfg_parallel:
+            rank = get_classifier_free_guidance_rank()
+        else:
+            rank = get_world_rank()
+        cfg_group = get_cfg_group()
+
+        for stage in stages:
+            paradigm = stage.parallelism_type
+
+            if paradigm == StageParallelismType.MAIN_RANK_ONLY:
+                if rank == 0:
+                    batches = stage.run_grouped_requests(batches, server_args)
+                torch.distributed.barrier()
+
+            elif paradigm == StageParallelismType.CFG_PARALLEL:
+                obj_list = [batches] if rank == 0 else []
+                broadcasted_list = broadcast_pyobj(
+                    obj_list, rank=rank, dist_group=cfg_group.cpu_group, src=0
+                )
+                if rank != 0:
+                    batches = broadcasted_list[0]
+                batches = stage.run_grouped_requests(batches, server_args)
+
+                torch.distributed.barrier()
+
+            elif paradigm == StageParallelismType.REPLICATED:
+                batches = stage.run_grouped_requests(batches, server_args)
+
+        return batches

@@ -208,6 +208,43 @@ class ImageEncodingStage(PipelineStage):
 
         return batch
 
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                batch.image_embeds = list(first_result.image_embeds)
+                batch.prompt_embeds = list(first_result.prompt_embeds)
+                batch.negative_prompt_embeds = (
+                    list(first_result.negative_prompt_embeds)
+                    if first_result.negative_prompt_embeds is not None
+                    else None
+                )
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        return (
+            self._freeze_for_dedup_key(batch.image_path),
+            self._freeze_for_dedup_key(batch.prompt),
+            self._freeze_for_dedup_key(batch.negative_prompt),
+            bool(batch.do_classifier_free_guidance),
+            batch.height,
+            batch.width,
+            batch.num_frames,
+        )
+
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """Verify image encoding stage inputs."""
         result = VerificationResult()
