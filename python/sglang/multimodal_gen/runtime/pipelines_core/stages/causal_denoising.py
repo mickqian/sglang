@@ -58,6 +58,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
         autocast_enabled = (
             target_dtype != torch.float32
         ) and not server_args.disable_autocast
+        scheduler = batch.scheduler or self.scheduler
 
         latent_seq_length = batch.latents.shape[-1] * batch.latents.shape[-2]
         patch_ratio = (
@@ -76,7 +77,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
         if server_args.pipeline_config.warp_denoising_step:
             logger.info("Warping timesteps...")
             scheduler_timesteps = torch.cat(
-                (self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
+                (scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
             )
             timesteps = scheduler_timesteps[1000 - timesteps]
         timesteps = timesteps.to(get_local_torch_device())
@@ -317,7 +318,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
                         pred_noise=pred_noise_btchw.flatten(0, 1),
                         noise_input_latent=noise_latents.flatten(0, 1),
                         timestep=t_expand,
-                        scheduler=self.scheduler,
+                        scheduler=scheduler,
                     ).unflatten(0, pred_noise_btchw.shape[:2])
 
                     if i < len(timesteps) - 1:
@@ -335,7 +336,7 @@ class CausalDMDDenoisingStage(DenoisingStage):
                             device=self.device,
                         )
                         noise_btchw = noise
-                        noise_latents_btchw = self.scheduler.add_noise(
+                        noise_latents_btchw = scheduler.add_noise(
                             pred_video_btchw.flatten(0, 1),
                             noise_btchw.flatten(0, 1),
                             next_timestep,
