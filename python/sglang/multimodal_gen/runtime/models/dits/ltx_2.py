@@ -519,6 +519,9 @@ class LTX2Attention(nn.Module):
         self.use_local_attention = bool(use_local_attention)
         self.apply_gated_attention = bool(apply_gated_attention)
         self.prefix = prefix
+        self.use_direct_torch_sdpa = supported_attention_backends == {
+            AttentionBackendEnum.TORCH_SDPA
+        }
 
         tp_size = get_tp_world_size()
         if tp_size <= 0:
@@ -668,7 +671,31 @@ class LTX2Attention(nn.Module):
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
             k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
 
-            if gather_context_kv_for_sp:
+            if (
+                self.use_direct_torch_sdpa
+                and get_tp_world_size() == 1
+                and get_sp_world_size() == 1
+                and not gather_context_kv_for_sp
+                and not skip_sequence_parallel_override
+            ):
+                q_sdpa = q.transpose(1, 2)
+                k_sdpa = k.transpose(1, 2)
+                v_sdpa = v.transpose(1, 2)
+                attn_mask = mask
+                if attn_mask is not None:
+                    if attn_mask.ndim == 2:
+                        attn_mask = attn_mask.unsqueeze(0)
+                    if attn_mask.ndim == 3:
+                        attn_mask = attn_mask.unsqueeze(1)
+                out = F.scaled_dot_product_attention(
+                    q_sdpa,
+                    k_sdpa,
+                    v_sdpa,
+                    attn_mask=attn_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                ).transpose(1, 2)
+            elif gather_context_kv_for_sp:
                 k_full = sequence_model_parallel_all_gather(k.contiguous(), dim=1)
                 v_full = sequence_model_parallel_all_gather(v.contiguous(), dim=1)
                 gathered_mask = None
