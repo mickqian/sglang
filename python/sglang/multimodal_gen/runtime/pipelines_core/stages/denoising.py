@@ -676,7 +676,28 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self, ctx: DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
         """Prepare scheduler state before entering the shared denoising loop."""
+        self._reset_scheduler_loop_state()
         self.scheduler.set_begin_index(0)
+
+    def _reset_scheduler_loop_state(self) -> None:
+        scheduler = self.scheduler
+        if hasattr(scheduler, "_step_index"):
+            scheduler._step_index = None
+        if hasattr(scheduler, "_begin_index"):
+            scheduler._begin_index = None
+        if hasattr(scheduler, "lower_order_nums"):
+            scheduler.lower_order_nums = 0
+        if hasattr(scheduler, "last_sample"):
+            scheduler.last_sample = None
+        if hasattr(scheduler, "this_order"):
+            scheduler.this_order = 0
+
+        solver_order = getattr(getattr(scheduler, "config", None), "solver_order", 0)
+        if solver_order:
+            if hasattr(scheduler, "model_outputs"):
+                scheduler.model_outputs = [None] * solver_order
+            if hasattr(scheduler, "timestep_list"):
+                scheduler.timestep_list = [None] * solver_order
 
     def _prepare_step_state(
         self,
