@@ -358,3 +358,11 @@
 - attention source audit: dirty official env `AttentionFunction.DEFAULT.to_callable()` 实际是 `PytorchAttention`，不是 xformers/FA3。尝试在 native `--attention-backend torch_sdpa` 单卡单 SP 下绕过 Local/USP wrapper，直接按 official 形态调用 `F.scaled_dot_product_attention`，输出完全持平 `17.4163 dB`；已 revert。结论: 单卡 SDPA wrapper/call-shape 不是当前主误差。
 - 复核 stage2 final denoise: official 在 append `0.0011` 前计算 `n_full_steps`，最后单独 final denoise；native 虽然 tqdm 显示 4 步，但 `sigma_next==0` 时 `_ltx2_stage2_res2s_step` 直接返回 x0，不跑 RK/SDE，语义等价，暂不改。
 - 当前 lightweight 对齐百分比: `17.4163 / 35 = 49.8%`。下一步继续查 DiT preprocessor/weight layout/LoRA merge 是否有真正 semantic mismatch；attention wrapper 方向降级。
+
+## 13:31 LTX LoRA fusion order 负例
+
+- git: `efa19b7e7`（先做 `12e454680` LoRA scale-before-matmul 实验，确认无收益后 revert）。
+- source 差异候选: official `fuse_loras.py` 里 LoRA delta 是 `(B * strength) @ A`，native merge 之前是 `(B @ A)` 后在 `add_` alpha 乘 strength；bf16 下两者不严格等价，且 HQ stage1/stage2 都依赖 distilled LoRA。
+- 实验只限定 LTX LoRA 文件名，避免影响 Z-Image 等其它 LoRA；plain CLI light torch_sdpa 输出 `/tmp/ltx23_lora_order_light_12e454680/native_lora_order_light.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，与基线完全一致。
+- LoRA stage 切换源码审计: `set_lora(... clear_existing=True)`，已 merged 时 `merge_lora_weights()` 会先 `unmerge_lora_weights()`，`cpu_weight` 是 wrapper 创建时 clone 的 base 权重；single-transformer original mode 没有 stage1+stage2 LoRA 叠加迹象。
+- 结论: LoRA scale 融合顺序和 stage 切换残留都不是当前主误差源。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。
