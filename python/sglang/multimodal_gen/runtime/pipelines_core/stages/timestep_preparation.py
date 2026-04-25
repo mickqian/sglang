@@ -8,6 +8,7 @@ This module contains implementations of timestep preparation stages for diffusio
 """
 
 import inspect
+from copy import deepcopy
 from typing import Any, Callable, Tuple
 
 import torch
@@ -68,7 +69,7 @@ class TimestepPreparationStage(PipelineStage):
         Returns:
             The batch with prepared timesteps.
         """
-        scheduler = self.scheduler
+        scheduler = deepcopy(self.scheduler)
         device = get_local_torch_device()
         num_inference_steps = batch.num_inference_steps
         timesteps = batch.timesteps
@@ -133,6 +134,7 @@ class TimestepPreparationStage(PipelineStage):
 
         # Update batch with prepared timesteps
         batch.timesteps = timesteps
+        batch.scheduler = scheduler
         if not batch.is_warmup:
             self.log_debug("timesteps: %s", timesteps)
         return batch
@@ -154,6 +156,7 @@ class TimestepPreparationStage(PipelineStage):
             for index, batch in group[1:]:
                 batch.timesteps = self._copy_stage_value(first_result.timesteps)
                 batch.sigmas = self._copy_stage_value(first_result.sigmas)
+                batch.scheduler = deepcopy(first_result.scheduler)
                 if "mu" in first_result.extra:
                     batch.extra["mu"] = self._copy_stage_value(first_result.extra["mu"])
                 results[index] = batch

@@ -127,6 +127,7 @@ class Req:
     paired_timesteps: torch.Tensor | None = None
     timestep: torch.Tensor | float | int | None = None
     step_index: int | None = None
+    scheduler: Any | None = None
 
     eta: float = 0.0
     sigmas: list[float] | None = None
