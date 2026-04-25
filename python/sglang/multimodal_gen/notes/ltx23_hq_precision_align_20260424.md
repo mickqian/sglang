@@ -339,3 +339,12 @@
 - 10s SpongeBob clean 59ca reference 指标: torch_sdpa `16.8763 dB`，default `16.2406 dB`，FA-only `16.1768 dB`。clean official 下 torch_sdpa 最接近 official；FA-only 没有改善，`force_sdpa_v2a_cross_attention` 不是负向主因。
 - 结论: precision 对拍应固定 clean official reference，并用 `--attention-backend torch_sdpa` 作为 official-like debug path；默认/FA 路径保留给性能，不能因为单 case PSNR 较低就强制改默认 backend。
 - 当前 clean-reference debug 对齐百分比: `16.88 / 35 = 48.2%`。
+
+## 12:40 history output 复查和 stage2 步数判断
+
+- git: `8e3993f23`。
+- 复查历史视频 `/tmp/ltx23_3e8g6_pr23366_10s_cli/native_3e8g6_pr23366_10s.mp4`: vs old reference `17.1952 dB`，vs clean 59ca reference `17.3760 dB`，vs current default output `15.9490 dB`。collab log 里的 `20.71 dB` 仍不可复现。
+- 轻量 recheck: `b479fc09f` detached worktree `/tmp/ltx23-b479-run`，`384x256/49f/4steps/SpongeBob talking with Patrick/torch_sdpa` 输出 `/tmp/ltx23_b479_light_sdpa_recheck/native_b479_light_sdpa.mp4`，pixel time `85.67s`。
+- 同一参数 current HEAD 输出 `/tmp/ltx23_head_light_sdpa_recheck/native_head_light_sdpa.mp4`，pixel time `97.04s`；两者互比 `15.9609 dB`，说明 b479 到 current 的代码确实改变了输出。但原 lightweight official reference 已从 `/tmp` 清理，暂时不能判断哪一个更接近 clean official。
+- 观察到 b479 stage2 tqdm 为 `3`，current 为 `4`。源码复核后暂不改: official `res2s_audio_video_denoising_loop` 的 final denoise 不在 tqdm 内；native 当前把 `0.0011 -> 0` final denoise 作为最后一个 loop step 执行，输出语义应等价。不能仅凭 tqdm 计数回滚 stage2 final denoise。
+- 下一步若继续追 history delta，应重新生成 clean official lightweight reference，再按 commit 做 native CLI bisect；不要只对齐 b479 输出本身。当前可靠 clean 10s debug 指标仍是 `16.88 / 35 = 48.2%`。
