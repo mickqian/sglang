@@ -938,6 +938,13 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 set_lora_kwargs["merge_weights"] = (
                     self._should_merge_stage2_distilled_lora(self.server_args)
                 )
+            elif phase == "stage1" and self.pipeline_name == "LTX2TwoStageHQPipeline":
+                # Official HQ builds stage 1 with distilled LoRA fused as well.
+                # Keep this scoped to HQ so regular LTX-2.3 two-stage preserves its
+                # existing stage-1 LoRA behavior.
+                set_lora_kwargs["merge_weights"] = (
+                    self._should_merge_stage2_distilled_lora(self.server_args)
+                )
             self.set_lora(
                 **set_lora_kwargs,
             )
