@@ -76,6 +76,8 @@ class VideoResponse(BaseModel):
     expires_at: Optional[int] = None
     error: Optional[Dict[str, Any]] = None
     file_path: Optional[str] = None
+    file_paths: Optional[List[str]] = None
+    num_outputs: Optional[int] = None
     peak_memory_mb: Optional[float] = None
     inference_time_s: Optional[float] = None
 
@@ -85,6 +87,8 @@ class VideoGenerationsRequest(BaseModel):
     input_reference: Optional[str] = None
     reference_url: Optional[str] = None
     model: Optional[str] = None
+    n: Optional[int] = 1
+    num_outputs_per_prompt: Optional[int] = None
     seconds: Optional[int] = 4
     size: Optional[str] = ""
     fps: Optional[int] = None

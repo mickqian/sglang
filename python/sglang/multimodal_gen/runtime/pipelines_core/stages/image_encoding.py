@@ -43,6 +43,23 @@ from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 logger = init_logger(__name__)
 
 
+def _image_value_dedup_key(value):
+    if isinstance(value, (list, tuple)):
+        return tuple(_image_value_dedup_key(item) for item in value)
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return ("object", id(value))
+
+
+def _image_source_dedup_key(batch: Req, *, prefer_vae_image: bool = False):
+    if batch.image_path is not None:
+        return ("path", PipelineStage._freeze_for_dedup_key(batch.image_path))
+    image = batch.vae_image if prefer_vae_image and batch.vae_image is not None else None
+    if image is None:
+        image = batch.condition_image
+    return ("image", _image_value_dedup_key(image))
+
+
 class ImageEncodingStage(PipelineStage):
     """
     Stage for encoding image prompts into embeddings for diffusion models.
@@ -223,26 +240,30 @@ class ImageEncodingStage(PipelineStage):
             results[first_index] = first_result
 
             for index, batch in group[1:]:
-                batch.image_embeds = list(first_result.image_embeds)
-                batch.prompt_embeds = list(first_result.prompt_embeds)
-                batch.negative_prompt_embeds = (
-                    list(first_result.negative_prompt_embeds)
-                    if first_result.negative_prompt_embeds is not None
-                    else None
-                )
+                self._copy_image_encoding_outputs(first_result, batch)
                 results[index] = batch
 
         return [result for result in results if result is not None]
 
     def get_dedup_key(self, batch: Req, server_args: ServerArgs):
         return (
-            self._freeze_for_dedup_key(batch.image_path),
+            _image_source_dedup_key(batch),
             self._freeze_for_dedup_key(batch.prompt),
             self._freeze_for_dedup_key(batch.negative_prompt),
             bool(batch.do_classifier_free_guidance),
             batch.height,
             batch.width,
             batch.num_frames,
+        )
+
+    @staticmethod
+    def _copy_image_encoding_outputs(src: Req, dst: Req) -> None:
+        dst.image_embeds = list(src.image_embeds)
+        dst.prompt_embeds = list(src.prompt_embeds)
+        dst.negative_prompt_embeds = (
+            list(src.negative_prompt_embeds)
+            if src.negative_prompt_embeds is not None
+            else None
         )
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
@@ -571,6 +592,53 @@ class LTX2ImageEncodingStage(PipelineStage):
         self.offload_model()
         return batch
 
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                self._copy_ltx2_outputs(first_result, batch)
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        if batch.image_path is None or batch.image_latent is not None:
+            return id(batch)
+
+        sample_mode = server_args.pipeline_config.vae_config.encode_sample_mode()
+        arch_config = server_args.pipeline_config.vae_config.arch_config
+        encoder_subdir = str(getattr(arch_config, "condition_encoder_subdir", ""))
+        if not encoder_subdir and sample_mode == "sample":
+            return id(batch)
+
+        latent_dtype = batch.latents.dtype if batch.latents is not None else None
+        return (
+            _image_source_dedup_key(batch),
+            batch.height,
+            batch.width,
+            batch.num_frames,
+            str(latent_dtype),
+            encoder_subdir,
+            sample_mode,
+        )
+
+    @staticmethod
+    def _copy_ltx2_outputs(src: Req, dst: Req) -> None:
+        dst.condition_image = src.condition_image
+        dst.image_latent = src.image_latent
+        dst.ltx2_num_image_tokens = src.ltx2_num_image_tokens
+
 
 class ImageVAEEncodingStage(PipelineStage):
     """
@@ -722,6 +790,52 @@ class ImageVAEEncodingStage(PipelineStage):
 
         self.offload_model()
         return batch
+
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                self._copy_image_vae_outputs(first_result, batch)
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        if batch.condition_image is None:
+            return id(batch)
+
+        sample_mode = server_args.pipeline_config.vae_config.encode_sample_mode()
+        if sample_mode == "sample":
+            return id(batch)
+
+        return (
+            _image_source_dedup_key(batch, prefer_vae_image=True),
+            batch.height,
+            batch.width,
+            batch.num_frames,
+            sample_mode,
+            server_args.pipeline_config.vae_precision,
+            bool(server_args.pipeline_config.vae_tiling),
+        )
+
+    @staticmethod
+    def _copy_image_vae_outputs(src: Req, dst: Req) -> None:
+        dst.image_latent = src.image_latent
+        dst.condition_image_latent_ids = src.condition_image_latent_ids
+        dst.vae_image_sizes = (
+            list(src.vae_image_sizes) if src.vae_image_sizes is not None else None
+        )
 
     def retrieve_latents(
         self,

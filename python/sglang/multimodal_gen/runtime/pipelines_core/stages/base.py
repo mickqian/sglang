@@ -232,11 +232,16 @@ class PipelineStage(ABC):
         calling ``self(batch, server_args)`` for every request, so stages that do
         not override this method keep exactly the same behavior as before.
 
-        Stage overrides may use ``get_dedup_key`` and
-        ``_group_requests_by_dedup_key`` to find requests whose stage-relevant
-        inputs are identical. They may compute that stage once, then copy or
-        split the resulting stage-local outputs back to every request. Overrides
-        must preserve input order and return one result per input request.
+        Stage overrides decide their own reuse granularity. A simple stage may
+        group by a single full-stage key, compute once, then copy or split the
+        stage-local outputs back to every request. A mixed stage may instead
+        reuse only one subprocess, such as positive prompt encoding, while
+        still running another subprocess per request. Overrides must preserve
+        input order and return one result per input request.
+
+        ``get_dedup_key`` and ``_group_requests_by_dedup_key`` are convenience
+        helpers for the full-stage case. They are not required for stages that
+        need finer internal grouping.
 
         This hook is deliberately not a global cache: deduplication is local to
         the current stage and current group. A dedup key must only contain
@@ -249,9 +254,10 @@ class PipelineStage(ABC):
     def get_dedup_key(self, batch: Req, server_args: ServerArgs) -> Any:
         """Return the stage-local equivalence key for grouped execution.
 
-        The key describes the inputs that determine this stage's output. Stages
-        that do not implement grouped dedup can ignore this method; the default
-        key is unique per request, which means "never merge by key".
+        The key describes the inputs that determine this stage's complete
+        output. Stages that do not implement full-stage grouped dedup can ignore
+        this method; the default key is unique per request, which means "never
+        merge by key".
 
         When overriding, include every field that can affect this stage and
         exclude fields that only matter to other stages. For tensor or nested
