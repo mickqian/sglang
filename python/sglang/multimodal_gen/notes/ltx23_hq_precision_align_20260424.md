@@ -389,3 +389,10 @@
 - materialized path: `/tmp/sgl_cache_ltx23_hf_overlay_pin0746/materialized_models/Lightricks__LTX-2.3-f8e08d59705c8338`；transformer config 确认 `apply_gated_attention=True`、`frequencies_precision=float64`、`double_precision_rope=True`、`av_ca_timestep_scale_multiplier=1000.0`。
 - plain CLI light torch_sdpa: `/tmp/ltx23_hq_pin0746_light_073721/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，pixel generate time `66.75s`。
 - 结论不变: overlay pin 已可换机复现，但不是当前 PSNR 主瓶颈。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。
+
+## 15:52 official metadata / context mask / pass order 审计
+
+- git: `d4d0e7179`。pinned materialized transformer config vs official checkpoint metadata 只剩 5 个差异: `_class_name`、`ltx_variant`、`double_precision_rope`、`force_sdpa_v2a_cross_attention`、`quantize_video_rope_coords_to_hidden_dtype`；这些是 native 适配或 official `frequencies_precision=float64` 的等价展开，不再有明显漏项。
+- official `modality_from_latent_state()` 固定 `context_mask=None`；native `_get_ltx_prompt_attention_mask()` 对 `ltx_2_3` two-stage/HQ 也返回 `None`，所以 text cross-attn mask 不是剩余差异。
+- official `GuidedDenoiser` pass 顺序是 `cond -> uncond -> ptb -> mod`，先 repeat state 再 cat context；native HQ split pass 顺序是 `cond -> neg -> perturbed -> modality`，`_repeat_ltx2_model_kwargs_batch()` 也是 pass-wise repeat，随后按 batch=1 split，语义匹配。
+- 当前结论: config、text context mask、stage1 guided pass order 继续降级；下一步应查 native `LatentState` 构造和 stage1/stage2 `positions/denoise_mask/attention_mask` 是否逐项等价，而不是回到 overlay 或 text mask。
