@@ -411,3 +411,11 @@
 - 修正: 仅在 `LTX2TwoStageHQPipeline` 且 LTX2.3 native variant 下，让 stage1 `set_lora(..., merge_weights=True)`；普通 LTX2.3 two-stage 默认 stage1、one-stage、legacy LTX2 不受影响。
 - plain CLI light torch_sdpa: `/tmp/ltx23_hq_stage1_lora_merge_085406/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，`min_psnr=16.676200413488672`，pixel generate time `69.61s`。
 - 结论: 这是应保留的 official 语义对齐 fix，但不是当前 PSNR 主因。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。下一步转向逐项确认 native/official 进入 transformer 的 `LatentState` 字段和 DiT args preprocessor，而不是继续在 LoRA merge 细节上试探。
+
+## 17:29 connector 权重和 forward 公式排除
+
+- git: `5052af7cc` + 本地未改代码。远端 pinned overlay connector 权重与 official checkpoint selected mapping 全量对齐: `262/262` tensors bit-exact，`max_abs=0`；aggregate embed 正确 official 前缀是 `text_embedding_projection.{video,audio}_aggregate_embed.*`。
+- 用同一组 raw Gemma hidden-state 形状 `[1,512,3840,49]` 和 padded mask 跑公式等价检查: native `pack_text_embeds_v2 + LTX2TextConnectors` 对 official V2 `norm_and_concat_per_token_rms + FeatureExtractorV2 + Embeddings1DConnector` 的 feature/video/audio/mask 输出全部 `max_abs=0`。
+- official prompt encoder `GemmaTextEncoder.encode()` 只做 `LTXVGemmaTokenizer.tokenize_with_weights(text.strip())`，不走 chat template 或 `_pad_inputs_for_attention_alignment`；native tokenization 与 V2 postprocess 已覆盖该路径。
+- official HQ stage1 guidance 也重新核对: `GuidedDenoiser` 先构造 `cond -> uncond -> ptb -> mod` batched passes，再由 `BatchSplitAdapter(max_batch_size=1)` 拆成单样本顺序执行；native HQ `use_split_stage1_guided_passes=True` 的 pass order 和 split 行为一致。
+- 结论: text encoder connector/feature projector/connector weights/connector forward/4-way split strategy 都降级；剩余高价值范围是 DiT block 内的 native wrapper 与 official `BasicAVTransformerBlock` 实际数值分支。当前 lightweight 对齐百分比仍按有效 CLI 基线 `17.4163 / 35 = 49.8%`。
