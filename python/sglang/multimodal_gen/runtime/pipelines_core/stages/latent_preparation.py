@@ -241,13 +241,13 @@ class LatentPreparationStage(PipelineStage):
     def _split_batched_latents(self, src: Req, batches: list[Req]) -> None:
         total = len(batches)
         assert src.latents is not None
+        latents = src.latents
+        latent_ids = src.latent_ids
         for index, batch in enumerate(batches):
-            batch.latents = self._slice_batch_tensor(src.latents, index, total)
+            batch.latents = self._slice_batch_tensor(latents, index, total)
             batch.raw_latent_shape = batch.latents.shape
-            if src.latent_ids is not None:
-                batch.latent_ids = self._slice_batch_tensor(
-                    src.latent_ids, index, total
-                )
+            if latent_ids is not None:
+                batch.latent_ids = self._slice_batch_tensor(latent_ids, index, total)
 
     def adjust_video_length(self, batch: Req, server_args: ServerArgs) -> int:
         """

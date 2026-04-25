@@ -1,11 +1,16 @@
 import unittest
 
+import torch
+
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     expand_request_outputs,
     normalize_output_seeds,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
+from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation import (
+    LatentPreparationStage,
+)
 
 
 class TestMultiOutputGrouping(unittest.TestCase):
@@ -65,6 +70,20 @@ class TestMultiOutputGrouping(unittest.TestCase):
             [item.request_id for item in outputs],
             ["rid:0", "rid:1"],
         )
+
+    def test_split_batched_latents_uses_original_batched_tensor(self):
+        stage = LatentPreparationStage(scheduler=None, transformer=None)
+        src = Req()
+        dst = Req()
+        src.latents = torch.tensor([[[1.0]], [[2.0]]])
+        src.latent_ids = torch.tensor([[[10.0]], [[20.0]]])
+
+        stage._split_batched_latents(src, [src, dst])
+
+        self.assertTrue(torch.equal(src.latents, torch.tensor([[[1.0]]])))
+        self.assertTrue(torch.equal(dst.latents, torch.tensor([[[2.0]]])))
+        self.assertTrue(torch.equal(src.latent_ids, torch.tensor([[[10.0]]])))
+        self.assertTrue(torch.equal(dst.latent_ids, torch.tensor([[[20.0]]])))
 
 
 if __name__ == "__main__":
