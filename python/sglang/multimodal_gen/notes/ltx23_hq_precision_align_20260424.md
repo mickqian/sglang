@@ -404,3 +404,10 @@
 - official connector runtime 复核: `LTXModelConfigurator` 从原始 `ltx-2.3-22b-dev.safetensors` 实例化出的 video/audio connector 都是 `rope_type=SPLIT`、`double_precision_rope=True`，并且 `caption_proj_before_connector=True`、`connector_apply_gated_attention=True`；排除“official 是 interleaved/float32 connector”的假设。
 - plain CLI light torch_sdpa 有效基线: `/tmp/ltx23_hq_current_e54_pypath_light_082535/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，`min_psnr=16.676200413488672`，`mean_mae=20.345458984375`，pixel generate time `106.64s`。
 - 当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。下一步继续 native/source 对齐，优先查 scheduler/sigma/upsampler 参数和 `LatentState` 输入，而不是 injection 或 stale overlay。
+
+## 16:57 HQ stage1 LoRA merge 语义修正但指标持平
+
+- git: `8fdd7a974`。官方 `ti2vid_two_stages_hq.py` 的 stage1/stage2 都通过 `DiffusionStage(... loras=...)` 走 `SingleGPUModelBuilder.apply_loras()`，即 distilled LoRA 在 build transformer 前融合进权重；native 之前只对 LTX2.3 stage2 merge，HQ stage1 仍走动态 LoRA wrapper。
+- 修正: 仅在 `LTX2TwoStageHQPipeline` 且 LTX2.3 native variant 下，让 stage1 `set_lora(..., merge_weights=True)`；普通 LTX2.3 two-stage 默认 stage1、one-stage、legacy LTX2 不受影响。
+- plain CLI light torch_sdpa: `/tmp/ltx23_hq_stage1_lora_merge_085406/native.mp4` vs `/tmp/ltx23_official_light_current/official_light.mp4`，`global_psnr=17.416288376188472`，`mean_psnr=17.42747989409195`，`min_psnr=16.676200413488672`，pixel generate time `69.61s`。
+- 结论: 这是应保留的 official 语义对齐 fix，但不是当前 PSNR 主因。当前 lightweight 对齐百分比仍为 `17.4163 / 35 = 49.8%`。下一步转向逐项确认 native/official 进入 transformer 的 `LatentState` 字段和 DiT args preprocessor，而不是继续在 LoRA merge 细节上试探。
