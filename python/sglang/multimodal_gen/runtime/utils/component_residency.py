@@ -417,13 +417,19 @@ class PipelineResidencyManager:
                 preferred_use is not None
                 and preferred_use.component_name == component_name
             )
-            if not preferred and self._should_keep_for_dynamic_budget(component_name):
+            if (
+                not preferred
+                and (
+                    self._should_keep_single_dit(component_name)
+                    or self._should_keep_for_dynamic_budget(component_name)
+                )
+            ):
                 self._trace(
                     "keep",
                     use,
                     self.strategy_for(component_name, module),
                     module,
-                    detail="dynamic_budget",
+                    detail="single_dit_or_dynamic_budget",
                 )
                 continue
             strategy = self.strategy_for(component_name, module)
@@ -503,7 +509,17 @@ class PipelineResidencyManager:
         }
         if use.component_name in future_component_names:
             return True
+        if self._should_keep_single_dit(use.component_name):
+            return True
         return self._should_keep_for_dynamic_budget(use.component_name)
+
+    def _should_keep_single_dit(self, component_name: str) -> bool:
+        modules = getattr(self.pipeline, "modules", {})
+        return (
+            component_name == "transformer"
+            and "transformer_2" not in modules
+            and getattr(self.pipeline, "_device_manager", None) is None
+        ) or (component_name == "video_dit" and "video_dit_2" not in modules)
 
     def _should_keep_for_dynamic_budget(self, component_name: str) -> bool:
         if (
