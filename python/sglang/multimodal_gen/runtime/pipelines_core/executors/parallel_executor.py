@@ -67,29 +67,39 @@ class ParallelExecutor(PipelineExecutor):
             rank = get_world_rank()
         cfg_group = get_cfg_group()
 
-        # TODO: decide when to gather on main when CFG_PARALLEL -> MAIN_RANK_ONLY
-        for stage in stages:
-            paradigm = stage.parallelism_type
+        self.begin_component_residency_request(stages, batch, server_args)
+        try:
+            # TODO: decide when to gather on main when CFG_PARALLEL -> MAIN_RANK_ONLY
+            for stage_index, stage in enumerate(stages):
+                paradigm = stage.parallelism_type
 
-            if paradigm == StageParallelismType.MAIN_RANK_ONLY:
-                if rank == 0:
-                    # Only main rank executes, others just wait
+                if paradigm == StageParallelismType.MAIN_RANK_ONLY:
+                    if rank == 0:
+                        # Only main rank executes, others just wait
+                        self.before_stage(stage, stage_index, batch, server_args)
+                        batch = stage(batch, server_args)
+                        self.after_stage(stage_index)
+                    torch.distributed.barrier()
+
+                elif paradigm == StageParallelismType.CFG_PARALLEL:
+                    obj_list = [batch] if rank == 0 else []
+                    broadcasted_list = broadcast_pyobj(
+                        obj_list, rank=rank, dist_group=cfg_group.cpu_group, src=0
+                    )
+                    if rank != 0:
+                        batch = broadcasted_list[0]
+                    self.before_stage(stage, stage_index, batch, server_args)
                     batch = stage(batch, server_args)
-                torch.distributed.barrier()
+                    self.after_stage(stage_index)
 
-            elif paradigm == StageParallelismType.CFG_PARALLEL:
-                obj_list = [batch] if rank == 0 else []
-                broadcasted_list = broadcast_pyobj(
-                    obj_list, rank=rank, dist_group=cfg_group.cpu_group, src=0
-                )
-                if rank != 0:
-                    batch = broadcasted_list[0]
-                batch = stage(batch, server_args)
+                    torch.distributed.barrier()
 
-                torch.distributed.barrier()
-
-            elif paradigm == StageParallelismType.REPLICATED:
-                batch = stage(batch, server_args)
+                elif paradigm == StageParallelismType.REPLICATED:
+                    self.before_stage(stage, stage_index, batch, server_args)
+                    batch = stage(batch, server_args)
+                    self.after_stage(stage_index)
+        finally:
+            self.finish_component_residency_request()
         return batch
 
     def execute(

@@ -482,6 +482,18 @@ class LTX2TwoStageDeviceManager:
         self._active_phase = phase
         return True
 
+    def enter_phase(self, phase: str) -> bool:
+        return self.switch_phase(phase)
+
+    def exit_phase(self, phase: str | None, next_phase: str | None = None) -> None:
+        del next_phase
+        if phase == "stage2":
+            self.release_premerged_transformers()
+
+    def finish_request(self, preferred_phase: str | None = "stage1") -> None:
+        del preferred_phase
+        self.release_premerged_transformers()
+
     def prefetch_stage2_after_stage1(self) -> None:
         """Kick off stage-2 H2D right after stage-1 denoising to hide switch latency."""
         if (
@@ -811,11 +823,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
     def release_premerged_transformers_to_cpu_snapshots(self) -> None:
         """Release inactive premerged DiTs according to the selected device mode."""
-        self._device_manager.release_premerged_transformers()
+        self._device_manager.finish_request(preferred_phase="stage1")
 
     def release_ltx2_phase_state(self, phase: str | None) -> None:
-        if phase == "stage2":
-            self.release_premerged_transformers_to_cpu_snapshots()
+        self._device_manager.exit_phase(phase)
 
     def ensure_ltx2_phase_ready(self, phase: str | None) -> None:
         self._device_manager.ensure_phase_ready(phase)
@@ -912,7 +923,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         if phase_signature == self._active_lora_signature:
             return
 
-        if self._device_manager.switch_phase(
+        if self._device_manager.enter_phase(
             phase
         ) and self._can_short_circuit_lora_switch(phase, batch):
             self._active_lora_phase = phase

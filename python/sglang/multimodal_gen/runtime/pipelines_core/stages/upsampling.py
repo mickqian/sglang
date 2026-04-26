@@ -4,6 +4,7 @@ from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.component_residency import ComponentUse
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -69,6 +70,19 @@ class LTX2UpsampleStage(PipelineStage):
         self.vae = vae
         self.audio_vae = audio_vae
         self.pipeline = pipeline
+
+    def component_uses(
+        self, server_args: ServerArgs, stage_name: str | None = None
+    ) -> list[ComponentUse]:
+        del server_args
+        stage_name = stage_name or self.__class__.__name__
+        uses = [
+            ComponentUse(stage_name, "spatial_upsampler"),
+            ComponentUse(stage_name, "vae"),
+        ]
+        if self.audio_vae is not None:
+            uses.append(ComponentUse(stage_name, "audio_vae"))
+        return uses
 
     def _upsample_video_latents(
         self, latents: torch.Tensor, server_args: ServerArgs, device: torch.device

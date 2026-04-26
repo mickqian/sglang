@@ -20,6 +20,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
+from sglang.multimodal_gen.runtime.utils.component_residency import ComponentUse
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 
@@ -52,6 +53,7 @@ class PipelineStage(ABC):
 
     def __init__(self):
         self.server_args = get_global_server_args()
+        self._component_residency_manager = None
 
     def log_info(self, msg, *args):
         """Logs an informational message with the stage name as a prefix."""
@@ -103,6 +105,15 @@ class PipelineStage(ABC):
         Offload the model for the stage.
         """
         pass
+
+    def set_component_residency_manager(self, manager) -> None:
+        self._component_residency_manager = manager
+
+    def component_uses(
+        self, server_args: ServerArgs, stage_name: str | None = None
+    ) -> list[ComponentUse]:
+        del server_args, stage_name
+        return []
 
     # Default role affinity: ENCODER. Override in subclasses for DENOISING/DECODER.
     @property

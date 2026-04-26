@@ -96,9 +96,11 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
         if callable(release_phase_state):
             release_phase_state(current_phase)
 
-        if isinstance(self.transformer, OffloadableDiTMixin):
-            for manager in self.transformer.layerwise_offload_managers:
-                manager.release_all()
+        if self._component_residency_manager is not None and self._active_dit_use:
+            self._component_residency_manager.after_use(self._active_dit_use)
+            self._active_dit_use = None
+        elif isinstance(self.transformer, OffloadableDiTMixin):
+            self.transformer.prepare_for_next_req()
 
 
 class LTX2RefinementStage(LTX2AVDenoisingStage):

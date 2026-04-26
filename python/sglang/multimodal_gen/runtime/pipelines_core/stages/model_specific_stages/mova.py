@@ -62,6 +62,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
+from sglang.multimodal_gen.runtime.utils.component_residency import ComponentUse
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
@@ -156,6 +157,17 @@ class MOVADenoisingStage(PipelineStage):
         self._cache_dit_enabled = False
         self._cached_num_steps = None
         self._torch_compiled = False
+        self._active_video_dit_use: ComponentUse | None = None
+
+    def component_uses(
+        self, server_args: ServerArgs, stage_name: str | None = None
+    ) -> list[ComponentUse]:
+        del server_args
+        stage_name = stage_name or self.__class__.__name__
+        return [
+            ComponentUse(stage_name, "audio_dit", access_kind="dit_forward"),
+            ComponentUse(stage_name, "dual_tower_bridge"),
+        ]
 
     @property
     def parallelism_type(self) -> StageParallelismType:
@@ -352,19 +364,48 @@ class MOVADenoisingStage(PipelineStage):
         self, timestep: float, boundary_ratio: float | None, server_args: ServerArgs
     ):
         if boundary_ratio is None or self.video_dit_2 is None:
-            self._manage_device_placement(self.video_dit, None, server_args)
+            if not self._manage_video_dit_use(self.video_dit, "video_dit"):
+                self._manage_device_placement(self.video_dit, None, server_args)
             return self.video_dit
 
         boundary_timestep = boundary_ratio * self.scheduler.num_train_timesteps
         if timestep >= boundary_timestep:
             current_model = self.video_dit
             model_to_offload = self.video_dit_2
+            current_name = "video_dit"
         else:
             current_model = self.video_dit_2
             model_to_offload = self.video_dit
+            current_name = "video_dit_2"
 
-        self._manage_device_placement(current_model, model_to_offload, server_args)
+        if not self._manage_video_dit_use(current_model, current_name):
+            self._manage_device_placement(current_model, model_to_offload, server_args)
         return current_model
+
+    def _manage_video_dit_use(self, current_model: nn.Module, default_name: str) -> bool:
+        manager = self._component_residency_manager
+        if manager is None or not manager.enabled:
+            return False
+
+        component_name = manager.component_name_for_module(current_model, default_name)
+        use = ComponentUse(
+            stage_name=manager.state.stage_name or self.__class__.__name__,
+            component_name=component_name,
+            access_kind="dit_forward",
+            phase=component_name,
+            preferred_after_request=component_name == "video_dit",
+        )
+        if (
+            self._active_video_dit_use is not None
+            and self._active_video_dit_use.component_name != use.component_name
+        ):
+            manager.after_use(self._active_video_dit_use)
+            self._active_video_dit_use = None
+
+        if self._active_video_dit_use is None:
+            manager.before_use(use)
+            self._active_video_dit_use = use
+        return True
 
     def _ensure_shared_models_on_device(self, server_args: ServerArgs):
         """Ensure shared denoising modules are on the active device when cpu offload is enabled."""
@@ -589,9 +630,16 @@ class MOVADenoisingStage(PipelineStage):
                     if not is_warmup and hasattr(self, "step_profile"):
                         self.step_profile()
 
-        for dit in filter(None, [self.video_dit, self.video_dit_2, self.audio_dit]):
-            if isinstance(dit, OffloadableDiTMixin):
-                dit.prepare_for_next_req()
+        if (
+            self._component_residency_manager is not None
+            and self._active_video_dit_use is not None
+        ):
+            self._component_residency_manager.after_use(self._active_video_dit_use)
+            self._active_video_dit_use = None
+        else:
+            for dit in filter(None, [self.video_dit, self.video_dit_2, self.audio_dit]):
+                if isinstance(dit, OffloadableDiTMixin):
+                    dit.prepare_for_next_req()
 
         return batch
 
@@ -901,6 +949,16 @@ class MOVADecodingStage(PipelineStage):
         super().__init__()
         self.video_vae = video_vae
         self.audio_vae = audio_vae
+
+    def component_uses(
+        self, server_args: ServerArgs, stage_name: str | None = None
+    ) -> list[ComponentUse]:
+        del server_args
+        stage_name = stage_name or self.__class__.__name__
+        return [
+            ComponentUse(stage_name, "video_vae"),
+            ComponentUse(stage_name, "audio_vae"),
+        ]
 
     @property
     def parallelism_type(self) -> StageParallelismType:

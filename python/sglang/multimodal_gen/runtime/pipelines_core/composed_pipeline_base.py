@@ -42,6 +42,9 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model,
     verify_model_config_and_directory,
 )
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    PipelineResidencyManager,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -92,6 +95,7 @@ class ComposedPipelineBase(ABC):
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
         self.executor = executor or self.build_executor(server_args=server_args)
+        self.component_residency_manager: PipelineResidencyManager | None = None
 
         if required_config_modules is not None:
             self._required_config_modules = required_config_modules
@@ -736,6 +740,20 @@ class ComposedPipelineBase(ABC):
                 "Running pipeline stages: %s",
                 list(self._stage_name_mapping.keys()),
                 main_process_only=True,
+            )
+
+        if server_args.component_residency_manager == "disabled":
+            self.executor.component_residency_manager = None
+            for stage in self.stages:
+                stage.set_component_residency_manager(None)
+        else:
+            if self.component_residency_manager is None:
+                self.component_residency_manager = PipelineResidencyManager(
+                    self, server_args
+                )
+            self.component_residency_manager.refresh_pipeline(self)
+            self.executor.component_residency_manager = (
+                self.component_residency_manager
             )
 
         return self.executor.execute_with_profiling(self.stages, batch, server_args)

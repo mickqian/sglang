@@ -19,6 +19,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.component_residency import ComponentUse
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
@@ -36,6 +37,12 @@ class EncodingStage(PipelineStage):
     def __init__(self, vae: ParallelTiledVAE) -> None:
         super().__init__()
         self.vae: ParallelTiledVAE = vae
+
+    def component_uses(
+        self, server_args: ServerArgs, stage_name: str | None = None
+    ) -> list[ComponentUse]:
+        del server_args
+        return [ComponentUse(stage_name or self.__class__.__name__, "vae")]
 
     @torch.no_grad()
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:

@@ -30,11 +30,17 @@ class SyncExecutor(PipelineExecutor):
         """
         Execute all pipeline stages sequentially.
         """
-        for stage in stages:
-            batch = stage(batch, server_args)
-            profiler = SGLDiffusionProfiler.get_instance()
-            if profiler:
-                profiler.step_stage()
+        self.begin_component_residency_request(stages, batch, server_args)
+        try:
+            for stage_index, stage in enumerate(stages):
+                self.before_stage(stage, stage_index, batch, server_args)
+                batch = stage(batch, server_args)
+                self.after_stage(stage_index)
+                profiler = SGLDiffusionProfiler.get_instance()
+                if profiler:
+                    profiler.step_stage()
+        finally:
+            self.finish_component_residency_request()
         return batch
 
     def execute(

@@ -87,6 +87,12 @@ from sglang.multimodal_gen.runtime.post_training.rollout_denoising_mixin import 
     RolloutDenoisingMixin,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    ComponentUse,
+    SequentialComponent,
+    SequentialComponentGroup,
+    build_dit_residency_strategy,
+)
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
@@ -193,6 +199,8 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self._cache_dit_enabled = False
         self._cached_num_steps = None
         self._is_warmed_up = False
+        self._sequential_dit_group: SequentialComponentGroup | None = None
+        self._active_dit_use: ComponentUse | None = None
 
     def _maybe_enable_torch_compile(self, module: object) -> None:
         """
@@ -920,13 +928,19 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
                 torch.mps.current_allocated_memory(),
             )
 
-        # reset offload managers with prefetching first layer for next forward
+        if self._component_residency_manager is not None and self._active_dit_use:
+            self._component_residency_manager.after_use(self._active_dit_use)
+            self._active_dit_use = None
+            return
+
+        if self._sequential_dit_group is not None:
+            self._sequential_dit_group.finish_request(preferred_phase="transformer")
+            return
+
+        # Keep the first layer window ready for the next request after peak VRAM drops.
         for dit in dits:
             if isinstance(dit, OffloadableDiTMixin):
-                # release all DiT weights to avoid peak VRAM usage, which may increasing the latency for next req
-                # TODO: should be make this an option?
-                for manager in dit.layerwise_offload_managers:
-                    manager.release_all()
+                dit.prepare_for_next_req()
 
     def _preprocess_sp_latents(self, batch: Req, server_args: ServerArgs):
         """Shard latents for Sequence Parallelism if applicable."""
@@ -1029,6 +1043,68 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         ):
             model_to_use.to(get_local_torch_device())
 
+    def _get_or_create_sequential_dit_group(
+        self, server_args: ServerArgs
+    ) -> SequentialComponentGroup | None:
+        if self.transformer_2 is None:
+            return None
+        if self._sequential_dit_group is None:
+            self._sequential_dit_group = SequentialComponentGroup(
+                [
+                    SequentialComponent(
+                        phase="transformer",
+                        name="transformer",
+                        module=self.transformer,
+                        strategy=build_dit_residency_strategy(
+                            self.transformer, server_args
+                        ),
+                    ),
+                    SequentialComponent(
+                        phase="transformer_2",
+                        name="transformer_2",
+                        module=self.transformer_2,
+                        strategy=build_dit_residency_strategy(
+                            self.transformer_2, server_args
+                        ),
+                    ),
+                ]
+            )
+        return self._sequential_dit_group
+
+    def _manage_dit_use_site(
+        self,
+        current_model: nn.Module,
+        current_phase: str,
+        batch: Req,
+    ) -> bool:
+        manager = self._component_residency_manager
+        if manager is None or not manager.enabled:
+            return False
+
+        component_name = manager.component_name_for_module(current_model, current_phase)
+        phase = str(getattr(batch, "extra", {}).get("ltx2_phase", current_phase))
+        use = ComponentUse(
+            stage_name=manager.state.stage_name or self.__class__.__name__,
+            component_name=component_name,
+            access_kind="dit_forward",
+            phase=phase,
+            preferred_after_request=component_name == "transformer",
+        )
+        if (
+            self._active_dit_use is not None
+            and (
+                self._active_dit_use.component_name != use.component_name
+                or self._active_dit_use.phase != use.phase
+            )
+        ):
+            manager.after_use(self._active_dit_use)
+            self._active_dit_use = None
+
+        if self._active_dit_use is None:
+            manager.before_use(use)
+            self._active_dit_use = use
+        return True
+
     def _select_and_manage_model(
         self,
         t_int: int,
@@ -1041,13 +1117,22 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             current_model = self.transformer
             model_to_offload = self.transformer_2
             current_guidance_scale = batch.guidance_scale
+            current_phase = "transformer"
         else:
             # Low-noise stage
             current_model = self.transformer_2
             model_to_offload = self.transformer
             current_guidance_scale = batch.guidance_scale_2
+            current_phase = "transformer_2"
 
-        self._manage_device_placement(current_model, model_to_offload, server_args)
+        if not self._manage_dit_use_site(current_model, current_phase, batch):
+            sequential_dit_group = self._get_or_create_sequential_dit_group(server_args)
+            if sequential_dit_group is not None:
+                sequential_dit_group.switch_phase(current_phase)
+            else:
+                self._manage_device_placement(
+                    current_model, model_to_offload, server_args
+                )
 
         assert current_model is not None, "The model for the current step is not set."
         return current_model, current_guidance_scale
