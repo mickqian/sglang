@@ -88,6 +88,12 @@ class ResidentStrategy(ComponentResidencyStrategy):
     name = "resident"
 
 
+class StageManagedStrategy(ComponentResidencyStrategy):
+    """No-op strategy for components with existing stage-local device lifecycle."""
+
+    name = "stage_managed"
+
+
 class VanillaD2HStrategy(ComponentResidencyStrategy):
     name = "vanilla"
 
@@ -210,9 +216,7 @@ def build_component_residency_strategy(
         return ResidentStrategy()
 
     if component_name == "image_encoder":
-        if server_args.image_encoder_cpu_offload and not server_args.use_fsdp_inference:
-            return VanillaD2HStrategy()
-        return ResidentStrategy()
+        return StageManagedStrategy()
 
     if component_name in {
         "vae",
@@ -221,9 +225,7 @@ def build_component_residency_strategy(
         "vocoder",
         "spatial_upsampler",
     }:
-        if server_args.vae_cpu_offload and not server_args.use_fsdp_inference:
-            return VanillaD2HStrategy()
-        return ResidentStrategy()
+        return StageManagedStrategy()
 
     return ResidentStrategy()
 
