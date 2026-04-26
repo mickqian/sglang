@@ -181,6 +181,10 @@ def build_dit_residency_strategy(
     return ResidentStrategy()
 
 
+def is_fsdp_managed_module(module: nn.Module) -> bool:
+    return module.__class__.__name__.startswith("FSDP")
+
+
 def build_component_residency_strategy(
     component_name: str,
     module: nn.Module,
@@ -197,7 +201,11 @@ def build_component_residency_strategy(
         return build_dit_residency_strategy(module, server_args)
 
     if component_name.startswith("text_encoder"):
-        if server_args.text_encoder_cpu_offload and not server_args.use_fsdp_inference:
+        if (
+            server_args.text_encoder_cpu_offload
+            and not server_args.use_fsdp_inference
+            and not is_fsdp_managed_module(module)
+        ):
             return VanillaD2HStrategy()
         return ResidentStrategy()
 
