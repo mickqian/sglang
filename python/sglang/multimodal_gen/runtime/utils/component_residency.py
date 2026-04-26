@@ -383,6 +383,9 @@ class PipelineResidencyManager:
             return
         self._uses_seen[use.component_name] = use
         strategy = self.strategy_for(use.component_name, module)
+        if isinstance(strategy, VanillaD2HStrategy):
+            self._trace("prefetch_skip", use, strategy, module)
+            return
         self._trace("prefetch", use, strategy, module)
         strategy.prepare_for_use(module, use, self.state)
 
