@@ -7,7 +7,6 @@ Three-stage pipeline: Preprocess -> TexGen -> Postprocess.
 from __future__ import annotations
 
 import os
-from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -776,7 +775,7 @@ class Hunyuan3DPaintTexGenStage(PipelineStage):
 
         prompt_embeds = self.transformer.learned_text_clip_gen.repeat(1, 1, 1)
         negative_prompt_embeds = torch.zeros_like(prompt_embeds)
-        scheduler = deepcopy(self.scheduler)
+        scheduler = self.scheduler
 
         if self.is_turbo:
             bsz = 3

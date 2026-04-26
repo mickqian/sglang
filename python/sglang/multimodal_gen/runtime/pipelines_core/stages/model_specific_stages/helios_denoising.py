@@ -16,6 +16,9 @@ import torch.nn.functional as F
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
+from sglang.multimodal_gen.runtime.pipelines_core.diffusion_scheduler_utils import (
+    get_or_create_request_scheduler,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
@@ -452,8 +455,7 @@ class HeliosChunkedDenoisingStage(PipelineStage):
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Run the Helios chunked denoising loop."""
         pipeline_config = server_args.pipeline_config
-        scheduler = deepcopy(batch.scheduler or self.scheduler)
-        batch.scheduler = scheduler
+        scheduler = get_or_create_request_scheduler(batch, self.scheduler)
         device = (
             batch.latents.device
             if hasattr(batch, "latents") and batch.latents is not None

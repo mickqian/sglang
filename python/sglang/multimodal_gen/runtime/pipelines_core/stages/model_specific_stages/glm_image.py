@@ -1,7 +1,6 @@
 import inspect
 import re
 import time
-from copy import deepcopy
 from math import sqrt
 from typing import List, Optional, Tuple, Union
 
@@ -776,7 +775,7 @@ class GlmImageBeforeDenoisingStage(PipelineStage):
         )
 
         # Prepare timesteps
-        scheduler = deepcopy(self.scheduler)
+        scheduler = self.scheduler
         image_seq_len = (
             (height // self.vae_scale_factor) * (width // self.vae_scale_factor)
         ) // (self.transformer.config.patch_size**2)

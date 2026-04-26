@@ -42,6 +42,8 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import (
     log_batch_completion,
     log_generation_timer,
 )
+from sglang.multimodal_gen.runtime.utils.trace_wrapper import trace_req
+from sglang.srt.observability.trace import process_tracing_init, trace_set_thread_info
 
 logger = init_logger(__name__)
 
@@ -120,6 +122,10 @@ class DiffGenerator:
         instance = cls(
             server_args=server_args,
         )
+        if server_args.enable_trace:
+            process_tracing_init(server_args.otlp_traces_endpoint, "sglang-diffusion")
+            trace_set_thread_info("DiffGenerator")
+
         logger.info(f"Local mode: {local_mode}")
         if local_mode:
             instance.local_scheduler_process = instance._start_local_server_if_needed()
@@ -177,6 +183,7 @@ class DiffGenerator:
     def generate(
         self,
         sampling_params_kwargs: dict | None = None,
+        external_trace_header: dict[str, str] | None = None,
     ) -> GenerationResult | list[GenerationResult] | None:
         """Generate image(s)/video(s) based on the given prompt(s).
 
@@ -218,6 +225,7 @@ class DiffGenerator:
             req = prepare_request(
                 server_args=self.server_args,
                 sampling_params=sampling_params,
+                external_trace_header=external_trace_header,
             )
             request_groups.append(
                 expand_request_outputs(
@@ -235,7 +243,9 @@ class DiffGenerator:
             try:
                 timer_prompt = [req.prompt for req in requests]
                 logger.info("Processing %d grouped request(s)", len(requests))
-                with log_generation_timer(logger, timer_prompt) as timer:
+                with trace_req(requests[0].trace_ctx), log_generation_timer(
+                    logger, timer_prompt
+                ) as timer:
                     output_batch = self._send_to_scheduler_and_wait_for_response(
                         requests
                     )

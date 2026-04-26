@@ -1,6 +1,5 @@
 import inspect
 import math
-from copy import deepcopy
 from typing import List, Optional, Union
 
 import numpy as np
@@ -489,7 +488,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         ]
 
         # 5. Prepare timesteps
-        scheduler = deepcopy(self.scheduler)
+        scheduler = self.scheduler
         sigmas = np.linspace(1.0, 0, num_inference_steps + 1)[:-1]
         image_seq_len = latents.shape[1]
         base_seqlen = 256 * 256 / 16 / 16
@@ -523,7 +522,7 @@ the image\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>as
         batch.timesteps = timesteps
         batch.scheduler = scheduler
         batch.num_inference_steps = num_inference_steps
-        batch.sigmas = sigmas.tolist()  # Convert numpy array to list for validation
+        batch.sigmas = None
         batch.generator = torch.manual_seed(0)
         batch.original_condition_image_size = image_size
         batch.raw_latent_shape = latents.shape

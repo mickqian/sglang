@@ -8,7 +8,6 @@ Four-stage pipeline: BeforeDenoising -> Denoising -> Export -> Save.
 from __future__ import annotations
 
 import os
-from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -197,7 +196,7 @@ class Hunyuan3DShapeBeforeDenoisingStage(PipelineStage):
             cond = cat_recursive(cond, un_cond)
 
         # 4. Latent and timestep preparation
-        scheduler = deepcopy(self.scheduler)
+        scheduler = self.scheduler
         batch_size = image.shape[0]
         sigmas = np.linspace(0, 1, batch.num_inference_steps)
         timesteps, _ = retrieve_timesteps(

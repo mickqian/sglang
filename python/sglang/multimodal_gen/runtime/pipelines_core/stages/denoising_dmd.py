@@ -1,6 +1,5 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
-import copy
 import time
 
 import torch
@@ -71,7 +70,7 @@ class DmdDenoisingStage(DenoisingStage):
         num_warmup_steps = prepared_vars["num_warmup_steps"]
         latents = prepared_vars["latents"]
         video_raw_latent_shape = latents.shape
-        scheduler = copy.deepcopy(self.scheduler)
+        scheduler = self.scheduler
 
         timesteps = torch.tensor(
             server_args.pipeline_config.dmd_denoising_steps,
@@ -291,7 +290,10 @@ class DmdDenoisingStage(DenoisingStage):
             boundary_ratio = batch.boundary_ratio
 
         if boundary_ratio is not None:
-            boundary_timestep = boundary_ratio * scheduler.num_train_timesteps
+            num_train_timesteps = getattr(scheduler, "num_train_timesteps", None)
+            if num_train_timesteps is None:
+                num_train_timesteps = scheduler.config.num_train_timesteps
+            boundary_timestep = boundary_ratio * num_train_timesteps
         else:
             boundary_timestep = None
 

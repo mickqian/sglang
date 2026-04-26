@@ -34,6 +34,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import (
     log_batch_completion,
     log_generation_timer,
 )
+from sglang.multimodal_gen.runtime.utils.trace_wrapper import trace_req
 
 # re-export LoRA protocol types for backward compatibility
 __all__ = [
@@ -325,8 +326,8 @@ async def process_generation_batch(
     batch,
 ) -> tuple[list[str], OutputBatch]:
     total_start_time = time.perf_counter()
-    with log_generation_timer(logger, batch.prompt):
-        requests = expand_request_outputs(batch)
+    requests = expand_request_outputs(batch)
+    with trace_req(batch.trace_ctx), log_generation_timer(logger, batch.prompt):
         result = await scheduler_client.forward(requests)
 
         if result.output is None and result.output_file_paths is None:

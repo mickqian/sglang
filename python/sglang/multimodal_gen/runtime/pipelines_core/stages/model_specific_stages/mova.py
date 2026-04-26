@@ -15,7 +15,6 @@ import functools
 import inspect
 import os
 from collections.abc import Iterable
-from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -128,7 +127,7 @@ class MOVATimestepPreparationStage(PipelineStage):
         self.scheduler = scheduler
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        scheduler = deepcopy(self.scheduler)
+        scheduler = self.scheduler
         scheduler.set_timesteps(
             batch.num_inference_steps,
             denoising_strength=1.0,
