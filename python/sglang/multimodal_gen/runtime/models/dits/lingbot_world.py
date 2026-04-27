@@ -168,7 +168,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: tuple[torch.Tensor, ...],
         block_mask,
         kv_cache: dict | None = None,
         current_start: int = 0,
@@ -177,9 +177,25 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
         if cache_start is None:
             cache_start = current_start
 
-        cos, sin = freqs_cis
-        roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
-        roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
+        cos, sin = freqs_cis[:2]
+        cos_sin_cache = freqs_cis[2] if len(freqs_cis) > 2 else None
+        if _is_cuda and q.dim() == 4 and q.shape == k.shape:
+            if cos_sin_cache is None:
+                cos_sin_cache = torch.cat(
+                    [
+                        cos.to(dtype=torch.float32).contiguous(),
+                        sin.to(dtype=torch.float32).contiguous(),
+                    ],
+                    dim=-1,
+                )
+            roped_query, roped_key = apply_flashinfer_rope_qk_inplace(
+                q, k, cos_sin_cache, is_neox=False
+            )
+            roped_query = roped_query.type_as(v)
+            roped_key = roped_key.type_as(v)
+        else:
+            roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
+            roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
         forward_batch = get_forward_context().forward_batch
         seq_splits = None
         sequence_shard_enabled = (
@@ -198,7 +214,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
                 q,
                 k,
                 v,
-                freqs_cis,
+                (cos, sin),
                 block_mask,
                 kv_cache,
                 current_start,
@@ -451,7 +467,7 @@ class LingBotWorldTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: tuple[torch.Tensor, ...],
         c2ws_plucker_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
@@ -948,7 +964,7 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: tuple[torch.Tensor, ...],
         block_mask,
         kv_cache: dict | None = None,
         crossattn_cache: dict | None = None,
@@ -1088,32 +1104,6 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         super().post_load_weights()
         for block in self.blocks:
             block.fuse_qkv_projection()
-        self._warmup_rotary_embedding()
-
-    def _warmup_rotary_embedding(self) -> None:
-        if not _is_cuda:
-            return
-        try:
-            param = next(self.parameters())
-            device = param.device
-            if device.type != "cuda":
-                return
-            head_dim = self.hidden_size // self.num_attention_heads
-            num_tokens = getattr(self.config, "rope_max_seq_len", 576) or 576
-            num_tokens = min(int(num_tokens), 576)
-            x = torch.empty(
-                (1, num_tokens, self.num_attention_heads, head_dim),
-                device=device,
-                dtype=param.dtype,
-            )
-            cos = torch.empty(
-                (num_tokens, head_dim // 2), device=device, dtype=torch.float32
-            )
-            sin = torch.empty_like(cos)
-            _apply_rotary_emb(x, cos, sin, is_neox_style=False)
-            torch.cuda.synchronize(device)
-        except Exception as err:
-            logger.debug("Skipping LingBot rotary warmup: %s", err)
 
     @lru_cache(maxsize=8)
     def _compute_rope_for_sequence_shard_with_offset(
@@ -1217,10 +1207,15 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 rope_theta=10000,
                 start_frame=start_frame,
             )
-            freqs_cis = (
-                freqs_cos.to(hidden_states.device).float(),
-                freqs_sin.to(hidden_states.device).float(),
-            )
+            freqs_cos = freqs_cos.to(hidden_states.device).float()
+            freqs_sin = freqs_sin.to(hidden_states.device).float()
+            freqs_cis = (freqs_cos, freqs_sin)
+            if _is_cuda:
+                freqs_cis = (
+                    freqs_cos,
+                    freqs_sin,
+                    torch.cat([freqs_cos.contiguous(), freqs_sin.contiguous()], dim=-1),
+                )
 
         hidden_states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
         c2ws_plucker_emb = self._prepare_c2ws_plucker_emb(
@@ -1246,7 +1241,15 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 post_patch_width,
                 hidden_states.device,
             )
-            freqs_cis = (freqs_cos.float(), freqs_sin.float())
+            freqs_cos = freqs_cos.float()
+            freqs_sin = freqs_sin.float()
+            freqs_cis = (freqs_cos, freqs_sin)
+            if _is_cuda:
+                freqs_cis = (
+                    freqs_cos,
+                    freqs_sin,
+                    torch.cat([freqs_cos.contiguous(), freqs_sin.contiguous()], dim=-1),
+                )
 
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = (
             self.condition_embedder(
