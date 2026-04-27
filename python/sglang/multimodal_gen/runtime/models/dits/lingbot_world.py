@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 
 from sglang.multimodal_gen.configs.models.dits import LingBotWorldVideoConfig
 from sglang.multimodal_gen.runtime.distributed import (
@@ -884,6 +885,63 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
             eps=self.attn1.eps,
         )
         self.cam_conditioner = LingBotWorldCamConditioner(self.hidden_dim)
+        self._fused_qkv_weight = None
+        self._fused_qkv_bias = None
+
+    def _can_fuse_qkv_projection(self) -> bool:
+        if self._fused_qkv_weight is not None:
+            return True
+
+        layers = (self.to_q, self.to_k, self.to_v)
+        biases = [layer.bias for layer in layers]
+        return (
+            all(bias is None for bias in biases)
+            or all(bias is not None for bias in biases)
+        ) and all(
+            getattr(layer, "quant_config", None) is None
+            and hasattr(layer, "weight")
+            and layer.weight is not None
+            for layer in layers
+        )
+
+    def fuse_qkv_projection(self) -> bool:
+        if not self._can_fuse_qkv_projection():
+            return False
+        if self._fused_qkv_weight is not None:
+            return True
+
+        layers = (self.to_q, self.to_k, self.to_v)
+        with torch.no_grad():
+            self._fused_qkv_weight = nn.Parameter(
+                torch.cat([layer.weight.detach() for layer in layers], dim=0)
+                .contiguous()
+                .to(self.to_q.weight.device),
+                requires_grad=False,
+            )
+            if all(layer.bias is not None for layer in layers):
+                self._fused_qkv_bias = nn.Parameter(
+                    torch.cat([layer.bias.detach() for layer in layers], dim=0)
+                    .contiguous()
+                    .to(self.to_q.weight.device),
+                    requires_grad=False,
+                )
+
+        del self.to_q
+        del self.to_k
+        del self.to_v
+        return True
+
+    def _project_qkv(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.fuse_qkv_projection():
+            qkv = F.linear(hidden_states, self._fused_qkv_weight, self._fused_qkv_bias)
+            return qkv.chunk(3, dim=-1)
+
+        query, _ = self.to_q(hidden_states)
+        key, _ = self.to_k(hidden_states)
+        value, _ = self.to_v(hidden_states)
+        return query, key, value
 
     def forward(
         self,
@@ -918,9 +976,7 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
             .flatten(1, 2)
             .to(orig_dtype)
         )
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        query, key, value = self._project_qkv(norm_hidden_states)
         query = self.norm_q(query)
         key = self.norm_k(key)
         query = query.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
@@ -1027,6 +1083,11 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 for i in range(config.num_layers)
             ]
         )
+
+    def post_load_weights(self) -> None:
+        super().post_load_weights()
+        for block in self.blocks:
+            block.fuse_qkv_projection()
 
     @lru_cache(maxsize=8)
     def _compute_rope_for_sequence_shard_with_offset(
