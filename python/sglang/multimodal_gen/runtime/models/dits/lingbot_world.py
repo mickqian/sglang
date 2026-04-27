@@ -1088,6 +1088,32 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         super().post_load_weights()
         for block in self.blocks:
             block.fuse_qkv_projection()
+        self._warmup_rotary_embedding()
+
+    def _warmup_rotary_embedding(self) -> None:
+        if not _is_cuda:
+            return
+        try:
+            param = next(self.parameters())
+            device = param.device
+            if device.type != "cuda":
+                return
+            head_dim = self.hidden_size // self.num_attention_heads
+            num_tokens = getattr(self.config, "rope_max_seq_len", 576) or 576
+            num_tokens = min(int(num_tokens), 576)
+            x = torch.empty(
+                (1, num_tokens, self.num_attention_heads, head_dim),
+                device=device,
+                dtype=param.dtype,
+            )
+            cos = torch.empty(
+                (num_tokens, head_dim // 2), device=device, dtype=torch.float32
+            )
+            sin = torch.empty_like(cos)
+            _apply_rotary_emb(x, cos, sin, is_neox_style=False)
+            torch.cuda.synchronize(device)
+        except Exception as err:
+            logger.debug("Skipping LingBot rotary warmup: %s", err)
 
     @lru_cache(maxsize=8)
     def _compute_rope_for_sequence_shard_with_offset(
