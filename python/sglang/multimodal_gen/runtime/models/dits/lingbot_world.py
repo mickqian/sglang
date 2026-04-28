@@ -1104,10 +1104,6 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         super().post_load_weights()
         for block in self.blocks:
             block.fuse_qkv_projection()
-            block.ffn.compile(mode="reduce-overhead", fullgraph=False, dynamic=False)
-            block.cam_conditioner.compile(
-                mode="reduce-overhead", fullgraph=False, dynamic=False
-            )
 
     @lru_cache(maxsize=8)
     def _compute_rope_for_sequence_shard_with_offset(
