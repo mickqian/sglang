@@ -263,8 +263,9 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             # Reset frame position on cache reset
             cache_state.current_chunk_start_frame = 0
             cache_state.chunk_idx = 0
-        # Keep cross-attention K/V cache across realtime chunks; LingBot text/image
-        # conditions are session-static and are invalidated by the cache reset above.
+        else:
+            for block_index in range(self.num_transformer_blocks):
+                crossattn_cache[block_index]["is_init"] = False
 
         current_start_frame = cache_state.current_chunk_start_frame
 
