@@ -407,24 +407,6 @@ def ltx2_rms_norm_scale_shift(
     return rms_norm(x, eps) * (1 + scale) + shift
 
 
-def ltx2_layer_norm_scale_shift(
-    x: torch.Tensor, eps: float, shift: torch.Tensor, scale: torch.Tensor
-) -> torch.Tensor:
-    if (
-        _ltx2_can_use_fused_scale_shift(x, shift, scale)
-        and x.shape[-1] % 256 == 0
-        and x.shape[-1] <= 8192
-    ):
-        from sglang.jit_kernel.diffusion.cutedsl.scale_residual_norm_scale_shift import (
-            fused_norm_scale_shift,
-        )
-
-        return fused_norm_scale_shift(x, None, None, scale, shift, "layer", eps)
-    with torch.autocast(device_type=x.device.type, enabled=False):
-        normalized = F.layer_norm(x, normalized_shape=(x.shape[-1],), eps=eps)
-    return normalized * (1 + scale) + shift
-
-
 class LTX2TextProjection(nn.Module):
     def __init__(
         self,
@@ -1919,9 +1901,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             device=hidden_states.device, dtype=hidden_states.dtype
         ) + embedded_timestep[:, :, None].to(dtype=hidden_states.dtype)
         shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
-        hidden_states = ltx2_layer_norm_scale_shift(
-            hidden_states, self.norm_eps, shift, scale
-        )
+        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            hidden_states = self.norm_out(hidden_states)
+        hidden_states = hidden_states * (1 + scale) + shift
         hidden_states, _ = self.proj_out(hidden_states)
 
         # Audio
@@ -1932,9 +1914,9 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             audio_scale_shift_values[:, :, 0],
             audio_scale_shift_values[:, :, 1],
         )
-        audio_hidden_states = ltx2_layer_norm_scale_shift(
-            audio_hidden_states, self.norm_eps, audio_shift, audio_scale
-        )
+        with torch.autocast(device_type=audio_hidden_states.device.type, enabled=False):
+            audio_hidden_states = self.audio_norm_out(audio_hidden_states)
+        audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
         # Unpatchify if requested (default True for pipeline compatibility)
         return_latents = kwargs.get("return_latents", True)
