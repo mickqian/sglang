@@ -445,12 +445,12 @@ class LTX2DenoisingStage(DenoisingStage):
         midpoint_audio_det = anchor_audio + h * a21 * eps1_audio
 
         sub_noise_video = (
-            self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True)
+            self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True).float()
             if ctx.use_native_hq_res2s_sde_noise
             else self._randn_like_with_batch_generators(ctx.latents, batch).float()
         )
         sub_noise_audio = (
-            self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=True)
+            self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=True).float()
             if ctx.use_native_hq_res2s_sde_noise
             else self._randn_like_with_batch_generators(
                 ctx.audio_latents, batch
@@ -517,12 +517,12 @@ class LTX2DenoisingStage(DenoisingStage):
         next_audio_det = anchor_audio + h * (b1 * eps1_audio + b2 * eps2_audio)
 
         step_noise_video = (
-            self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False)
+            self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False).float()
             if ctx.use_native_hq_res2s_sde_noise
             else self._randn_like_with_batch_generators(ctx.latents, batch).float()
         )
         step_noise_audio = (
-            self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=False)
+            self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=False).float()
             if ctx.use_native_hq_res2s_sde_noise
             else self._randn_like_with_batch_generators(
                 ctx.audio_latents, batch
@@ -1849,7 +1849,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 midpoint_audio_deterministic = anchor_audio + h * a21 * eps1_audio
 
                 substep_video_noise = (
-                    self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True)
+                    self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True).float()
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.latents, batch
@@ -1858,7 +1858,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 substep_audio_noise = (
                     self._ltx2_res2s_noise_like(
                         ctx.audio_latents, ctx, substep=True
-                    )
+                    ).float()
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch
@@ -1916,7 +1916,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 )
 
                 step_video_noise = (
-                    self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False)
+                    self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False).float()
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.latents, batch
@@ -1925,7 +1925,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 step_audio_noise = (
                     self._ltx2_res2s_noise_like(
                         ctx.audio_latents, ctx, substep=False
-                    )
+                    ).float()
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch
