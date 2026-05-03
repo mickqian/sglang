@@ -716,7 +716,7 @@ class ComposedPipelineBase(ABC):
         return self
 
     # TODO(will): don't hardcode no_grad
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward(
         self,
         batch: Req,
@@ -752,7 +752,7 @@ class ComposedPipelineBase(ABC):
 
         return self.executor.execute_with_profiling(self.stages, batch, server_args)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward_batch(
         self,
         batches: list[Req],
