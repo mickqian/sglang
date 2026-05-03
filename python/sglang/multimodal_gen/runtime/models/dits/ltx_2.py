@@ -403,6 +403,23 @@ def ltx2_scale_shift(
     return x * (1 + scale) + shift
 
 
+def ltx2_gate_residual(
+    residual: torch.Tensor, x: torch.Tensor, gate: torch.Tensor
+) -> torch.Tensor:
+    if (
+        residual.is_cuda
+        and residual.ndim == 3
+        and residual.is_contiguous()
+        and x.is_cuda
+        and x.shape == residual.shape
+        and x.is_contiguous()
+        and gate.is_cuda
+        and gate.stride(-1) == 1
+    ):
+        return fuse_scale_shift_kernel(x, gate, residual, scale_constant=0.0)
+    return residual + x * gate
+
+
 def ltx2_rms_norm_scale_shift(
     x: torch.Tensor, eps: float, shift: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
@@ -1344,10 +1361,12 @@ class LTX2TransformerBlock(nn.Module):
             )
         # 4. Feedforward
         ff_output = self.ff(ff_norm_hidden_states)
-        hidden_states = hidden_states + ff_output * vgate_mlp
+        hidden_states = ltx2_gate_residual(hidden_states, ff_output, vgate_mlp)
 
         audio_ff_output = self.audio_ff(ff_norm_audio_hidden_states)
-        audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        audio_hidden_states = ltx2_gate_residual(
+            audio_hidden_states, audio_ff_output, agate_mlp
+        )
         return hidden_states, audio_hidden_states
 
 
