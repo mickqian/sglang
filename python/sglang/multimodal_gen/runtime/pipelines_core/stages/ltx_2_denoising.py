@@ -498,10 +498,10 @@ class LTX2DenoisingStage(DenoisingStage):
             sigma_next=sub_sigma,
             noise=sub_noise_audio,
         )
-        midpoint_video_latents = self._ltx2_apply_clean_latent_mask(
+        midpoint_video_model_latents = self._ltx2_apply_clean_latent_mask(
             midpoint_video_latents.to(dtype=ctx.latents.dtype), ctx
         )
-        midpoint_audio_latents = midpoint_audio_latents.to(
+        midpoint_audio_model_latents = midpoint_audio_latents.to(
             dtype=ctx.audio_latents.dtype
         )
 
@@ -516,7 +516,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 eps1_audio = denoised_audio.double() - anchor_audio
 
         mid_v, mid_a, mid_video_timestep, mid_audio_timestep = midpoint_model_call(
-            midpoint_video_latents, midpoint_audio_latents, sub_sigma
+            midpoint_video_model_latents, midpoint_audio_model_latents, sub_sigma
         )
 
         mid_video_sigma_for_x0 = (
@@ -1908,11 +1908,11 @@ class LTX2DenoisingStage(DenoisingStage):
                     noise=substep_audio_noise,
                 )
 
-                midpoint_video_latents = self._ltx2_apply_clean_latent_mask(
+                midpoint_video_model_latents = self._ltx2_apply_clean_latent_mask(
                     midpoint_video_latents.to(dtype=ctx.latents.dtype),
                     ctx,
                 )
-                midpoint_audio_latents = midpoint_audio_latents.to(
+                midpoint_audio_model_latents = midpoint_audio_latents.to(
                     dtype=ctx.audio_latents.dtype
                 )
 
@@ -1927,8 +1927,8 @@ class LTX2DenoisingStage(DenoisingStage):
 
                 midpoint_denoised_video, midpoint_denoised_audio = (
                     evaluate_stage1_guided_x0(
-                        video_latents=midpoint_video_latents,
-                        audio_latents=midpoint_audio_latents,
+                        video_latents=midpoint_video_model_latents,
+                        audio_latents=midpoint_audio_model_latents,
                         sigma_value=sub_sigma,
                         update_skip_cache=False,
                     )
