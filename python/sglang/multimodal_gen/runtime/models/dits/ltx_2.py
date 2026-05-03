@@ -371,6 +371,18 @@ def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
     return F.rms_norm(x, normalized_shape=(x.shape[-1],), eps=eps)
 
 
+_LTX2_ZERO_SCALAR_CACHE: dict[tuple[str, int | None, torch.dtype], torch.Tensor] = {}
+
+
+def _ltx2_zero_scalar_like(x: torch.Tensor) -> torch.Tensor:
+    key = (x.device.type, x.device.index, x.dtype)
+    zero = _LTX2_ZERO_SCALAR_CACHE.get(key)
+    if zero is None or zero.device != x.device:
+        zero = torch.zeros(1, device=x.device, dtype=x.dtype)
+        _LTX2_ZERO_SCALAR_CACHE[key] = zero
+    return zero
+
+
 def _ltx2_can_use_fused_scale_shift(
     x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor
 ) -> bool:
@@ -434,6 +446,36 @@ def ltx2_residual_rms_norm_scale_shift(
         )
     residual = residual + x * gate
     return ltx2_rms_norm_scale_shift(residual, eps, shift, scale), residual
+
+
+def ltx2_residual_rms_norm(
+    residual: torch.Tensor,
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        residual.is_cuda
+        and residual.ndim == 3
+        and residual.is_contiguous()
+        and x.is_cuda
+        and x.shape == residual.shape
+        and x.is_contiguous()
+        and gate.is_cuda
+        and gate.stride(-1) == 1
+        and residual.shape[-1] % 256 == 0
+        and residual.shape[-1] <= 8192
+    ):
+        from sglang.jit_kernel.diffusion.cutedsl.scale_residual_norm_scale_shift import (
+            fused_scale_residual_norm_scale_shift,
+        )
+
+        zero = _ltx2_zero_scalar_like(residual)
+        return fused_scale_residual_norm_scale_shift(
+            residual, x, gate, None, None, zero, zero, "rms", eps
+        )
+    residual = residual + x * gate
+    return rms_norm(residual, eps), residual
 
 
 class LTX2TextProjection(nn.Module):
@@ -1125,7 +1167,9 @@ class LTX2TransformerBlock(nn.Module):
                 context=mod_encoder_hidden_states,
                 mask=encoder_attention_mask,
             )
-            hidden_states = hidden_states + attn_hidden_states * vgate_q
+            norm_hidden_states, hidden_states = ltx2_residual_rms_norm(
+                hidden_states, attn_hidden_states, vgate_q, self.norm_eps
+            )
 
             a_prompt_shift, a_prompt_scale = self.get_ada_values(
                 self.audio_prompt_scale_shift_table,
@@ -1141,8 +1185,11 @@ class LTX2TransformerBlock(nn.Module):
                 context=mod_audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
             )
-            audio_hidden_states = (
-                audio_hidden_states + attn_audio_hidden_states * agate_q
+            norm_audio_hidden_states, audio_hidden_states = ltx2_residual_rms_norm(
+                audio_hidden_states,
+                attn_audio_hidden_states,
+                agate_q,
+                self.norm_eps,
             )
         else:
             norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
@@ -1161,8 +1208,9 @@ class LTX2TransformerBlock(nn.Module):
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
-        norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
-        norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
+        if not self.cross_attention_adaln:
+            norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
+            norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
         vshift_mlp, vscale_mlp, vgate_mlp = video_ada_values[3:6]
         ashift_mlp, ascale_mlp, agate_mlp = audio_ada_values[3:6]
 
