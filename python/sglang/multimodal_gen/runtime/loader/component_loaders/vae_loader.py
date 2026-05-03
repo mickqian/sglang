@@ -59,6 +59,17 @@ def _convert_conv3d_weights_to_channels_last_3d(module: nn.Module) -> int:
     return num_converted
 
 
+def _should_convert_video_vae_to_channels_last_3d(
+    server_args: ServerArgs, component_name: str
+) -> bool:
+    if component_name not in ("vae", "video_vae") or not torch.cuda.is_available():
+        return False
+    if getattr(envs, "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D", False):
+        return True
+    arch_config = server_args.pipeline_config.vae_config.arch_config
+    return str(getattr(arch_config, "video_decoder_variant", "")) == "ltx_2_3"
+
+
 class VAELoader(ComponentLoader):
     """Shared loader for (video/audio) VAE modules."""
 
@@ -120,10 +131,8 @@ class VAELoader(ComponentLoader):
                     trust_remote_code=server_args.trust_remote_code,
                 )
             vae = vae.to(device=target_device, dtype=vae_dtype)
-            if (
-                component_name in ("vae", "video_vae")
-                and torch.cuda.is_available()
-                and getattr(envs, "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D", False)
+            if _should_convert_video_vae_to_channels_last_3d(
+                server_args, component_name
             ):
                 n = _convert_conv3d_weights_to_channels_last_3d(vae)
                 if n > 0:
@@ -167,11 +176,7 @@ class VAELoader(ComponentLoader):
         if unexpected_keys:
             logger.warning("VAE unexpected keys: %s", unexpected_keys)
 
-        if (
-            component_name in ("vae", "video_vae")
-            and torch.cuda.is_available()
-            and getattr(envs, "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D", False)
-        ):
+        if _should_convert_video_vae_to_channels_last_3d(server_args, component_name):
             n = _convert_conv3d_weights_to_channels_last_3d(vae)
             if n > 0:
                 logger.info("VAE: converted %d Conv3d weights to channels_last_3d", n)
