@@ -1458,7 +1458,6 @@ class LTX2DenoisingStage(DenoisingStage):
             ctx.latents = video_latents
             ctx.audio_latents = audio_latents
             try:
-                sigma_value_float = float(sigma_value.item())
                 model_inputs_local = self._prepare_ltx2_model_inputs(
                     ctx, step, batch, server_args, sigma_value
                 )
@@ -1688,6 +1687,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     v_ptb, a_v_ptb = pass_outputs.get("perturbed", (None, None))
                     v_mod, a_v_mod = pass_outputs.get("modality", (None, None))
 
+                sigma_value_float = float(sigma_value.item())
                 video_sigma_for_x0: float | torch.Tensor = sigma_value_float
                 if ctx.denoise_mask is not None:
                     video_sigma_for_x0 = sigma_value.to(
