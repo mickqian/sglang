@@ -1,4 +1,3 @@
-import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -53,10 +52,6 @@ class LTX2DenoisingContext(DenoisingContext):
     use_ltx23_hq_timestep_semantics: bool = False
     res2s_step_noise_generator: torch.Generator | None = None
     res2s_substep_noise_generator: torch.Generator | None = None
-    sigma_host_values: tuple[float, ...] = ()
-    sigma_next_host_values: tuple[float, ...] = ()
-    res2s_sub_sigma_host_values: tuple[float, ...] = ()
-    res2s_h_host_values: tuple[float, ...] = ()
 
 
 @dataclass(slots=True)
@@ -325,77 +320,6 @@ class LTX2DenoisingStage(DenoisingStage):
         return a21, b1, b2
 
     @staticmethod
-    def _prepare_ltx2_sigma_host_values(ctx: LTX2DenoisingContext) -> None:
-        sigmas = getattr(ctx.scheduler, "sigmas", None)
-        if not isinstance(sigmas, torch.Tensor):
-            return
-
-        num_steps = min(int(ctx.num_inference_steps), int(sigmas.numel()) - 1)
-        if num_steps <= 0:
-            ctx.sigma_host_values = ()
-            ctx.sigma_next_host_values = ()
-            ctx.res2s_sub_sigma_host_values = ()
-            ctx.res2s_h_host_values = ()
-            return
-
-        sigma_values_raw = sigmas.detach()[: num_steps + 1].to(
-            device="cpu", dtype=torch.float32
-        )
-        sigma_values_all = tuple(float(value) for value in sigma_values_raw.tolist())
-        sigma_values = sigma_values_all[:-1]
-        sigma_next_values = sigma_values_all[1:]
-        sub_sigma_values: list[float] = []
-        h_values: list[float] = []
-        for sigma_val, sigma_next_val in zip(
-            sigma_values, sigma_next_values, strict=True
-        ):
-            if sigma_val <= 0.0 or sigma_next_val <= 0.0:
-                sub_sigma_values.append(0.0)
-                h_values.append(0.0)
-                continue
-            sub_sigma_values.append(math.sqrt(max(sigma_val * sigma_next_val, 0.0)))
-            h_values.append(-math.log(max(sigma_next_val / sigma_val, 1e-12)))
-
-        ctx.sigma_host_values = sigma_values
-        ctx.sigma_next_host_values = sigma_next_values
-        ctx.res2s_sub_sigma_host_values = tuple(sub_sigma_values)
-        ctx.res2s_h_host_values = tuple(h_values)
-
-    @staticmethod
-    def _ltx2_host_value(
-        values: tuple[float, ...], step_index: int, fallback: torch.Tensor
-    ) -> float:
-        if 0 <= step_index < len(values):
-            return values[step_index]
-        return float(fallback.detach().to(device="cpu", dtype=torch.float64).item())
-
-    @staticmethod
-    def _ltx2_res2s_sub_sigma_host_value(
-        ctx: LTX2DenoisingContext,
-        step_index: int,
-        sigma_val: float,
-        sigma_next_val: float,
-    ) -> float:
-        if 0 <= step_index < len(ctx.res2s_sub_sigma_host_values):
-            return ctx.res2s_sub_sigma_host_values[step_index]
-        if sigma_val <= 0.0 or sigma_next_val <= 0.0:
-            return 0.0
-        return math.sqrt(max(sigma_val * sigma_next_val, 0.0))
-
-    @staticmethod
-    def _ltx2_res2s_h_host_value(
-        ctx: LTX2DenoisingContext,
-        step_index: int,
-        sigma_val: float,
-        sigma_next_val: float,
-    ) -> float:
-        if 0 <= step_index < len(ctx.res2s_h_host_values):
-            return ctx.res2s_h_host_values[step_index]
-        if sigma_val <= 0.0 or sigma_next_val <= 0.0:
-            return 0.0
-        return -math.log(max(sigma_next_val / sigma_val, 1e-12))
-
-    @staticmethod
     def _ltx2_get_sde_coeff(
         sigma_next: torch.Tensor,
         *,
@@ -462,9 +386,6 @@ class LTX2DenoisingStage(DenoisingStage):
         batch: Req,
         sigma: torch.Tensor,
         sigma_next: torch.Tensor,
-        sigma_val: float,
-        sigma_next_val: float,
-        h_val: float,
         model_video_velocity: torch.Tensor,
         model_audio_velocity: torch.Tensor,
         midpoint_model_call,
@@ -476,6 +397,9 @@ class LTX2DenoisingStage(DenoisingStage):
         final RK2 combination with SDE noise). Mirrors the guided stage-1 res2s
         math but without CFG/STG (stage-2 HQ uses the simple CFG path).
         """
+        sigma_val = float(sigma.item())
+        sigma_next_val = float(sigma_next.item())
+
         if sigma_val == 0.0:
             denoised_video = ctx.latents.float()
             denoised_audio = ctx.audio_latents.float()
@@ -541,7 +465,7 @@ class LTX2DenoisingStage(DenoisingStage):
         )
 
         # Bongmath anchor refinement for the first stage-2 step.
-        if h_val < 0.5 and sigma_val > 0.03:
+        if float(h.item()) < 0.5 and sigma_val > 0.03:
             x_mid_v = midpoint_video_latents.double()
             x_mid_a = midpoint_audio_latents.double()
             for _ in range(100):
@@ -1235,7 +1159,6 @@ class LTX2DenoisingStage(DenoisingStage):
                     clean_latent_background=clean_latent_background,
                 )
             )
-        self._prepare_ltx2_sigma_host_values(ctx)
         return ctx
 
     def _before_denoising_loop(
@@ -1292,18 +1215,8 @@ class LTX2DenoisingStage(DenoisingStage):
             device=ctx.latents.device, dtype=torch.float32
         )
         dt = sigma_next - sigma
-        sigma_val = self._ltx2_host_value(
-            ctx.sigma_host_values, step.step_index, sigma
-        )
-        sigma_next_val = self._ltx2_host_value(
-            ctx.sigma_next_host_values, step.step_index, sigma_next
-        )
-        res2s_sub_sigma_val = self._ltx2_res2s_sub_sigma_host_value(
-            ctx, step.step_index, sigma_val, sigma_next_val
-        )
-        res2s_h_val = self._ltx2_res2s_h_host_value(
-            ctx, step.step_index, sigma_val, sigma_next_val
-        )
+        sigma_val = float(sigma.item())
+        sigma_next_val = float(sigma_next.item())
 
         stage1_guider_params = self._get_ltx2_stage1_guider_params(
             batch, server_args, ctx.stage
@@ -1471,9 +1384,6 @@ class LTX2DenoisingStage(DenoisingStage):
                     batch=batch,
                     sigma=sigma,
                     sigma_next=sigma_next,
-                    sigma_val=sigma_val,
-                    sigma_next_val=sigma_next_val,
-                    h_val=res2s_h_val,
                     model_video_velocity=model_video,
                     model_audio_velocity=model_audio,
                     midpoint_model_call=_stage2_midpoint_model_call,
@@ -1541,7 +1451,6 @@ class LTX2DenoisingStage(DenoisingStage):
             video_latents: torch.Tensor,
             audio_latents: torch.Tensor,
             sigma_value: torch.Tensor,
-            sigma_value_float: float,
             update_skip_cache: bool,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             original_video_latents = ctx.latents
@@ -1549,6 +1458,7 @@ class LTX2DenoisingStage(DenoisingStage):
             ctx.latents = video_latents
             ctx.audio_latents = audio_latents
             try:
+                sigma_value_float = float(sigma_value.item())
                 model_inputs_local = self._prepare_ltx2_model_inputs(
                     ctx, step, batch, server_args, sigma_value
                 )
@@ -1887,7 +1797,6 @@ class LTX2DenoisingStage(DenoisingStage):
             video_latents=ctx.latents,
             audio_latents=ctx.audio_latents,
             sigma_value=sigma,
-            sigma_value_float=sigma_val,
             update_skip_cache=True,
         )
 
@@ -1952,7 +1861,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     dtype=ctx.audio_latents.dtype
                 )
 
-                if res2s_h_val < 0.5 and sigma_val > 0.03:
+                if float(h.item()) < 0.5 and sigma_val > 0.03:
                     x_mid_v = midpoint_video_latents.double()
                     x_mid_a = midpoint_audio_latents.double()
                     for _ in range(100):
@@ -1966,7 +1875,6 @@ class LTX2DenoisingStage(DenoisingStage):
                         video_latents=midpoint_video_latents,
                         audio_latents=midpoint_audio_latents,
                         sigma_value=sub_sigma,
-                        sigma_value_float=res2s_sub_sigma_val,
                         update_skip_cache=False,
                     )
                 )
