@@ -49,7 +49,11 @@ from sglang.multimodal_gen.runtime.pipelines_core import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.platforms import current_platform
-from sglang.multimodal_gen.runtime.server_args import PortArgs, ServerArgs
+from sglang.multimodal_gen.runtime.server_args import (
+    PortArgs,
+    ServerArgs,
+    is_ltx2_two_stage_pipeline_name,
+)
 from sglang.multimodal_gen.runtime.utils.common import set_cuda_arch, set_musa_arch
 from sglang.multimodal_gen.runtime.utils.logging_utils import (
     configure_logger,
@@ -345,7 +349,18 @@ class GPUWorker:
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
 
-            if torch.cuda.is_initialized() and output_batch.output is None:
+            # LTX2 two-stage drops the saved output tensors here and immediately
+            # reuses the CUDA allocator pool on later requests. Flushing that
+            # pool would add a device sync to the user-visible response tail
+            # without changing the tensors already written to disk.
+            skip_output_empty_cache = is_ltx2_two_stage_pipeline_name(
+                self.server_args.pipeline_class_name
+            )
+            if (
+                torch.cuda.is_initialized()
+                and output_batch.output is None
+                and not skip_output_empty_cache
+            ):
                 torch.cuda.empty_cache()
 
             if req.perf_dump_path is not None or envs.SGLANG_DIFFUSION_STAGE_LOGGING:
