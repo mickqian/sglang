@@ -1678,16 +1678,6 @@ class LTX2DenoisingStage(DenoisingStage):
 
                     num_passes = len(pass_specs)
                     expanded_batch_size = batch_size_local * num_passes
-                    perturbation_configs = tuple(
-                        {
-                            "skip_video_self_attn_blocks": pass_spec.skip_video_self_attn_blocks,
-                            "skip_audio_self_attn_blocks": pass_spec.skip_audio_self_attn_blocks,
-                            "skip_a2v_cross_attn": pass_spec.disable_a2v_cross_attn,
-                            "skip_v2a_cross_attn": pass_spec.disable_v2a_cross_attn,
-                        }
-                        for pass_spec in pass_specs
-                        for _ in range(batch_size_local)
-                    )
                     batched_model_kwargs = self._repeat_ltx2_model_kwargs_batch(
                         base_model_kwargs_local, expanded_batch_size
                     )
@@ -1717,19 +1707,33 @@ class LTX2DenoisingStage(DenoisingStage):
                     )
                     if use_split_stage1_guided_passes:
                         split_sizes = [1] * expanded_batch_size
+                        split_pass_specs = tuple(
+                            pass_spec
+                            for pass_spec in pass_specs
+                            for _ in range(batch_size_local)
+                        )
                         batched_video_chunks = []
                         batched_audio_chunks = []
                         with self._ltx2_model_forward_context(ctx, step):
-                            for model_kwargs_chunk, perturbation_config in zip(
+                            for model_kwargs_chunk, pass_spec in zip(
                                 self._split_ltx2_model_kwargs(
                                     batched_model_kwargs, split_sizes
                                 ),
-                                perturbation_configs,
+                                split_pass_specs,
                                 strict=True,
                             ):
-                                model_kwargs_chunk["perturbation_configs"] = (
-                                    perturbation_config,
-                                )
+                                if pass_spec.skip_video_self_attn_blocks:
+                                    model_kwargs_chunk[
+                                        "skip_video_self_attn_blocks"
+                                    ] = pass_spec.skip_video_self_attn_blocks
+                                if pass_spec.skip_audio_self_attn_blocks:
+                                    model_kwargs_chunk[
+                                        "skip_audio_self_attn_blocks"
+                                    ] = pass_spec.skip_audio_self_attn_blocks
+                                if pass_spec.disable_a2v_cross_attn:
+                                    model_kwargs_chunk["disable_a2v_cross_attn"] = True
+                                if pass_spec.disable_v2a_cross_attn:
+                                    model_kwargs_chunk["disable_v2a_cross_attn"] = True
                                 video_chunk, audio_chunk = step.current_model(
                                     **model_kwargs_chunk
                                 )
@@ -1739,6 +1743,16 @@ class LTX2DenoisingStage(DenoisingStage):
                         batched_video = torch.cat(batched_video_chunks, dim=0)
                         batched_audio = torch.cat(batched_audio_chunks, dim=0)
                     else:
+                        perturbation_configs = tuple(
+                            {
+                                "skip_video_self_attn_blocks": pass_spec.skip_video_self_attn_blocks,
+                                "skip_audio_self_attn_blocks": pass_spec.skip_audio_self_attn_blocks,
+                                "skip_a2v_cross_attn": pass_spec.disable_a2v_cross_attn,
+                                "skip_v2a_cross_attn": pass_spec.disable_v2a_cross_attn,
+                            }
+                            for pass_spec in pass_specs
+                            for _ in range(batch_size_local)
+                        )
                         with self._ltx2_model_forward_context(ctx, step):
                             batched_video, batched_audio = step.current_model(
                                 **batched_model_kwargs,
