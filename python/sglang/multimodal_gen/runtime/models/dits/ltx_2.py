@@ -10,9 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sglang.jit_kernel.diffusion.cutedsl.scale_residual_norm_scale_shift import (
-    fused_norm_scale_shift,
-)
 from sglang.jit_kernel.diffusion.triton.scale_shift import fuse_scale_shift_kernel
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
@@ -393,17 +390,7 @@ def ltx2_scale_shift(
 def ltx2_rms_norm_scale_shift(
     x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, eps: float
 ) -> torch.Tensor:
-    if _ltx2_can_use_fused_scale_shift(x):
-        return fused_norm_scale_shift(
-            x.contiguous(),
-            None,
-            None,
-            scale.contiguous(),
-            shift.contiguous(),
-            "rms",
-            eps,
-        )
-    return rms_norm(x, eps) * (1 + scale) + shift
+    return ltx2_scale_shift(rms_norm(x, eps), scale, shift)
 
 
 class LTX2TextProjection(nn.Module):
