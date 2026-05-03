@@ -1442,6 +1442,9 @@ class LTX2DenoisingStage(DenoisingStage):
                 and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
             )
         )
+        use_split_pass_kwargs = (
+            server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
+        )
         skip_v2a_cross_attn_for_video_gt = bool(
             batch.extra.get("ltx2_skip_v2a_cross_attn_for_video_gt", False)
         )
@@ -1621,28 +1624,51 @@ class LTX2DenoisingStage(DenoisingStage):
                             for pass_spec in pass_specs
                             for _ in range(batch_size_local)
                         )
+                        split_perturbation_configs = ()
+                        if not use_split_pass_kwargs:
+                            split_perturbation_configs = tuple(
+                                {
+                                    "skip_video_self_attn_blocks": pass_spec.skip_video_self_attn_blocks,
+                                    "skip_audio_self_attn_blocks": pass_spec.skip_audio_self_attn_blocks,
+                                    "skip_a2v_cross_attn": pass_spec.disable_a2v_cross_attn,
+                                    "skip_v2a_cross_attn": pass_spec.disable_v2a_cross_attn,
+                                }
+                                for pass_spec in pass_specs
+                                for _ in range(batch_size_local)
+                            )
                         batched_video_chunks = []
                         batched_audio_chunks = []
                         with self._ltx2_model_forward_context(ctx, step):
-                            for model_kwargs_chunk, pass_spec in zip(
-                                self._split_ltx2_model_kwargs(
-                                    batched_model_kwargs, split_sizes
-                                ),
-                                split_pass_specs,
-                                strict=True,
+                            for index, (model_kwargs_chunk, pass_spec) in enumerate(
+                                zip(
+                                    self._split_ltx2_model_kwargs(
+                                        batched_model_kwargs, split_sizes
+                                    ),
+                                    split_pass_specs,
+                                    strict=True,
+                                )
                             ):
-                                if pass_spec.skip_video_self_attn_blocks:
-                                    model_kwargs_chunk[
-                                        "skip_video_self_attn_blocks"
-                                    ] = pass_spec.skip_video_self_attn_blocks
-                                if pass_spec.skip_audio_self_attn_blocks:
-                                    model_kwargs_chunk[
-                                        "skip_audio_self_attn_blocks"
-                                    ] = pass_spec.skip_audio_self_attn_blocks
-                                if pass_spec.disable_a2v_cross_attn:
-                                    model_kwargs_chunk["disable_a2v_cross_attn"] = True
-                                if pass_spec.disable_v2a_cross_attn:
-                                    model_kwargs_chunk["disable_v2a_cross_attn"] = True
+                                if use_split_pass_kwargs:
+                                    if pass_spec.skip_video_self_attn_blocks:
+                                        model_kwargs_chunk[
+                                            "skip_video_self_attn_blocks"
+                                        ] = pass_spec.skip_video_self_attn_blocks
+                                    if pass_spec.skip_audio_self_attn_blocks:
+                                        model_kwargs_chunk[
+                                            "skip_audio_self_attn_blocks"
+                                        ] = pass_spec.skip_audio_self_attn_blocks
+                                    if pass_spec.disable_a2v_cross_attn:
+                                        model_kwargs_chunk[
+                                            "disable_a2v_cross_attn"
+                                        ] = True
+                                    if pass_spec.disable_v2a_cross_attn:
+                                        model_kwargs_chunk[
+                                            "disable_v2a_cross_attn"
+                                        ] = True
+                                else:
+                                    model_kwargs_chunk["perturbation_configs"] = (
+                                        split_perturbation_configs[index],
+                                    )
                                 video_chunk, audio_chunk = step.current_model(
                                     **model_kwargs_chunk
                                 )
