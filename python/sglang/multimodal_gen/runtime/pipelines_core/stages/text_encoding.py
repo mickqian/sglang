@@ -25,7 +25,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
-from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.server_args import (
+    ServerArgs,
+    is_ltx2_two_stage_pipeline_name,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -59,6 +62,7 @@ class TextEncodingStage(PipelineStage):
         "clip_embedding_neg",
         "is_prompt_processed",
     )
+    _TEXT_CACHE_MAX_ENTRIES = 4
 
     def __init__(self, text_encoders, tokenizers) -> None:
         """
@@ -68,8 +72,7 @@ class TextEncodingStage(PipelineStage):
         super().__init__()
         self.tokenizers = tokenizers
         self.text_encoders = text_encoders
-        self._negative_text_cache_key = None
-        self._negative_text_cache_value = None
+        self._text_cache = {}
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -104,11 +107,13 @@ class TextEncodingStage(PipelineStage):
 
         all_indices: list[int] = list(range(len(self.text_encoders)))
 
-        prompt_embeds_list, prompt_masks_list, pooler_embeds_list = self.encode_text(
-            prompt_text,
-            server_args,
-            encoder_index=all_indices,
-            return_attention_mask=True,
+        prompt_embeds_list, prompt_masks_list, pooler_embeds_list = (
+            self._encode_text_with_cache(
+                batch,
+                prompt_text,
+                server_args,
+                encoder_indices=all_indices,
+            )
         )
 
         for pe in prompt_embeds_list:
@@ -125,46 +130,14 @@ class TextEncodingStage(PipelineStage):
         # Encode negative prompt if CFG is enabled
         if batch.do_classifier_free_guidance:
             assert isinstance(batch.negative_prompt, str)
-            negative_cache_key = (
-                server_args.pipeline_class_name,
-                tuple(all_indices),
-                batch.negative_prompt,
+            neg_embeds_list, neg_masks_list, neg_pooler_embeds_list = (
+                self._encode_text_with_cache(
+                    batch,
+                    batch.negative_prompt,
+                    server_args,
+                    encoder_indices=all_indices,
+                )
             )
-            use_negative_cache = not batch.is_warmup
-            cached_negative = None
-            if use_negative_cache:
-                cached_negative = (
-                    self._negative_text_cache_value
-                    if self._negative_text_cache_key == negative_cache_key
-                    else None
-                )
-            if cached_negative is None:
-                neg_embeds_list, neg_masks_list, neg_pooler_embeds_list = (
-                    self.encode_text(
-                        batch.negative_prompt,
-                        server_args,
-                        encoder_index=all_indices,
-                        return_attention_mask=True,
-                    )
-                )
-                # Classifier-free guidance encodes both the user prompt and a
-                # negative prompt. The negative prompt is often one long model
-                # default reused by many requests. For a fixed pipeline, encoder
-                # set, and text, the encoder output is deterministic, so reusing
-                # this one-entry cache is equivalent to encoding the same text
-                # again. Warmup requests are synthetic, so they do not read from
-                # or populate the cache for later real requests.
-                if use_negative_cache:
-                    self._negative_text_cache_key = negative_cache_key
-                    self._negative_text_cache_value = (
-                        tuple(neg_embeds_list),
-                        tuple(neg_masks_list),
-                        tuple(neg_pooler_embeds_list),
-                    )
-            else:
-                neg_embeds_list, neg_masks_list, neg_pooler_embeds_list = (
-                    cached_negative
-                )
 
             assert batch.negative_prompt_embeds is not None
 
@@ -179,6 +152,59 @@ class TextEncodingStage(PipelineStage):
                     batch.negative_attention_mask.append(nm)
 
         return batch
+
+    def _text_cache_key(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        text: str | list[str],
+        encoder_indices: list[int],
+    ):
+        return (
+            server_args.pipeline_class_name,
+            tuple(encoder_indices),
+            self.freeze_for_dedup(text),
+            self.freeze_for_dedup(batch.prompt_template),
+            batch.max_sequence_length,
+        )
+
+    def _encode_text_with_cache(
+        self,
+        batch: Req,
+        text: str | list[str],
+        server_args: ServerArgs,
+        encoder_indices: list[int],
+    ):
+        cache_key = self._text_cache_key(batch, server_args, text, encoder_indices)
+        use_cache = (not batch.is_warmup) and is_ltx2_two_stage_pipeline_name(
+            server_args.pipeline_class_name
+        )
+        if use_cache and cache_key in self._text_cache:
+            return self._text_cache[cache_key]
+
+        result = self.encode_text(
+            text,
+            server_args,
+            encoder_index=encoder_indices,
+            return_attention_mask=True,
+        )
+
+        if use_cache:
+            # Text encoding is deterministic for the same pipeline, encoder
+            # selection, prompt text, prompt template, and max sequence length.
+            # Reusing those tensors on a later real request skips tokenizer,
+            # text-encoder forward, and text-encoder residency work without
+            # changing the conditioning tensors passed to denoising. Warmup
+            # requests are synthetic, so they neither read nor fill this cache.
+            if len(self._text_cache) >= self._TEXT_CACHE_MAX_ENTRIES:
+                self._text_cache.pop(next(iter(self._text_cache)))
+            self._text_cache[cache_key] = (
+                tuple(result[0]),
+                tuple(result[1]),
+                tuple(result[2]),
+            )
+            return self._text_cache[cache_key]
+        return result
 
     def build_dedup_fingerprint(
         self, batch: Req, server_args: ServerArgs
