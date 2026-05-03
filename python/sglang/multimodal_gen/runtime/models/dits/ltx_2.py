@@ -370,11 +370,15 @@ def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
     return F.rms_norm(x, normalized_shape=(x.shape[-1],), eps=eps)
 
 
-def _ltx2_can_use_fused_scale_shift(x: torch.Tensor) -> bool:
+def _ltx2_can_use_fused_scale_shift(
+    x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor
+) -> bool:
     return (
         x.is_cuda
         and x.ndim == 3
         and x.dtype == torch.bfloat16
+        and scale.dtype == x.dtype
+        and shift.dtype == x.dtype
         and x.shape[-1] % 256 == 0
         and x.shape[-1] <= 8192
     )
@@ -383,7 +387,7 @@ def _ltx2_can_use_fused_scale_shift(x: torch.Tensor) -> bool:
 def ltx2_scale_shift(
     x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor
 ) -> torch.Tensor:
-    if _ltx2_can_use_fused_scale_shift(x):
+    if _ltx2_can_use_fused_scale_shift(x, scale, shift):
         # LTX2.3 is sensitive to tiny modulation changes. Keep the same
         # bf16 intermediate rounding as the original three PyTorch ops.
         return fuse_scale_shift_kernel(x, scale, shift, round_bf16_intermediate=True)
