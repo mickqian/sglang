@@ -176,3 +176,18 @@ request warmup 会先跑一次 one-step request，并在 stage2 前把 transform
   - `sdpa_output_raw`: not exact, mean_abs `35.7053`, rms `56.4228`。
   - `hidden_01`: not exact, mean_abs `1.6150`, rms `9.7864`（包含 padding tokens 的全量统计）。
 - 结论：第一处漂移不是 QKV/权重/RoPE，而是 masked SDPA 的调用语义：official default 是 repeated K/V + bool mask；当前 `enable_gqa=True` + additive bf16 mask 路径不等价。
+
+## 2026-05-04 official 对齐 + SDPA 性能复核
+
+- worktree: `/Users/mick/repos/sglang-ltx23-fa-official-align-20260504`，分支 `ltx23-fa-official-align-20260504`。
+- `73878b357`: 恢复 HF masked GQA 语义：K/V 先 explicit repeat 到 Q heads，再调用 SDPA，不传 `enable_gqa=True`。
+  - raw Gemma hidden: pos/neg valid hidden 全部 100% bit-exact。
+  - final mp4: PSNR `29.9201`, SSIM `0.9482`, mean_abs `3.3920`。
+  - `TextEncodingStage=12.1403s`；对比错误的 masked `enable_gqa=True` 路径 `12.5287s`，没有观察到 text encode 回退。
+  - 关闭 math SDP 但保留 cudnn/flash/mem-efficient 时，first attention probe 可跑通，`sdpa_output_raw` 和 `hidden_01` exact；说明 repeat 路径不依赖 math fallback。
+- `b2ea162c6`: 将 Gemma attention mask 改为 bool keep-mask，进一步贴近 official meta，并改善实际 dispatch/性能。
+  - raw Gemma hidden: pos/neg valid hidden 全部 100% bit-exact。
+  - final mp4: PSNR `29.9201`, SSIM `0.9482`, mean_abs `3.3920`。
+  - `TextEncodingStage=9.2593s`, pixel time `41.73s`。
+  - strict flash-only probe（只开 flash SDP，关 cudnn/mem-efficient/math）仍 `Invalid backend`；当前 PyTorch/H200 组合下 masked SDPA 不能证明走 pure flash-only。但 bool mask 已比 additive mask 的真实 text encode 更快，且保持 official exact。
+- 当前结论：最佳保留版本是 `b2ea162c6`。它同时满足 official text hidden bit-exact 和 final video 指标，并在现有 SDPA dispatch 下比 additive repeat 更快。若未来要 pure flash-only，需要考虑更大改造，例如按 valid tokens 截短 text sequence、消除 padding mask，而不是回到 masked `enable_gqa=True`。
