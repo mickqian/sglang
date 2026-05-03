@@ -108,6 +108,9 @@ def apply_split_rotary_emb(
         x.ndim == 3
         and cos.ndim == 4
         and sin.ndim == 4
+        and x.dtype == torch.bfloat16
+        and cos.dtype == torch.bfloat16
+        and sin.dtype == torch.bfloat16
         and x.is_cuda
         and x.is_contiguous()
         and cos.is_cuda
