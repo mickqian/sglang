@@ -41,6 +41,9 @@ from transformers.models.mistral.modeling_mistral import (
 )
 
 from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
+from sglang.multimodal_gen.runtime.managers.layerwise_offload import (
+    LayerwiseOffloadableMixin,
+)
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -370,7 +373,7 @@ class Mistral3Model(nn.Module):
         )
 
 
-class Mistral3ForConditionalGeneration(nn.Module):
+class Mistral3ForConditionalGeneration(LayerwiseOffloadableMixin, nn.Module):
     _checkpoint_conversion_mapping = {
         "^language_model.model": "model.language_model",
         "^multi_modal_projector": "model.multi_modal_projector",
@@ -378,6 +381,9 @@ class Mistral3ForConditionalGeneration(nn.Module):
     }
     _tied_weights_keys = ["lm_head.weight"]
     uses_sglang_forward_context = False
+    layer_names = ["model.language_model.layers"]
+    layerwise_prefetch_size = 1.0
+    layerwise_persistent_size = 0
 
     def __init__(self, config: LlavaConfig):
         super().__init__()

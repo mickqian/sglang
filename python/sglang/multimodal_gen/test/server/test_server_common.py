@@ -96,8 +96,21 @@ def diffusion_server(case: DiffusionTestCase) -> ServerContext:
             f" --dit-offload-prefetch-size {server_args.dit_offload_prefetch_size}"
         )
 
+    if server_args.dit_offload_persistent_size:
+        extra_args += (
+            f" --dit-offload-persistent-size {server_args.dit_offload_persistent_size}"
+        )
+
+    if server_args.dit_offload_persistent_bins:
+        extra_args += (
+            f" --dit-offload-persistent-bins {server_args.dit_offload_persistent_bins}"
+        )
+
     if server_args.text_encoder_cpu_offload:
         extra_args += f" --text-encoder-cpu-offload"
+
+    if server_args.text_encoder_layerwise_offload:
+        extra_args += f" --text-encoder-layerwise-offload true"
 
     if server_args.ring_degree is not None:
         extra_args += f" --ring-degree {server_args.ring_degree}"

@@ -184,8 +184,11 @@ class DiffusionServerArgs:
 
     dit_layerwise_offload: bool = False
     dit_offload_prefetch_size: int | float | None = None
+    dit_offload_persistent_size: int | float | None = None
+    dit_offload_persistent_bins: int | None = None
     enable_cache_dit: bool = False
     text_encoder_cpu_offload: bool = False
+    text_encoder_layerwise_offload: bool = False
     enable_warmup: bool = True
 
     extras: list[str] = field(default_factory=lambda: [])

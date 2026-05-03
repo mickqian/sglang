@@ -12,15 +12,27 @@ from sglang.multimodal_gen.configs.models.encoders import (
     ImageEncoderConfig,
     TextEncoderConfig,
 )
+from sglang.multimodal_gen.runtime.managers.layerwise_offload import (
+    LayerwiseOffloadableMixin,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
-class TextEncoder(nn.Module, ABC):
+class TextEncoder(LayerwiseOffloadableMixin, nn.Module, ABC):
     _fsdp_shard_conditions: list = field(default_factory=lambda: [])
     _stacked_params_mapping: list[tuple[str, str, str]] = field(default_factory=list)
     _supported_attention_backends: set[AttentionBackendEnum] = (
         TextEncoderConfig()._supported_attention_backends
     )
+    layerwise_candidate_layer_names = (
+        "encoder.block",
+        "layers",
+        "model.language_model.layers",
+        "language_model.layers",
+        "model.layers",
+    )
+    layerwise_prefetch_size = 1.0
+    layerwise_persistent_size = 0
 
     def __init__(self, config: TextEncoderConfig) -> None:
         super().__init__()

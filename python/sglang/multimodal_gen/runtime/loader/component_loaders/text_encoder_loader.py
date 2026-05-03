@@ -71,6 +71,8 @@ class TextEncoderLoader(ComponentLoader):
         should_offload = server_args.text_encoder_cpu_offload
         if not should_offload:
             return False
+        if server_args.text_encoder_layerwise_offload:
+            return False
         # _fsdp_shard_conditions is in arch_config, not directly on model_config
         arch_config = (
             getattr(model_config, "arch_config", model_config) if model_config else None

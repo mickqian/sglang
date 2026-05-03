@@ -3,17 +3,12 @@ from types import SimpleNamespace
 
 import torch
 
-from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
-    ModelOptFp8Config,
-)
-from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
-    _ModelOptFp8OffloadAdapter,
-)
 from sglang.multimodal_gen.runtime.managers import (
     layerwise_offload as layerwise_offload_mod,
 )
 from sglang.multimodal_gen.runtime.managers.layerwise_offload import (
     LayerwiseOffloadManager,
+    _resolve_persistent_layer_indices,
 )
 
 
@@ -104,6 +99,13 @@ def test_layerwise_offload_preserves_non_contiguous_stride(monkeypatch):
 
 
 def test_modelopt_fp8_adapter_keeps_layerwise_offload_enabled():
+    from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+        ModelOptFp8Config,
+    )
+    from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
+        _ModelOptFp8OffloadAdapter,
+    )
+
     server_args = SimpleNamespace(
         dit_cpu_offload=True,
         dit_layerwise_offload=True,
@@ -164,3 +166,55 @@ def test_layerwise_offload_aligns_contiguous_tensor_offsets(monkeypatch):
     assert restored_bias.data_ptr() % 32 == 0
     assert torch.equal(restored_weight, original_weight)
     assert torch.equal(restored_bias, original_bias)
+
+
+def test_layerwise_offload_supports_dotted_layer_path_and_persistent_layers(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        layerwise_offload_mod.torch, "get_device_module", lambda: _FakeDeviceModule
+    )
+    monkeypatch.setattr(layerwise_offload_mod.current_platform, "device_type", "cpu")
+
+    class _NestedBlocks(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = torch.nn.ModuleList([_DummyBlock(), _DummyBlock()])
+
+    class _NestedDummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = _NestedBlocks()
+
+    model = _NestedDummyModel()
+    persistent_weight = model.encoder.blocks[0].weight.detach().clone()
+    offloaded_weight = model.encoder.blocks[1].weight.detach().clone()
+
+    manager = LayerwiseOffloadManager(
+        model=model,
+        layers_attr_str="encoder.blocks",
+        num_layers=2,
+        enabled=True,
+        pin_cpu_memory=False,
+        prefetch_size=1,
+        persistent_size=1,
+    )
+
+    assert "encoder.blocks.0.weight" in manager._weight_metadata[0]
+    assert "encoder.blocks.1.weight" in manager._weight_metadata[1]
+
+    manager.release_layer(0)
+    assert torch.equal(model.encoder.blocks[0].weight.data, persistent_weight)
+
+    manager.prefetch_layer(1, non_blocking=False)
+    assert torch.equal(model.encoder.blocks[1].weight.data, offloaded_weight)
+    manager.release_layer(1)
+    assert tuple(model.encoder.blocks[1].weight.shape) == (1,)
+
+
+def test_resolve_persistent_layer_indices_can_spread_across_bins():
+    assert _resolve_persistent_layer_indices(
+        num_layers=8,
+        persistent_size=4,
+        persistent_bins=2,
+    ) == {0, 1, 4, 5}

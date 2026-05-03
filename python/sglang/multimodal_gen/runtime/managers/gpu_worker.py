@@ -38,6 +38,7 @@ from sglang.multimodal_gen.runtime.loader.weights_updater import (
     get_updatable_modules,
 )
 from sglang.multimodal_gen.runtime.managers.layerwise_offload import (
+    LayerwiseOffloadableMixin,
     OffloadableDiTMixin,
     iter_materialized_weights,
 )
@@ -170,6 +171,21 @@ class GPUWorker:
                         logger.info(
                             f"Module {type(dit).__name__} does not support layerwise offload. Skipping."
                         )
+
+        if self.server_args.text_encoder_layerwise_offload:
+            for module_name, module in self.pipeline.modules.items():
+                if not module_name.startswith("text_encoder"):
+                    continue
+                if isinstance(module, LayerwiseOffloadableMixin):
+                    module.configure_layerwise_offload(self.server_args)
+                    if not module.layerwise_offload_managers:
+                        logger.info(
+                            f"Module {type(module).__name__} does not expose text encoder layerwise offload layers. Skipping."
+                        )
+                else:
+                    logger.info(
+                        f"Module {type(module).__name__} does not support text encoder layerwise offload. Skipping."
+                    )
 
         logger.info(
             f"Worker {self.rank}: Initialized device, model, and distributed environment."
@@ -620,8 +636,10 @@ class GPUWorker:
             "transformer": self.server_args.dit_cpu_offload
             or self.server_args.dit_layerwise_offload,
             "vae": self.server_args.vae_cpu_offload,
-            "text_encoder": self.server_args.text_encoder_cpu_offload,
-            "text_encoder_2": self.server_args.text_encoder_cpu_offload,
+            "text_encoder": self.server_args.text_encoder_cpu_offload
+            or self.server_args.text_encoder_layerwise_offload,
+            "text_encoder_2": self.server_args.text_encoder_cpu_offload
+            or self.server_args.text_encoder_layerwise_offload,
             "image_encoder": self.server_args.image_encoder_cpu_offload,
         }
 

@@ -1,14 +1,69 @@
+from __future__ import annotations
+
 import re
 from itertools import chain
-from typing import Any, Dict, List, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Set, Tuple
 
 import torch
 
 from sglang.multimodal_gen.runtime.platforms import current_platform
-from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
 logger = init_logger(__name__)
+
+
+def _resolve_persistent_layer_indices(
+    *, num_layers: int, persistent_size: int, persistent_bins: int
+) -> Set[int]:
+    if num_layers <= 0 or persistent_size <= 0:
+        return set()
+
+    effective_persistent_size = min(persistent_size, num_layers)
+    effective_bins = min(max(1, persistent_bins), effective_persistent_size, num_layers)
+    boundaries = [
+        (index * num_layers) // effective_bins for index in range(effective_bins + 1)
+    ]
+    capacities = [
+        boundaries[index + 1] - boundaries[index] for index in range(effective_bins)
+    ]
+    allocations = [0 for _ in range(effective_bins)]
+
+    remaining = effective_persistent_size
+    while remaining > 0:
+        made_progress = False
+        for index, capacity in enumerate(capacities):
+            if allocations[index] >= capacity:
+                continue
+            allocations[index] += 1
+            remaining -= 1
+            made_progress = True
+            if remaining == 0:
+                break
+        if not made_progress:
+            break
+
+    return {
+        layer_idx
+        for index, allocated in enumerate(allocations)
+        for layer_idx in range(boundaries[index], boundaries[index] + allocated)
+    }
+
+
+def _resolve_prefetch_layer_count(raw_size: float, num_layers: int) -> int:
+    if raw_size < 1.0:
+        return 1 + int(round(raw_size * (num_layers - 1)))
+    return int(raw_size)
+
+
+def _resolve_optional_layer_count(raw_size: float, num_layers: int) -> int:
+    if raw_size <= 0.0:
+        return 0
+    if raw_size < 1.0:
+        return max(1, int(round(raw_size * num_layers)))
+    return int(raw_size)
 
 
 # Adapted from skywork AI Infra diffusion optimize
@@ -35,12 +90,21 @@ class LayerwiseOffloadManager:
         enabled: bool,
         pin_cpu_memory: bool = True,
         prefetch_size: int = 1,
+        persistent_size: int = 0,
+        persistent_bins: int = 1,
     ) -> None:
         self.model = model
         self.layers_attr_str = layers_attr_str
         self.num_layers = num_layers
         self.pin_cpu_memory = pin_cpu_memory
         self.prefetch_size = min(max(1, prefetch_size), self.num_layers)
+        self.persistent_size = min(max(0, persistent_size), self.num_layers)
+        self.persistent_bins = max(1, persistent_bins)
+        self._persistent_layers: Set[int] = _resolve_persistent_layer_indices(
+            num_layers=self.num_layers,
+            persistent_size=self.persistent_size,
+            persistent_bins=self.persistent_bins,
+        )
         self.enabled = bool(enabled and torch.get_device_module().is_available())
         if not self.enabled:
             return
@@ -74,6 +138,14 @@ class LayerwiseOffloadManager:
         self._forward_hooks: List[Any] = []
 
         self._initialize()
+
+    def _get_layers(self) -> torch.nn.ModuleList:
+        layers = self.model.get_submodule(self.layers_attr_str)
+        if not isinstance(layers, torch.nn.ModuleList):
+            raise ValueError(
+                f"{self.layers_attr_str} is not a ModuleList on {type(self.model).__name__}"
+            )
+        return layers
 
     def _match_layer_idx(self, name: str) -> int | None:
         m = self._layer_name_re.search(name)
@@ -204,13 +276,24 @@ class LayerwiseOffloadManager:
         # offloaded layer weights.
         self.model.to(self.device)
 
+        self.prepare_persistent_layers(non_blocking=False)
+
         # prefetch the first layer for warm-up
         self.prepare_for_next_req(non_blocking=False)
 
         self.register_forward_hooks()
         logger.info(
-            f"LayerwiseOffloadManager initialized with num prefetched layer: {self.prefetch_size}, total num layers: {self.num_layers}"
+            f"LayerwiseOffloadManager initialized with num prefetched layer: {self.prefetch_size}, persistent layers: {sorted(self._persistent_layers)}, total num layers: {self.num_layers}"
         )
+
+    def prepare_persistent_layers(self, non_blocking=True):
+        """
+        Keep selected layer buckets resident for the manager lifetime.
+        """
+        for i in sorted(self._persistent_layers):
+            self.prefetch_layer(i, non_blocking=non_blocking)
+        if not non_blocking and self.copy_stream is not None:
+            torch.get_device_module().current_stream().wait_stream(self.copy_stream)
 
     def prepare_for_next_req(self, non_blocking=True):
         """
@@ -302,6 +385,8 @@ class LayerwiseOffloadManager:
         self._prefetch_events.pop(layer_idx, None)
 
         if layer_idx not in self._gpu_layers:
+            return
+        if layer_idx in self._persistent_layers:
             return
 
         for name, meta in self._weight_metadata.get(layer_idx, {}).items():
@@ -467,7 +552,7 @@ class LayerwiseOffloadManager:
         if not self.enabled:
             return
 
-        layers = getattr(self.model, self.layers_attr_str)
+        layers = self._get_layers()
 
         def make_pre_hook(i):
             def hook(module, input):
@@ -509,30 +594,65 @@ class LayerwiseOffloadManager:
         self._forward_hooks.clear()
 
 
-class OffloadableDiTMixin:
+class LayerwiseOffloadableMixin:
     """
-    A mixin that registers forward hooks for a DiT to enable layerwise offload
+    A mixin that registers forward hooks for a module to enable layerwise offload
     """
 
-    # the list of names of a DiT's layers/blocks
-    layer_names: List[str]
+    # the list of names of a module's layers/blocks
+    layer_names: List[str] = []
+    layerwise_candidate_layer_names: tuple[str, ...] = ()
+    layerwise_prefetch_size: float | None = None
+    layerwise_persistent_size: int | None = None
+    layerwise_persistent_bins: int = 1
     layerwise_offload_managers: list[LayerwiseOffloadManager] = []
+
+    def _resolve_layerwise_layer_names(self) -> list[str]:
+        if self.layer_names:
+            return self.layer_names
+        resolved: list[str] = []
+        for layer_name in self.layerwise_candidate_layer_names:
+            try:
+                layers = self.get_submodule(layer_name)
+            except AttributeError:
+                continue
+            if isinstance(layers, torch.nn.ModuleList) and len(layers) > 0:
+                resolved.append(layer_name)
+        return resolved
+
+    def _resolve_prefetch_size(self, server_args: ServerArgs, num_layers: int) -> int:
+        raw_prefetch_size = (
+            server_args.dit_offload_prefetch_size
+            if self.layerwise_prefetch_size is None
+            else self.layerwise_prefetch_size
+        )
+        return _resolve_prefetch_layer_count(raw_prefetch_size, num_layers)
+
+    def _resolve_persistent_size(
+        self, server_args: ServerArgs, prefetch_size: int, num_layers: int
+    ) -> int:
+        if self.layerwise_persistent_size is None:
+            return prefetch_size
+        return self.layerwise_persistent_size
+
+    def _resolve_persistent_bins(self, server_args: ServerArgs) -> int:
+        return self.layerwise_persistent_bins
 
     def configure_layerwise_offload(self, server_args: ServerArgs):
         self.layerwise_offload_managers = []
-        for layer_name in self.layer_names:
+        layer_names = self._resolve_layerwise_layer_names()
+        for layer_name in layer_names:
             # a manager per layer-list
-            module_list = getattr(self, layer_name, None)
-            if module_list is None or not isinstance(module_list, torch.nn.ModuleList):
+            module_list = self.get_submodule(layer_name)
+            if not isinstance(module_list, torch.nn.ModuleList):
                 continue
 
             num_layers = len(module_list)
-            if server_args.dit_offload_prefetch_size < 1.0:
-                prefetch_size = 1 + int(
-                    round(server_args.dit_offload_prefetch_size * (num_layers - 1))
-                )
-            else:
-                prefetch_size = int(server_args.dit_offload_prefetch_size)
+            prefetch_size = self._resolve_prefetch_size(server_args, num_layers)
+            persistent_size = self._resolve_persistent_size(
+                server_args, prefetch_size, num_layers
+            )
+            persistent_bins = self._resolve_persistent_bins(server_args)
 
             manager = LayerwiseOffloadManager(
                 model=self,
@@ -541,11 +661,13 @@ class OffloadableDiTMixin:
                 enabled=True,
                 pin_cpu_memory=server_args.pin_cpu_memory,
                 prefetch_size=prefetch_size,
+                persistent_size=persistent_size,
+                persistent_bins=persistent_bins,
             )
             self.layerwise_offload_managers.append(manager)
 
         logger.info(
-            f"Enabled layerwise offload for {self.__class__.__name__} on modules: {self.layer_names}"
+            f"Enabled layerwise offload for {self.__class__.__name__} on modules: {layer_names}"
         )
 
     def prepare_for_next_req(self):
@@ -583,7 +705,10 @@ def iter_materialized_weights(module: torch.nn.Module):
     the non-offloaded parameters.
     """
     offload_managers: list = []
-    if isinstance(module, OffloadableDiTMixin) and module.layerwise_offload_managers:
+    if (
+        isinstance(module, LayerwiseOffloadableMixin)
+        and module.layerwise_offload_managers
+    ):
         offload_managers = [m for m in module.layerwise_offload_managers if m.enabled]
 
     if not offload_managers:
@@ -601,3 +726,19 @@ def iter_materialized_weights(module: torch.nn.Module):
     for name, param in module.named_parameters():
         if name not in offloaded_names:
             yield name, param
+
+
+class OffloadableDiTMixin(LayerwiseOffloadableMixin):
+    """
+    A mixin that registers forward hooks for a DiT to enable layerwise offload
+    """
+
+    def _resolve_persistent_size(
+        self, server_args: ServerArgs, prefetch_size: int, num_layers: int
+    ) -> int:
+        return _resolve_optional_layer_count(
+            server_args.dit_offload_persistent_size, num_layers
+        )
+
+    def _resolve_persistent_bins(self, server_args: ServerArgs) -> int:
+        return server_args.dit_offload_persistent_bins

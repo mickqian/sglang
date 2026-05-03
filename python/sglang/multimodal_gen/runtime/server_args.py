@@ -188,7 +188,10 @@ class ServerArgs(DisaggArgsMixin):
     dit_cpu_offload: bool | None = None
     dit_layerwise_offload: bool | None = None
     dit_offload_prefetch_size: float = 0.0
+    dit_offload_persistent_size: float = 0.0
+    dit_offload_persistent_bins: int = 1
     text_encoder_cpu_offload: bool | None = None
+    text_encoder_layerwise_offload: bool | None = None
     image_encoder_cpu_offload: bool | None = None
     vae_cpu_offload: bool | None = None
     use_fsdp_inference: bool = False
@@ -960,6 +963,19 @@ class ServerArgs(DisaggArgsMixin):
             help="The size of prefetch for dit-layerwise-offload. If the value is between 0.0 and 1.0, it is treated as a ratio of the total number of layers. If the value is >= 1, it is treated as the absolute number of layers. 0.0 means prefetch 1 layer (lowest memory). Values above 0.5 might have peak memory close to no offload but worse performance.",
         )
         parser.add_argument(
+            "--dit-offload-persistent-size",
+            type=float,
+            default=ServerArgs.dit_offload_persistent_size,
+            help="The number of DiT layerwise-offloaded layers to keep resident on GPU. "
+            "0.0 keeps the old behavior. Values between 0.0 and 1.0 are treated as a ratio of total layers; values >= 1 are absolute layer counts.",
+        )
+        parser.add_argument(
+            "--dit-offload-persistent-bins",
+            type=int,
+            default=ServerArgs.dit_offload_persistent_bins,
+            help="How many evenly distributed bins to use when placing DiT persistent layerwise-offload layers.",
+        )
+        parser.add_argument(
             "--use-fsdp-inference",
             action=StoreBoolean,
             help="Use FSDP for inference by sharding the model weights. Latency is very low due to prefetch--enable if run out of memory.",
@@ -968,6 +984,12 @@ class ServerArgs(DisaggArgsMixin):
             "--text-encoder-cpu-offload",
             action=StoreBoolean,
             help="Use CPU offload for text encoder. Enable if run out of memory.",
+        )
+        parser.add_argument(
+            "--text-encoder-layerwise-offload",
+            action=StoreBoolean,
+            default=ServerArgs.text_encoder_layerwise_offload,
+            help="Use layerwise CPU offload for supported native large text encoders.",
         )
         parser.add_argument(
             "--image-encoder-cpu-offload",
@@ -1360,6 +1382,20 @@ class ServerArgs(DisaggArgsMixin):
             logger.info(
                 "We do not recommend --dit-offload-prefetch-size to be between 0.5 and 1.0"
             )
+        if self.dit_offload_persistent_size > 1 and (
+            isinstance(self.dit_offload_persistent_size, float)
+            and not self.dit_offload_persistent_size.is_integer()
+        ):
+            self.dit_offload_persistent_size = int(
+                math.floor(self.dit_offload_persistent_size)
+            )
+            logger.info(
+                f"Invalid --dit-offload-persistent-size value passed, truncated to: {self.dit_offload_persistent_size}"
+            )
+        if self.dit_offload_persistent_size < 0.0:
+            raise ValueError("dit_offload_persistent_size must be non-negative")
+        if self.dit_offload_persistent_bins < 1:
+            raise ValueError("dit_offload_persistent_bins must be >= 1")
 
         # validate dit_layerwise_offload conflicts
         if self.dit_layerwise_offload:

@@ -13,7 +13,10 @@ from sglang.multimodal_gen.runtime.managers.component_resident_strategies import
     ResidentStrategy,
     VanillaD2HStrategy,
 )
-from sglang.multimodal_gen.runtime.managers.layerwise_offload import OffloadableDiTMixin
+from sglang.multimodal_gen.runtime.managers.layerwise_offload import (
+    LayerwiseOffloadableMixin,
+    OffloadableDiTMixin,
+)
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -102,6 +105,14 @@ def build_dit_residency_strategy(
     return ResidentStrategy()
 
 
+def has_enabled_layerwise_offload(module: nn.Module) -> bool:
+    return (
+        isinstance(module, LayerwiseOffloadableMixin)
+        and module.layerwise_offload_managers
+        and any(manager.enabled for manager in module.layerwise_offload_managers)
+    )
+
+
 def is_fsdp_managed_module(module: nn.Module) -> bool:
     return module.__class__.__name__.startswith("FSDP")
 
@@ -124,6 +135,8 @@ def build_component_residency_strategy(
     if component_name.startswith("text_encoder") or component_name.endswith(
         "text_encoder"
     ):
+        if has_enabled_layerwise_offload(module):
+            return LayerwiseOffloadStrategy()
         if (
             server_args.text_encoder_cpu_offload
             and not server_args.use_fsdp_inference

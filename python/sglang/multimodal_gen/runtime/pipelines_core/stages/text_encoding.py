@@ -73,11 +73,16 @@ class TextEncodingStage(PipelineStage):
         self, server_args: ServerArgs, stage_name: str | None = None
     ) -> list[ComponentUse]:
         stage_name = self._component_stage_name(stage_name)
+        offloaded_text_encoder = bool(
+            server_args.text_encoder_cpu_offload
+            or server_args.text_encoder_layerwise_offload
+        )
         return [
             ComponentUse(
                 stage_name=stage_name,
                 component_name="text_encoder" if i == 0 else f"text_encoder_{i + 1}",
-                preferred_ready_after_request=i == 0,
+                preferred_ready_after_request=i == 0 or offloaded_text_encoder,
+                memory_intensive=offloaded_text_encoder,
             )
             for i in range(len(self.text_encoders))
         ]

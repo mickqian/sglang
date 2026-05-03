@@ -61,8 +61,14 @@ def _build_server_extra_args(case: DiffusionTestCase) -> str:
         a += " --dit-layerwise-offload true"
     if server_args.dit_offload_prefetch_size:
         a += f" --dit-offload-prefetch-size {server_args.dit_offload_prefetch_size}"
+    if server_args.dit_offload_persistent_size:
+        a += f" --dit-offload-persistent-size {server_args.dit_offload_persistent_size}"
+    if server_args.dit_offload_persistent_bins:
+        a += f" --dit-offload-persistent-bins {server_args.dit_offload_persistent_bins}"
     if server_args.text_encoder_cpu_offload:
         a += " --text-encoder-cpu-offload"
+    if server_args.text_encoder_layerwise_offload:
+        a += " --text-encoder-layerwise-offload true"
     if server_args.ring_degree is not None:
         a += f" --ring-degree {server_args.ring_degree}"
     if server_args.lora_path:
