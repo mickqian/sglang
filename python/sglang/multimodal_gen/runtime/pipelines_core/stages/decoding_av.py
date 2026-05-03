@@ -49,7 +49,6 @@ class LTX2AVDecodingStage(DecodingStage):
             vae_dtype != torch.float32
         ) and not server_args.disable_autocast
 
-        original_dtype = vae_dtype
         with self.use_declared_component(component_name="vae", module=self.vae) as vae:
             assert vae is not None
             self.vae = vae
@@ -62,6 +61,8 @@ class LTX2AVDecodingStage(DecodingStage):
             latents = server_args.pipeline_config.preprocess_decoding(
                 latents, server_args, vae=self.vae
             )
+            if latents.ndim == 5 and latents.is_cuda:
+                latents = latents.contiguous(memory_format=torch.channels_last_3d)
 
             with torch.autocast(
                 device_type=current_platform.device_type,
@@ -81,7 +82,6 @@ class LTX2AVDecodingStage(DecodingStage):
                 else:
                     video = decode_output
 
-            self.vae.to(original_dtype)
         video = self.video_processor.postprocess_video(video, output_type="np")
 
         output_batch = OutputBatch(
