@@ -224,7 +224,6 @@ def _fused_scale_shift_4d_kernel(
     scale_ptr,
     shift_ptr,
     scale_constant: tl.constexpr,  # scale_constant is either 0 or 1.
-    round_bf16_intermediate: tl.constexpr,
     rows,
     inner_dim,
     seq_len,
@@ -258,11 +257,7 @@ def _fused_scale_shift_4d_kernel(
     shift = tl.load(shift_ptrs, mask=mask, other=0.0)
 
     scale_const_tensor = tl.full([BLOCK_N], scale_constant, dtype=scale.dtype)
-    if round_bf16_intermediate:
-        scale_term = (scale_const_tensor + scale).to(tl.bfloat16)
-        output = (normalized * scale_term).to(tl.bfloat16) + shift
-    else:
-        output = normalized * (scale_const_tensor + scale) + shift
+    output = normalized * (scale_const_tensor + scale) + shift
 
     tl.store(out_ptrs, output, mask=mask)
 
@@ -273,7 +268,6 @@ def fuse_scale_shift_kernel_blc_opt(
     shift_ptr,
     scale_ptr,
     scale_constant: tl.constexpr,  # scale_constant is either 0 or 1.,
-    round_bf16_intermediate: tl.constexpr,
     y_ptr,
     B,
     L,
@@ -332,11 +326,7 @@ def fuse_scale_shift_kernel_blc_opt(
         )
         scale = tl.load(scale_ptr + sc_off, mask=mask, other=0)
 
-    if round_bf16_intermediate:
-        scale_term = (scale_constant + scale).to(tl.bfloat16)
-        y = (x * scale_term).to(tl.bfloat16) + shift
-    else:
-        y = x * (scale_constant + scale) + shift
+    y = x * (scale_constant + scale) + shift
     tl.store(y_ptr + x_off, y, mask=mask)
 
 
@@ -345,7 +335,6 @@ def fuse_scale_shift_kernel(
     scale: torch.Tensor,
     shift: torch.Tensor,
     scale_constant: float = 1.0,
-    round_bf16_intermediate: bool = False,
     block_l: int = 128,
     block_c: int = 128,
 ):
@@ -381,7 +370,6 @@ def fuse_scale_shift_kernel(
             scale_reshaped,
             shift_reshaped,
             scale_constant,
-            round_bf16_intermediate,
             rows,
             C,
             L,
@@ -441,7 +429,6 @@ def fuse_scale_shift_kernel(
             shift_blc if need_shift_scalar else shift_exp,
             scale_blc if need_scale_scalar else scale_exp,
             scale_constant,
-            round_bf16_intermediate,
             output,
             B,
             L,
