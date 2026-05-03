@@ -73,6 +73,25 @@ class TextEncodingStage(PipelineStage):
         super().__init__()
         self.tokenizers = tokenizers
         self.text_encoders = text_encoders
+        self._negative_text_cache_key = None
+        self._negative_text_cache_value = None
+
+    def _build_negative_text_cache_key(self, batch: Req, encoder_indices: list[int]):
+        return (
+            self.freeze_for_dedup(batch.negative_prompt),
+            tuple(encoder_indices),
+            self.freeze_for_dedup(batch.prompt_template),
+            batch.max_sequence_length,
+        )
+
+    def _get_cached_negative_text_encoding(self, cache_key):
+        if cache_key == self._negative_text_cache_key:
+            return self._negative_text_cache_value
+        return None
+
+    def _set_cached_negative_text_encoding(self, cache_key, cache_value) -> None:
+        self._negative_text_cache_key = cache_key
+        self._negative_text_cache_value = cache_value
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -141,18 +160,34 @@ class TextEncodingStage(PipelineStage):
         # Encode negative prompt if CFG is enabled
         if batch.do_classifier_free_guidance:
             assert isinstance(batch.negative_prompt, str)
+            negative_cache_key = self._build_negative_text_cache_key(
+                batch, all_indices
+            )
+            negative_cache_value = None
+            if not batch.is_warmup:
+                negative_cache_value = self._get_cached_negative_text_encoding(
+                    negative_cache_key
+                )
+            if negative_cache_value is None:
+                negative_cache_value = self.encode_text(
+                    batch.negative_prompt,
+                    server_args,
+                    encoder_index=all_indices,
+                    return_attention_mask=True,
+                )
+                if not batch.is_warmup:
+                    # Warmup requests exercise kernels and residency; they should not
+                    # seed the prompt cache for later user requests.
+                    self._set_cached_negative_text_encoding(
+                        negative_cache_key, negative_cache_value
+                    )
             (
                 neg_embeds_list,
                 neg_masks_list,
                 neg_pooler_embeds_list,
                 neg_embeds_masks_list,
                 neg_seq_lens_list,
-            ) = self.encode_text(
-                batch.negative_prompt,
-                server_args,
-                encoder_index=all_indices,
-                return_attention_mask=True,
-            )
+            ) = negative_cache_value
 
             assert batch.negative_prompt_embeds is not None
 
