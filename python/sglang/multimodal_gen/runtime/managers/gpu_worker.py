@@ -345,9 +345,6 @@ class GPUWorker:
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
 
-                if torch.cuda.is_initialized():
-                    torch.cuda.empty_cache()
-
             if torch.cuda.is_initialized() and output_batch.output is None:
                 torch.cuda.empty_cache()
 
