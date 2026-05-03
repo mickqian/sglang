@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -6,6 +8,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBa
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding import DecodingStage
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.common import get_bool_env_var
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
@@ -25,6 +28,20 @@ class LTX2AVDecodingStage(DecodingStage):
         from diffusers.video_processor import VideoProcessor
 
         self.video_processor = VideoProcessor(vae_scale_factor=32)
+        self._compiled_video_decoder = False
+
+    def _maybe_compile_video_decoder(self, server_args: ServerArgs) -> None:
+        if (
+            self._compiled_video_decoder
+            or not server_args.enable_torch_compile
+            or not get_bool_env_var("SGLANG_LTX2_COMPILE_VAE_DECODER")
+        ):
+            return
+
+        mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs")
+        logger.info("Compiling LTX2 video VAE decoder with mode: %s", mode)
+        self.vae.decoder.compile(mode=mode, fullgraph=False, dynamic=None)
+        self._compiled_video_decoder = True
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -54,6 +71,7 @@ class LTX2AVDecodingStage(DecodingStage):
             assert vae is not None
             self.vae = vae
             self.vae.eval()
+            self._maybe_compile_video_decoder(server_args)
             latents = batch.latents.to(get_local_torch_device(), dtype=torch.bfloat16)
             if self._ltx2_should_externally_denorm_video_latents(server_args):
                 std = self.vae.latents_std.view(1, -1, 1, 1, 1).to(latents)
