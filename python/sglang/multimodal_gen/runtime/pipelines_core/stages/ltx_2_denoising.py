@@ -1048,20 +1048,27 @@ class LTX2DenoisingStage(DenoisingStage):
             return None
         return torch.cat(items, dim=0)
 
-    @staticmethod
-    def _split_ltx2_model_kwargs(
+    @classmethod
+    def _slice_ltx2_model_kwargs_batch(
+        cls,
         model_kwargs: dict[str, object],
-        split_sizes: list[int],
-    ) -> list[dict[str, object]]:
-        split_kwargs = [dict() for _ in split_sizes]
-        for key, value in model_kwargs.items():
+        batch_index: int,
+    ) -> dict[str, object]:
+        chunk = dict(model_kwargs)
+        for key in cls._LTX2_BATCH_REPEATABLE_KWARG_KEYS:
+            value = chunk.get(key)
             if torch.is_tensor(value):
-                values = list(value.split(split_sizes, dim=0))
-            else:
-                values = [value] * len(split_sizes)
-            for index, item in enumerate(values):
-                split_kwargs[index][key] = item
-        return split_kwargs
+                chunk[key] = value.narrow(0, batch_index, 1)
+        return chunk
+
+    @staticmethod
+    def _slice_optional_ltx2_batch_tensor(
+        value: torch.Tensor | None,
+        batch_index: int,
+    ) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return value.narrow(0, batch_index, 1)
 
     def _preprocess_sp_latents(self, batch: Req, server_args: ServerArgs):
         """LTX-2 TI2V applies image_latent in token space *after* SP sharding,
@@ -1487,18 +1494,15 @@ class LTX2DenoisingStage(DenoisingStage):
                 and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
             )
         )
-        # "Perturbation" means disabling selected attention paths
-        # for that item (self-attention blocks or audio/video cross-attention)
-        # to compute STG/modality guidance.
+        # A model input here is one latent/prompt item passed through the
+        # transformer. Perturbation is the STG/modality variant of that input:
+        # it disables selected attention paths while conditional/negative
+        # variants keep their normal attention.
         #
-
-        # Decide whether to use different pass kwargs for split model calls
-        # 1. HQ splits the expanded batch into one-item model calls. Since each
-        # call has only one perturbation setting, pass the disable options
-        # directly as model arguments.
-        # 2. TI2V/non-HQ may keep several expanded
-        # items with different settings in one model call, so it needs
-        # perturbation_configs: one config dict per expanded item.
+        # HQ uses one transformer call per model input, so each call can pass
+        # the disable flags directly. TI2V keeps the per-input config object so
+        # split and batched execution both feed the transformer the same shape of
+        # attention-disable data.
         use_split_pass_kwargs = (
             server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
         )
@@ -1646,41 +1650,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         )
 
                     num_passes = len(pass_specs)
-                    expanded_batch_size = batch_size_local * num_passes
-                    batched_model_kwargs = self._repeat_ltx2_model_kwargs_batch(
-                        base_model_kwargs_local, expanded_batch_size
-                    )
-                    batched_model_kwargs = self._build_ltx2_model_kwargs(
-                        ctx,
-                        batched_model_kwargs,
-                        encoder_hidden_states=torch.cat(
-                            [
-                                pass_spec.encoder_hidden_states
-                                for pass_spec in pass_specs
-                            ],
-                            dim=0,
-                        ),
-                        audio_encoder_hidden_states=torch.cat(
-                            [
-                                pass_spec.audio_encoder_hidden_states
-                                for pass_spec in pass_specs
-                            ],
-                            dim=0,
-                        ),
-                        encoder_attention_mask=self._cat_or_none(
-                            [
-                                pass_spec.encoder_attention_mask
-                                for pass_spec in pass_specs
-                            ]
-                        ),
-                    )
                     if use_split_stage1_guided_passes:
-                        split_sizes = [1] * expanded_batch_size
-                        split_pass_specs = tuple(
-                            pass_spec
-                            for pass_spec in pass_specs
-                            for _ in range(batch_size_local)
-                        )
                         split_perturbation_configs = (
                             ()
                             if use_split_pass_kwargs
@@ -1688,35 +1658,79 @@ class LTX2DenoisingStage(DenoisingStage):
                                 pass_specs, batch_size_local
                             )
                         )
+                        base_model_kwargs_chunks = [
+                            self._slice_ltx2_model_kwargs_batch(
+                                base_model_kwargs_local, batch_index
+                            )
+                            for batch_index in range(batch_size_local)
+                        ]
                         batched_video_chunks = []
                         batched_audio_chunks = []
                         with self._ltx2_model_forward_context(ctx, step):
-                            for index, (model_kwargs_chunk, pass_spec) in enumerate(
-                                zip(
-                                    self._split_ltx2_model_kwargs(
-                                        batched_model_kwargs, split_sizes
-                                    ),
-                                    split_pass_specs,
-                                    strict=True,
-                                )
-                            ):
-                                if use_split_pass_kwargs:
-                                    self._apply_ltx2_guidance_pass_kwargs(
-                                        model_kwargs_chunk, pass_spec
+                            for pass_index, pass_spec in enumerate(pass_specs):
+                                for batch_index in range(batch_size_local):
+                                    model_kwargs_chunk = self._build_ltx2_model_kwargs(
+                                        ctx,
+                                        base_model_kwargs_chunks[batch_index],
+                                        encoder_hidden_states=pass_spec.encoder_hidden_states.narrow(
+                                            0, batch_index, 1
+                                        ),
+                                        audio_encoder_hidden_states=pass_spec.audio_encoder_hidden_states.narrow(
+                                            0, batch_index, 1
+                                        ),
+                                        encoder_attention_mask=self._slice_optional_ltx2_batch_tensor(
+                                            pass_spec.encoder_attention_mask,
+                                            batch_index,
+                                        ),
                                     )
-                                else:
-                                    model_kwargs_chunk["perturbation_configs"] = (
-                                        split_perturbation_configs[index],
+                                    if use_split_pass_kwargs:
+                                        self._apply_ltx2_guidance_pass_kwargs(
+                                            model_kwargs_chunk, pass_spec
+                                        )
+                                    else:
+                                        config_index = (
+                                            pass_index * batch_size_local + batch_index
+                                        )
+                                        model_kwargs_chunk["perturbation_configs"] = (
+                                            split_perturbation_configs[config_index],
+                                        )
+                                    video_chunk, audio_chunk = step.current_model(
+                                        **model_kwargs_chunk
                                     )
-                                video_chunk, audio_chunk = step.current_model(
-                                    **model_kwargs_chunk
-                                )
-                                batched_video_chunks.append(video_chunk)
-                                batched_audio_chunks.append(audio_chunk)
+                                    batched_video_chunks.append(video_chunk)
+                                    batched_audio_chunks.append(audio_chunk)
 
                         batched_video = torch.cat(batched_video_chunks, dim=0)
                         batched_audio = torch.cat(batched_audio_chunks, dim=0)
                     else:
+                        expanded_batch_size = batch_size_local * num_passes
+                        batched_model_kwargs = self._repeat_ltx2_model_kwargs_batch(
+                            base_model_kwargs_local, expanded_batch_size
+                        )
+                        batched_model_kwargs = self._build_ltx2_model_kwargs(
+                            ctx,
+                            batched_model_kwargs,
+                            encoder_hidden_states=torch.cat(
+                                [
+                                    pass_spec.encoder_hidden_states
+                                    for pass_spec in pass_specs
+                                ],
+                                dim=0,
+                            ),
+                            audio_encoder_hidden_states=torch.cat(
+                                [
+                                    pass_spec.audio_encoder_hidden_states
+                                    for pass_spec in pass_specs
+                                ],
+                                dim=0,
+                            ),
+                            encoder_attention_mask=self._cat_or_none(
+                                [
+                                    pass_spec.encoder_attention_mask
+                                    for pass_spec in pass_specs
+                                ]
+                            ),
+                        )
                         perturbation_configs = (
                             self._build_ltx2_guidance_perturbation_configs(
                                 pass_specs, batch_size_local
