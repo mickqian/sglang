@@ -391,12 +391,12 @@ class LTX2DenoisingStage(DenoisingStage):
         *,
         iterations: int = 100,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        anchor = torch.empty_like(x_mid)
-        scaled_eps = torch.empty_like(eps1)
-        for _ in range(iterations):
-            torch.mul(eps1, scale, out=scaled_eps)
-            torch.sub(x_mid, scaled_eps, out=anchor)
-            torch.sub(denoised, anchor, out=eps1)
+        delta = denoised - x_mid
+        scale_prev = scale.pow(iterations - 1)
+        geom_sum = (1.0 - scale_prev) / (1.0 - scale)
+        eps_prev = delta * geom_sum + scale_prev * eps1
+        anchor = x_mid - scale * eps_prev
+        eps1 = denoised - anchor
         return anchor, eps1
 
     def _ltx2_stage2_res2s_step(
