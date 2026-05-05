@@ -52,9 +52,6 @@ class LTX2DenoisingContext(DenoisingContext):
     use_ltx23_hq_timestep_semantics: bool = False
     res2s_step_noise_generator: torch.Generator | None = None
     res2s_substep_noise_generator: torch.Generator | None = None
-    rotary_emb_cache: dict[tuple[object, ...], tuple[object, ...]] = field(
-        default_factory=dict
-    )
 
 
 @dataclass(slots=True)
@@ -64,10 +61,6 @@ class LTX2ModelInputs:
     audio_num_frames_latent: int
     video_coords: torch.Tensor | None
     audio_coords: torch.Tensor | None
-    video_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
-    audio_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
-    ca_video_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
-    ca_audio_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
     timestep_video: torch.Tensor
     timestep_audio: torch.Tensor
     prompt_timestep_video: torch.Tensor | None
@@ -104,10 +97,6 @@ class LTX2DenoisingStage(DenoisingStage):
         "audio_prompt_timestep",
         "video_coords",
         "audio_coords",
-        "video_rotary_emb",
-        "audio_rotary_emb",
-        "ca_video_rotary_emb",
-        "ca_audio_rotary_emb",
         "video_self_attention_mask",
         "audio_self_attention_mask",
         "a2v_cross_attention_mask",
@@ -698,14 +687,6 @@ class LTX2DenoisingStage(DenoisingStage):
         return tensor.repeat(repeat_factor, *([1] * (tensor.ndim - 1)))
 
     @staticmethod
-    def _repeat_readonly_batch_dim(
-        tensor: torch.Tensor, target_batch_size: int
-    ) -> torch.Tensor:
-        if tensor.shape[0] == 1 and int(target_batch_size) > 1:
-            return tensor.expand(int(target_batch_size), *([-1] * (tensor.ndim - 1)))
-        return LTX2DenoisingStage._repeat_batch_dim(tensor, target_batch_size)
-
-    @staticmethod
     def _build_ltx2_sp_padding_mask(
         batch: Req,
         *,
@@ -780,16 +761,11 @@ class LTX2DenoisingStage(DenoisingStage):
     @classmethod
     def _repeat_optional_batch_dim(
         cls,
-        tensor: torch.Tensor | tuple[torch.Tensor, ...] | None,
+        tensor: torch.Tensor | None,
         target_batch_size: int,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> torch.Tensor | None:
         if tensor is None:
             return None
-        if isinstance(tensor, tuple):
-            return tuple(
-                cls._repeat_readonly_batch_dim(item, target_batch_size)
-                for item in tensor
-            )
         return cls._repeat_batch_dim(tensor, target_batch_size)
 
     @staticmethod
@@ -802,74 +778,6 @@ class LTX2DenoisingStage(DenoisingStage):
             "Unexpected audio latents rank: "
             f"{audio_latent_model_input.ndim}, shape={tuple(audio_latent_model_input.shape)}"
         )
-
-    @staticmethod
-    def _get_ltx2_cached_rotary_embs(
-        ctx: LTX2DenoisingContext,
-        step: DenoisingStepState,
-        batch: Req,
-        video_coords: torch.Tensor | None,
-        audio_coords: torch.Tensor | None,
-        latent_model_input: torch.Tensor,
-        audio_latent_model_input: torch.Tensor,
-    ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor] | None,
-        tuple[torch.Tensor, torch.Tensor] | None,
-        tuple[torch.Tensor, torch.Tensor] | None,
-        tuple[torch.Tensor, torch.Tensor] | None,
-    ]:
-        if video_coords is None or audio_coords is None:
-            return None, None, None, None
-
-        model = getattr(step.current_model, "_orig_mod", step.current_model)
-        cache_key = (
-            id(model),
-            tuple(video_coords.shape),
-            tuple(audio_coords.shape),
-            str(video_coords.device),
-            str(audio_coords.device),
-            latent_model_input.dtype,
-            audio_latent_model_input.dtype,
-            video_coords.dtype,
-            audio_coords.dtype,
-            float(batch.fps),
-            int(getattr(batch, "sp_video_start_frame", 0)),
-            int(getattr(batch, "sp_audio_start_frame", 0)),
-        )
-        cached = ctx.rotary_emb_cache.get(cache_key)
-        if cached is None:
-            video_coords_for_rope = model._maybe_quantize_video_rope_coords(
-                video_coords,
-                latent_model_input.device,
-                latent_model_input.dtype,
-            )
-            audio_coords_for_rope = audio_coords.to(
-                device=audio_latent_model_input.device
-            )
-            cached = (
-                model.rope(
-                    video_coords_for_rope,
-                    device=latent_model_input.device,
-                    out_dtype=latent_model_input.dtype,
-                ),
-                model.audio_rope(
-                    audio_coords_for_rope,
-                    device=audio_latent_model_input.device,
-                    out_dtype=audio_latent_model_input.dtype,
-                ),
-                model.cross_attn_rope(
-                    video_coords_for_rope[:, 0:1, :],
-                    device=latent_model_input.device,
-                    out_dtype=latent_model_input.dtype,
-                ),
-                model.cross_attn_audio_rope(
-                    audio_coords_for_rope[:, 0:1, :],
-                    device=audio_latent_model_input.device,
-                    out_dtype=audio_latent_model_input.dtype,
-                ),
-            )
-            ctx.rotary_emb_cache[cache_key] = cached
-        return cached
 
     def _prepare_ltx2_model_inputs(
         self,
@@ -902,20 +810,6 @@ class LTX2DenoisingStage(DenoisingStage):
                 audio_latent_model_input,
                 num_frames=audio_num_frames_latent,
             )
-        (
-            video_rotary_emb,
-            audio_rotary_emb,
-            ca_video_rotary_emb,
-            ca_audio_rotary_emb,
-        ) = self._get_ltx2_cached_rotary_embs(
-            ctx,
-            step,
-            batch,
-            video_coords,
-            audio_coords,
-            latent_model_input,
-            audio_latent_model_input,
-        )
 
         batch_size = int(latent_model_input.shape[0])
         use_raw_sigma_timestep = ctx.use_ltx23_hq_timestep_semantics
@@ -1010,10 +904,6 @@ class LTX2DenoisingStage(DenoisingStage):
             audio_num_frames_latent=audio_num_frames_latent,
             video_coords=video_coords,
             audio_coords=audio_coords,
-            video_rotary_emb=video_rotary_emb,
-            audio_rotary_emb=audio_rotary_emb,
-            ca_video_rotary_emb=ca_video_rotary_emb,
-            ca_audio_rotary_emb=ca_audio_rotary_emb,
             timestep_video=timestep_video,
             timestep_audio=timestep_audio,
             prompt_timestep_video=prompt_timestep_video,
@@ -1042,10 +932,6 @@ class LTX2DenoisingStage(DenoisingStage):
             "audio_num_frames": model_inputs.audio_num_frames_latent,
             "video_coords": model_inputs.video_coords,
             "audio_coords": model_inputs.audio_coords,
-            "video_rotary_emb": model_inputs.video_rotary_emb,
-            "audio_rotary_emb": model_inputs.audio_rotary_emb,
-            "ca_video_rotary_emb": model_inputs.ca_video_rotary_emb,
-            "ca_audio_rotary_emb": model_inputs.ca_audio_rotary_emb,
             "return_latents": False,
             "return_dict": False,
         }
@@ -1171,9 +1057,6 @@ class LTX2DenoisingStage(DenoisingStage):
         for key, value in model_kwargs.items():
             if torch.is_tensor(value):
                 values = list(value.split(split_sizes, dim=0))
-            elif isinstance(value, tuple) and all(torch.is_tensor(x) for x in value):
-                split_values = [list(x.split(split_sizes, dim=0)) for x in value]
-                values = [tuple(parts) for parts in zip(*split_values, strict=True)]
             else:
                 values = [value] * len(split_sizes)
             for index, item in enumerate(values):
