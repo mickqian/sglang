@@ -55,6 +55,13 @@ class LTX2DenoisingContext(DenoisingContext):
     res2s_substep_noise_generator: torch.Generator | None = None
     sigmas_cpu: torch.Tensor | None = None
     sigmas_device: torch.Tensor | None = None
+    cfg_text_batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None = (
+        None
+    )
+    stage1_text_batch_cache: dict[
+        tuple[tuple[str, ...], int],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None],
+    ] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1295,30 +1302,12 @@ class LTX2DenoisingStage(DenoisingStage):
                 ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage
             ),
         )
-        use_official_cfg_path = stage1_guider_params is None
-        if use_official_cfg_path:
-            model_kwargs = self._build_ltx2_model_kwargs(
-                ctx,
-                base_model_kwargs,
-                encoder_hidden_states=batch.prompt_embeds[0],
-                audio_encoder_hidden_states=batch.audio_prompt_embeds[0],
-                encoder_attention_mask=prompt_attention_mask,
-            )
-            if batch.do_classifier_free_guidance:
-                cfg_batch_size = batch_size * 2
-                model_kwargs = self._repeat_ltx2_model_kwargs_batch(
-                    model_kwargs, cfg_batch_size
-                )
-                model_kwargs["encoder_hidden_states"] = torch.cat(
-                    [batch.negative_prompt_embeds[0], batch.prompt_embeds[0]], dim=0
-                )
-                model_kwargs["audio_encoder_hidden_states"] = torch.cat(
-                    [
-                        batch.negative_audio_prompt_embeds[0],
-                        batch.audio_prompt_embeds[0],
-                    ],
-                    dim=0,
-                )
+
+        def get_cfg_text_batch() -> tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor | None
+        ]:
+            if ctx.cfg_text_batch is None:
+                repeated_attention_mask = None
                 if self._should_pass_ltx2_text_attention_mask(ctx):
                     repeated_attention_mask = self._cat_or_none(
                         [
@@ -1333,10 +1322,45 @@ class LTX2DenoisingStage(DenoisingStage):
                             prompt_attention_mask,
                         ]
                     )
-                    model_kwargs["encoder_attention_mask"] = repeated_attention_mask
-                    model_kwargs["audio_encoder_attention_mask"] = (
-                        repeated_attention_mask
-                    )
+                # Prompt tensors do not change during denoising. Reuse the
+                # concatenated CFG batch instead of copying the same text
+                # embeddings before every model call.
+                ctx.cfg_text_batch = (
+                    torch.cat(
+                        [batch.negative_prompt_embeds[0], batch.prompt_embeds[0]],
+                        dim=0,
+                    ),
+                    torch.cat(
+                        [
+                            batch.negative_audio_prompt_embeds[0],
+                            batch.audio_prompt_embeds[0],
+                        ],
+                        dim=0,
+                    ),
+                    repeated_attention_mask,
+                )
+            return ctx.cfg_text_batch
+
+        use_official_cfg_path = stage1_guider_params is None
+        if use_official_cfg_path:
+            model_kwargs = self._build_ltx2_model_kwargs(
+                ctx,
+                base_model_kwargs,
+                encoder_hidden_states=batch.prompt_embeds[0],
+                audio_encoder_hidden_states=batch.audio_prompt_embeds[0],
+                encoder_attention_mask=prompt_attention_mask,
+            )
+            if batch.do_classifier_free_guidance:
+                cfg_batch_size = batch_size * 2
+                model_kwargs = self._repeat_ltx2_model_kwargs_batch(
+                    model_kwargs, cfg_batch_size
+                )
+                cfg_text, cfg_audio_text, cfg_attention_mask = get_cfg_text_batch()
+                model_kwargs["encoder_hidden_states"] = cfg_text
+                model_kwargs["audio_encoder_hidden_states"] = cfg_audio_text
+                if self._should_pass_ltx2_text_attention_mask(ctx):
+                    model_kwargs["encoder_attention_mask"] = cfg_attention_mask
+                    model_kwargs["audio_encoder_attention_mask"] = cfg_attention_mask
 
             with self._ltx2_model_forward_context(ctx, step):
                 model_video, model_audio = step.current_model(**model_kwargs)
@@ -1388,41 +1412,19 @@ class LTX2DenoisingStage(DenoisingStage):
                             model_kwargs_local = self._repeat_ltx2_model_kwargs_batch(
                                 model_kwargs_local, cfg_batch_size
                             )
-                            model_kwargs_local["encoder_hidden_states"] = torch.cat(
-                                [
-                                    batch.negative_prompt_embeds[0],
-                                    batch.prompt_embeds[0],
-                                ],
-                                dim=0,
+                            cfg_text, cfg_audio_text, cfg_attention_mask = (
+                                get_cfg_text_batch()
                             )
+                            model_kwargs_local["encoder_hidden_states"] = cfg_text
                             model_kwargs_local["audio_encoder_hidden_states"] = (
-                                torch.cat(
-                                    [
-                                        batch.negative_audio_prompt_embeds[0],
-                                        batch.audio_prompt_embeds[0],
-                                    ],
-                                    dim=0,
-                                )
+                                cfg_audio_text
                             )
                             if self._should_pass_ltx2_text_attention_mask(ctx):
-                                repeated_attention_mask = self._cat_or_none(
-                                    [
-                                        self._get_ltx_prompt_attention_mask(
-                                            batch,
-                                            is_ltx23_variant=(
-                                                ctx.is_ltx23_variant
-                                                and not ctx.use_ltx23_legacy_one_stage
-                                            ),
-                                            negative=True,
-                                        ),
-                                        prompt_attention_mask,
-                                    ]
-                                )
                                 model_kwargs_local["encoder_attention_mask"] = (
-                                    repeated_attention_mask
+                                    cfg_attention_mask
                                 )
                                 model_kwargs_local["audio_encoder_attention_mask"] = (
-                                    repeated_attention_mask
+                                    cfg_attention_mask
                                 )
 
                         with self._ltx2_model_forward_context(ctx, step):
@@ -1480,6 +1482,41 @@ class LTX2DenoisingStage(DenoisingStage):
             ),
             negative=True,
         )
+
+        def get_stage1_text_batch(
+            pass_specs: list[LTX2GuidancePassSpec],
+            batch_size_local: int,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+            cache_key = (
+                tuple(pass_spec.name for pass_spec in pass_specs),
+                batch_size_local,
+            )
+            cached = ctx.stage1_text_batch_cache.get(cache_key)
+            if cached is None:
+                cached = (
+                    torch.cat(
+                        [
+                            pass_spec.encoder_hidden_states
+                            for pass_spec in pass_specs
+                        ],
+                        dim=0,
+                    ),
+                    torch.cat(
+                        [
+                            pass_spec.audio_encoder_hidden_states
+                            for pass_spec in pass_specs
+                        ],
+                        dim=0,
+                    ),
+                    self._cat_or_none(
+                        [
+                            pass_spec.encoder_attention_mask
+                            for pass_spec in pass_specs
+                        ]
+                    ),
+                )
+                ctx.stage1_text_batch_cache[cache_key] = cached
+            return cached
 
         video_skip = self._ltx2_should_skip_step(
             step.step_index, int(stage1_guider_params["video_skip_step"])
@@ -1668,29 +1705,15 @@ class LTX2DenoisingStage(DenoisingStage):
                     batched_model_kwargs = self._repeat_ltx2_model_kwargs_batch(
                         base_model_kwargs_local, expanded_batch_size
                     )
+                    text_batch, audio_text_batch, attention_mask_batch = (
+                        get_stage1_text_batch(pass_specs, batch_size_local)
+                    )
                     batched_model_kwargs = self._build_ltx2_model_kwargs(
                         ctx,
                         batched_model_kwargs,
-                        encoder_hidden_states=torch.cat(
-                            [
-                                pass_spec.encoder_hidden_states
-                                for pass_spec in pass_specs
-                            ],
-                            dim=0,
-                        ),
-                        audio_encoder_hidden_states=torch.cat(
-                            [
-                                pass_spec.audio_encoder_hidden_states
-                                for pass_spec in pass_specs
-                            ],
-                            dim=0,
-                        ),
-                        encoder_attention_mask=self._cat_or_none(
-                            [
-                                pass_spec.encoder_attention_mask
-                                for pass_spec in pass_specs
-                            ]
-                        ),
+                        encoder_hidden_states=text_batch,
+                        audio_encoder_hidden_states=audio_text_batch,
+                        encoder_attention_mask=attention_mask_batch,
                     )
                     if use_split_stage1_guided_passes:
                         split_sizes = [1] * expanded_batch_size
