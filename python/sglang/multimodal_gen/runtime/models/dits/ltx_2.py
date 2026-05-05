@@ -1601,6 +1601,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_num_frames: Optional[int] = None,
         video_coords: Optional[torch.Tensor] = None,
         audio_coords: Optional[torch.Tensor] = None,
+        video_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        audio_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        ca_video_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        ca_audio_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         video_self_attention_mask: Optional[torch.Tensor] = None,
         audio_self_attention_mask: Optional[torch.Tensor] = None,
         a2v_cross_attention_mask: Optional[torch.Tensor] = None,
@@ -1660,30 +1664,36 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 device=audio_hidden_states.device,
             )
 
-        video_coords = self._maybe_quantize_video_rope_coords(
-            video_coords, hidden_states.device, hidden_states.dtype
-        )
-        audio_coords = audio_coords.to(device=audio_hidden_states.device)
-        video_rotary_emb = self.rope(
-            video_coords,
-            device=hidden_states.device,
-            out_dtype=hidden_states.dtype,
-        )
-        audio_rotary_emb = self.audio_rope(
-            audio_coords,
-            device=audio_hidden_states.device,
-            out_dtype=audio_hidden_states.dtype,
-        )
-        ca_video_rotary_emb = self.cross_attn_rope(
-            video_coords[:, 0:1, :],
-            device=hidden_states.device,
-            out_dtype=hidden_states.dtype,
-        )
-        ca_audio_rotary_emb = self.cross_attn_audio_rope(
-            audio_coords[:, 0:1, :],
-            device=audio_hidden_states.device,
-            out_dtype=audio_hidden_states.dtype,
-        )
+        if (
+            video_rotary_emb is None
+            or audio_rotary_emb is None
+            or ca_video_rotary_emb is None
+            or ca_audio_rotary_emb is None
+        ):
+            video_coords = self._maybe_quantize_video_rope_coords(
+                video_coords, hidden_states.device, hidden_states.dtype
+            )
+            audio_coords = audio_coords.to(device=audio_hidden_states.device)
+            video_rotary_emb = self.rope(
+                video_coords,
+                device=hidden_states.device,
+                out_dtype=hidden_states.dtype,
+            )
+            audio_rotary_emb = self.audio_rope(
+                audio_coords,
+                device=audio_hidden_states.device,
+                out_dtype=audio_hidden_states.dtype,
+            )
+            ca_video_rotary_emb = self.cross_attn_rope(
+                video_coords[:, 0:1, :],
+                device=hidden_states.device,
+                out_dtype=hidden_states.dtype,
+            )
+            ca_audio_rotary_emb = self.cross_attn_audio_rope(
+                audio_coords[:, 0:1, :],
+                device=audio_hidden_states.device,
+                out_dtype=audio_hidden_states.dtype,
+            )
 
         # 2. Patchify input projections
         hidden_states, _ = self.patchify_proj(hidden_states)
