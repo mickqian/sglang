@@ -71,6 +71,33 @@ class LTX2ArchConfig(DiTArchConfig):
             # FeedForward
             r"(.*)ff\.net\.0\.proj\.(.*)$": r"\1ff.proj_in.\2",
             r"(.*)ff\.net\.2\.(.*)$": r"\1ff.proj_out.\2",
+            # Load HF split projections into packed modules when the projections
+            # use the same input tensor: self-attention Q/K/V, cross-attention K/V.
+            r"(.*\.(?:attn1|audio_attn1)\.)to_q\.(.*)$": (
+                r"\1to_qkv.\2",
+                0,
+                3,
+            ),
+            r"(.*\.(?:attn1|audio_attn1)\.)to_k\.(.*)$": (
+                r"\1to_qkv.\2",
+                1,
+                3,
+            ),
+            r"(.*\.(?:attn1|audio_attn1)\.)to_v\.(.*)$": (
+                r"\1to_qkv.\2",
+                2,
+                3,
+            ),
+            r"(.*\.(?:attn2|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.)to_k\.(.*)$": (
+                r"\1to_kv.\2",
+                0,
+                2,
+            ),
+            r"(.*\.(?:attn2|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.)to_v\.(.*)$": (
+                r"\1to_kv.\2",
+                1,
+                2,
+            ),
             # Attention Norms
             r"(.*)\.norm_q\.(.*)$": r"\1.q_norm.\2",
             r"(.*)\.norm_k\.(.*)$": r"\1.k_norm.\2",

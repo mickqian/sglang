@@ -25,7 +25,10 @@ from sglang.multimodal_gen.runtime.distributed.communication_op import (
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
+    IS_AMP_SUPPORTED,
+    MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -537,6 +540,7 @@ class LTX2Attention(nn.Module):
         self.use_local_attention = bool(use_local_attention)
         self.apply_gated_attention = bool(apply_gated_attention)
         self.prefix = prefix
+        self.is_self_attention = context_dim is None
 
         tp_size = get_tp_world_size()
         if tp_size <= 0:
@@ -553,28 +557,31 @@ class LTX2Attention(nn.Module):
                 f"{self.inner_dim=} {tp_size=}."
             )
         self.local_heads = self.heads // tp_size
+        self.local_inner_dim = self.inner_dim // tp_size
 
-        self.to_q = ColumnParallelLinear(
-            self.query_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
-        self.to_k = ColumnParallelLinear(
-            self.context_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
-        self.to_v = ColumnParallelLinear(
-            self.context_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
+        if self.is_self_attention:
+            self.to_qkv = MergedColumnParallelLinear(
+                self.query_dim,
+                [self.inner_dim, self.inner_dim, self.inner_dim],
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
+        else:
+            self.to_q = ColumnParallelLinear(
+                self.query_dim,
+                self.inner_dim,
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
+            self.to_kv = MergedColumnParallelLinear(
+                self.context_dim,
+                [self.inner_dim, self.inner_dim],
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
         self.to_gate_logits: ColumnParallelLinear | None = None
         if self.apply_gated_attention:
             self.to_gate_logits = ColumnParallelLinear(
@@ -636,6 +643,24 @@ class LTX2Attention(nn.Module):
                 prefix=f"{prefix}.attn",
             )
 
+    def _project_self_attention_value(self, x: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.to_qkv.quant_method, UnquantizedLinearMethod):
+            start = 2 * self.local_inner_dim
+            weight = self.to_qkv.weight.narrow(0, start, self.local_inner_dim)
+            bias = (
+                None
+                if self.to_qkv.bias is None
+                else self.to_qkv.bias.narrow(0, start, self.local_inner_dim)
+            )
+            return (
+                F.linear(x, weight, bias)
+                if IS_AMP_SUPPORTED or bias is None
+                else F.linear(x, weight, bias.to(x.dtype))
+            )
+
+        qkv, _ = self.to_qkv(x)
+        return qkv.narrow(-1, 2 * self.local_inner_dim, self.local_inner_dim)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -650,13 +675,21 @@ class LTX2Attention(nn.Module):
     ) -> torch.Tensor:
         gate_input = x
         context_ = x if context is None else context
-        v, _ = self.to_v(context_)
         use_attention = not all_perturbed
 
-        if use_attention:
-            q, _ = self.to_q(x)
-            k, _ = self.to_k(context_)
+        if self.is_self_attention:
+            if use_attention:
+                qkv, _ = self.to_qkv(context_)
+                q, k, v = [t.contiguous() for t in qkv.chunk(3, dim=-1)]
+            else:
+                v = self._project_self_attention_value(context_)
+        else:
+            kv, _ = self.to_kv(context_)
+            k, v = [t.contiguous() for t in kv.chunk(2, dim=-1)]
+            if use_attention:
+                q, _ = self.to_q(x)
 
+        if use_attention:
             if self.qk_norm:
                 assert self.q_norm is not None and self.k_norm is not None
                 q = self.q_norm(q)
