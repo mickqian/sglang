@@ -474,14 +474,9 @@ class USPAttention(nn.Module):
 
             sp_size = get_ulysses_parallel_world_size()
             if sp_size > 1:
-                if q.shape == k.shape == v.shape:
-                    qkv = torch.cat([q, k, v], dim=0)
-                    qkv = _usp_input_all_to_all(qkv, head_dim=2)
-                    q, k, v = qkv.chunk(3, dim=0)
-                else:
-                    q = _usp_input_all_to_all(q, head_dim=2)
-                    k = _usp_input_all_to_all(k, head_dim=2)
-                    v = _usp_input_all_to_all(v, head_dim=2)
+                q = _usp_input_all_to_all(q, head_dim=2)
+                k = _usp_input_all_to_all(k, head_dim=2)
+                v = _usp_input_all_to_all(v, head_dim=2)
 
             gathered_mask = sequence_model_parallel_all_gather(
                 attn_mask.contiguous(), dim=1
