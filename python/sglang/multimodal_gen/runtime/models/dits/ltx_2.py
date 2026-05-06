@@ -1176,8 +1176,8 @@ class LTX2TransformerBlock(nn.Module):
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
         )
-        norm_audio_hidden_states = (
-            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
+        norm_audio_hidden_states = rms_norm_scale_shift(
+            audio_hidden_states, ashift_msa, ascale_msa, self.norm_eps
         )
         attn_audio_hidden_states = self.audio_attn1(
             norm_audio_hidden_states,
@@ -1228,8 +1228,8 @@ class LTX2TransformerBlock(nn.Module):
                 temb_audio_prompt,
                 slice(None),
             )
-            norm_audio_hidden_states = (
-                rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_q) + ashift_q
+            norm_audio_hidden_states = rms_norm_scale_shift(
+                audio_hidden_states, ashift_q, ascale_q, self.norm_eps
             )
             mod_audio_encoder_hidden_states = scale_shift(
                 audio_encoder_hidden_states, a_prompt_shift, a_prompt_scale
@@ -1456,8 +1456,8 @@ class LTX2TransformerBlock(nn.Module):
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(3, 6)
         )
-        norm_audio_hidden_states = (
-            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
+        norm_audio_hidden_states = rms_norm_scale_shift(
+            audio_hidden_states, ashift_mlp, ascale_mlp, self.norm_eps
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
