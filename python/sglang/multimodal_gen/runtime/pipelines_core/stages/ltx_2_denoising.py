@@ -1348,16 +1348,6 @@ class LTX2DenoisingStage(DenoisingStage):
         server_args: ServerArgs,
     ) -> None:
         """Run one joint video/audio denoising step with LTX-2-specific guidance."""
-        if (
-            server_args.enable_cfg_parallel
-            and server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
-            and server_args.sp_degree > 1
-        ):
-            raise ValueError(
-                "LTX2TwoStageHQPipeline supports CFG parallel only without "
-                "sequence parallel. CFG+SP was validated to change HQ outputs "
-                "too much; use 2 GPUs with --enable-cfg-parallel instead."
-            )
         if ctx.audio_latents is None:
             raise ValueError("LTX-2 requires audio latents for denoising.")
         if ctx.audio_scheduler is None:
