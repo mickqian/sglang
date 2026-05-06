@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sglang.jit_kernel.diffusion.triton.scale_shift import fuse_scale_shift_kernel
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_parallel_rank,
@@ -489,27 +488,6 @@ def rms_norm_scale_shift(
         return out
 
     return rms_norm(x, eps) * (1 + scale) + shift
-
-
-def gate_residual(
-    residual: torch.Tensor, x: torch.Tensor, gate: torch.Tensor
-) -> torch.Tensor:
-    if (
-        residual.is_cuda
-        and residual.is_contiguous()
-        and residual.dtype in (torch.float16, torch.bfloat16)
-        and residual.ndim == 3
-        and 4096 <= residual.shape[-1] <= 8192
-        and x.is_contiguous()
-        and x.shape == residual.shape
-        and x.dtype == residual.dtype
-        and gate.is_cuda
-        and gate.stride(-1) == 1
-    ):
-        return fuse_scale_shift_kernel(
-            x, gate.contiguous(), residual, scale_constant=0.0
-        )
-    return residual + x * gate
 
 
 def scale_residual_rms_norm_scale_shift(
@@ -1454,7 +1432,7 @@ class LTX2TransformerBlock(nn.Module):
                     + vshift_mlp
                 )
         ff_output = self.ff(norm_hidden_states)
-        hidden_states = gate_residual(hidden_states, ff_output, vgate_mlp)
+        hidden_states = hidden_states + ff_output * vgate_mlp
 
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(3, 6)
@@ -1463,9 +1441,7 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
-        audio_hidden_states = gate_residual(
-            audio_hidden_states, audio_ff_output, agate_mlp
-        )
+        audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
         return hidden_states, audio_hidden_states
 
 
