@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+from collections import defaultdict
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -40,6 +42,64 @@ logger = init_logger(__name__)
 
 ADALN_NUM_BASE_PARAMS = 6
 ADALN_NUM_CROSS_ATTN_PARAMS = 3
+
+_LTX2_PROFILE_FORWARD_COUNT = 0
+_LTX2_PROFILE_ACTIVE: dict[str, Any] | None = None
+
+
+def _ltx2_profile_start_forward(device: torch.device) -> bool:
+    global _LTX2_PROFILE_ACTIVE, _LTX2_PROFILE_FORWARD_COUNT
+    if os.environ.get("SGLANG_LTX2_PROFILE") != "1":
+        return False
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    max_forwards = int(os.environ.get("SGLANG_LTX2_PROFILE_MAX_FORWARDS", "4"))
+    if _LTX2_PROFILE_FORWARD_COUNT >= max_forwards:
+        return False
+
+    _LTX2_PROFILE_FORWARD_COUNT += 1
+    start = torch.cuda.Event(enable_timing=True)
+    start.record(torch.cuda.current_stream(device))
+    _LTX2_PROFILE_ACTIVE = {
+        "id": _LTX2_PROFILE_FORWARD_COUNT,
+        "device": device,
+        "last": start,
+        "events": [],
+    }
+    return True
+
+
+def _ltx2_profile_mark(name: str) -> None:
+    active = _LTX2_PROFILE_ACTIVE
+    if active is None:
+        return
+    device = active["device"]
+    event = torch.cuda.Event(enable_timing=True)
+    event.record(torch.cuda.current_stream(device))
+    active["events"].append((name, active["last"], event))
+    active["last"] = event
+
+
+def _ltx2_profile_finish_forward() -> None:
+    global _LTX2_PROFILE_ACTIVE
+    active = _LTX2_PROFILE_ACTIVE
+    if active is None:
+        return
+    torch.cuda.synchronize(active["device"])
+    totals: defaultdict[str, float] = defaultdict(float)
+    for name, start, end in active["events"]:
+        totals[name] += start.elapsed_time(end)
+    total_ms = sum(totals.values())
+    rank = get_sp_parallel_rank() if model_parallel_is_initialized() else 0
+    parts = " ".join(f"{name}={value:.3f}ms" for name, value in totals.items())
+    logger.info(
+        "[LTX2_PROFILE] rank=%s forward=%s total=%.3fms %s",
+        rank,
+        active["id"],
+        total_ms,
+        parts,
+    )
+    _LTX2_PROFILE_ACTIVE = None
 
 
 def adaln_embedding_coefficient(cross_attention_adaln: bool) -> int:
@@ -1012,6 +1072,7 @@ class LTX2TransformerBlock(nn.Module):
             gather_context_kv_for_sp=audio_replicated_for_sp,
         )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
+        _ltx2_profile_mark("block.video_self")
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
@@ -1028,6 +1089,7 @@ class LTX2TransformerBlock(nn.Module):
             skip_sequence_parallel_override=audio_replicated_for_sp,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        _ltx2_profile_mark("block.audio_self")
         # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
             # LTX2.3
@@ -1093,6 +1155,7 @@ class LTX2TransformerBlock(nn.Module):
                 mask=audio_encoder_attention_mask,
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+        _ltx2_profile_mark("block.prompt_cross")
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -1154,6 +1217,7 @@ class LTX2TransformerBlock(nn.Module):
             audio_v2a_ca_shift,
         ) = [t.squeeze(2) for t in audio_ca_scale_shift_table]
         v2a_gate = audio_ca_gate[0].squeeze(2)
+        _ltx2_profile_mark("block.av_prepare")
 
         # A2V
         mod_norm_hidden_states = (
@@ -1177,6 +1241,7 @@ class LTX2TransformerBlock(nn.Module):
                     a2v_attn_hidden_states * a2v_cross_attn_perturbation_mask
                 )
             hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
+        _ltx2_profile_mark("block.a2v_cross")
 
         # V2A
         mod_norm_hidden_states = (
@@ -1202,6 +1267,7 @@ class LTX2TransformerBlock(nn.Module):
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
             )
+        _ltx2_profile_mark("block.v2a_cross")
         # 4. Feedforward
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(3, 6)
@@ -1211,6 +1277,7 @@ class LTX2TransformerBlock(nn.Module):
         )
         ff_output = self.ff(norm_hidden_states)
         hidden_states = hidden_states + ff_output * vgate_mlp
+        _ltx2_profile_mark("block.video_ff")
 
         ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
             self.audio_scale_shift_table, batch_size, temb_audio, slice(3, 6)
@@ -1220,6 +1287,7 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        _ltx2_profile_mark("block.audio_ff")
         return hidden_states, audio_hidden_states
 
 
@@ -1614,6 +1682,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
 
         batch_size = hidden_states.size(0)
+        _ltx2_profile_start_forward(hidden_states.device)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
 
         if num_frames is None or height is None or width is None:
@@ -1790,6 +1859,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             audio_encoder_hidden_states = self.audio_caption_projection(
                 audio_encoder_hidden_states
             )
+        _ltx2_profile_mark("model.setup")
         # 5. Run blocks
         skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
         skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
@@ -1880,6 +1950,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 v2a_cross_attn_perturbation_mask=v2a_cross_attn_perturbation_mask,
                 audio_replicated_for_sp=audio_replicated_for_sp,
             )
+        _ltx2_profile_mark("model.blocks")
 
         # 6. Output layers
         # Video
@@ -1904,6 +1975,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
+        _ltx2_profile_mark("model.output_projection")
         # Unpatchify if requested (default True for pipeline compatibility)
         return_latents = kwargs.get("return_latents", True)
 
@@ -1929,6 +2001,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 # simple reshape for 1D patch
                 audio_hidden_states = audio_hidden_states.permute(0, 2, 1)  # [B, C, T]
 
+        _ltx2_profile_mark("model.unpatchify")
+        _ltx2_profile_finish_forward()
         return hidden_states, audio_hidden_states
 
 
