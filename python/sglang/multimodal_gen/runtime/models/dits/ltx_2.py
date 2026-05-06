@@ -80,6 +80,22 @@ def _ltx2_profile_mark(name: str) -> None:
     active["last"] = event
 
 
+def _ltx2_profile_attn_kind(prefix: str) -> str:
+    if prefix.endswith(".audio_attn1"):
+        return "attn.audio_self"
+    if prefix.endswith(".attn1"):
+        return "attn.video_self"
+    if prefix.endswith(".audio_attn2"):
+        return "attn.audio_prompt"
+    if prefix.endswith(".attn2"):
+        return "attn.video_prompt"
+    if prefix.endswith(".audio_to_video_attn"):
+        return "attn.a2v"
+    if prefix.endswith(".video_to_audio_attn"):
+        return "attn.v2a"
+    return "attn.other"
+
+
 def _ltx2_profile_finish_forward() -> None:
     global _LTX2_PROFILE_ACTIVE
     active = _LTX2_PROFILE_ACTIVE
@@ -708,14 +724,17 @@ class LTX2Attention(nn.Module):
         skip_sequence_parallel_override: bool = False,
         gather_context_kv_for_sp: bool = False,
     ) -> torch.Tensor:
+        profile_kind = _ltx2_profile_attn_kind(self.prefix)
         gate_input = x
         context_ = x if context is None else context
         v, _ = self.to_v(context_)
+        _ltx2_profile_mark(f"{profile_kind}.to_v")
         use_attention = not all_perturbed
 
         if use_attention:
             q, _ = self.to_q(x)
             k, _ = self.to_k(context_)
+            _ltx2_profile_mark(f"{profile_kind}.qk_proj")
 
             if self.qk_norm:
                 assert self.q_norm is not None and self.k_norm is not None
@@ -740,11 +759,13 @@ class LTX2Attention(nn.Module):
                 else:
                     q = apply_split_rotary_emb(q, (cos, sin))
                     k = apply_split_rotary_emb(k, (k_cos, k_sin))
+            _ltx2_profile_mark(f"{profile_kind}.qk_norm_rope")
 
         v = v.view(*v.shape[:-1], self.local_heads, self.dim_head)
         if use_attention:
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
             k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
+            _ltx2_profile_mark(f"{profile_kind}.reshape")
 
             if gather_context_kv_for_sp:
                 k_full = sequence_model_parallel_all_gather(k.contiguous(), dim=1)
@@ -754,6 +775,7 @@ class LTX2Attention(nn.Module):
                     gathered_mask = sequence_model_parallel_all_gather(
                         mask.contiguous(), dim=1
                     )
+                _ltx2_profile_mark(f"{profile_kind}.kv_gather")
                 if self.use_local_attention:
                     out = self.attn(q, k_full, v_full, attn_mask=gathered_mask)
                 else:
@@ -764,8 +786,10 @@ class LTX2Attention(nn.Module):
                         attn_mask=gathered_mask,
                         skip_sequence_parallel_override=True,
                     )
+                _ltx2_profile_mark(f"{profile_kind}.core")
             elif self.use_local_attention:
                 out = self.attn(q, k, v, attn_mask=mask)
+                _ltx2_profile_mark(f"{profile_kind}.core")
             else:
                 out = self.attn(
                     q,
@@ -774,11 +798,13 @@ class LTX2Attention(nn.Module):
                     attn_mask=mask,
                     skip_sequence_parallel_override=skip_sequence_parallel_override,
                 )
+                _ltx2_profile_mark(f"{profile_kind}.core")
 
             if perturbation_mask is not None:
                 if perturbation_mask.ndim == out.ndim - 1:
                     perturbation_mask = perturbation_mask.unsqueeze(-1)
                 out = out * perturbation_mask + v * (1 - perturbation_mask)
+                _ltx2_profile_mark(f"{profile_kind}.perturb")
 
         if not use_attention:
             out = v
@@ -789,9 +815,11 @@ class LTX2Attention(nn.Module):
             out = out.view(b, t, self.local_heads, self.dim_head)
             out = out * (2.0 * torch.sigmoid(gate_logits).unsqueeze(-1))
             out = out.view(b, t, self.local_heads * self.dim_head)
+            _ltx2_profile_mark(f"{profile_kind}.gate")
 
         out_flat = out.flatten(2)
         out_proj, _ = self.to_out[0](out_flat)
+        _ltx2_profile_mark(f"{profile_kind}.out_proj")
 
         return out_proj
 
