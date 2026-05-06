@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.jit_kernel.diffusion.triton.scale_shift import fuse_scale_shift_kernel
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_parallel_rank,
@@ -488,6 +489,24 @@ def rms_norm_scale_shift(
         return out
 
     return rms_norm(x, eps) * (1 + scale) + shift
+
+
+def scale_shift(
+    x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    if (
+        x.is_cuda
+        and x.is_contiguous()
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and x.ndim == 3
+        and 4096 <= x.shape[-1] <= 8192
+        and scale.is_cuda
+        and shift.is_cuda
+        and scale.stride(-1) == 1
+        and shift.stride(-1) == 1
+    ):
+        return fuse_scale_shift_kernel(x, scale.contiguous(), shift.contiguous())
+    return x * (1 + scale) + shift
 
 
 def scale_residual_rms_norm_scale_shift(
@@ -1190,8 +1209,8 @@ class LTX2TransformerBlock(nn.Module):
                 vscale_q,
                 self.norm_eps,
             )
-            mod_encoder_hidden_states = (
-                encoder_hidden_states * (1 + v_prompt_scale) + v_prompt_shift
+            mod_encoder_hidden_states = scale_shift(
+                encoder_hidden_states, v_prompt_shift, v_prompt_scale
             )
             attn_hidden_states = self.attn2(
                 norm_hidden_states,
@@ -1212,8 +1231,8 @@ class LTX2TransformerBlock(nn.Module):
             norm_audio_hidden_states = (
                 rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_q) + ashift_q
             )
-            mod_audio_encoder_hidden_states = (
-                audio_encoder_hidden_states * (1 + a_prompt_scale) + a_prompt_shift
+            mod_audio_encoder_hidden_states = scale_shift(
+                audio_encoder_hidden_states, a_prompt_shift, a_prompt_scale
             )
             attn_audio_hidden_states = self.audio_attn2(
                 norm_audio_hidden_states,
@@ -1364,8 +1383,8 @@ class LTX2TransformerBlock(nn.Module):
                     + video_v2a_ca_shift
                 )
 
-        mod_norm_audio_hidden_states = (
-            norm_audio_hidden_states * (1 + audio_a2v_ca_scale) + audio_a2v_ca_shift
+        mod_norm_audio_hidden_states = scale_shift(
+            norm_audio_hidden_states, audio_a2v_ca_shift, audio_a2v_ca_scale
         )
 
         if not skip_a2v_cross_attn:
@@ -1385,8 +1404,8 @@ class LTX2TransformerBlock(nn.Module):
         else:
             a2v_attn_output = None
 
-        mod_norm_audio_hidden_states = (
-            norm_audio_hidden_states * (1 + audio_v2a_ca_scale) + audio_v2a_ca_shift
+        mod_norm_audio_hidden_states = scale_shift(
+            norm_audio_hidden_states, audio_v2a_ca_shift, audio_v2a_ca_scale
         )
 
         if not skip_v2a_cross_attn:
