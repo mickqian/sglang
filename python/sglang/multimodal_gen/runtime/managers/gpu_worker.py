@@ -313,28 +313,15 @@ class GPUWorker:
                 )
 
             if req.save_output and req.return_file_paths_only and self.rank == 0:
-                if output_batch.output is not None:
-                    # handle sync save file
-                    output_batch.output_file_paths = _save_output_file(
-                        output_batch.output, req, output_batch
-                    )
-                    output_batch.output = None
-                elif (
-                    output_batch.asyn_post_process
-                    and req.session
-                    and req.request_id in req.session.output_futures
-                ):
-                    # handle async save file and notify callback
+                if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
-                    _future = req.session.output_futures.pop(req.request_id)
                     _notify_callback = self.notify_callback
 
-                    def _async_save_with_postprocess(
-                        _future, _req, _output_batch, _notify_callback
-                    ):
-                        _output = _future.result()
-                        saved_paths = _save_output_file(_output, _req, _output_batch)
+                    def _async_save_with_postprocess(_future, _req, _notify_callback):
+                        saved_paths = _save_output_file(
+                            _output_batch.output, _req, _output_batch
+                        )
                         _notify_callback(
                             FileReadyNotification(
                                 dispatch_id=_req.extra.get("realtime_session_id", ""),
@@ -345,11 +332,17 @@ class GPUWorker:
 
                     self._save_file_executor.submit(
                         _async_save_with_postprocess,
-                        _future,
                         _req,
                         _output_batch,
                         _notify_callback,
                     )
+
+                elif output_batch.output is not None:
+                    # handle sync save file
+                    output_batch.output_file_paths = _save_output_file(
+                        output_batch.output, req, output_batch
+                    )
+                    output_batch.output = None
 
                 # No rank needs to hold on to generated tensors once the file-path
                 # response has been materialized on rank 0
