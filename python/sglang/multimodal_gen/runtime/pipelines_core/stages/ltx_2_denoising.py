@@ -1680,10 +1680,10 @@ class LTX2DenoisingStage(DenoisingStage):
         # contains NCCL collectives).
         use_split_stage1_guided_passes = (
             server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
-            or (
-                is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
-                and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
-            )
+            and not server_args.enable_cfg_parallel
+        ) or (
+            is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
+            and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
         )
         # "Perturbation" means disabling selected attention paths
         # for that item (self-attention blocks or audio/video cross-attention)
@@ -1699,6 +1699,7 @@ class LTX2DenoisingStage(DenoisingStage):
         # perturbation_configs: one config dict per expanded item.
         use_split_pass_kwargs = (
             server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
+            and use_split_stage1_guided_passes
         )
         skip_v2a_cross_attn_for_video_gt = bool(
             batch.extra.get("ltx2_skip_v2a_cross_attn_for_video_gt", False)
