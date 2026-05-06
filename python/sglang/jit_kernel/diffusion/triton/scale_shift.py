@@ -452,6 +452,232 @@ def fuse_scale_shift_kernel(
     return output
 
 
+@triton.jit
+def _fused_rms_norm_scale_shift_blc_kernel(
+    output_ptr,
+    x_ptr,
+    scale_ptr,
+    shift_ptr,
+    B: tl.constexpr,
+    L: tl.constexpr,
+    C: tl.constexpr,
+    stride_x_b: tl.constexpr,
+    stride_x_l: tl.constexpr,
+    stride_x_c: tl.constexpr,
+    stride_s_b: tl.constexpr,
+    stride_s_l: tl.constexpr,
+    stride_s_c: tl.constexpr,
+    stride_sh_b: tl.constexpr,
+    stride_sh_l: tl.constexpr,
+    stride_sh_c: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    row = tl.program_id(0)
+    b = row // L
+    l = row - b * L
+    cols = tl.arange(0, BLOCK_C)
+    mask = cols < C
+
+    x = tl.load(
+        x_ptr + b * stride_x_b + l * stride_x_l + cols * stride_x_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    scale = tl.load(
+        scale_ptr + b * stride_s_b + l * stride_s_l + cols * stride_s_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    shift = tl.load(
+        shift_ptr + b * stride_sh_b + l * stride_sh_l + cols * stride_sh_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    var = tl.sum(tl.where(mask, x * x, 0.0), axis=0) / C
+    y = x * tl.rsqrt(var + eps) * (1.0 + scale) + shift
+    tl.store(output_ptr + b * L * C + l * C + cols, y, mask=mask)
+
+
+@triton.jit
+def _fused_residual_rms_norm_scale_shift_blc_kernel(
+    output_ptr,
+    residual_out_ptr,
+    residual_ptr,
+    x_ptr,
+    gate_ptr,
+    scale_ptr,
+    shift_ptr,
+    B: tl.constexpr,
+    L: tl.constexpr,
+    C: tl.constexpr,
+    stride_r_b: tl.constexpr,
+    stride_r_l: tl.constexpr,
+    stride_r_c: tl.constexpr,
+    stride_x_b: tl.constexpr,
+    stride_x_l: tl.constexpr,
+    stride_x_c: tl.constexpr,
+    stride_g_b: tl.constexpr,
+    stride_g_l: tl.constexpr,
+    stride_g_c: tl.constexpr,
+    stride_s_b: tl.constexpr,
+    stride_s_l: tl.constexpr,
+    stride_s_c: tl.constexpr,
+    stride_sh_b: tl.constexpr,
+    stride_sh_l: tl.constexpr,
+    stride_sh_c: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    row = tl.program_id(0)
+    b = row // L
+    l = row - b * L
+    cols = tl.arange(0, BLOCK_C)
+    mask = cols < C
+
+    residual = tl.load(
+        residual_ptr + b * stride_r_b + l * stride_r_l + cols * stride_r_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    x = tl.load(
+        x_ptr + b * stride_x_b + l * stride_x_l + cols * stride_x_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    gate = tl.load(
+        gate_ptr + b * stride_g_b + l * stride_g_l + cols * stride_g_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    scale = tl.load(
+        scale_ptr + b * stride_s_b + l * stride_s_l + cols * stride_s_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    shift = tl.load(
+        shift_ptr + b * stride_sh_b + l * stride_sh_l + cols * stride_sh_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    residual_out = residual + x * gate
+    tl.store(residual_out_ptr + b * L * C + l * C + cols, residual_out, mask=mask)
+
+    var = tl.sum(tl.where(mask, residual_out * residual_out, 0.0), axis=0) / C
+    y = residual_out * tl.rsqrt(var + eps) * (1.0 + scale) + shift
+    tl.store(output_ptr + b * L * C + l * C + cols, y, mask=mask)
+
+
+def _as_expanded_blc(t: torch.Tensor, B: int, L: int, C: int) -> torch.Tensor:
+    if t.dim() == 1:
+        t = t.reshape(1, 1, C)
+    elif t.dim() == 2:
+        t = t[:, None, :]
+    elif t.dim() != 3:
+        raise ValueError("expected a 1D, 2D, or 3D tensor")
+    return t.expand(B, L, C)
+
+
+def _rms_norm_scale_shift_launch_config(x: torch.Tensor) -> tuple[int, int]:
+    block_c = triton.next_power_of_2(x.shape[-1])
+    num_warps = 8 if block_c >= 2048 else 4
+    return block_c, num_warps
+
+
+def fuse_rms_norm_scale_shift_kernel(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+):
+    assert x.is_cuda
+    assert x.is_contiguous()
+    B, L, C = x.shape
+    scale = _as_expanded_blc(scale, B, L, C)
+    shift = _as_expanded_blc(shift, B, L, C)
+    output = torch.empty_like(x)
+    block_c, num_warps = _rms_norm_scale_shift_launch_config(x)
+
+    _fused_rms_norm_scale_shift_blc_kernel[(B * L,)](
+        output,
+        x,
+        scale,
+        shift,
+        B,
+        L,
+        C,
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
+        shift.stride(0),
+        shift.stride(1),
+        shift.stride(2),
+        eps,
+        BLOCK_C=block_c,
+        num_warps=num_warps,
+        num_stages=4,
+    )
+    return output
+
+
+def fuse_residual_rms_norm_scale_shift_kernel(
+    residual: torch.Tensor,
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+):
+    assert residual.is_cuda
+    assert residual.is_contiguous()
+    assert x.is_contiguous()
+    B, L, C = residual.shape
+    gate = _as_expanded_blc(gate, B, L, C)
+    scale = _as_expanded_blc(scale, B, L, C)
+    shift = _as_expanded_blc(shift, B, L, C)
+    output = torch.empty_like(residual)
+    residual_out = torch.empty_like(residual)
+    block_c, num_warps = _rms_norm_scale_shift_launch_config(residual)
+
+    _fused_residual_rms_norm_scale_shift_blc_kernel[(B * L,)](
+        output,
+        residual_out,
+        residual,
+        x,
+        gate,
+        scale,
+        shift,
+        B,
+        L,
+        C,
+        residual.stride(0),
+        residual.stride(1),
+        residual.stride(2),
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        gate.stride(0),
+        gate.stride(1),
+        gate.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
+        shift.stride(0),
+        shift.stride(1),
+        shift.stride(2),
+        eps,
+        BLOCK_C=block_c,
+        num_warps=num_warps,
+        num_stages=4,
+    )
+    return output, residual_out
+
+
 def fuse_layernorm_scale_shift_gate_select01_kernel(
     x: torch.Tensor,
     weight: torch.Tensor | None,

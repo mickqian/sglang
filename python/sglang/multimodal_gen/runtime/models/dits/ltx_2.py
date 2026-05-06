@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sglang.jit_kernel.diffusion.triton.scale_shift import fuse_scale_shift_kernel
+from sglang.jit_kernel.diffusion.triton.scale_shift import (
+    fuse_residual_rms_norm_scale_shift_kernel,
+    fuse_rms_norm_scale_shift_kernel,
+    fuse_scale_shift_kernel,
+)
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_parallel_rank,
@@ -426,6 +430,10 @@ def scale_shift(
 def rms_norm_scale_shift(
     x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor, eps: float
 ) -> torch.Tensor:
+    if _ltx2_can_use_scale_shift_kernel(x, shift, scale):
+        return fuse_rms_norm_scale_shift_kernel(
+            x, scale.contiguous(), shift.contiguous(), eps
+        )
     return scale_shift(rms_norm(x, eps), shift, scale)
 
 
@@ -447,6 +455,22 @@ def scale_residual_rms_norm_scale_shift(
     scale: torch.Tensor,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        _ltx2_can_use_scale_shift_kernel(residual, shift, scale)
+        and x.is_contiguous()
+        and x.shape == residual.shape
+        and x.dtype == residual.dtype
+        and gate.stride(-1) == 1
+    ):
+        return fuse_residual_rms_norm_scale_shift_kernel(
+            residual,
+            x,
+            gate.contiguous(),
+            scale.contiguous(),
+            shift.contiguous(),
+            eps,
+        )
+
     residual_out = gated_residual_add(residual, x, gate)
     return rms_norm_scale_shift(residual_out, shift, scale, eps), residual_out
 
