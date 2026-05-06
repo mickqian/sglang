@@ -25,6 +25,7 @@ from sglang.multimodal_gen.runtime.distributed.communication_op import (
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
@@ -553,28 +554,32 @@ class LTX2Attention(nn.Module):
                 f"{self.inner_dim=} {tp_size=}."
             )
         self.local_heads = self.heads // tp_size
+        self.local_inner_dim = self.local_heads * self.dim_head
+        self.is_self_attention = context_dim is None
 
-        self.to_q = ColumnParallelLinear(
-            self.query_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
-        self.to_k = ColumnParallelLinear(
-            self.context_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
-        self.to_v = ColumnParallelLinear(
-            self.context_dim,
-            self.inner_dim,
-            bias=True,
-            gather_output=False,
-            quant_config=quant_config,
-        )
+        if self.is_self_attention:
+            self.to_qkv = MergedColumnParallelLinear(
+                self.query_dim,
+                [self.inner_dim, self.inner_dim, self.inner_dim],
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
+        else:
+            self.to_q = ColumnParallelLinear(
+                self.query_dim,
+                self.inner_dim,
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
+            self.to_kv = MergedColumnParallelLinear(
+                self.context_dim,
+                [self.inner_dim, self.inner_dim],
+                bias=True,
+                gather_output=False,
+                quant_config=quant_config,
+            )
         self.to_gate_logits: ColumnParallelLinear | None = None
         if self.apply_gated_attention:
             self.to_gate_logits = ColumnParallelLinear(
@@ -650,13 +655,24 @@ class LTX2Attention(nn.Module):
     ) -> torch.Tensor:
         gate_input = x
         context_ = x if context is None else context
-        v, _ = self.to_v(context_)
         use_attention = not all_perturbed
+        q: torch.Tensor | None
+        k: torch.Tensor | None
+
+        if self.is_self_attention:
+            qkv, _ = self.to_qkv(x)
+            if use_attention:
+                q, k, v = qkv.split(self.local_inner_dim, dim=-1)
+            else:
+                q = k = None
+                v = qkv[..., 2 * self.local_inner_dim :]
+        else:
+            kv, _ = self.to_kv(context_)
+            k, v = kv.split(self.local_inner_dim, dim=-1)
+            q, _ = self.to_q(x)
 
         if use_attention:
-            q, _ = self.to_q(x)
-            k, _ = self.to_k(context_)
-
+            assert q is not None and k is not None
             if self.qk_norm:
                 assert self.q_norm is not None and self.k_norm is not None
                 q = self.q_norm(q)
