@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import Future
 from typing import Any
 
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -22,6 +23,7 @@ class RealtimeSession:
     def __init__(self):
         # Store independent per-session state objects by type.
         self._states: dict[type[BaseRealtimeState], BaseRealtimeState] = {}
+        self.output_futures: dict[int, Future] = {}
 
     @staticmethod
     def resolve_session_id(req: Any) -> str | None:
@@ -58,6 +60,8 @@ class RealtimeSession:
         for state in self._states.values():
             state.dispose()
         self._states.clear()
+        if self.output_futures:
+            self.output_futures.clear()
 
 
 class RealtimeSessionCache:

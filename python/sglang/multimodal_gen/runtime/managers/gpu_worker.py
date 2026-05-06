@@ -6,7 +6,8 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from typing import List, Union
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, List, Sequence, Union
 
 import torch
 from setproctitle import setproctitle
@@ -29,7 +30,10 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ulysses_parallel_rank,
     get_ulysses_parallel_world_size,
 )
-from sglang.multimodal_gen.runtime.entrypoints.utils import save_outputs
+from sglang.multimodal_gen.runtime.entrypoints.utils import (
+    FileReadyNotification,
+    save_outputs,
+)
 from sglang.multimodal_gen.runtime.loader.weight_utils import compute_weights_checksum
 from sglang.multimodal_gen.runtime.loader.weights_updater import (
     WeightsUpdater,
@@ -77,6 +81,7 @@ class GPUWorker:
         rank: int,
         master_port: int,
         server_args: ServerArgs,
+        notify_callback: Callable | None = None,
     ):
         self.local_rank = local_rank
         self.rank = rank
@@ -84,6 +89,7 @@ class GPUWorker:
         # FIXME: should we use tcp as distribute init method?
         self.server_args = server_args
         self.pipeline: ComposedPipelineBase = None
+        self.notify_callback = notify_callback
 
         self.init_device_and_model()
         self.sp_group = get_sp_group()
@@ -94,6 +100,8 @@ class GPUWorker:
         self.cfg_group = get_cfg_group()
         self.cfg_cpu_group = self.cfg_group.cpu_group
         self._realtime_sessions = RealtimeSessionCache(max_sessions=1)
+
+        self._save_file_executor = ThreadPoolExecutor(max_workers=1)
 
     def release_realtime_session(self, session_id: str) -> OutputBatch:
         if not session_id:
@@ -283,26 +291,65 @@ class GPUWorker:
 
             # Save output to file and return file path only if requested. Avoid the serialization
             # and deserialization overhead between scheduler_client and gpu_worker.
-            if req.save_output and req.return_file_paths_only:
-                if self.rank == 0 and output_batch.output is not None:
-                    output_paths = save_outputs(
-                        output_batch.output,
-                        req.data_type,
-                        req.fps,
-                        True,
-                        lambda idx: req.output_file_path(len(output_batch.output), idx),
-                        audio=output_batch.audio,
-                        audio_sample_rate=output_batch.audio_sample_rate,
-                        output_compression=req.output_compression,
-                        enable_frame_interpolation=req.enable_frame_interpolation,
-                        frame_interpolation_exp=req.frame_interpolation_exp,
-                        frame_interpolation_scale=req.frame_interpolation_scale,
-                        frame_interpolation_model_path=req.frame_interpolation_model_path,
-                        enable_upscaling=req.enable_upscaling,
-                        upscaling_model_path=req.upscaling_model_path,
-                        upscaling_scale=req.upscaling_scale,
+            def _save_output_file(
+                outputs: Sequence[Any], req: Req, output_batch: OutputBatch
+            ):
+                return save_outputs(
+                    outputs,
+                    req.data_type,
+                    req.fps,
+                    True,
+                    lambda idx: req.output_file_path(len(outputs), idx),
+                    audio=output_batch.audio,
+                    audio_sample_rate=output_batch.audio_sample_rate,
+                    output_compression=req.output_compression,
+                    enable_frame_interpolation=req.enable_frame_interpolation,
+                    frame_interpolation_exp=req.frame_interpolation_exp,
+                    frame_interpolation_scale=req.frame_interpolation_scale,
+                    frame_interpolation_model_path=req.frame_interpolation_model_path,
+                    enable_upscaling=req.enable_upscaling,
+                    upscaling_model_path=req.upscaling_model_path,
+                    upscaling_scale=req.upscaling_scale,
+                )
+
+            if req.save_output and req.return_file_paths_only and self.rank == 0:
+                if output_batch.output is not None:
+                    # handle sync save file
+                    output_batch.output_file_paths = _save_output_file(
+                        output_batch.output, req, output_batch
                     )
-                    output_batch.output_file_paths = output_paths
+                    output_batch.output = None
+                elif (
+                    output_batch.asyn_post_process
+                    and req.session
+                    and req.request_id in req.session.output_futures
+                ):
+                    # handle async save file and notify callback
+                    _req = req
+                    _output_batch = output_batch
+                    _future = req.session.output_futures.pop(req.request_id)
+                    _notify_callback = self.notify_callback
+
+                    def _async_save_with_postprocess(
+                        _future, _req, _output_batch, _notify_callback
+                    ):
+                        _output = _future.result()
+                        saved_paths = _save_output_file(_output, _req, _output_batch)
+                        _notify_callback(
+                            FileReadyNotification(
+                                dispatch_id=_req.extra.get("realtime_session_id", ""),
+                                request_id=_req.request_id,
+                                file_paths=saved_paths,
+                            )
+                        )
+
+                    self._save_file_executor.submit(
+                        _async_save_with_postprocess,
+                        _future,
+                        _req,
+                        _output_batch,
+                        _notify_callback,
+                    )
 
                 # No rank needs to hold on to generated tensors once the file-path
                 # response has been materialized on rank 0

@@ -346,6 +346,8 @@ class OutputBatch:
     """
 
     output: torch.Tensor | None = None
+    asyn_post_process: bool = False
+    output_size: int | None = None
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None
