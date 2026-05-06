@@ -913,6 +913,20 @@ class Scheduler(SchedulerDisaggMixin):
             # if server is warmed-up, set this flag to avoid req-based warmup
             self.warmed_up = True
 
+    def _effective_warmup_steps(self, req: Req | None = None) -> int:
+        warmup_steps = self.server_args.warmup_steps
+        if (
+            self.server_args.enable_torch_compile
+            and warmup_steps == ServerArgs.warmup_steps
+            and req is not None
+            and isinstance(req.num_inference_steps, int)
+        ):
+            # One compiled denoise step can leave the next guidance graph cold.
+            # Two steps keep the first real request from paying that compile
+            # cost while still keeping startup warmup bounded.
+            warmup_steps = min(max(warmup_steps, 2), req.num_inference_steps)
+        return warmup_steps
+
     def _prepare_shared_warmup_image_path(self) -> str:
         world_group = get_world_group()
         src_rank = world_group.ranks[0]
@@ -976,7 +990,7 @@ class Scheduler(SchedulerDisaggMixin):
         identity, req_or_group = recv_reqs[0]
         req = self._first_generation_req(req_or_group)
         if req is not None:
-            warmup_req = req.copy_as_warmup(self.server_args.warmup_steps)
+            warmup_req = req.copy_as_warmup(self._effective_warmup_steps(req))
             recv_reqs.insert(0, (identity, warmup_req))
             self._warmup_total = 1
             self._warmup_processed = 0
