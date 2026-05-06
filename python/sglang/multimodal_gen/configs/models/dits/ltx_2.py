@@ -71,21 +71,6 @@ class LTX2ArchConfig(DiTArchConfig):
             r"(.*)ff\.net\.0\.proj\.(.*)$": r"\1ff.proj_in.\2",
             r"(.*)ff\.net\.2\.(.*)$": r"\1ff.proj_out.\2",
             # Attention projections
-            r"(.*)\.(attn1|audio_attn1)\.to_q\.(.*)$": (
-                r"\1.\2.to_qkv.\3",
-                0,
-                3,
-            ),
-            r"(.*)\.(attn1|audio_attn1)\.to_k\.(.*)$": (
-                r"\1.\2.to_qkv.\3",
-                1,
-                3,
-            ),
-            r"(.*)\.(attn1|audio_attn1)\.to_v\.(.*)$": (
-                r"\1.\2.to_qkv.\3",
-                2,
-                3,
-            ),
             r"(.*)\.(attn2|audio_attn2|audio_to_video_attn|video_to_audio_attn)\.to_k\.(.*)$": (
                 r"\1.\2.to_kv.\3",
                 0,
