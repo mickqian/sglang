@@ -333,6 +333,7 @@ class GPUWorker:
 
                     self._save_file_executor.submit(
                         _async_save_with_postprocess,
+                        _output,
                         _req,
                         _output_batch,
                         _notify_callback,
