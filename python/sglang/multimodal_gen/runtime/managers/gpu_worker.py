@@ -318,7 +318,9 @@ class GPUWorker:
                     _output_batch = output_batch
                     _notify_callback = self.notify_callback
 
-                    def _async_save_with_postprocess(_future, _req, _notify_callback):
+                    def _async_save_with_postprocess(
+                        _req, _output_batch, _notify_callback
+                    ):
                         saved_paths = _save_output_file(
                             _output_batch.output, _req, _output_batch
                         )
