@@ -316,17 +316,22 @@ class GPUWorker:
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
-                    _output = output_batch.output.cpu()
+                    _output = output_batch.output.cpu(non_blocking=True)
                     _notify_callback = self.notify_callback
 
                     def _async_save_with_postprocess(
-                        _output, _req, _output_batch, _notify_callback
+                        output: torch.Tensor,
+                        req: Req,
+                        output_batch: OutputBatch,
+                        notify_callback: Callable,
                     ):
-                        saved_paths = _save_output_file(_output, _req, _output_batch)
-                        _notify_callback(
+                        if output.is_cuda:
+                            output = output.cpu()
+                        saved_paths = _save_output_file(output, req, output_batch)
+                        notify_callback(
                             FileReadyNotification(
-                                dispatch_id=_req.extra.get("realtime_session_id", ""),
-                                request_id=_req.request_id,
+                                dispatch_id=req.extra.get("realtime_session_id", ""),
+                                request_id=req.request_id,
                                 file_paths=saved_paths,
                             )
                         )
