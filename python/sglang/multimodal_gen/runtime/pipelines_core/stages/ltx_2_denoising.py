@@ -49,7 +49,7 @@ class LTX2DenoisingContext(DenoisingContext):
     last_denoised_video: torch.Tensor | None = None
     last_denoised_audio: torch.Tensor | None = None
     trajectory_audio_latents: list[torch.Tensor] = field(default_factory=list)
-    use_native_hq_res2s_sde_noise: bool = False
+    use_native_ltx23_res2s_sde_noise: bool = False
     use_ltx23_hq_timestep_semantics: bool = False
     res2s_step_noise_generator: torch.Generator | None = None
     res2s_substep_noise_generator: torch.Generator | None = None
@@ -481,12 +481,12 @@ class LTX2DenoisingStage(DenoisingStage):
 
         sub_noise_video = (
             self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True)
-            if ctx.use_native_hq_res2s_sde_noise
+            if ctx.use_native_ltx23_res2s_sde_noise
             else self._randn_like_with_batch_generators(ctx.latents, batch).float()
         )
         sub_noise_audio = (
             self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=True)
-            if ctx.use_native_hq_res2s_sde_noise
+            if ctx.use_native_ltx23_res2s_sde_noise
             else self._randn_like_with_batch_generators(
                 ctx.audio_latents, batch
             ).float()
@@ -553,12 +553,12 @@ class LTX2DenoisingStage(DenoisingStage):
 
         step_noise_video = (
             self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False)
-            if ctx.use_native_hq_res2s_sde_noise
+            if ctx.use_native_ltx23_res2s_sde_noise
             else self._randn_like_with_batch_generators(ctx.latents, batch).float()
         )
         step_noise_audio = (
             self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=False)
-            if ctx.use_native_hq_res2s_sde_noise
+            if ctx.use_native_ltx23_res2s_sde_noise
             else self._randn_like_with_batch_generators(
                 ctx.audio_latents, batch
             ).float()
@@ -1137,8 +1137,10 @@ class LTX2DenoisingStage(DenoisingStage):
         batch.image_latent = saved
 
     @staticmethod
-    def _should_use_native_hq_res2s_sde_noise(server_args: ServerArgs) -> bool:
-        return server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
+    def _should_use_native_ltx23_res2s_sde_noise(server_args: ServerArgs) -> bool:
+        # Official LTX-2.3 two-stage res2s normalizes SDE noise with fixed
+        # step/substep generators; using request RNG drifts the denoising path.
+        return is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
 
     @staticmethod
     def _should_use_ltx23_hq_timestep_semantics(server_args: ServerArgs) -> bool:
@@ -1185,9 +1187,9 @@ class LTX2DenoisingStage(DenoisingStage):
         ctx.use_ltx23_legacy_one_stage = self._should_use_ltx23_legacy_one_stage(
             server_args
         )
-        ctx.use_native_hq_res2s_sde_noise = (
+        ctx.use_native_ltx23_res2s_sde_noise = (
             ctx.is_ltx23_variant
-            and self._should_use_native_hq_res2s_sde_noise(server_args)
+            and self._should_use_native_ltx23_res2s_sde_noise(server_args)
         )
         ctx.use_ltx23_hq_timestep_semantics = (
             ctx.is_ltx23_variant
@@ -1285,7 +1287,7 @@ class LTX2DenoisingStage(DenoisingStage):
         if ctx.audio_scheduler is None:
             raise ValueError("LTX-2 audio scheduler was not prepared.")
         ctx.audio_scheduler.set_begin_index(0)
-        if self.sampler_name == "res2s" and ctx.use_native_hq_res2s_sde_noise:
+        if self.sampler_name == "res2s" and ctx.use_native_ltx23_res2s_sde_noise:
             self._ltx2_init_res2s_noise_generators(ctx)
 
     def _prepare_step_attn_metadata(
@@ -1969,14 +1971,14 @@ class LTX2DenoisingStage(DenoisingStage):
 
                 substep_video_noise = (
                     self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True)
-                    if ctx.use_native_hq_res2s_sde_noise
+                    if ctx.use_native_ltx23_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.latents, batch
                     ).float()
                 )
                 substep_audio_noise = (
                     self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=True)
-                    if ctx.use_native_hq_res2s_sde_noise
+                    if ctx.use_native_ltx23_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch
                     ).float()
@@ -2036,14 +2038,14 @@ class LTX2DenoisingStage(DenoisingStage):
 
                 step_video_noise = (
                     self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False)
-                    if ctx.use_native_hq_res2s_sde_noise
+                    if ctx.use_native_ltx23_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.latents, batch
                     ).float()
                 )
                 step_audio_noise = (
                     self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=False)
-                    if ctx.use_native_hq_res2s_sde_noise
+                    if ctx.use_native_ltx23_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch
                     ).float()
