@@ -316,7 +316,7 @@ class GPUWorker:
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
-                    _output = output_batch.output.cpu(non_blocking=True)
+                    _output = output_batch.output.to("cpu", non_blocking=True)
                     _notify_callback = self.notify_callback
 
                     def _async_save_with_postprocess(
@@ -325,8 +325,6 @@ class GPUWorker:
                         output_batch: OutputBatch,
                         notify_callback: Callable,
                     ):
-                        if output.is_cuda:
-                            output = output.cpu()
                         saved_paths = _save_output_file(output, req, output_batch)
                         notify_callback(
                             FileReadyNotification(
