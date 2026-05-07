@@ -316,14 +316,13 @@ class GPUWorker:
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
+                    _output = output_batch.output.cpu()
                     _notify_callback = self.notify_callback
 
                     def _async_save_with_postprocess(
-                        _req, _output_batch, _notify_callback
+                        _output, _req, _output_batch, _notify_callback
                     ):
-                        saved_paths = _save_output_file(
-                            _output_batch.output, _req, _output_batch
-                        )
+                        saved_paths = _save_output_file(_output, _req, _output_batch)
                         _notify_callback(
                             FileReadyNotification(
                                 dispatch_id=_req.extra.get("realtime_session_id", ""),
