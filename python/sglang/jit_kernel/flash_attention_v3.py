@@ -27,6 +27,18 @@ def _call_fa3_kernel(kernel, *args, out=None):
         return kernel(*args)
 
 
+def _call_fa3_kernel_kwargs(kernel, **kwargs):
+    try:
+        return kernel(**kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'out'" not in str(exc):
+            raise
+        # Some FA3 wheels expose an older signature without out; retrying keeps
+        # the backend usable without changing attention math.
+        kwargs.pop("out", None)
+        return kernel(**kwargs)
+
+
 @cache_once
 def _load_fa3_kernels():
     # By default, we use the implementation from sgl-kernel,
@@ -212,7 +224,8 @@ def flash_attn_varlen_func(
             "flash_attn at sgl-kernel is only supported on sm90 and above"
         )
 
-    return _load_fa3_kernels()["flash_attn_varlen_func"](
+    return _call_fa3_kernel_kwargs(
+        _load_fa3_kernels()["flash_attn_varlen_func"],
         q=q,
         k=k,
         v=v,
