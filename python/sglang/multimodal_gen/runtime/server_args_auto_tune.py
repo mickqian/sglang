@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config import (
+from sglang.multimodal_gen.configs.pipeline_configs.model_deployment import (
     ModelDeploymentConfig,
 )
 
