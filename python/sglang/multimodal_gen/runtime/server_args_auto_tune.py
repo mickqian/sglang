@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 PERFORMANCE_MODES = ("auto", "speed", "memory", "balanced")
+PERFORMANCE_MODE_ALIASES = {
+    "throughput": "speed",
+    "aggressive": "speed",
+    "conservative": "memory",
+    "balance": "balanced",
+}
 
 
 class ServerArgsAutoTuner:
@@ -144,8 +150,9 @@ class ServerArgsAutoTuner:
     def _normalize_performance_mode(self) -> str:
         args = self.server_args
         mode = (args.performance_mode or "auto").lower()
+        mode = PERFORMANCE_MODE_ALIASES.get(mode, mode)
         if mode not in PERFORMANCE_MODES:
-            valid_modes = PERFORMANCE_MODES
+            valid_modes = PERFORMANCE_MODES + tuple(PERFORMANCE_MODE_ALIASES)
             raise ValueError(
                 f"Invalid performance_mode={args.performance_mode!r}. "
                 f"Expected one of {valid_modes}."
