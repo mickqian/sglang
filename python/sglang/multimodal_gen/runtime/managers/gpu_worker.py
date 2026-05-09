@@ -325,6 +325,7 @@ class GPUWorker:
                         output_batch: OutputBatch,
                         notify_callback: Callable,
                     ):
+                        start_time = time.perf_counter()
                         try:
                             saved_paths = _save_output_file(output, req, output_batch)
                             notify_callback(
@@ -335,6 +336,13 @@ class GPUWorker:
                                     request_id=req.request_id,
                                     file_paths=saved_paths,
                                 )
+                            )
+                            duration_s = time.perf_counter() - start_time
+                            logger.info(
+                                "Async postprocess completed in %.3f seconds for request %s (files=%s)",
+                                duration_s,
+                                req.request_id,
+                                saved_paths,
                             )
                         except Exception:
                             logger.exception(
