@@ -191,6 +191,19 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
     """Detect architecture from checkpoint keys and return an unloaded network."""
     if "conv_first.weight" in state_dict:
         # RRDBNet (e.g., RealESRGAN_x4plus)
+        conv_first_weight = state_dict["conv_first.weight"]
+        in_ch = conv_first_weight.shape[1]
+        if in_ch == 3:
+            scale = 4
+        elif in_ch == 12:
+            scale = 2
+        elif in_ch == 48:
+            scale = 1
+        else:
+            raise ValueError(
+                "Unsupported RRDBNet checkpoint: conv_first.weight input channels "
+                f"{in_ch} do not match expected scale 1/2/4 layouts."
+            )
         num_feat = state_dict["conv_first.weight"].shape[0]
         num_block = sum(
             1
@@ -199,7 +212,8 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
         )
         num_grow_ch = state_dict["body.0.rdb1.conv1.weight"].shape[0]
         logger.info(
-            "Detected RRDBNet: num_feat=%d, num_block=%d, num_grow_ch=%d",
+            "Detected RRDBNet: scale=%d, num_feat=%d, num_block=%d, num_grow_ch=%d",
+            scale,
             num_feat,
             num_block,
             num_grow_ch,
@@ -207,7 +221,7 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
         return RRDBNet(
             num_in_ch=3,
             num_out_ch=3,
-            scale=4,
+            scale=scale,
             num_feat=num_feat,
             num_block=num_block,
             num_grow_ch=num_grow_ch,
