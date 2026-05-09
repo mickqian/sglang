@@ -899,22 +899,13 @@ def _shutdown_torch_compile_workers() -> None:
     shutdown_compile_workers()
 
 
-def _cleanup_tqdm_mp_lock() -> None:
+def _disable_tqdm_mp_lock() -> None:
     try:
-        from tqdm.std import TqdmDefaultWriteLock, tqdm
+        from tqdm.std import TqdmDefaultWriteLock
     except ImportError:
         return
 
-    lock = None
-    mp_lock = None
-    if "_lock" in tqdm.__dict__:
-        lock = tqdm._lock
-        del tqdm._lock
-    if "mp_lock" in TqdmDefaultWriteLock.__dict__:
-        mp_lock = TqdmDefaultWriteLock.mp_lock
-        del TqdmDefaultWriteLock.mp_lock
-    del lock
-    del mp_lock
+    TqdmDefaultWriteLock.mp_lock = None
 
 
 def run_scheduler_process(
@@ -939,6 +930,7 @@ def run_scheduler_process(
     """
     configure_logger(server_args)
     globally_suppress_loggers()
+    _disable_tqdm_mp_lock()
     if current_platform.is_cuda():
         set_cuda_arch()
     elif current_platform.is_musa():
@@ -982,7 +974,6 @@ def run_scheduler_process(
             scheduler.close()
             del scheduler
         _shutdown_torch_compile_workers()
-        _cleanup_tqdm_mp_lock()
         gc.collect()
         if torch.cuda.is_initialized():
             torch.cuda.empty_cache()
