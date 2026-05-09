@@ -325,14 +325,22 @@ class GPUWorker:
                         output_batch: OutputBatch,
                         notify_callback: Callable,
                     ):
-                        saved_paths = _save_output_file(output, req, output_batch)
-                        notify_callback(
-                            FileReadyNotification(
-                                dispatch_id=req.extra.get("realtime_session_id", ""),
-                                request_id=req.request_id,
-                                file_paths=saved_paths,
+                        try:
+                            saved_paths = _save_output_file(output, req, output_batch)
+                            notify_callback(
+                                FileReadyNotification(
+                                    dispatch_id=req.extra.get(
+                                        "realtime_session_id", ""
+                                    ),
+                                    request_id=req.request_id,
+                                    file_paths=saved_paths,
+                                )
                             )
-                        )
+                        except Exception:
+                            logger.exception(
+                                "Async postprocess/save failed for request %s",
+                                req.request_id,
+                            )
 
                     self._save_file_executor.submit(
                         _async_save_with_postprocess,
