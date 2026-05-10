@@ -1874,9 +1874,8 @@ class LTX2DenoisingStage(DenoisingStage):
             float(stage1_guider_params["video_modality_scale"]) != 1.0
             or float(stage1_guider_params["audio_modality_scale"]) != 1.0
         )
-        stage1_cfg_parallel = (
-            server_args.enable_cfg_parallel and not ctx.use_ltx23_legacy_one_stage
-        )
+        # debug: keep the CFG-parallel server path but run full stage-1 guidance on each rank
+        stage1_cfg_parallel = False
         stage1_cfg_rank = (
             get_classifier_free_guidance_rank() if stage1_cfg_parallel else 0
         )
