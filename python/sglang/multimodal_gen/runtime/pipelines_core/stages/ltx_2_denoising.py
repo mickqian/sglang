@@ -2051,15 +2051,27 @@ class LTX2DenoisingStage(DenoisingStage):
                             )
                         )
 
-                    execution_pass_specs = (
-                        [
-                            pass_spec
-                            for index, pass_spec in enumerate(pass_specs)
-                            if index % stage1_cfg_world_size == stage1_cfg_rank
-                        ]
-                        if stage1_cfg_parallel
-                        else pass_specs
-                    )
+                    if stage1_cfg_parallel:
+                        if stage1_cfg_world_size == 2 and len(pass_specs) == 4:
+                            rank_by_name = {
+                                "cond": 0,
+                                "neg": 0,
+                                "perturbed": 1,
+                                "modality": 1,
+                            }
+                            execution_pass_specs = [
+                                pass_spec
+                                for pass_spec in pass_specs
+                                if rank_by_name[pass_spec.name] == stage1_cfg_rank
+                            ]
+                        else:
+                            execution_pass_specs = [
+                                pass_spec
+                                for index, pass_spec in enumerate(pass_specs)
+                                if index % stage1_cfg_world_size == stage1_cfg_rank
+                            ]
+                    else:
+                        execution_pass_specs = pass_specs
                     num_execution_passes = len(execution_pass_specs)
                     if num_execution_passes == 0:
                         raise ValueError(
