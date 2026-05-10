@@ -448,12 +448,12 @@ class LTX2DenoisingStage(DenoisingStage):
             "modality": 1.0 - modality_scale,
         }
         first_velocity = next(iter(local_velocities.values()))
-        template = cls._ltx2_velocity_to_x0(latents, first_velocity, sigma)
+        template = cls._ltx2_velocity_to_x0(latents, first_velocity, sigma).float()
         cond_partial = torch.zeros_like(template)
         pred_partial = torch.zeros_like(template)
 
         for name, velocity in local_velocities.items():
-            denoised = cls._ltx2_velocity_to_x0(latents, velocity, sigma)
+            denoised = cls._ltx2_velocity_to_x0(latents, velocity, sigma).float()
             if name == "cond":
                 cond_partial = cond_partial + denoised
             pred_partial = pred_partial + denoised * coefficients[name]
