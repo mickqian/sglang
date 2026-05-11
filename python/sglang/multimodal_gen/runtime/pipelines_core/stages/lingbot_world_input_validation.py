@@ -27,6 +27,11 @@ class LingBotWorldInputValidationState(BaseRealtimeState):
         self.original_condition_image_size = None
         self.height = None
         self.width = None
+        self.generator = None
+        self.seeds = None
+        self.generator_seed = None
+        self.generator_device = None
+        self.num_outputs_per_prompt = None
 
     def dispose(self):
         super().dispose()
@@ -35,6 +40,11 @@ class LingBotWorldInputValidationState(BaseRealtimeState):
         self.original_condition_image_size = None
         self.height = None
         self.width = None
+        self.generator = None
+        self.seeds = None
+        self.generator_seed = None
+        self.generator_device = None
+        self.num_outputs_per_prompt = None
 
 
 class LingBotWorldInputValidationStage(InputValidationStage):
@@ -78,6 +88,36 @@ class LingBotWorldInputValidationStage(InputValidationStage):
             and batch.width in (None, state.width)
         )
 
+    def _cache_generator(
+        self, batch: Req, state: LingBotWorldInputValidationState
+    ) -> None:
+        state.generator = batch.generator
+        state.seeds = batch.seeds
+        state.generator_seed = batch.seed
+        state.generator_device = batch.generator_device
+        state.num_outputs_per_prompt = batch.num_outputs_per_prompt
+
+    def _can_reuse_generator(
+        self, batch: Req, state: LingBotWorldInputValidationState
+    ) -> bool:
+        if batch.block_idx == 0 or state.generator is None:
+            return False
+        return (
+            state.generator_seed == batch.seed
+            and state.generator_device == batch.generator_device
+            and state.num_outputs_per_prompt == batch.num_outputs_per_prompt
+        )
+
+    def _reuse_or_cache_generator(
+        self, batch: Req, state: LingBotWorldInputValidationState
+    ) -> None:
+        if self._can_reuse_generator(batch, state):
+            batch.generator = state.generator
+            batch.seeds = state.seeds
+            return
+
+        self._cache_generator(batch, state)
+
     def forward(
         self,
         batch: Req,
@@ -97,10 +137,13 @@ class LingBotWorldInputValidationStage(InputValidationStage):
             if batch.width is None:
                 batch.width = state.width
             try:
-                return super().forward(batch, server_args)
+                batch = super().forward(batch, server_args)
+                self._reuse_or_cache_generator(batch, state)
+                return batch
             finally:
                 batch.image_path = original_image_path
 
         batch = super().forward(batch, server_args)
         self._cache_batch(batch, state)
+        self._reuse_or_cache_generator(batch, state)
         return batch
