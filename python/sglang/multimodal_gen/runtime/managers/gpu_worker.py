@@ -316,14 +316,32 @@ class GPUWorker:
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
-                    # The save thread immediately reads the tensor while the next
-                    # realtime chunk may start using the GPU. Make the D2H copy
-                    # complete here so post-processing never sees a partial copy.
-                    _output = (
-                        output_batch.output.detach()
-                        .to("cpu", non_blocking=False)
-                        .contiguous()
-                    )
+                    _output = output_batch.output.detach().contiguous()
+                    _copy_event = None
+                    _source_ref = None
+                    if _output.is_cuda and torch.cuda.is_available():
+                        try:
+                            _cpu_output = torch.empty_like(
+                                _output, device="cpu", pin_memory=True
+                            )
+                            _cpu_output.copy_(_output, non_blocking=True)
+                            _copy_event = torch.cuda.Event()
+                            _copy_event.record(
+                                torch.cuda.current_stream(_output.device)
+                            )
+                            # Keep the source allocation alive until the copy event
+                            # has completed in the save thread.
+                            _source_ref = _output
+                            _output = _cpu_output
+                        except RuntimeError as e:
+                            logger.warning(
+                                "Failed to start pinned async output copy; "
+                                "falling back to blocking CPU copy: %s",
+                                e,
+                            )
+                            _output = _output.to("cpu", non_blocking=False).contiguous()
+                    else:
+                        _output = _output.to("cpu", non_blocking=False).contiguous()
                     _notify_callback = self.notify_callback
 
                     def _async_save_with_postprocess(
@@ -331,7 +349,12 @@ class GPUWorker:
                         req: Req,
                         output_batch: OutputBatch,
                         notify_callback: Callable,
+                        copy_event: Any | None = None,
+                        source_ref: torch.Tensor | None = None,
                     ):
+                        if copy_event is not None:
+                            copy_event.synchronize()
+                        del source_ref
                         saved_paths = _save_output_file(output, req, output_batch)
                         notify_callback(
                             FileReadyNotification(
@@ -347,6 +370,8 @@ class GPUWorker:
                         _req,
                         _output_batch,
                         _notify_callback,
+                        _copy_event,
+                        _source_ref,
                     )
 
                 elif output_batch.output is not None:
