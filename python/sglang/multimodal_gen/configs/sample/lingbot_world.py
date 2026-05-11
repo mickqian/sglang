@@ -1,7 +1,7 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from sglang.multimodal_gen.configs.sample.wan import Wan2_2_I2V_A14B_SamplingParam
@@ -14,6 +14,7 @@ class LingBotWorldSamplingParams(Wan2_2_I2V_A14B_SamplingParam):
     guidance_scale: float = 5.0
     guidance_scale_2: float = 5.0
     num_inference_steps: int = 70
+    num_frames: int = 117
     fps: int = 16
 
     def _adjust(self, server_args):

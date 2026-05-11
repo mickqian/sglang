@@ -40,6 +40,26 @@ class LingBotWorldInputValidationState(BaseRealtimeState):
 class LingBotWorldInputValidationStage(InputValidationStage):
     """Reuse LingBot realtime conditioning image validation across chunks."""
 
+    def preprocess_condition_image(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        condition_image_width,
+        condition_image_height,
+    ):
+        del server_args, condition_image_width, condition_image_height
+
+        if batch.condition_image is None:
+            return
+        if isinstance(batch.condition_image, list):
+            batch.condition_image = batch.condition_image[0]
+
+        width = int(batch.width or 832)
+        height = int(batch.height or 480)
+        batch.condition_image = batch.condition_image.resize((width, height))
+        batch.width = width
+        batch.height = height
+
     def _cache_batch(self, batch: Req, state: LingBotWorldInputValidationState) -> None:
         state.image_path = batch.image_path
         state.condition_image = batch.condition_image

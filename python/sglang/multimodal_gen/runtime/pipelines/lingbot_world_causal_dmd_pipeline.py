@@ -5,8 +5,8 @@
 LingBot-World realtime causal DMD pipeline.
 """
 
-from sglang.multimodal_gen.runtime.models.schedulers.scheduling_flow_unipc_multistep import (
-    FlowUniPCMultistepScheduler,
+from sglang.multimodal_gen.runtime.models.schedulers.scheduling_self_forcing_flow_match import (
+    SelfForcingFlowMatchScheduler,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
@@ -38,8 +38,11 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
     ]
 
     def initialize_pipeline(self, server_args: ServerArgs):
-        self.modules["scheduler"] = FlowUniPCMultistepScheduler(
-            shift=server_args.pipeline_config.flow_shift
+        self.modules["scheduler"] = SelfForcingFlowMatchScheduler(
+            num_inference_steps=1000,
+            shift=server_args.pipeline_config.flow_shift,
+            sigma_min=0.0,
+            extra_one_step=True,
         )
 
     def create_pipeline_stages(self, server_args) -> None:

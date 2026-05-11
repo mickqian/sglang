@@ -1,6 +1,9 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+import html
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -10,11 +13,27 @@ from sglang.multimodal_gen.configs.models.dits import LingBotWorldVideoConfig
 from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_I2V_A14B_Config
 
 
+def lingbot_prompt_clean(text: str) -> str:
+    try:
+        import ftfy
+
+        text = ftfy.fix_text(text)
+    except ImportError:
+        pass
+    text = html.unescape(html.unescape(text))
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 @dataclass
 class LingBotWorldI2VConfig(Wan2_2_I2V_A14B_Config):
     dit_config: DiTConfig = field(default_factory=LingBotWorldVideoConfig)
     flow_shift: float | None = 10.0
     boundary_ratio: float | None = 0.947
+    text_encoder_precisions: tuple[str, ...] = field(default_factory=lambda: ("bf16",))
+    preprocess_text_funcs: tuple[Callable[[str], str] | None, ...] = field(
+        default_factory=lambda: (lingbot_prompt_clean,)
+    )
 
     def prepare_pos_cond_kwargs(self, batch, device, rotary_emb, dtype):
         kwargs = super().prepare_pos_cond_kwargs(batch, device, rotary_emb, dtype)
@@ -60,8 +79,11 @@ class LingBotWorldCausalDMDConfig(LingBotWorldI2VConfig):
 
         # Build mask: [B, temporal_ratio, num_latent_frames, H, W]
         mask = torch.ones(
-            1, temporal_ratio, num_latent_frames,
-            latent_height, latent_width,
+            1,
+            temporal_ratio,
+            num_latent_frames,
+            latent_height,
+            latent_width,
             dtype=latent_condition.dtype,
             device=latent_condition.device,
         )
