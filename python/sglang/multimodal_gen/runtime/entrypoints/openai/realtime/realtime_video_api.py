@@ -68,6 +68,26 @@ async def _recv_notify_and_send(
             logger.error(f"error during sending bytes from queue: {err_msg}")
 
 
+async def _send_file_paths(
+    ws: WebSocket,
+    file_paths: list[str],
+    *,
+    chunk_index_start: int,
+    request_id: str,
+) -> None:
+    chunk_index = chunk_index_start
+    for file_path in file_paths:
+        with open(file_path, "rb") as f:
+            frame_bytes = f.read()
+        await write_frame_msg(
+            frame_bytes,
+            ws,
+            chunk_index=chunk_index,
+            request_id=request_id,
+        )
+        chunk_index += 1
+
+
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     while True:
         try:
@@ -107,7 +127,17 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             batch.input_video = (
                 session.sample_video_frames() if session.is_v2v_enabled() else None
             )
-            _, result = await process_generation_batch(async_scheduler_client, batch)
+            save_file_path_list, result = await process_generation_batch(
+                async_scheduler_client, batch
+            )
+
+            if not result.asyn_post_process and save_file_path_list:
+                await _send_file_paths(
+                    ws,
+                    save_file_path_list,
+                    chunk_index_start=batch.block_idx,
+                    request_id=session.request_id,
+                )
 
             # finish
             session.generate_chunk_completed()
@@ -250,30 +280,35 @@ async def generate(websocket: WebSocket):
     generate_task = None
     listen_task = None
     send_task = None
-    notification_queue = register_notification_listener(session.id)
+    notification_queue = None
     try:
         # receive new generate request
         await _listen_generate_request(websocket, session)
+        server_args = get_global_server_args()
+        if server_args.realtime_async_postprocess:
+            notification_queue = register_notification_listener(session.id)
 
         # generate video chunk
         generate_task = asyncio.create_task(_generate_loop(websocket, session))
         # listen for user actions
         listen_task = asyncio.create_task(_listen_actions(websocket, session))
         # send video chunk back to client
-        send_task = asyncio.create_task(
-            _recv_notify_and_send(websocket, notification_queue)
-        )
+        if notification_queue is not None:
+            send_task = asyncio.create_task(
+                _recv_notify_and_send(websocket, notification_queue)
+            )
 
-        await asyncio.wait(
-            [generate_task, listen_task, send_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        wait_tasks = [generate_task, listen_task]
+        if send_task is not None:
+            wait_tasks.append(send_task)
+        await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
     except WebSocketDisconnect:
         logger.info(f"client disconnected, session_id: {session.id}")
     finally:
         logger.info(f"terminating session, session_id: {session.id}")
-        unregister_notification_listener(session.id)
+        if notification_queue is not None:
+            unregister_notification_listener(session.id)
         if generate_task and not generate_task.done():
             generate_task.cancel()
         if listen_task and not listen_task.done():

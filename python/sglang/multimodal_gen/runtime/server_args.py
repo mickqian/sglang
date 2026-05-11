@@ -206,6 +206,7 @@ class ServerArgs:
 
     output_path: str | None = "outputs/"
     input_save_path: str | None = "inputs/uploads"
+    realtime_async_postprocess: bool = False
 
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
@@ -840,6 +841,12 @@ class ServerArgs:
             type=str,
             default=ServerArgs.input_save_path,
             help='Directory path to save uploaded input images/videos. Set to "" to disable persistent saving.',
+        )
+        parser.add_argument(
+            "--realtime-async-postprocess",
+            action="store_true",
+            default=ServerArgs.realtime_async_postprocess,
+            help="Run realtime video postprocess/save in the background thread.",
         )
 
         # LoRA
