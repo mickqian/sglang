@@ -114,6 +114,8 @@ class GPUWorker:
             )
 
         released = self._realtime_sessions.release(session_id)
+        if released and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
         return OutputBatch(output={"released": released, "session_id": session_id})
 
     def init_device_and_model(self) -> None:
@@ -254,6 +256,7 @@ class GPUWorker:
 
             req.log(server_args=self.server_args)
             result = self.pipeline.forward(req, self.server_args)
+            is_realtime_req = bool(req.extra.get("realtime_session_id", ""))
 
             if isinstance(result, Req):
                 output_batch = OutputBatch(
@@ -387,7 +390,7 @@ class GPUWorker:
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
 
-                if torch.cuda.is_initialized():
+                if not is_realtime_req and torch.cuda.is_initialized():
                     torch.cuda.empty_cache()
 
             # TODO: extract to avoid duplication
