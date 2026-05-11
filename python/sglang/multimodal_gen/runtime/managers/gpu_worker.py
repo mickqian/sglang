@@ -316,7 +316,14 @@ class GPUWorker:
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
-                    _output = output_batch.output.to("cpu", non_blocking=True)
+                    # The save thread immediately reads the tensor while the next
+                    # realtime chunk may start using the GPU. Make the D2H copy
+                    # complete here so post-processing never sees a partial copy.
+                    _output = (
+                        output_batch.output.detach()
+                        .to("cpu", non_blocking=False)
+                        .contiguous()
+                    )
                     _notify_callback = self.notify_callback
 
                     def _async_save_with_postprocess(
@@ -526,7 +533,7 @@ class GPUWorker:
         return checksums
 
 
-OOM_MSG = f"""
+OOM_MSG = """
 OOM detected. Possible solutions:
   - If the OOM occurs during loading:
     1. Enable CPU offload for memory-intensive components, or use `--dit-layerwise-offload` for DiT
