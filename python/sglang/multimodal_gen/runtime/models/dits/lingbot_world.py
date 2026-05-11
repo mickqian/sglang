@@ -173,6 +173,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
         kv_cache: dict | None = None,
         current_start: int = 0,
         cache_start: int | None = None,
+        frame_seq_length: int | None = None,
     ):
         if cache_start is None:
             cache_start = current_start
@@ -233,7 +234,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
             qkv = _usp_input_all_to_all_variable(qkv, seq_splits, head_dim=2)
             roped_query, roped_key, v = qkv.chunk(3, dim=-1)
 
-        frame_seqlen = roped_query.shape[1]
+        frame_seqlen = frame_seq_length or roped_query.shape[1]
         current_end = current_start + roped_query.shape[1]
         sink_tokens = self.sink_size * frame_seqlen
         kv_cache_size = kv_cache["k"].shape[1]
@@ -1046,6 +1047,7 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
             kv_cache,
             current_start,
             cache_start,
+            frame_seq_length=frame_seqlen,
         )
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
