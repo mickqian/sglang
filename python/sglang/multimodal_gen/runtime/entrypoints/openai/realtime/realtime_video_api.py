@@ -1,5 +1,6 @@
 import asyncio
 import io
+import math
 import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -34,6 +35,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
+_FRAME_PART_SIZE = 512 * 1024
 
 
 async def _recv_notify_and_send(
@@ -41,6 +43,7 @@ async def _recv_notify_and_send(
     notification_queue: asyncio.Queue,
 ):
     """Wait for a file-ready notification from the GPU worker via ZMQ."""
+    chunk_index = 0
     while True:
         try:
             notification = await asyncio.wait_for(
@@ -53,7 +56,13 @@ async def _recv_notify_and_send(
             for file_path in notification.file_paths:
                 with open(file_path, "rb") as f:
                     frame_bytes = f.read()
-                await write_frame_msg(frame_bytes, ws)
+                await write_frame_msg(
+                    frame_bytes,
+                    ws,
+                    chunk_index=chunk_index,
+                    request_id=notification.request_id,
+                )
+                chunk_index += 1
         except Exception as e:
             err_msg = str(e).splitlines()[0]
             logger.error(f"error during sending bytes from queue: {err_msg}")
@@ -293,5 +302,45 @@ async def write_status_msg(status: str, websocket: WebSocket):
     await websocket.send_bytes(packb({"type": "status", "content": status}))
 
 
-async def write_frame_msg(content: bytes, websocket: WebSocket):
-    await websocket.send_bytes(packb({"type": "frame", "content": content}))
+async def write_frame_msg(
+    content: bytes,
+    websocket: WebSocket,
+    *,
+    chunk_index: int,
+    request_id: str,
+):
+    num_parts = max(1, math.ceil(len(content) / _FRAME_PART_SIZE))
+    await websocket.send_bytes(
+        packb(
+            {
+                "type": "frame_start",
+                "request_id": request_id,
+                "chunk_index": chunk_index,
+                "total_size": len(content),
+                "num_parts": num_parts,
+            }
+        )
+    )
+    for part_index in range(num_parts):
+        start = part_index * _FRAME_PART_SIZE
+        end = min(len(content), start + _FRAME_PART_SIZE)
+        await websocket.send_bytes(
+            packb(
+                {
+                    "type": "frame_part",
+                    "request_id": request_id,
+                    "chunk_index": chunk_index,
+                    "part_index": part_index,
+                    "content": content[start:end],
+                }
+            )
+        )
+    await websocket.send_bytes(
+        packb(
+            {
+                "type": "frame_end",
+                "request_id": request_id,
+                "chunk_index": chunk_index,
+            }
+        )
+    )
