@@ -53,16 +53,13 @@ async def _recv_notify_and_send(
                 continue
 
             # send file contents to client
-            for file_path in notification.file_paths:
-                with open(file_path, "rb") as f:
-                    frame_bytes = f.read()
-                await write_frame_msg(
-                    frame_bytes,
-                    ws,
-                    chunk_index=chunk_index,
-                    request_id=notification.request_id,
-                )
-                chunk_index += 1
+            await _send_file_paths(
+                ws,
+                notification.file_paths,
+                chunk_index_start=chunk_index,
+                request_id=notification.request_id,
+            )
+            chunk_index += len(notification.file_paths)
         except Exception as e:
             err_msg = str(e).splitlines()[0]
             logger.error(f"error during sending bytes from queue: {err_msg}")

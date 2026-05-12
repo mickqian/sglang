@@ -11,6 +11,7 @@ The ImageUpscaler wrapper and integration code are original work.
 
 import math
 import os
+import time
 from typing import Optional
 
 import numpy as np
@@ -306,6 +307,80 @@ class UpscalerModel:
         out_np = out.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).cpu().numpy()
         return (out_np * 255.0).astype(np.uint8)
 
+    def upscale_batch(
+        self, frames: list[np.ndarray], outscale: float | None = None
+    ) -> list[np.ndarray]:
+        """Upscale same-resolution HWC uint8 frames in one batched forward pass."""
+        if not frames:
+            return []
+
+        h, w = frames[0].shape[:2]
+        if any(frame.shape[:2] != (h, w) for frame in frames):
+            raise ValueError("All frames in a batch must have the same resolution")
+
+        start_time = time.perf_counter()
+        imgs = np.stack(frames, axis=0).astype(np.float32) / 255.0
+        stack_duration_s = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2).to(self.device)
+        h2d_duration_s = time.perf_counter() - start_time
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        start_time = time.perf_counter()
+        with torch.no_grad():
+            out = self.net(imgs_t)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        forward_duration_s = time.perf_counter() - start_time
+
+        resize_duration_s = 0.0
+        if outscale is not None and outscale != self.scale:
+            start_time = time.perf_counter()
+            target_h = int(h * outscale)
+            target_w = int(w * outscale)
+            out = F.interpolate(
+                out, size=(target_h, target_w), mode="bicubic", align_corners=False
+            )
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            resize_duration_s = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        out_np = out.permute(0, 2, 3, 1).clamp(0.0, 1.0).cpu().numpy()
+        d2h_duration_s = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        outputs = [(frame * 255.0).astype(np.uint8) for frame in out_np]
+        post_duration_s = time.perf_counter() - start_time
+
+        total_duration_s = (
+            stack_duration_s
+            + h2d_duration_s
+            + forward_duration_s
+            + resize_duration_s
+            + d2h_duration_s
+            + post_duration_s
+        )
+        logger.info(
+            "RealESRGAN batch upscale: batch=%d input=%dx%d native_scale=%dx outscale=%s "
+            "total=%.3fs stack=%.3fs h2d=%.3fs forward=%.3fs resize=%.3fs d2h=%.3fs post=%.3fs",
+            len(frames),
+            w,
+            h,
+            self.scale,
+            outscale if outscale is not None else self.scale,
+            total_duration_s,
+            stack_duration_s,
+            h2d_duration_s,
+            forward_duration_s,
+            resize_duration_s,
+            d2h_duration_s,
+            post_duration_s,
+        )
+        return outputs
+
 
 # ---------------------------------------------------------------------------
 # ImageUpscaler public class
@@ -400,9 +475,34 @@ class ImageUpscaler:
         """
         if not frames:
             return frames
+        total_start_time = time.perf_counter()
         model = self._ensure_model_loaded()
         outscale = self._scale if self._scale != model.scale else None
-        return [model.upscale(frame, outscale=outscale) for frame in frames]
+        output_frames: list[np.ndarray] = [None] * len(frames)
+        groups: dict[tuple[int, ...], list[int]] = {}
+        for idx, frame in enumerate(frames):
+            groups.setdefault(tuple(frame.shape), []).append(idx)
+
+        for shape, indices in groups.items():
+            logger.info(
+                "RealESRGAN upscale group: frames=%d shape=%s indices=%s",
+                len(indices),
+                shape,
+                indices,
+            )
+            group_frames = [frames[idx] for idx in indices]
+            group_outputs = model.upscale_batch(group_frames, outscale=outscale)
+            for idx, output in zip(indices, group_outputs):
+                output_frames[idx] = output
+
+        total_duration_s = time.perf_counter() - total_start_time
+        logger.info(
+            "RealESRGAN upscale_frames completed in %.3f seconds for %d frames across %d groups",
+            total_duration_s,
+            len(frames),
+            len(groups),
+        )
+        return output_frames
 
 
 # ---------------------------------------------------------------------------
