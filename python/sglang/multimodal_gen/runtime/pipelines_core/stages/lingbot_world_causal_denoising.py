@@ -8,6 +8,8 @@ Extends CausalDMDDenoisingStage with:
 - Session-persistent KV cache with cumulative frame position tracking
 """
 
+import os
+
 import torch
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -57,6 +59,44 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ``[noise(16ch), condition(20ch)]`` concatenated along channel dim.
     Each call processes one chunk (num_frames_per_block frames).
     """
+
+    def __init__(self, transformer, scheduler) -> None:
+        self._lingbot_transformer_torch_compiled = False
+        super().__init__(transformer, scheduler)
+        self._maybe_enable_lingbot_torch_compile()
+
+    def _maybe_enable_torch_compile(self, module: object) -> None:
+        """Disable the generic whole-DiT compile path for LingBot.
+
+        LingBot realtime inference carries mutable session/KV-cache dict state through
+        the transformer forward. The generic compile hook specializes too easily on
+        those values. Compile is applied below with LingBot-specific kwargs instead.
+        """
+        return
+
+    def _maybe_enable_lingbot_torch_compile(self) -> None:
+        if (
+            self._lingbot_transformer_torch_compiled
+            or not self.server_args.enable_torch_compile
+            or not isinstance(self.transformer, torch.nn.Module)
+        ):
+            return
+
+        try:
+            import torch._inductor.config as _inductor_cfg
+
+            _inductor_cfg.reorder_for_compute_comm_overlap = True
+        except ImportError:
+            pass
+
+        mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs")
+        logger.info(
+            "Compiling LingBot transformer with torch.compile "
+            "(mode=%s, fullgraph=False, dynamic=True)",
+            mode,
+        )
+        self.transformer.compile(fullgraph=False, dynamic=True, mode=mode)
+        self._lingbot_transformer_torch_compiled = True
 
     def _get_cache_state(
         self,
