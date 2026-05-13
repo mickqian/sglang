@@ -40,7 +40,6 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-_CURRENT_PLATFORM_AMP_SUPPORTED = current_platform.is_amp_supported()
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
@@ -155,11 +154,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        # Keep the platform query outside torch.compile traces; the bias cast is
-        # only needed on platforms where AMP is unsupported.
-        if not _CURRENT_PLATFORM_AMP_SUPPORTED and bias is not None:
-            bias = bias.to(x.dtype)
-        return F.linear(x, layer.weight, bias)
+        output = (
+            F.linear(x, layer.weight, bias)
+            if current_platform.is_amp_supported() or bias is None
+            else F.linear(x, layer.weight, bias.to(x.dtype))
+        )  # NOTE: explicit dtype cast for bias is needed on platforms where amp isn't supported
+        return output
 
 
 class LinearBase(torch.nn.Module):
