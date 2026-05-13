@@ -409,10 +409,12 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                         forward_batch=batch,
                     ),
                 ):
+                    # TimestepEmbedder uses float timesteps internally; keep the
+                    # compiled condition_embedder on one dtype across requests.
                     t_expanded = t_cur * torch.ones(
                         (b, 1),
                         device=device,
-                        dtype=torch.long,
+                        dtype=torch.float32,
                     )
                     pred_noise = self.transformer(
                         latent_model_input,
