@@ -337,16 +337,12 @@ class UpscalerModel:
         stack_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        imgs_t = self._prepare_input(imgs)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2).to(self.device)
         h2d_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
         with torch.inference_mode():
             out = self.net(imgs_t)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
         forward_duration_s = time.perf_counter() - start_time
 
         resize_duration_s = 0.0
@@ -357,8 +353,6 @@ class UpscalerModel:
             out = F.interpolate(
                 out, size=(target_h, target_w), mode="bicubic", align_corners=False
             )
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
             resize_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
