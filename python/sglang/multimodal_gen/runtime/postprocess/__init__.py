@@ -4,6 +4,7 @@
 from sglang.multimodal_gen.runtime.postprocess.realesrgan_upscaler import (
     ImageUpscaler,
     upscale_frames,
+    upscale_tensor_frames,
 )
 from sglang.multimodal_gen.runtime.postprocess.rife_interpolator import (
     FrameInterpolator,
@@ -15,4 +16,5 @@ __all__ = [
     "interpolate_video_frames",
     "ImageUpscaler",
     "upscale_frames",
+    "upscale_tensor_frames",
 ]
