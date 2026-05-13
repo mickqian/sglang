@@ -479,10 +479,12 @@ class ImageUpscaler:
         model_path: Optional[str] = None,
         scale: int = 4,
         half_precision: bool = False,
+        cudnn_benchmark: bool = False,
     ):
         self._model_path = model_path
         self._scale = scale
         self._half_precision = half_precision
+        self._cudnn_benchmark = cudnn_benchmark
 
     def _ensure_model_loaded(self) -> UpscalerModel:
         """Download/load Real-ESRGAN weights, detect arch, and cache globally."""
@@ -490,6 +492,10 @@ class ImageUpscaler:
 
         # Resolve: local .pth pass-through, or HF repo → download single file
         resolved_path = _resolve_model_path(model_path)
+        device = current_platform.get_local_torch_device()
+        if self._cudnn_benchmark and device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
 
         if resolved_path in _MODEL_CACHE:
             return _MODEL_CACHE[resolved_path]
@@ -524,7 +530,6 @@ class ImageUpscaler:
             ) from e
         net.eval()
 
-        device = current_platform.get_local_torch_device()
         if self._half_precision:
             net = net.half()
         net = net.to(device)
@@ -541,11 +546,12 @@ class ImageUpscaler:
         model = UpscalerModel(net=net, scale=native_scale)
         _MODEL_CACHE[resolved_path] = model
         logger.info(
-            "Real-ESRGAN model loaded on device: %s (dtype=%s, native_scale=%dx, outscale=%s)",
+            "Real-ESRGAN model loaded on device: %s (dtype=%s, native_scale=%dx, outscale=%s, cudnn_benchmark=%s)",
             device,
             next(net.parameters()).dtype,
             native_scale,
             f"{self._scale}x" if self._scale != native_scale else "native",
+            torch.backends.cudnn.benchmark,
         )
         return model
 
@@ -651,6 +657,7 @@ def upscale_frames(
     model_path: Optional[str] = None,
     scale: int = 4,
     half_precision: bool = False,
+    cudnn_benchmark: bool = False,
 ) -> list[np.ndarray]:
     """
     Convenience wrapper around ImageUpscaler.
@@ -670,11 +677,15 @@ def upscale_frames(
                         The 4× model is used internally; the output is
                         resized to match *scale* when it differs.
         half_precision: Use fp16 inference (faster on supported GPUs).
+        cudnn_benchmark: Enable cuDNN convolution autotuning.
 
     Returns:
         List of upscaled uint8 HWC numpy frames.
     """
     upscaler = ImageUpscaler(
-        model_path=model_path, scale=scale, half_precision=half_precision
+        model_path=model_path,
+        scale=scale,
+        half_precision=half_precision,
+        cudnn_benchmark=cudnn_benchmark,
     )
     return upscaler.upscale(frames)
