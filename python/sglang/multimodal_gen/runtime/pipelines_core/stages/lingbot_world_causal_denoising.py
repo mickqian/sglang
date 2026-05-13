@@ -114,6 +114,11 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             getattr(self.transformer, "patch_embedding", None), "patch_embedding"
         )
         compile_module(
+            getattr(self.transformer, "patch_embedding_wancamctrl", None),
+            "patch_embedding_wancamctrl",
+        )
+        compile_module(getattr(self.transformer, "c2ws_mlp", None), "c2ws_mlp")
+        compile_module(
             getattr(self.transformer, "condition_embedder", None), "condition_embedder"
         )
         compile_module(getattr(self.transformer, "norm_out", None), "norm_out")
