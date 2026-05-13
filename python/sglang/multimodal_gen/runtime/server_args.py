@@ -207,6 +207,7 @@ class ServerArgs:
     output_path: str | None = "outputs/"
     input_save_path: str | None = "inputs/uploads"
     realtime_async_postprocess: bool = False
+    realesrgan_half_precision: bool = False
 
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
@@ -847,6 +848,12 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.realtime_async_postprocess,
             help="Run realtime video postprocess/save in the background thread.",
+        )
+        parser.add_argument(
+            "--realesrgan-half-precision",
+            action="store_true",
+            default=ServerArgs.realesrgan_half_precision,
+            help="Run Real-ESRGAN upscaling in fp16 half precision.",
         )
 
         # LoRA

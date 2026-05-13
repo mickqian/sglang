@@ -425,6 +425,8 @@ def post_process_sample(
     """
     Process sample output, optionally interpolate video frames, and save.
     """
+    from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+
     audio = None
     if isinstance(sample, (tuple, list)) and len(sample) == 2:
         sample, audio = sample
@@ -484,6 +486,7 @@ def post_process_sample(
             frames,
             model_path=upscaling_model_path,
             scale=upscaling_scale,
+            half_precision=get_global_server_args().realesrgan_half_precision,
         )
 
     # 4. Save outputs if requested
