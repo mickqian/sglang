@@ -283,16 +283,50 @@ class UpscalerModel:
         return next(self.net.parameters()).dtype
 
     def _prepare_input(self, frames: np.ndarray) -> torch.Tensor:
-        imgs_t = torch.from_numpy(frames).to(self.device)
+        imgs_t = self._copy_input_to_device(frames)
+        return self._preprocess_input_tensor(imgs_t)
+
+    def _copy_input_to_device(self, frames: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(frames).to(self.device)
+
+    def _preprocess_input_tensor(self, imgs_t: torch.Tensor) -> torch.Tensor:
         imgs_t = imgs_t.permute(0, 3, 1, 2).to(dtype=self.dtype).mul_(1.0 / 255.0)
         if self.device.type == "cuda":
             imgs_t = imgs_t.contiguous(memory_format=torch.channels_last)
         return imgs_t
 
     def _tensor_to_uint8_frames(self, out: torch.Tensor) -> np.ndarray:
+        out = self._postprocess_output_tensor(out)
+        return self._copy_output_to_host(out)
+
+    @staticmethod
+    def _postprocess_output_tensor(out: torch.Tensor) -> torch.Tensor:
         out = out.permute(0, 2, 3, 1).clamp(0.0, 1.0).mul_(255.0)
-        out = out.to(torch.uint8).contiguous().cpu().numpy()
-        return out
+        return out.to(torch.uint8).contiguous()
+
+    @staticmethod
+    def _copy_output_to_host(out: torch.Tensor) -> np.ndarray:
+        return out.cpu().numpy()
+
+    def _start_cuda_timer(self):
+        if self.device.type != "cuda":
+            return None
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        return start, end
+
+    @staticmethod
+    def _stop_cuda_timer(timer) -> None:
+        if timer is not None:
+            timer[1].record()
+
+    @staticmethod
+    def _cuda_elapsed_s(timer, fallback_s: float) -> float:
+        if timer is None:
+            return fallback_s
+        timer[1].synchronize()
+        return timer[0].elapsed_time(timer[1]) / 1000.0
 
     def upscale(self, frame: np.ndarray, outscale: float | None = None) -> np.ndarray:
         """Upscale a single HWC uint8 frame → HWC uint8 frame.
@@ -332,60 +366,96 @@ class UpscalerModel:
         if any(frame.shape[:2] != (h, w) for frame in frames):
             raise ValueError("All frames in a batch must have the same resolution")
 
+        total_start_time = time.perf_counter()
+
         start_time = time.perf_counter()
         imgs = np.stack(frames, axis=0)
         stack_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        imgs_t = self._prepare_input(imgs)
-        h2d_duration_s = time.perf_counter() - start_time
+        h2d_timer = self._start_cuda_timer()
+        imgs_t = self._copy_input_to_device(imgs)
+        self._stop_cuda_timer(h2d_timer)
+        h2d_wall_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
+        input_preprocess_timer = self._start_cuda_timer()
+        imgs_t = self._preprocess_input_tensor(imgs_t)
+        self._stop_cuda_timer(input_preprocess_timer)
+        input_preprocess_wall_duration_s = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        forward_timer = self._start_cuda_timer()
         with torch.inference_mode():
             out = self.net(imgs_t)
-        forward_duration_s = time.perf_counter() - start_time
+        self._stop_cuda_timer(forward_timer)
+        forward_wall_duration_s = time.perf_counter() - start_time
 
-        resize_duration_s = 0.0
+        resize_timer = None
+        resize_wall_duration_s = 0.0
         if outscale is not None and outscale != self.scale:
             start_time = time.perf_counter()
+            resize_timer = self._start_cuda_timer()
             target_h = int(h * outscale)
             target_w = int(w * outscale)
             out = F.interpolate(
                 out, size=(target_h, target_w), mode="bicubic", align_corners=False
             )
-            resize_duration_s = time.perf_counter() - start_time
+            self._stop_cuda_timer(resize_timer)
+            resize_wall_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        out_np = self._tensor_to_uint8_frames(out)
-        d2h_duration_s = time.perf_counter() - start_time
+        output_postprocess_timer = self._start_cuda_timer()
+        out = self._postprocess_output_tensor(out)
+        self._stop_cuda_timer(output_postprocess_timer)
+        output_postprocess_wall_duration_s = time.perf_counter() - start_time
+
+        start_time = time.perf_counter()
+        output_d2h_timer = self._start_cuda_timer()
+        out_np = self._copy_output_to_host(out)
+        self._stop_cuda_timer(output_d2h_timer)
+        output_d2h_wall_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
         outputs = [frame for frame in out_np]
         post_duration_s = time.perf_counter() - start_time
 
-        total_duration_s = (
-            stack_duration_s
-            + h2d_duration_s
-            + forward_duration_s
-            + resize_duration_s
-            + d2h_duration_s
-            + post_duration_s
+        h2d_duration_s = self._cuda_elapsed_s(h2d_timer, h2d_wall_duration_s)
+        input_preprocess_duration_s = self._cuda_elapsed_s(
+            input_preprocess_timer, input_preprocess_wall_duration_s
         )
+        forward_duration_s = self._cuda_elapsed_s(
+            forward_timer, forward_wall_duration_s
+        )
+        resize_duration_s = self._cuda_elapsed_s(resize_timer, resize_wall_duration_s)
+        output_postprocess_duration_s = self._cuda_elapsed_s(
+            output_postprocess_timer, output_postprocess_wall_duration_s
+        )
+        output_d2h_duration_s = self._cuda_elapsed_s(
+            output_d2h_timer, output_d2h_wall_duration_s
+        )
+        total_duration_s = time.perf_counter() - total_start_time
+        timing_source = "cuda_event" if self.device.type == "cuda" else "wall"
         logger.info(
             "RealESRGAN batch upscale: batch=%d input=%dx%d native_scale=%dx outscale=%s "
-            "dtype=%s total=%.3fs stack=%.3fs h2d=%.3fs forward=%.3fs resize=%.3fs d2h=%.3fs post=%.3fs",
+            "dtype=%s timing=%s total=%.3fs stack=%.3fs input_h2d=%.3fs "
+            "input_pre=%.3fs forward=%.3fs resize=%.3fs output_post=%.3fs "
+            "output_d2h=%.3fs python_post=%.3fs",
             len(frames),
             w,
             h,
             self.scale,
             outscale if outscale is not None else self.scale,
             self.dtype,
+            timing_source,
             total_duration_s,
             stack_duration_s,
             h2d_duration_s,
+            input_preprocess_duration_s,
             forward_duration_s,
             resize_duration_s,
-            d2h_duration_s,
+            output_postprocess_duration_s,
+            output_d2h_duration_s,
             post_duration_s,
         )
         return outputs
