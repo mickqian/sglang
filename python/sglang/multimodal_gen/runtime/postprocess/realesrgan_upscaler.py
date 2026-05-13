@@ -308,27 +308,6 @@ class UpscalerModel:
     def _copy_output_to_host(out: torch.Tensor) -> np.ndarray:
         return out.cpu().numpy()
 
-    def _normalize_tensor_frames(self, frames: torch.Tensor) -> torch.Tensor:
-        """Convert CTHW/CHW tensor frames to batched NCHW input for Real-ESRGAN."""
-        if frames.dim() == 3:
-            frames = frames.unsqueeze(1)
-        if frames.dim() != 4:
-            raise ValueError(f"Unexpected tensor frame shape: {tuple(frames.shape)}")
-        if frames.shape[0] != 3:
-            raise ValueError(
-                "Real-ESRGAN tensor input must use CTHW/CHW layout with 3 channels, "
-                f"got shape {tuple(frames.shape)}"
-            )
-
-        imgs_t = frames.permute(1, 0, 2, 3).to(device=self.device)
-        if imgs_t.dtype == torch.uint8:
-            imgs_t = imgs_t.to(dtype=self.dtype).mul_(1.0 / 255.0)
-        else:
-            imgs_t = imgs_t.to(dtype=self.dtype).clamp(0.0, 1.0)
-        if self.device.type == "cuda":
-            imgs_t = imgs_t.contiguous(memory_format=torch.channels_last)
-        return imgs_t
-
     def _start_cuda_timer(self):
         if self.device.type != "cuda":
             return None
@@ -481,111 +460,6 @@ class UpscalerModel:
         )
         return outputs
 
-    def upscale_tensor(
-        self, frames: torch.Tensor, outscale: float | None = None
-    ) -> list[np.ndarray]:
-        """Upscale CTHW/CHW tensor frames without round-tripping input through CPU."""
-        if frames.dim() == 3:
-            h, w = frames.shape[-2:]
-            batch = 1
-        elif frames.dim() == 4:
-            h, w = frames.shape[-2:]
-            batch = frames.shape[1]
-        else:
-            raise ValueError(f"Unexpected tensor frame shape: {tuple(frames.shape)}")
-
-        total_start_time = time.perf_counter()
-        input_device = frames.device
-
-        start_time = time.perf_counter()
-        h2d_timer = self._start_cuda_timer()
-        if frames.device != self.device:
-            frames = frames.to(self.device)
-        self._stop_cuda_timer(h2d_timer)
-        h2d_wall_duration_s = time.perf_counter() - start_time
-
-        start_time = time.perf_counter()
-        input_preprocess_timer = self._start_cuda_timer()
-        imgs_t = self._normalize_tensor_frames(frames)
-        self._stop_cuda_timer(input_preprocess_timer)
-        input_preprocess_wall_duration_s = time.perf_counter() - start_time
-
-        start_time = time.perf_counter()
-        forward_timer = self._start_cuda_timer()
-        with torch.inference_mode():
-            out = self.net(imgs_t)
-        self._stop_cuda_timer(forward_timer)
-        forward_wall_duration_s = time.perf_counter() - start_time
-
-        resize_timer = None
-        resize_wall_duration_s = 0.0
-        if outscale is not None and outscale != self.scale:
-            start_time = time.perf_counter()
-            resize_timer = self._start_cuda_timer()
-            target_h = int(h * outscale)
-            target_w = int(w * outscale)
-            out = F.interpolate(
-                out, size=(target_h, target_w), mode="bicubic", align_corners=False
-            )
-            self._stop_cuda_timer(resize_timer)
-            resize_wall_duration_s = time.perf_counter() - start_time
-
-        start_time = time.perf_counter()
-        output_postprocess_timer = self._start_cuda_timer()
-        out = self._postprocess_output_tensor(out)
-        self._stop_cuda_timer(output_postprocess_timer)
-        output_postprocess_wall_duration_s = time.perf_counter() - start_time
-
-        start_time = time.perf_counter()
-        output_d2h_timer = self._start_cuda_timer()
-        out_np = self._copy_output_to_host(out)
-        self._stop_cuda_timer(output_d2h_timer)
-        output_d2h_wall_duration_s = time.perf_counter() - start_time
-
-        start_time = time.perf_counter()
-        outputs = [frame for frame in out_np]
-        post_duration_s = time.perf_counter() - start_time
-
-        h2d_duration_s = self._cuda_elapsed_s(h2d_timer, h2d_wall_duration_s)
-        input_preprocess_duration_s = self._cuda_elapsed_s(
-            input_preprocess_timer, input_preprocess_wall_duration_s
-        )
-        forward_duration_s = self._cuda_elapsed_s(
-            forward_timer, forward_wall_duration_s
-        )
-        resize_duration_s = self._cuda_elapsed_s(resize_timer, resize_wall_duration_s)
-        output_postprocess_duration_s = self._cuda_elapsed_s(
-            output_postprocess_timer, output_postprocess_wall_duration_s
-        )
-        output_d2h_duration_s = self._cuda_elapsed_s(
-            output_d2h_timer, output_d2h_wall_duration_s
-        )
-        total_duration_s = time.perf_counter() - total_start_time
-        timing_source = "cuda_event" if self.device.type == "cuda" else "wall"
-        logger.info(
-            "RealESRGAN tensor upscale: batch=%d input=%dx%d input_device=%s "
-            "native_scale=%dx outscale=%s dtype=%s timing=%s total=%.3fs "
-            "input_h2d=%.3fs input_pre=%.3fs forward=%.3fs resize=%.3fs "
-            "output_post=%.3fs output_d2h=%.3fs python_post=%.3fs",
-            batch,
-            w,
-            h,
-            input_device,
-            self.scale,
-            outscale if outscale is not None else self.scale,
-            self.dtype,
-            timing_source,
-            total_duration_s,
-            h2d_duration_s,
-            input_preprocess_duration_s,
-            forward_duration_s,
-            resize_duration_s,
-            output_postprocess_duration_s,
-            output_d2h_duration_s,
-            post_duration_s,
-        )
-        return outputs
-
 
 # ---------------------------------------------------------------------------
 # ImageUpscaler public class
@@ -712,12 +586,6 @@ class ImageUpscaler:
         )
         return output_frames
 
-    def upscale_tensor(self, frames: torch.Tensor) -> list[np.ndarray]:
-        """Upscale CTHW/CHW tensor frames."""
-        model = self._ensure_model_loaded()
-        outscale = self._scale if self._scale != model.scale else None
-        return model.upscale_tensor(frames, outscale=outscale)
-
 
 # ---------------------------------------------------------------------------
 # HF download helper
@@ -810,16 +678,3 @@ def upscale_frames(
         model_path=model_path, scale=scale, half_precision=half_precision
     )
     return upscaler.upscale(frames)
-
-
-def upscale_tensor_frames(
-    frames: torch.Tensor,
-    model_path: Optional[str] = None,
-    scale: int = 4,
-    half_precision: bool = False,
-) -> list[np.ndarray]:
-    """Upscale CTHW/CHW tensor frames without first converting them to numpy."""
-    upscaler = ImageUpscaler(
-        model_path=model_path, scale=scale, half_precision=half_precision
-    )
-    return upscaler.upscale_tensor(frames)

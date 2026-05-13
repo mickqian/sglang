@@ -431,19 +431,7 @@ def post_process_sample(
 
     # 1. Convert tensor / array to list of uint8 HWC frames
     frames = None
-    if (
-        isinstance(sample, torch.Tensor)
-        and enable_upscaling
-        and not enable_frame_interpolation
-    ):
-        from sglang.multimodal_gen.runtime.postprocess import upscale_tensor_frames
-
-        frames = upscale_tensor_frames(
-            sample,
-            model_path=upscaling_model_path,
-            scale=upscaling_scale,
-        )
-    elif isinstance(sample, torch.Tensor):
+    if isinstance(sample, torch.Tensor):
         if sample.dim() == 3:
             sample = sample.unsqueeze(1)
         sample = (sample * 255).clamp(0, 255).to(torch.uint8)

@@ -320,37 +320,26 @@ class GPUWorker:
                     _copy_event = None
                     _source_ref = None
                     if _output.is_cuda and torch.cuda.is_available():
-                        _can_keep_gpu_output = (
-                            req.enable_upscaling and not req.enable_frame_interpolation
-                        )
-                        if _can_keep_gpu_output:
+                        try:
+                            _cpu_output = torch.empty_like(
+                                _output, device="cpu", pin_memory=True
+                            )
+                            _cpu_output.copy_(_output, non_blocking=True)
                             _copy_event = torch.cuda.Event()
                             _copy_event.record(
                                 torch.cuda.current_stream(_output.device)
                             )
-                        else:
-                            try:
-                                _cpu_output = torch.empty_like(
-                                    _output, device="cpu", pin_memory=True
-                                )
-                                _cpu_output.copy_(_output, non_blocking=True)
-                                _copy_event = torch.cuda.Event()
-                                _copy_event.record(
-                                    torch.cuda.current_stream(_output.device)
-                                )
-                                # Keep the source allocation alive until the copy event
-                                # has completed in the save thread.
-                                _source_ref = _output
-                                _output = _cpu_output
-                            except RuntimeError as e:
-                                logger.warning(
-                                    "Failed to start pinned async output copy; "
-                                    "falling back to blocking CPU copy: %s",
-                                    e,
-                                )
-                                _output = _output.to(
-                                    "cpu", non_blocking=False
-                                ).contiguous()
+                            # Keep the source allocation alive until the copy event
+                            # has completed in the save thread.
+                            _source_ref = _output
+                            _output = _cpu_output
+                        except RuntimeError as e:
+                            logger.warning(
+                                "Failed to start pinned async output copy; "
+                                "falling back to blocking CPU copy: %s",
+                                e,
+                            )
+                            _output = _output.to("cpu", non_blocking=False).contiguous()
                     else:
                         _output = _output.to("cpu", non_blocking=False).contiguous()
                     _notify_callback = self.notify_callback
