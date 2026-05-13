@@ -8,6 +8,8 @@ Extends CausalDMDDenoisingStage with:
 - Session-persistent KV cache with cumulative frame position tracking
 """
 
+import os
+
 import torch
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -80,12 +82,54 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             return
 
         # LingBot realtime inference passes mutable KV/cache state and changing
-        # frame offsets through the transformer. Whole-transformer compile
-        # specializes around RoPE/KV branches during warmup and remains slower
-        # than eager execution after all variants are compiled.
+        # frame offsets through the transformer. Compile only stable tensor-heavy
+        # submodules and leave RoPE/KV/attention control flow in eager mode.
+        try:
+            import torch._inductor.config as _inductor_cfg
+
+            _inductor_cfg.reorder_for_compute_comm_overlap = True
+        except ImportError:
+            pass
+
+        mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs")
+        compiled_modules = 0
+
+        def compile_module(module: object, name: str) -> None:
+            nonlocal compiled_modules
+            if not isinstance(module, torch.nn.Module) or getattr(
+                module, "_lingbot_torch_compiled", False
+            ):
+                return
+            logger.info(
+                "Compiling LingBot %s with torch.compile "
+                "(mode=%s, fullgraph=False, dynamic=True)",
+                name,
+                mode,
+            )
+            module.compile(fullgraph=False, dynamic=True, mode=mode)
+            module._lingbot_torch_compiled = True
+            compiled_modules += 1
+
+        compile_module(
+            getattr(self.transformer, "patch_embedding", None), "patch_embedding"
+        )
+        compile_module(
+            getattr(self.transformer, "condition_embedder", None), "condition_embedder"
+        )
+        compile_module(getattr(self.transformer, "norm_out", None), "norm_out")
+        compile_module(getattr(self.transformer, "proj_out", None), "proj_out")
+
+        for block_index, block in enumerate(getattr(self.transformer, "blocks", [])):
+            compile_module(getattr(block, "ffn", None), f"blocks.{block_index}.ffn")
+            compile_module(
+                getattr(block, "cam_conditioner", None),
+                f"blocks.{block_index}.cam_conditioner",
+            )
+
         logger.info(
-            "Skipping torch.compile for LingBot transformer; the realtime KV-cache "
-            "path is faster in eager mode."
+            "Compiled %s LingBot stable submodules; transformer RoPE/KV-cache "
+            "control flow remains eager.",
+            compiled_modules,
         )
         self._lingbot_torch_compile_checked = True
 
