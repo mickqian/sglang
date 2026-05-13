@@ -482,13 +482,11 @@ def post_process_sample(
     if enable_upscaling and frames:
         from sglang.multimodal_gen.runtime.postprocess import upscale_frames
 
-        server_args = get_global_server_args()
         frames = upscale_frames(
             frames,
             model_path=upscaling_model_path,
             scale=upscaling_scale,
-            half_precision=server_args.realesrgan_half_precision,
-            cudnn_benchmark=server_args.realesrgan_cudnn_benchmark,
+            half_precision=get_global_server_args().realesrgan_half_precision,
         )
 
     # 4. Save outputs if requested

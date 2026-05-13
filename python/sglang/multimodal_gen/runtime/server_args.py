@@ -208,7 +208,6 @@ class ServerArgs:
     input_save_path: str | None = "inputs/uploads"
     realtime_async_postprocess: bool = False
     realesrgan_half_precision: bool = False
-    realesrgan_cudnn_benchmark: bool = False
 
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
@@ -855,12 +854,6 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.realesrgan_half_precision,
             help="Run Real-ESRGAN upscaling in fp16 half precision.",
-        )
-        parser.add_argument(
-            "--realesrgan-cudnn-benchmark",
-            action="store_true",
-            default=ServerArgs.realesrgan_cudnn_benchmark,
-            help="Enable cuDNN convolution autotuning for Real-ESRGAN upscaling.",
         )
 
         # LoRA
