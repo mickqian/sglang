@@ -63,10 +63,8 @@ from sglang.multimodal_gen.runtime.models.vaes.parallel.wan_dist_utils import (
     split_for_parallel_decode,
     split_for_parallel_encode,
 )
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 CACHE_T = 2
-logger = init_logger(__name__)
 
 is_first_frame = contextvars.ContextVar("is_first_frame", default=False)
 feat_cache = contextvars.ContextVar("feat_cache", default=None)
@@ -866,23 +864,6 @@ class AutoencoderKLWan(ParallelTiledVAE):
 
         self.use_feature_cache = config.use_feature_cache
         self._causal_decode_initialized = False
-        sp_world_size = 1
-        sp_rank = 0
-        if dist.is_initialized():
-            sp_world_size = get_sp_world_size()
-            sp_rank = get_sp_parallel_rank()
-        logger.info(
-            "WanVAE parallel config: use_parallel_encode=%s use_parallel_decode=%s "
-            "sp_world_size=%s sp_rank=%s parallel_encode_active=%s "
-            "parallel_decode_active=%s use_feature_cache=%s",
-            self.use_parallel_encode,
-            self.use_parallel_decode,
-            sp_world_size,
-            sp_rank,
-            self.use_parallel_encode and sp_world_size > 1,
-            self.use_parallel_decode and sp_world_size > 1,
-            self.use_feature_cache,
-        )
 
     def clear_cache(self) -> None:
 
