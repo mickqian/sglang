@@ -278,6 +278,22 @@ class UpscalerModel:
     def device(self) -> torch.device:
         return next(self.net.parameters()).device
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.net.parameters()).dtype
+
+    def _prepare_input(self, frames: np.ndarray) -> torch.Tensor:
+        imgs_t = torch.from_numpy(frames).to(self.device)
+        imgs_t = imgs_t.permute(0, 3, 1, 2).to(dtype=self.dtype).mul_(1.0 / 255.0)
+        if self.device.type == "cuda":
+            imgs_t = imgs_t.contiguous(memory_format=torch.channels_last)
+        return imgs_t
+
+    def _tensor_to_uint8_frames(self, out: torch.Tensor) -> np.ndarray:
+        out = out.permute(0, 2, 3, 1).clamp(0.0, 1.0).mul_(255.0)
+        out = out.to(torch.uint8).contiguous().cpu().numpy()
+        return out
+
     def upscale(self, frame: np.ndarray, outscale: float | None = None) -> np.ndarray:
         """Upscale a single HWC uint8 frame → HWC uint8 frame.
 
@@ -290,9 +306,8 @@ class UpscalerModel:
                       ``None`` means use the model's native scale as-is.
         """
         h, w = frame.shape[:2]
-        img = frame.astype(np.float32) / 255.0
-        img_t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        with torch.no_grad():
+        img_t = self._prepare_input(frame[None, ...])
+        with torch.inference_mode():
             out = self.net(img_t)
 
         # If the desired outscale differs from the model's native scale,
@@ -304,8 +319,7 @@ class UpscalerModel:
                 out, size=(target_h, target_w), mode="bicubic", align_corners=False
             )
 
-        out_np = out.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).cpu().numpy()
-        return (out_np * 255.0).astype(np.uint8)
+        return self._tensor_to_uint8_frames(out)[0]
 
     def upscale_batch(
         self, frames: list[np.ndarray], outscale: float | None = None
@@ -319,17 +333,17 @@ class UpscalerModel:
             raise ValueError("All frames in a batch must have the same resolution")
 
         start_time = time.perf_counter()
-        imgs = np.stack(frames, axis=0).astype(np.float32) / 255.0
+        imgs = np.stack(frames, axis=0)
         stack_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2).to(self.device)
-        h2d_duration_s = time.perf_counter() - start_time
-
+        imgs_t = self._prepare_input(imgs)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+        h2d_duration_s = time.perf_counter() - start_time
+
         start_time = time.perf_counter()
-        with torch.no_grad():
+        with torch.inference_mode():
             out = self.net(imgs_t)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -348,11 +362,11 @@ class UpscalerModel:
             resize_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        out_np = out.permute(0, 2, 3, 1).clamp(0.0, 1.0).cpu().numpy()
+        out_np = self._tensor_to_uint8_frames(out)
         d2h_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        outputs = [(frame * 255.0).astype(np.uint8) for frame in out_np]
+        outputs = [frame for frame in out_np]
         post_duration_s = time.perf_counter() - start_time
 
         total_duration_s = (
@@ -365,12 +379,13 @@ class UpscalerModel:
         )
         logger.info(
             "RealESRGAN batch upscale: batch=%d input=%dx%d native_scale=%dx outscale=%s "
-            "total=%.3fs stack=%.3fs h2d=%.3fs forward=%.3fs resize=%.3fs d2h=%.3fs post=%.3fs",
+            "dtype=%s total=%.3fs stack=%.3fs h2d=%.3fs forward=%.3fs resize=%.3fs d2h=%.3fs post=%.3fs",
             len(frames),
             w,
             h,
             self.scale,
             outscale if outscale is not None else self.scale,
+            self.dtype,
             total_duration_s,
             stack_duration_s,
             h2d_duration_s,
@@ -449,6 +464,8 @@ class ImageUpscaler:
         if self._half_precision:
             net = net.half()
         net = net.to(device)
+        if device.type == "cuda":
+            net = net.to(memory_format=torch.channels_last)
 
         # Detect the model's native scale from network architecture
         native_scale = 4  # sensible default
@@ -460,8 +477,9 @@ class ImageUpscaler:
         model = UpscalerModel(net=net, scale=native_scale)
         _MODEL_CACHE[resolved_path] = model
         logger.info(
-            "Real-ESRGAN model loaded on device: %s (native_scale=%dx, outscale=%s)",
+            "Real-ESRGAN model loaded on device: %s (dtype=%s, native_scale=%dx, outscale=%s)",
             device,
+            next(net.parameters()).dtype,
             native_scale,
             f"{self._scale}x" if self._scale != native_scale else "native",
         )
