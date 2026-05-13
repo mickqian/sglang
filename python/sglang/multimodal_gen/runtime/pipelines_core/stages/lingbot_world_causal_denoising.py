@@ -109,6 +109,22 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             kv_cache_size = self.local_attn_size * self.frame_seq_length
         else:
             kv_cache_size = self.frame_seq_length * self.sliding_window_num_frames
+        logger.info(
+            "LingBot KV cache init: batch=%s layers=%s frame_seq_length=%s "
+            "num_frames_per_block=%s sliding_window_num_frames=%s local_attn_size=%s "
+            "sink_size=%s kv_cache_tokens=%s heads=%s head_dim=%s sequence_shard=%s",
+            batch_size,
+            self.num_transformer_blocks,
+            self.frame_seq_length,
+            self.num_frames_per_block,
+            self.sliding_window_num_frames,
+            self.local_attn_size,
+            self.transformer.config.arch_config.sink_size,
+            kv_cache_size,
+            num_attention_heads,
+            attention_head_dim,
+            sequence_shard_enabled,
+        )
 
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append(

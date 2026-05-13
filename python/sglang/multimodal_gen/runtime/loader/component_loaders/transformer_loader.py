@@ -55,6 +55,24 @@ class TransformerLoader(ComponentLoader):
             raise ValueError(f"Invalid module name: {component_name}")
         dit_config = getattr(server_args.pipeline_config, pipeline_dit_config_attr)
         dit_config.update_model_arch(config)
+        arch_config = dit_config.arch_config
+        realtime_config_fields = (
+            "num_frames_per_block",
+            "sliding_window_num_frames",
+            "local_attn_size",
+            "sink_size",
+        )
+        realtime_config_values = {
+            field: getattr(arch_config, field)
+            for field in realtime_config_fields
+            if hasattr(arch_config, field)
+        }
+        if realtime_config_values:
+            logger.info(
+                "Transformer realtime config loaded from %s: %s",
+                component_model_path,
+                realtime_config_values,
+            )
 
         cls_name = config.pop("_class_name")
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
@@ -86,7 +104,7 @@ class TransformerLoader(ComponentLoader):
             and server_args.transformer_weights_path is not None
         ):
             logger.warning(
-                f"transformer_weights_path provided, but quantization config not resolved, which is unexpected and likely to cause errors"
+                "transformer_weights_path provided, but quantization config not resolved, which is unexpected and likely to cause errors"
             )
         else:
             logger.debug("quantization config: %s", init_params["quant_config"])
