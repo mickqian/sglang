@@ -337,7 +337,7 @@ class UpscalerModel:
         stack_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
-        imgs_t = torch.from_numpy(imgs).permute(0, 3, 1, 2).to(self.device)
+        imgs_t = self._prepare_input(imgs)
         h2d_duration_s = time.perf_counter() - start_time
 
         start_time = time.perf_counter()
