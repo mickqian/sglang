@@ -85,6 +85,13 @@ class FileReadyNotification(Notification):
     file_paths: list[str]
 
 
+@dataclass
+class FrameReadyNotification(Notification):
+    request_id: str
+    frame_batches: list[list[bytes]]
+    content_type: str = "image/jpeg"
+
+
 def format_lora_message(
     lora_nickname: Union[str, List[str]],
     target: Union[str, List[str]],

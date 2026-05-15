@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     FileReadyNotification,
+    FrameReadyNotification,
     ReleaseRealtimeSessionReq,
     prepare_request,
 )
@@ -49,17 +50,26 @@ async def _recv_notify_and_send(
             notification = await asyncio.wait_for(
                 notification_queue.get(), timeout=None
             )
-            if not isinstance(notification, FileReadyNotification):
+            if isinstance(notification, FileReadyNotification):
+                # send file contents to client
+                await _send_file_paths(
+                    ws,
+                    notification.file_paths,
+                    chunk_index_start=chunk_index,
+                    request_id=notification.request_id,
+                )
+                chunk_index += len(notification.file_paths)
+            elif isinstance(notification, FrameReadyNotification):
+                await _send_frame_batches(
+                    ws,
+                    notification.frame_batches,
+                    content_type=notification.content_type,
+                    chunk_index_start=chunk_index,
+                    request_id=notification.request_id,
+                )
+                chunk_index += len(notification.frame_batches)
+            else:
                 continue
-
-            # send file contents to client
-            await _send_file_paths(
-                ws,
-                notification.file_paths,
-                chunk_index_start=chunk_index,
-                request_id=notification.request_id,
-            )
-            chunk_index += len(notification.file_paths)
         except Exception as e:
             err_msg = str(e).splitlines()[0]
             logger.error(f"error during sending bytes from queue: {err_msg}")
@@ -81,6 +91,32 @@ async def _send_file_paths(
             ws,
             chunk_index=chunk_index,
             request_id=request_id,
+        )
+        chunk_index += 1
+
+
+async def _send_frame_batches(
+    ws: WebSocket,
+    frame_batches: list[list[bytes]],
+    *,
+    content_type: str,
+    chunk_index_start: int,
+    request_id: str,
+) -> None:
+    chunk_index = chunk_index_start
+    for frames in frame_batches:
+        await ws.send_bytes(
+            packb(
+                {
+                    "type": "frame_batch",
+                    "request_id": request_id,
+                    "chunk_index": chunk_index,
+                    "content_type": content_type,
+                    "num_frames": len(frames),
+                    "frames": frames,
+                    "total_size": sum(len(frame) for frame in frames),
+                }
+            )
         )
         chunk_index += 1
 

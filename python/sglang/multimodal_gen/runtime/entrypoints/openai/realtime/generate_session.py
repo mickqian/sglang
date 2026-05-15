@@ -155,6 +155,7 @@ class GenerateSession:
             fps=self.request.fps,
             image_path=self.request.first_frame,
             output_file_name=self.request_id,
+            save_output=False,
             seed=self.request.seed,
             generator_device=self.request.generator_device,
             num_inference_steps=self.request.num_inference_steps,

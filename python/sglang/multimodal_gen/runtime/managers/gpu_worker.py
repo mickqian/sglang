@@ -32,6 +32,8 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     FileReadyNotification,
+    FrameReadyNotification,
+    post_process_sample,
     save_outputs,
 )
 from sglang.multimodal_gen.runtime.loader.weight_utils import compute_weights_checksum
@@ -289,8 +291,8 @@ class GPUWorker:
             duration_ms = (time.monotonic() - start_time) * 1000
             output_batch.metrics.total_duration_ms = duration_ms
 
-            # Save output to file and return file path only if requested. Avoid the serialization
-            # and deserialization overhead between scheduler_client and gpu_worker.
+            # Return materialized outputs from rank 0 without sending large tensors back
+            # through the scheduler response path.
             def _save_output_file(
                 outputs: Sequence[Any], req: Req, output_batch: OutputBatch
             ):
@@ -312,7 +314,69 @@ class GPUWorker:
                     upscaling_scale=req.upscaling_scale,
                 )
 
-            if req.save_output and req.return_file_paths_only and self.rank == 0:
+            def _build_frame_ready_notification(
+                output: Any,
+                req: Req,
+                output_batch: OutputBatch,
+                realtime_session_id: str,
+            ) -> FrameReadyNotification:
+                frame_batches = []
+                if isinstance(output, torch.Tensor):
+                    outputs = list(output)
+                else:
+                    outputs = output if isinstance(output, Sequence) else [output]
+
+                import io
+
+                from PIL import Image
+
+                quality = int(
+                    os.environ.get("SGLANG_REALTIME_DIRECT_FRAME_JPEG_QUALITY", "80")
+                )
+                for sample in outputs:
+                    frames = post_process_sample(
+                        sample,
+                        req.data_type,
+                        req.fps,
+                        False,
+                        None,
+                        audio_sample_rate=output_batch.audio_sample_rate,
+                        output_compression=req.output_compression,
+                        enable_frame_interpolation=req.enable_frame_interpolation,
+                        frame_interpolation_exp=req.frame_interpolation_exp,
+                        frame_interpolation_scale=req.frame_interpolation_scale,
+                        frame_interpolation_model_path=req.frame_interpolation_model_path,
+                        enable_upscaling=req.enable_upscaling,
+                        upscaling_model_path=req.upscaling_model_path,
+                        upscaling_scale=req.upscaling_scale,
+                    )
+                    encoded_frames = []
+                    for frame in frames:
+                        buf = io.BytesIO()
+                        Image.fromarray(frame).save(
+                            buf,
+                            format="JPEG",
+                            quality=quality,
+                            optimize=False,
+                        )
+                        encoded_frames.append(buf.getvalue())
+                    frame_batches.append(encoded_frames)
+
+                return FrameReadyNotification(
+                    dispatch_id=realtime_session_id,
+                    request_id=req.request_id,
+                    frame_batches=frame_batches,
+                )
+
+            realtime_session_id = req.extra.get("realtime_session_id", "")
+            should_direct_return_frames = bool(realtime_session_id)
+            should_return_file_paths = req.save_output and req.return_file_paths_only
+
+            if (
+                (should_direct_return_frames or should_return_file_paths)
+                and req.return_file_paths_only
+                and self.rank == 0
+            ):
                 if output_batch.asyn_post_process:
                     _req = req
                     _output_batch = output_batch
@@ -357,12 +421,37 @@ class GPUWorker:
                             if copy_event is not None:
                                 copy_event.synchronize()
                             del source_ref
+
+                            realtime_session_id = req.extra.get(
+                                "realtime_session_id", ""
+                            )
+                            if realtime_session_id:
+                                notification = _build_frame_ready_notification(
+                                    output,
+                                    req,
+                                    output_batch,
+                                    realtime_session_id,
+                                )
+                                frame_batches = notification.frame_batches
+                                notify_callback(notification)
+                                duration_s = time.perf_counter() - start_time
+                                logger.info(
+                                    "Direct frame postprocess completed in %.3f seconds for request %s (batches=%s frames=%s bytes=%s)",
+                                    duration_s,
+                                    req.request_id,
+                                    len(frame_batches),
+                                    [len(batch) for batch in frame_batches],
+                                    [
+                                        sum(len(frame) for frame in batch)
+                                        for batch in frame_batches
+                                    ],
+                                )
+                                return
+
                             saved_paths = _save_output_file(output, req, output_batch)
                             notify_callback(
                                 FileReadyNotification(
-                                    dispatch_id=req.extra.get(
-                                        "realtime_session_id", ""
-                                    ),
+                                    dispatch_id=realtime_session_id,
                                     request_id=req.request_id,
                                     file_paths=saved_paths,
                                 )
@@ -391,14 +480,23 @@ class GPUWorker:
                     )
 
                 elif output_batch.output is not None:
-                    # handle sync save file
-                    output_batch.output_file_paths = _save_output_file(
-                        output_batch.output, req, output_batch
-                    )
+                    if should_direct_return_frames:
+                        notification = _build_frame_ready_notification(
+                            output_batch.output,
+                            req,
+                            output_batch,
+                            realtime_session_id,
+                        )
+                        self.notify_callback(notification)
+                    else:
+                        # handle sync save file
+                        output_batch.output_file_paths = _save_output_file(
+                            output_batch.output, req, output_batch
+                        )
                     output_batch.output = None
 
-                # No rank needs to hold on to generated tensors once the file-path
-                # response has been materialized on rank 0
+                # No rank needs to hold on to generated tensors once the realtime
+                # frame notification or file-path response has been materialized.
                 output_batch.output = None
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
