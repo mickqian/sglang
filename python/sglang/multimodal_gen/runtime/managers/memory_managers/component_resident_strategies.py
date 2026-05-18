@@ -4,6 +4,7 @@ Basic Component Resident Strategy Utilities for defining usage of components, to
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import torch
@@ -388,6 +389,110 @@ class SnapshotStrategy(ComponentResidencyStrategy):
         state: ResidencyState,
     ) -> None:
         self.prepare_for_use(module, use, state)
+
+
+class SnapshotPhaseSwapStrategy(SnapshotStrategy):
+    """Snapshot residency for mutually exclusive phase components.
+
+    Some pipelines execute one large phase component at a time. This helper
+    keeps CPU snapshots, releases inactive phases before low-VRAM prefetch, and
+    rehydrates the target phase through the regular snapshot path.
+    """
+
+    name = "snapshot_phase_swap"
+
+    def __init__(
+        self,
+        *,
+        phase_to_component_name: Mapping[str, str],
+        get_module: Callable[[str], nn.Module | None],
+        pin_cpu_memory: bool,
+        enable_async_prefetch: bool,
+        copy_runtime_buffers_on_release: bool = False,
+    ) -> None:
+        super().__init__(
+            pin_cpu_memory=pin_cpu_memory,
+            enable_async_prefetch=enable_async_prefetch,
+            copy_runtime_buffers_on_release=copy_runtime_buffers_on_release,
+        )
+        self._phase_to_component_name = dict(phase_to_component_name)
+        self._get_module = get_module
+
+    def component_name_for_phase(self, phase: str | None) -> str | None:
+        if phase is None:
+            return None
+        return self._phase_to_component_name.get(phase)
+
+    def capture_phase_components(self) -> None:
+        for component_name in self._phase_to_component_name.values():
+            module = self._get_module(component_name)
+            if module is None:
+                raise ValueError(f"Module {component_name} is not available.")
+            self.capture(component_name, module)
+
+    def is_phase_ready(self, phase: str | None) -> bool:
+        component_name = self.component_name_for_phase(phase)
+        return component_name is not None and self.is_ready(component_name)
+
+    def record_phase_ready(self, phase: str | None) -> None:
+        component_name = self.component_name_for_phase(phase)
+        if component_name is not None:
+            self.record_ready(component_name, self._get_module(component_name))
+
+    def wait_phase_ready(self, phase: str | None) -> None:
+        component_name = self.component_name_for_phase(phase)
+        if component_name is not None:
+            self.wait_component_ready(component_name)
+
+    def prefetch_phase(
+        self,
+        phase: str | None,
+        *,
+        release_other_phases_first: bool = False,
+    ) -> bool:
+        component_name = self.component_name_for_phase(phase)
+        if component_name is None:
+            return False
+        module = self._get_module(component_name)
+        if self.is_ready(component_name):
+            return True
+        if SnapshotModuleResidency.is_on_gpu(module):
+            self.record_ready(component_name, module)
+            return True
+        if release_other_phases_first:
+            self.release_other_phases(phase)
+        self.prefetch_component(component_name, module)
+        return True
+
+    def prefetch_phase_for_use(
+        self,
+        phase: str | None,
+        state: ResidencyState,
+        *,
+        release_other_phases_first: bool = False,
+        block_when_another_use_is_active: bool = False,
+    ) -> bool:
+        if self.is_phase_ready(phase):
+            return True
+        if block_when_another_use_is_active and state.current_use is not None:
+            return False
+        return self.prefetch_phase(
+            phase,
+            release_other_phases_first=release_other_phases_first,
+        )
+
+    def release_phase_if_on_gpu(self, phase: str | None) -> None:
+        component_name = self.component_name_for_phase(phase)
+        if component_name is None:
+            return
+        module = self._get_module(component_name)
+        if module is not None and SnapshotModuleResidency.is_on_gpu(module):
+            self.release_component(component_name, module)
+
+    def release_other_phases(self, active_phase: str | None) -> None:
+        for phase in self._phase_to_component_name:
+            if phase != active_phase:
+                self.release_phase_if_on_gpu(phase)
 
 
 class VanillaD2HStrategy(ComponentResidencyStrategy):
