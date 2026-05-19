@@ -192,7 +192,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             frame_metadata = {}
             if result.encoded_frame_batches is not None:
                 frame_metadata = (
-                    _raw_rgb_frame_metadata(batch)
+                    result.encoded_frame_metadata or _raw_rgb_frame_metadata(batch)
                     if result.encoded_frame_content_type == RAW_RGB_CONTENT_TYPE
                     else {}
                 )

@@ -348,6 +348,7 @@ class OutputBatch:
     output: torch.Tensor | None = None
     encoded_frame_batches: list[list[bytes]] | None = None
     encoded_frame_content_type: str = "image/jpeg"
+    encoded_frame_metadata: dict[str, Any] | None = None
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None

@@ -312,7 +312,7 @@ class GPUWorker:
                 output: Any,
                 req: Req,
                 output_batch: OutputBatch,
-            ) -> list[list[bytes]]:
+            ) -> tuple[list[list[bytes]], dict[str, Any]]:
                 start = time.monotonic()
                 postprocess_ms = 0.0
                 pack_bytes_ms = 0.0
@@ -355,7 +355,7 @@ class GPUWorker:
                         elif frame.shape[-1] > 3:
                             frame = frame[:, :, :3]
                         frame = np.ascontiguousarray(frame)
-                        frame_shape = tuple(frame.shape)
+                        frame_shape = tuple(int(dim) for dim in frame.shape)
                         frame_bytes = frame.tobytes()
                         raw_bytes += len(frame_bytes)
                         num_frames += 1
@@ -379,7 +379,17 @@ class GPUWorker:
                     frame_shape,
                     raw_bytes,
                 )
-                return frame_batches
+                frame_metadata: dict[str, Any] = {}
+                if frame_shape is not None and len(frame_shape) == 3:
+                    frame_height, frame_width, channels = frame_shape
+                    frame_metadata = {
+                        "format": "rgb24",
+                        "width": frame_width,
+                        "height": frame_height,
+                        "channels": channels,
+                        "bytes_per_frame": frame_width * frame_height * channels,
+                    }
+                return frame_batches, frame_metadata
 
             realtime_session_id = req.extra.get("realtime_session_id", "")
             should_direct_return_frames = bool(realtime_session_id)
@@ -395,12 +405,13 @@ class GPUWorker:
                         output_batch.encoded_frame_content_type = (
                             "application/x-raw-rgb"
                         )
-                        output_batch.encoded_frame_batches = (
-                            _build_raw_rgb_frame_batches(
-                                output_batch.output,
-                                req,
-                                output_batch,
-                            )
+                        (
+                            output_batch.encoded_frame_batches,
+                            output_batch.encoded_frame_metadata,
+                        ) = _build_raw_rgb_frame_batches(
+                            output_batch.output,
+                            req,
+                            output_batch,
                         )
                     else:
                         # handle sync save file
