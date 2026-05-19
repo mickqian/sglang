@@ -72,42 +72,54 @@ async def _send_frame_batches(
 ) -> dict[str, float | int]:
     chunk_index = chunk_index_start
     metadata = frame_metadata or {}
-    pack_ms = 0.0
-    ws_send_ms = 0.0
+    header_pack_ms = 0.0
+    header_send_ms = 0.0
+    raw_join_ms = 0.0
+    raw_send_ms = 0.0
     raw_bytes = 0
     ws_payload_bytes = 0
     num_frames = 0
     num_batches = 0
     for frames in frame_batches:
         frame_bytes = sum(len(frame) for frame in frames)
-        message = {
-            "type": "frame_batch",
+        header = {
+            "type": "frame_batch_header",
             "request_id": request_id,
             "chunk_index": chunk_index,
             "content_type": content_type,
             "num_frames": len(frames),
-            "frames": frames,
             "total_size": frame_bytes,
         }
-        message.update(metadata)
+        header.update(metadata)
 
         stage_start = time.perf_counter()
-        payload = packb(message, use_bin_type=True)
-        pack_ms += (time.perf_counter() - stage_start) * 1000.0
+        header_payload = packb(header, use_bin_type=True)
+        header_pack_ms += (time.perf_counter() - stage_start) * 1000.0
 
         stage_start = time.perf_counter()
-        await ws.send_bytes(payload)
-        ws_send_ms += (time.perf_counter() - stage_start) * 1000.0
+        await ws.send_bytes(header_payload)
+        header_send_ms += (time.perf_counter() - stage_start) * 1000.0
+
+        stage_start = time.perf_counter()
+        raw_payload = b"".join(frames)
+        raw_join_ms += (time.perf_counter() - stage_start) * 1000.0
+
+        stage_start = time.perf_counter()
+        await ws.send_bytes(raw_payload)
+        raw_send_ms += (time.perf_counter() - stage_start) * 1000.0
 
         raw_bytes += frame_bytes
-        ws_payload_bytes += len(payload)
+        ws_payload_bytes += len(header_payload) + len(raw_payload)
         num_frames += len(frames)
         num_batches += 1
         chunk_index += 1
 
     return {
-        "msgpack_pack_ms": pack_ms,
-        "ws_send_ms": ws_send_ms,
+        "msgpack_pack_ms": header_pack_ms,
+        "header_send_ms": header_send_ms,
+        "raw_join_ms": raw_join_ms,
+        "raw_send_ms": raw_send_ms,
+        "ws_send_ms": header_send_ms + raw_send_ms,
         "raw_bytes": raw_bytes,
         "ws_payload_bytes": ws_payload_bytes,
         "num_frames": num_frames,
@@ -168,6 +180,9 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
 
             send_stats: dict[str, float | int] = {
                 "msgpack_pack_ms": 0.0,
+                "header_send_ms": 0.0,
+                "raw_join_ms": 0.0,
+                "raw_send_ms": 0.0,
                 "ws_send_ms": 0.0,
                 "raw_bytes": 0,
                 "ws_payload_bytes": 0,
@@ -190,6 +205,9 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                     frame_metadata=frame_metadata,
                 )
             timings["msgpack_pack_ms"] = float(send_stats["msgpack_pack_ms"])
+            timings["header_send_ms"] = float(send_stats["header_send_ms"])
+            timings["raw_join_ms"] = float(send_stats["raw_join_ms"])
+            timings["raw_send_ms"] = float(send_stats["raw_send_ms"])
             timings["ws_send_ms"] = float(send_stats["ws_send_ms"])
             timings["total_ms"] = (time.perf_counter() - start) * 1000.0
 
@@ -200,6 +218,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 "realtime video stage timing: session_id=%s request_id=%s "
                 "chunk_idx=%s wait_video=%.2fms prepare=%.2fms "
                 "process_generation=%.2fms msgpack_pack=%.2fms "
+                "header_send=%.2fms raw_join=%.2fms raw_send=%.2fms "
                 "ws_send=%.2fms total=%.2fms batches=%d frames=%d "
                 "frame_shape=%s raw_bytes=%d ws_payload_bytes=%d content_type=%s",
                 session.id,
@@ -209,6 +228,9 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 timings["prepare_ms"],
                 timings["process_generation_ms"],
                 timings["msgpack_pack_ms"],
+                timings["header_send_ms"],
+                timings["raw_join_ms"],
+                timings["raw_send_ms"],
                 timings["ws_send_ms"],
                 timings["total_ms"],
                 send_stats["num_batches"],
