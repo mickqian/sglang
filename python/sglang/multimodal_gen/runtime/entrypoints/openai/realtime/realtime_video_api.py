@@ -34,29 +34,58 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _ACTIVE_SESSION_IDS: set[str] = set()
+RAW_RGB_CONTENT_TYPE = "application/x-raw-rgb"
+RAW_RGB_CHANNELS = 3
 
 
-async def _send_encoded_frame_batches(
+def _raw_rgb_frame_metadata(batch) -> dict[str, int | str]:
+    frame_width = batch.width
+    frame_height = batch.height
+    if frame_width is None or frame_height is None:
+        return {}
+
+    frame_width = int(frame_width)
+    frame_height = int(frame_height)
+    if batch.enable_upscaling:
+        upscaling_scale = int(batch.upscaling_scale or 1)
+        frame_width *= upscaling_scale
+        frame_height *= upscaling_scale
+
+    return {
+        "format": "rgb24",
+        "width": frame_width,
+        "height": frame_height,
+        "channels": RAW_RGB_CHANNELS,
+        "bytes_per_frame": frame_width * frame_height * RAW_RGB_CHANNELS,
+    }
+
+
+async def _send_frame_batches(
     ws: WebSocket,
-    encoded_frame_batches: list[list[bytes]],
+    frame_batches: list[list[bytes]],
     *,
     content_type: str,
     chunk_index_start: int,
     request_id: str,
+    frame_metadata: dict[str, int | str] | None = None,
 ) -> None:
     chunk_index = chunk_index_start
-    for encoded_frames in encoded_frame_batches:
+    metadata = frame_metadata or {}
+    for frames in frame_batches:
+        message = {
+            "type": "frame_batch",
+            "request_id": request_id,
+            "chunk_index": chunk_index,
+            "content_type": content_type,
+            "num_frames": len(frames),
+            "frames": frames,
+            "total_size": sum(len(frame) for frame in frames),
+        }
+        message.update(metadata)
         await ws.send_bytes(
             packb(
-                {
-                    "type": "frame_batch",
-                    "request_id": request_id,
-                    "chunk_index": chunk_index,
-                    "content_type": content_type,
-                    "num_frames": len(encoded_frames),
-                    "frames": encoded_frames,
-                    "total_size": sum(len(frame) for frame in encoded_frames),
-                }
+                message,
+                use_bin_type=True,
             )
         )
         chunk_index += 1
@@ -104,12 +133,17 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             _, result = await process_generation_batch(async_scheduler_client, batch)
 
             if result.encoded_frame_batches is not None:
-                await _send_encoded_frame_batches(
+                await _send_frame_batches(
                     ws,
                     result.encoded_frame_batches,
                     content_type=result.encoded_frame_content_type,
                     chunk_index_start=batch.block_idx,
                     request_id=session.request_id,
+                    frame_metadata=(
+                        _raw_rgb_frame_metadata(batch)
+                        if result.encoded_frame_content_type == RAW_RGB_CONTENT_TYPE
+                        else None
+                    ),
                 )
 
             # finish
@@ -137,7 +171,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
 
 async def _listen_actions(ws: WebSocket, session: GenerateSession):
     async for data in ws.iter_bytes():
-        data = unpackb(data)
+        data = unpackb(data, raw=False)
         try:
             realtime_action = RealtimeAction.model_validate(data)
             if realtime_action.type == "video":
@@ -199,7 +233,7 @@ async def _listen_actions(ws: WebSocket, session: GenerateSession):
 async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
     while True:
         try:
-            data = unpackb(await ws.receive_bytes())
+            data = unpackb(await ws.receive_bytes(), raw=False)
             if not isinstance(data, dict):
                 raise ValueError("generate request must be a map")
 
@@ -312,4 +346,6 @@ async def generate(websocket: WebSocket):
 
 
 async def write_error_msg(error_msg: str, websocket: WebSocket):
-    await websocket.send_bytes(packb({"type": "error", "content": error_msg}))
+    await websocket.send_bytes(
+        packb({"type": "error", "content": error_msg}, use_bin_type=True)
+    )

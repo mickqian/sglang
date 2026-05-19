@@ -8,6 +8,7 @@ import os
 import time
 from typing import Any, List, Sequence, Union
 
+import numpy as np
 import torch
 from setproctitle import setproctitle
 
@@ -307,24 +308,17 @@ class GPUWorker:
                     upscaling_scale=req.upscaling_scale,
                 )
 
-            def _encode_frame_batches(
+            def _build_raw_rgb_frame_batches(
                 output: Any,
                 req: Req,
                 output_batch: OutputBatch,
             ) -> list[list[bytes]]:
-                encoded_frame_batches = []
+                frame_batches = []
                 if isinstance(output, torch.Tensor):
                     outputs = list(output)
                 else:
                     outputs = output if isinstance(output, Sequence) else [output]
 
-                import io
-
-                from PIL import Image
-
-                quality = int(
-                    os.environ.get("SGLANG_REALTIME_DIRECT_FRAME_JPEG_QUALITY", "80")
-                )
                 for sample in outputs:
                     frames = post_process_sample(
                         sample,
@@ -342,19 +336,18 @@ class GPUWorker:
                         upscaling_model_path=req.upscaling_model_path,
                         upscaling_scale=req.upscaling_scale,
                     )
-                    encoded_frames = []
+                    raw_frames = []
                     for frame in frames:
-                        buf = io.BytesIO()
-                        Image.fromarray(frame).save(
-                            buf,
-                            format="JPEG",
-                            quality=quality,
-                            optimize=False,
-                        )
-                        encoded_frames.append(buf.getvalue())
-                    encoded_frame_batches.append(encoded_frames)
+                        if frame.ndim == 2:
+                            frame = frame[:, :, None]
+                        if frame.shape[-1] == 1:
+                            frame = np.repeat(frame, 3, axis=-1)
+                        elif frame.shape[-1] > 3:
+                            frame = frame[:, :, :3]
+                        raw_frames.append(np.ascontiguousarray(frame).tobytes())
+                    frame_batches.append(raw_frames)
 
-                return encoded_frame_batches
+                return frame_batches
 
             realtime_session_id = req.extra.get("realtime_session_id", "")
             should_direct_return_frames = bool(realtime_session_id)
@@ -367,10 +360,15 @@ class GPUWorker:
             ):
                 if output_batch.output is not None:
                     if should_direct_return_frames:
-                        output_batch.encoded_frame_batches = _encode_frame_batches(
-                            output_batch.output,
-                            req,
-                            output_batch,
+                        output_batch.encoded_frame_content_type = (
+                            "application/x-raw-rgb"
+                        )
+                        output_batch.encoded_frame_batches = (
+                            _build_raw_rgb_frame_batches(
+                                output_batch.output,
+                                req,
+                                output_batch,
+                            )
                         )
                     else:
                         # handle sync save file
