@@ -206,7 +206,6 @@ class ServerArgs:
 
     output_path: str | None = "outputs/"
     input_save_path: str | None = "inputs/uploads"
-    realtime_async_postprocess: bool = False
     realesrgan_half_precision: bool = False
 
     # Prompt text file for batch processing
@@ -239,17 +238,6 @@ class ServerArgs:
     @property
     def broker_port(self) -> int:
         return self.port + 1
-
-    @property
-    def notification_port(self) -> int:
-        return self.scheduler_port + 1
-
-    @property
-    def notification_endpoint(self) -> str:
-        notification_host = self.host
-        if notification_host is None or notification_host == "localhost":
-            notification_host = "127.0.0.1"
-        return f"tcp://{notification_host}:{self.notification_port}"
 
     @property
     def is_local_mode(self) -> bool:
@@ -842,12 +830,6 @@ class ServerArgs:
             type=str,
             default=ServerArgs.input_save_path,
             help='Directory path to save uploaded input images/videos. Set to "" to disable persistent saving.',
-        )
-        parser.add_argument(
-            "--realtime-async-postprocess",
-            action="store_true",
-            default=ServerArgs.realtime_async_postprocess,
-            help="Run realtime video postprocess/save in the background thread.",
         )
         parser.add_argument(
             "--realesrgan-half-precision",

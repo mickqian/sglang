@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import io
 import math
 import os
+import shutil
+import tempfile
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from msgpack import packb, unpackb
@@ -21,90 +25,29 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     save_image_to_path,
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
-    FileReadyNotification,
-    FrameReadyNotification,
     ReleaseRealtimeSessionReq,
     prepare_request,
 )
-from sglang.multimodal_gen.runtime.scheduler_client import (
-    async_scheduler_client,
-    register_notification_listener,
-    unregister_notification_listener,
-)
+from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _FRAME_PART_SIZE = 512 * 1024
+_ACTIVE_SESSION_IDS: set[str] = set()
 
 
-async def _recv_notify_and_send(
+async def _send_encoded_frame_batches(
     ws: WebSocket,
-    notification_queue: asyncio.Queue,
-):
-    """Wait for a file-ready notification from the GPU worker via ZMQ."""
-    chunk_index = 0
-    while True:
-        try:
-            notification = await asyncio.wait_for(
-                notification_queue.get(), timeout=None
-            )
-            if isinstance(notification, FileReadyNotification):
-                # send file contents to client
-                await _send_file_paths(
-                    ws,
-                    notification.file_paths,
-                    chunk_index_start=chunk_index,
-                    request_id=notification.request_id,
-                )
-                chunk_index += len(notification.file_paths)
-            elif isinstance(notification, FrameReadyNotification):
-                await _send_frame_batches(
-                    ws,
-                    notification.frame_batches,
-                    content_type=notification.content_type,
-                    chunk_index_start=chunk_index,
-                    request_id=notification.request_id,
-                )
-                chunk_index += len(notification.frame_batches)
-            else:
-                continue
-        except Exception as e:
-            err_msg = str(e).splitlines()[0]
-            logger.error(f"error during sending bytes from queue: {err_msg}")
-
-
-async def _send_file_paths(
-    ws: WebSocket,
-    file_paths: list[str],
-    *,
-    chunk_index_start: int,
-    request_id: str,
-) -> None:
-    chunk_index = chunk_index_start
-    for file_path in file_paths:
-        with open(file_path, "rb") as f:
-            frame_bytes = f.read()
-        await write_frame_msg(
-            frame_bytes,
-            ws,
-            chunk_index=chunk_index,
-            request_id=request_id,
-        )
-        chunk_index += 1
-
-
-async def _send_frame_batches(
-    ws: WebSocket,
-    frame_batches: list[list[bytes]],
+    encoded_frame_batches: list[list[bytes]],
     *,
     content_type: str,
     chunk_index_start: int,
     request_id: str,
 ) -> None:
     chunk_index = chunk_index_start
-    for frames in frame_batches:
+    for encoded_frames in encoded_frame_batches:
         await ws.send_bytes(
             packb(
                 {
@@ -112,9 +55,9 @@ async def _send_frame_batches(
                     "request_id": request_id,
                     "chunk_index": chunk_index,
                     "content_type": content_type,
-                    "num_frames": len(frames),
-                    "frames": frames,
-                    "total_size": sum(len(frame) for frame in frames),
+                    "num_frames": len(encoded_frames),
+                    "frames": encoded_frames,
+                    "total_size": sum(len(frame) for frame in encoded_frames),
                 }
             )
         )
@@ -149,25 +92,24 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             chunk_size = batch.extra.get("chunk_size", 1)
             control_chunk = session.sample_control_chunk(chunk_size)
             if control_chunk is not None:
-                logger.info(
-                    "consume realtime action, session_id=%s, block_idx=%s, chunk_size=%s, control_chunk=%s",
+                logger.debug(
+                    "consume realtime control, session_id=%s, block_idx=%s, chunk_size=%s, num_control_frames=%s",
                     session.id,
                     batch.block_idx,
                     chunk_size,
-                    control_chunk,
+                    len(control_chunk),
                 )
                 batch.extra["actions"] = control_chunk
             batch.input_video = (
                 session.sample_video_frames() if session.is_v2v_enabled() else None
             )
-            save_file_path_list, result = await process_generation_batch(
-                async_scheduler_client, batch
-            )
+            _, result = await process_generation_batch(async_scheduler_client, batch)
 
-            if not result.asyn_post_process and save_file_path_list:
-                await _send_file_paths(
+            if result.encoded_frame_batches is not None:
+                await _send_encoded_frame_batches(
                     ws,
-                    save_file_path_list,
+                    result.encoded_frame_batches,
+                    content_type=result.encoded_frame_content_type,
                     chunk_index_start=batch.block_idx,
                     request_id=session.request_id,
                 )
@@ -246,7 +188,7 @@ async def _listen_actions(ws: WebSocket, session: GenerateSession):
                 action_log = (
                     f"type=prompt, content_len={len(realtime_action.action_content)}"
                 )
-            logger.info(
+            logger.debug(
                 f"receive realtime action, session_id: {session.id}, {action_log}"
             )
         except (ValidationError, ValueError) as e:
@@ -285,8 +227,16 @@ async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
             # TODO(puf147): convert RGB for krea
             # params.start_frame = Image.open(params.start_frame).convert("RGB")
             if realtime_req.first_frame is not None:
-                uploads_dir = os.path.join("inputs", "uploads")
-                os.makedirs(uploads_dir, exist_ok=True)
+                server_args = get_global_server_args()
+                if server_args.input_save_path is not None:
+                    uploads_dir = server_args.input_save_path
+                    os.makedirs(uploads_dir, exist_ok=True)
+                else:
+                    if session.input_temp_dir is None:
+                        session.input_temp_dir = tempfile.mkdtemp(
+                            prefix="sglang_input_"
+                        )
+                    uploads_dir = session.input_temp_dir
 
                 target_path = os.path.join(uploads_dir, f"{session.id}_first_frame")
                 image_path = await save_image_to_path(
@@ -296,7 +246,7 @@ async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
 
             # Keep session state update atomic with validated request.
             session.set_mode(mode)
-            session.setRequest(realtime_req)
+            session.set_request(realtime_req)
             break
         except Exception as e:
             logger.warning(
@@ -309,45 +259,44 @@ async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
 @router.websocket("/generate")
 async def generate(websocket: WebSocket):
     await websocket.accept()
+    if _ACTIVE_SESSION_IDS:
+        logger.warning(
+            "reject realtime session because another session is active: %s",
+            sorted(_ACTIVE_SESSION_IDS),
+        )
+        try:
+            await write_error_msg(
+                "another realtime session is already active", websocket
+            )
+        finally:
+            await websocket.close(code=1008)
+        return
+
     session = GenerateSession()
+    _ACTIVE_SESSION_IDS.add(session.id)
     generate_task = None
     listen_task = None
-    send_task = None
-    notification_queue = None
     try:
         # receive new generate request
         await _listen_generate_request(websocket, session)
-        server_args = get_global_server_args()
-        if server_args.realtime_async_postprocess:
-            notification_queue = register_notification_listener(session.id)
 
         # generate video chunk
         generate_task = asyncio.create_task(_generate_loop(websocket, session))
         # listen for user actions
         listen_task = asyncio.create_task(_listen_actions(websocket, session))
-        # send video chunk back to client
-        if notification_queue is not None:
-            send_task = asyncio.create_task(
-                _recv_notify_and_send(websocket, notification_queue)
-            )
 
         wait_tasks = [generate_task, listen_task]
-        if send_task is not None:
-            wait_tasks.append(send_task)
         await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
     except WebSocketDisconnect:
         logger.info(f"client disconnected, session_id: {session.id}")
     finally:
         logger.info(f"terminating session, session_id: {session.id}")
-        if notification_queue is not None:
-            unregister_notification_listener(session.id)
+        _ACTIVE_SESSION_IDS.discard(session.id)
         if generate_task and not generate_task.done():
             generate_task.cancel()
         if listen_task and not listen_task.done():
             listen_task.cancel()
-        if send_task and not send_task.done():
-            send_task.cancel()
         try:
             await async_scheduler_client.forward(
                 ReleaseRealtimeSessionReq(session_id=session.id)
@@ -358,6 +307,8 @@ async def generate(websocket: WebSocket):
                 session.id,
                 e,
             )
+        if session.input_temp_dir is not None:
+            shutil.rmtree(session.input_temp_dir, ignore_errors=True)
         if session:
             session.dispose()
 

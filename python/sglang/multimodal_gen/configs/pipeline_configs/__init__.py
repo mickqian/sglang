@@ -29,7 +29,6 @@ from sglang.multimodal_gen.configs.pipeline_configs.hunyuan3d import (
 )
 from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
     LingBotWorldCausalDMDConfig,
-    LingBotWorldI2VConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
@@ -67,5 +66,4 @@ __all__ = [
     "ZImagePipelineConfig",
     "LTX2PipelineConfig",
     "LingBotWorldCausalDMDConfig",
-    "LingBotWorldI2VConfig",
 ]

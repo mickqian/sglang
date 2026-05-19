@@ -6,8 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, List, Sequence, Union
+from typing import Any, List, Sequence, Union
 
 import torch
 from setproctitle import setproctitle
@@ -31,8 +30,6 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ulysses_parallel_world_size,
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
-    FileReadyNotification,
-    FrameReadyNotification,
     post_process_sample,
     save_outputs,
 )
@@ -83,7 +80,6 @@ class GPUWorker:
         rank: int,
         master_port: int,
         server_args: ServerArgs,
-        notify_callback: Callable | None = None,
     ):
         self.local_rank = local_rank
         self.rank = rank
@@ -91,7 +87,6 @@ class GPUWorker:
         # FIXME: should we use tcp as distribute init method?
         self.server_args = server_args
         self.pipeline: ComposedPipelineBase = None
-        self.notify_callback = notify_callback
 
         self.init_device_and_model()
         self.sp_group = get_sp_group()
@@ -102,8 +97,6 @@ class GPUWorker:
         self.cfg_group = get_cfg_group()
         self.cfg_cpu_group = self.cfg_group.cpu_group
         self._realtime_sessions = RealtimeSessionCache(max_sessions=1)
-
-        self._save_file_executor = ThreadPoolExecutor(max_workers=1)
 
     def release_realtime_session(self, session_id: str) -> OutputBatch:
         if not session_id:
@@ -314,13 +307,12 @@ class GPUWorker:
                     upscaling_scale=req.upscaling_scale,
                 )
 
-            def _build_frame_ready_notification(
+            def _encode_frame_batches(
                 output: Any,
                 req: Req,
                 output_batch: OutputBatch,
-                realtime_session_id: str,
-            ) -> FrameReadyNotification:
-                frame_batches = []
+            ) -> list[list[bytes]]:
+                encoded_frame_batches = []
                 if isinstance(output, torch.Tensor):
                     outputs = list(output)
                 else:
@@ -360,13 +352,9 @@ class GPUWorker:
                             optimize=False,
                         )
                         encoded_frames.append(buf.getvalue())
-                    frame_batches.append(encoded_frames)
+                    encoded_frame_batches.append(encoded_frames)
 
-                return FrameReadyNotification(
-                    dispatch_id=realtime_session_id,
-                    request_id=req.request_id,
-                    frame_batches=frame_batches,
-                )
+                return encoded_frame_batches
 
             realtime_session_id = req.extra.get("realtime_session_id", "")
             should_direct_return_frames = bool(realtime_session_id)
@@ -377,117 +365,13 @@ class GPUWorker:
                 and req.return_file_paths_only
                 and self.rank == 0
             ):
-                if output_batch.asyn_post_process:
-                    _req = req
-                    _output_batch = output_batch
-                    _output = output_batch.output.detach().contiguous()
-                    _copy_event = None
-                    _source_ref = None
-                    if _output.is_cuda and torch.cuda.is_available():
-                        try:
-                            _cpu_output = torch.empty_like(
-                                _output, device="cpu", pin_memory=True
-                            )
-                            _cpu_output.copy_(_output, non_blocking=True)
-                            _copy_event = torch.cuda.Event()
-                            _copy_event.record(
-                                torch.cuda.current_stream(_output.device)
-                            )
-                            # Keep the source allocation alive until the copy event
-                            # has completed in the save thread.
-                            _source_ref = _output
-                            _output = _cpu_output
-                        except RuntimeError as e:
-                            logger.warning(
-                                "Failed to start pinned async output copy; "
-                                "falling back to blocking CPU copy: %s",
-                                e,
-                            )
-                            _output = _output.to("cpu", non_blocking=False).contiguous()
-                    else:
-                        _output = _output.to("cpu", non_blocking=False).contiguous()
-                    _notify_callback = self.notify_callback
-
-                    def _async_save_with_postprocess(
-                        output: torch.Tensor,
-                        req: Req,
-                        output_batch: OutputBatch,
-                        notify_callback: Callable,
-                        copy_event: Any | None = None,
-                        source_ref: torch.Tensor | None = None,
-                    ):
-                        start_time = time.perf_counter()
-                        try:
-                            if copy_event is not None:
-                                copy_event.synchronize()
-                            del source_ref
-
-                            realtime_session_id = req.extra.get(
-                                "realtime_session_id", ""
-                            )
-                            if realtime_session_id:
-                                notification = _build_frame_ready_notification(
-                                    output,
-                                    req,
-                                    output_batch,
-                                    realtime_session_id,
-                                )
-                                frame_batches = notification.frame_batches
-                                notify_callback(notification)
-                                duration_s = time.perf_counter() - start_time
-                                logger.info(
-                                    "Direct frame postprocess completed in %.3f seconds for request %s (batches=%s frames=%s bytes=%s)",
-                                    duration_s,
-                                    req.request_id,
-                                    len(frame_batches),
-                                    [len(batch) for batch in frame_batches],
-                                    [
-                                        sum(len(frame) for frame in batch)
-                                        for batch in frame_batches
-                                    ],
-                                )
-                                return
-
-                            saved_paths = _save_output_file(output, req, output_batch)
-                            notify_callback(
-                                FileReadyNotification(
-                                    dispatch_id=realtime_session_id,
-                                    request_id=req.request_id,
-                                    file_paths=saved_paths,
-                                )
-                            )
-                            duration_s = time.perf_counter() - start_time
-                            logger.info(
-                                "Async postprocess completed in %.3f seconds for request %s (files=%s)",
-                                duration_s,
-                                req.request_id,
-                                saved_paths,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Async postprocess/save failed for request %s",
-                                req.request_id,
-                            )
-
-                    self._save_file_executor.submit(
-                        _async_save_with_postprocess,
-                        _output,
-                        _req,
-                        _output_batch,
-                        _notify_callback,
-                        _copy_event,
-                        _source_ref,
-                    )
-
-                elif output_batch.output is not None:
+                if output_batch.output is not None:
                     if should_direct_return_frames:
-                        notification = _build_frame_ready_notification(
+                        output_batch.encoded_frame_batches = _encode_frame_batches(
                             output_batch.output,
                             req,
                             output_batch,
-                            realtime_session_id,
                         )
-                        self.notify_callback(notification)
                     else:
                         # handle sync save file
                         output_batch.output_file_paths = _save_output_file(
@@ -496,7 +380,7 @@ class GPUWorker:
                     output_batch.output = None
 
                 # No rank needs to hold on to generated tensors once the realtime
-                # frame notification or file-path response has been materialized.
+                # frame batch or file-path response has been materialized.
                 output_batch.output = None
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None

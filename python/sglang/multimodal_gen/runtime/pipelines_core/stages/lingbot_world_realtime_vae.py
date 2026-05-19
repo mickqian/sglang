@@ -128,7 +128,6 @@ class LingBotWorldCausalDecodingStage(DecodingStage):
 
         output_batch = OutputBatch(
             output=frames,
-            asyn_post_process=server_args.realtime_async_postprocess,
             trajectory_timesteps=batch.trajectory_timesteps,
             trajectory_latents=batch.trajectory_latents,
             rollout_trajectory_data=batch.rollout_trajectory_data,

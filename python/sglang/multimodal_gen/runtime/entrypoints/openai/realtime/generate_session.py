@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
 from enum import Enum
 from uuid import uuid4
@@ -26,8 +28,9 @@ class GenerateSession:
     def __init__(self):
         self.id = uuid4().hex
         self.request_id = None
-        self.request = None
+        self.request: RealtimeVideoGenerationsRequest | None = None
         self.mode: RealtimeVideoMode | None = None
+        self.input_temp_dir: str | None = None
         self.action_queue = deque(maxlen=1)
         self.control_queue = deque(maxlen=512)
         self.video_frame_queue = deque(maxlen=256)
@@ -36,7 +39,7 @@ class GenerateSession:
         self.has_control_state = False
         self.realtime_session = RealtimeSession()
 
-    def setRequest(self, request: RealtimeVideoGenerationsRequest):
+    def set_request(self, request: RealtimeVideoGenerationsRequest):
         self.request = request
 
     def set_mode(self, mode: RealtimeVideoMode | None):
@@ -49,6 +52,7 @@ class GenerateSession:
         self.mode = None
         self.request = None
         self.request_id = None
+        self.input_temp_dir = None
         self.generate_chunk_cnt = 0
         self.last_control_actions = []
         self.has_control_state = False

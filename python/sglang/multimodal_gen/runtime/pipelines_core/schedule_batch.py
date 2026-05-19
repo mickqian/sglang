@@ -174,13 +174,13 @@ class Req:
 
     def __init__(self, **kwargs):
         # Initialize dataclass fields
-        for name, field in self.__class__.__dataclass_fields__.items():
+        for name, dataclass_field in self.__class__.__dataclass_fields__.items():
             if name in kwargs:
                 object.__setattr__(self, name, kwargs.pop(name))
-            elif field.default is not MISSING:
-                object.__setattr__(self, name, field.default)
-            elif field.default_factory is not MISSING:
-                object.__setattr__(self, name, field.default_factory())
+            elif dataclass_field.default is not MISSING:
+                object.__setattr__(self, name, dataclass_field.default)
+            elif dataclass_field.default_factory is not MISSING:
+                object.__setattr__(self, name, dataclass_field.default_factory())
 
         for name, value in kwargs.items():
             setattr(self, name, value)
@@ -346,7 +346,8 @@ class OutputBatch:
     """
 
     output: torch.Tensor | None = None
-    asyn_post_process: bool = False
+    encoded_frame_batches: list[list[bytes]] | None = None
+    encoded_frame_content_type: str = "image/jpeg"
     audio: torch.Tensor | None = None
     audio_sample_rate: int | None = None
     trajectory_timesteps: torch.Tensor | None = None

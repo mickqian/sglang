@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from typing import Any
@@ -183,7 +185,7 @@ def get_camera_control(
         device=device,
         dtype=dtype,
     ).repeat(chunk_size, 1)
-    logger.info(f"prefix c2ws shape: {c2ws.shape}, Ks shape: {Ks.shape}")
+    logger.debug("prefix c2ws shape: %s, Ks shape: %s", c2ws.shape, Ks.shape)
     return c2ws, Ks
 
 
@@ -263,7 +265,7 @@ def _build_camera_condition(
     spatial_scale: int,
     device: torch.device | str,
     dtype: torch.dtype,
-    tail_chunk_size: int | None = None,
+    tail_chunk_size: int,
 ) -> torch.Tensor:
     c2ws_prefix, Ks = get_camera_control(
         action_history,
@@ -274,8 +276,7 @@ def _build_camera_condition(
         dtype=dtype,
     )
     c2ws_prefix = compute_relative_poses(c2ws_prefix, framewise=True)
-    if tail_chunk_size is not None:
-        c2ws_prefix = c2ws_prefix[-tail_chunk_size:]
+    c2ws_prefix = c2ws_prefix[-tail_chunk_size:]
 
     return camera_poses_to_plucker(
         c2ws=c2ws_prefix,
@@ -294,13 +295,18 @@ def prepare_lingbot_world_condition(
     pipeline_config,
     device: torch.device | str,
     dtype: torch.dtype,
-) -> tuple[torch.Tensor | None, int | None]:
+) -> torch.Tensor | None:
     if batch.c2ws_plucker_emb is not None:
-        return batch.c2ws_plucker_emb.to(device=device, dtype=dtype), None
+        return batch.c2ws_plucker_emb.to(device=device, dtype=dtype)
 
     actions = batch.extra.get("actions")
     if actions is None:
-        return None, None
+        return None
+
+    if batch.session is None:
+        raise ValueError(
+            "LingBot World actions are only supported in realtime sessions"
+        )
 
     spatial_scale = pipeline_config.vae_config.arch_config.spatial_compression_ratio
     chunk_size = batch.extra.get(
@@ -310,50 +316,31 @@ def prepare_lingbot_world_condition(
 
     normalized_actions = _validate_actions(actions)
     if len(normalized_actions) == 0:
-        return None, None
+        return None
 
-    if batch.session is not None:
-        # Realtime: accumulate actions in session state.
-        state = batch.session.get_or_create_state(LingBotWorldRealtimeState)
-        if batch.block_idx == 0:
-            state.reset_controls()
-        state.append_control_chunk(normalized_actions)
-        action_history = state.action_history
+    state = batch.session.get_or_create_state(LingBotWorldRealtimeState)
+    if batch.block_idx == 0:
+        state.reset_controls()
+    state.append_control_chunk(normalized_actions)
+    action_history = state.action_history
 
-        if len(action_history) == 0:
-            return None, None
+    if len(action_history) == 0:
+        return None
 
-        c2ws_plucker_emb = _build_camera_condition(
-            action_history=action_history,
-            width=int(batch.width),
-            height=int(batch.height),
-            spatial_scale=spatial_scale,
-            device=device,
-            dtype=dtype,
-            tail_chunk_size=chunk_size,
-        )
-        logger.info(
-            "LingBot action condition prepared: session_id=%s, block_idx=%s, new_actions=%s, total_history=%s",
-            batch.extra.get("realtime_session_id"),
-            batch.block_idx,
-            normalized_actions,
-            len(action_history),
-        )
-        return c2ws_plucker_emb, None
-    else:
-        # Offline: actions define the full trajectory.
-        temporal_ratio = (
-            pipeline_config.vae_config.arch_config.temporal_compression_ratio
-        )
-        resolved_num_frames = (len(normalized_actions) - 1) * temporal_ratio + 1
-        return (
-            _build_camera_condition(
-                action_history=normalized_actions,
-                width=int(batch.width),
-                height=int(batch.height),
-                spatial_scale=spatial_scale,
-                device=device,
-                dtype=dtype,
-            ),
-            resolved_num_frames,
-        )
+    c2ws_plucker_emb = _build_camera_condition(
+        action_history=action_history,
+        width=int(batch.width),
+        height=int(batch.height),
+        spatial_scale=spatial_scale,
+        device=device,
+        dtype=dtype,
+        tail_chunk_size=chunk_size,
+    )
+    logger.debug(
+        "LingBot action condition prepared: session_id=%s, block_idx=%s, new_action_count=%s, total_history=%s",
+        batch.extra.get("realtime_session_id"),
+        batch.block_idx,
+        len(normalized_actions),
+        len(action_history),
+    )
+    return c2ws_plucker_emb

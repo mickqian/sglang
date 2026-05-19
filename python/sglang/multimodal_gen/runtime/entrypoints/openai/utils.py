@@ -271,9 +271,9 @@ async def process_generation_batch(
         result = await scheduler_client.forward([batch])
 
         if (
-            not result.asyn_post_process
-            and result.output is None
+            result.output is None
             and result.output_file_paths is None
+            and result.encoded_frame_batches is None
         ):
             error_msg = result.error or "Unknown error"
             raise RuntimeError(

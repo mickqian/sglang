@@ -36,7 +36,6 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     HeliosT2VConfig,
     HunyuanConfig,
     LingBotWorldCausalDMDConfig,
-    LingBotWorldI2VConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
     WanT2V480PConfig,
@@ -384,7 +383,7 @@ def _get_config_info(
     if len(matched_model_names) >= 1:
         if len(matched_model_names) > 1:
             logger.warning(
-                f"More than one model name is matched, using the first matched"
+                "More than one model name is matched, using the first matched"
             )
         model_id = matched_model_names[0]
         return _CONFIG_REGISTRY.get(model_id)
@@ -733,19 +732,7 @@ def _register_configs():
         sampling_param_cls=LingBotWorldSamplingParams,
         pipeline_config_cls=LingBotWorldCausalDMDConfig,
         hf_model_paths=["FastVideo/lingbot-world-fast-diffusers"],
-        model_detectors=[
-            lambda hf_id: "lingbot-world-fast" in hf_id.lower()
-        ],
-    )
-    register_configs(
-        sampling_param_cls=LingBotWorldSamplingParams,
-        pipeline_config_cls=LingBotWorldI2VConfig,
-        hf_model_paths=["FastVideo/LingBot-World-Base-Cam-Diffusers"],
-        model_detectors=[
-            lambda hf_id: (
-                "lingbotworld" in hf_id.lower()
-            )
-        ],
+        model_detectors=[lambda hf_id: "lingbot-world-fast" in hf_id.lower()],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,
