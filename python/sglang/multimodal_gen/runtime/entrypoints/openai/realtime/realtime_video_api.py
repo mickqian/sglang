@@ -5,6 +5,7 @@ import io
 import os
 import shutil
 import tempfile
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from msgpack import packb, unpackb
@@ -68,10 +69,17 @@ async def _send_frame_batches(
     chunk_index_start: int,
     request_id: str,
     frame_metadata: dict[str, int | str] | None = None,
-) -> None:
+) -> dict[str, float | int]:
     chunk_index = chunk_index_start
     metadata = frame_metadata or {}
+    pack_ms = 0.0
+    ws_send_ms = 0.0
+    raw_bytes = 0
+    ws_payload_bytes = 0
+    num_frames = 0
+    num_batches = 0
     for frames in frame_batches:
+        frame_bytes = sum(len(frame) for frame in frames)
         message = {
             "type": "frame_batch",
             "request_id": request_id,
@@ -79,23 +87,42 @@ async def _send_frame_batches(
             "content_type": content_type,
             "num_frames": len(frames),
             "frames": frames,
-            "total_size": sum(len(frame) for frame in frames),
+            "total_size": frame_bytes,
         }
         message.update(metadata)
-        await ws.send_bytes(
-            packb(
-                message,
-                use_bin_type=True,
-            )
-        )
+
+        stage_start = time.perf_counter()
+        payload = packb(message, use_bin_type=True)
+        pack_ms += (time.perf_counter() - stage_start) * 1000.0
+
+        stage_start = time.perf_counter()
+        await ws.send_bytes(payload)
+        ws_send_ms += (time.perf_counter() - stage_start) * 1000.0
+
+        raw_bytes += frame_bytes
+        ws_payload_bytes += len(payload)
+        num_frames += len(frames)
+        num_batches += 1
         chunk_index += 1
+
+    return {
+        "msgpack_pack_ms": pack_ms,
+        "ws_send_ms": ws_send_ms,
+        "raw_bytes": raw_bytes,
+        "ws_payload_bytes": ws_payload_bytes,
+        "num_frames": num_frames,
+        "num_batches": num_batches,
+    }
 
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
     while True:
         try:
+            start = time.perf_counter()
+            timings: dict[str, float] = {}
             # For stream-driven v2v (no first_frame),
             # wait until enough frames are buffered for this block.
+            stage_start = time.perf_counter()
             if (
                 session.request is not None
                 and session.is_v2v_enabled()
@@ -103,10 +130,12 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             ):
                 while not session.has_pending_video_frames():
                     await asyncio.sleep(0.01)
+            timings["wait_video_ms"] = (time.perf_counter() - stage_start) * 1000.0
 
             session.new_request()
 
             # send to scheduler and generate video chunk
+            stage_start = time.perf_counter()
             server_args = get_global_server_args()
             sampling_params = session.build_sampling_params()
             batch = prepare_request(
@@ -130,29 +159,72 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             batch.input_video = (
                 session.sample_video_frames() if session.is_v2v_enabled() else None
             )
+            timings["prepare_ms"] = (time.perf_counter() - stage_start) * 1000.0
+            stage_start = time.perf_counter()
             _, result = await process_generation_batch(async_scheduler_client, batch)
+            timings["process_generation_ms"] = (
+                time.perf_counter() - stage_start
+            ) * 1000.0
 
+            send_stats: dict[str, float | int] = {
+                "msgpack_pack_ms": 0.0,
+                "ws_send_ms": 0.0,
+                "raw_bytes": 0,
+                "ws_payload_bytes": 0,
+                "num_frames": 0,
+                "num_batches": 0,
+            }
+            frame_metadata = {}
             if result.encoded_frame_batches is not None:
-                await _send_frame_batches(
+                frame_metadata = (
+                    _raw_rgb_frame_metadata(batch)
+                    if result.encoded_frame_content_type == RAW_RGB_CONTENT_TYPE
+                    else {}
+                )
+                send_stats = await _send_frame_batches(
                     ws,
                     result.encoded_frame_batches,
                     content_type=result.encoded_frame_content_type,
                     chunk_index_start=batch.block_idx,
                     request_id=session.request_id,
-                    frame_metadata=(
-                        _raw_rgb_frame_metadata(batch)
-                        if result.encoded_frame_content_type == RAW_RGB_CONTENT_TYPE
-                        else None
-                    ),
+                    frame_metadata=frame_metadata,
                 )
+            timings["msgpack_pack_ms"] = float(send_stats["msgpack_pack_ms"])
+            timings["ws_send_ms"] = float(send_stats["ws_send_ms"])
+            timings["total_ms"] = (time.perf_counter() - start) * 1000.0
 
             # finish
             session.generate_chunk_completed()
 
             logger.info(
-                f"generate video chunk, "
-                f"request_id: {session.request_id},"
-                f"chunk_cnt: {session.generate_chunk_cnt},"
+                "realtime video stage timing: session_id=%s request_id=%s "
+                "chunk_idx=%s wait_video=%.2fms prepare=%.2fms "
+                "process_generation=%.2fms msgpack_pack=%.2fms "
+                "ws_send=%.2fms total=%.2fms batches=%d frames=%d "
+                "frame_shape=%s raw_bytes=%d ws_payload_bytes=%d content_type=%s",
+                session.id,
+                session.request_id,
+                batch.block_idx,
+                timings["wait_video_ms"],
+                timings["prepare_ms"],
+                timings["process_generation_ms"],
+                timings["msgpack_pack_ms"],
+                timings["ws_send_ms"],
+                timings["total_ms"],
+                send_stats["num_batches"],
+                send_stats["num_frames"],
+                (
+                    (
+                        int(frame_metadata["height"]),
+                        int(frame_metadata["width"]),
+                        int(frame_metadata["channels"]),
+                    )
+                    if frame_metadata
+                    else None
+                ),
+                send_stats["raw_bytes"],
+                send_stats["ws_payload_bytes"],
+                result.encoded_frame_content_type,
             )
 
         except asyncio.CancelledError:
