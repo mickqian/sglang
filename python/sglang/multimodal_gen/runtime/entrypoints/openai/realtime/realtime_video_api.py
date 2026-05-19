@@ -2,7 +2,6 @@
 
 import asyncio
 import io
-import math
 import os
 import shutil
 import tempfile
@@ -34,7 +33,6 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
-_FRAME_PART_SIZE = 512 * 1024
 _ACTIVE_SESSION_IDS: set[str] = set()
 
 
@@ -315,51 +313,3 @@ async def generate(websocket: WebSocket):
 
 async def write_error_msg(error_msg: str, websocket: WebSocket):
     await websocket.send_bytes(packb({"type": "error", "content": error_msg}))
-
-
-async def write_status_msg(status: str, websocket: WebSocket):
-    await websocket.send_bytes(packb({"type": "status", "content": status}))
-
-
-async def write_frame_msg(
-    content: bytes,
-    websocket: WebSocket,
-    *,
-    chunk_index: int,
-    request_id: str,
-):
-    num_parts = max(1, math.ceil(len(content) / _FRAME_PART_SIZE))
-    await websocket.send_bytes(
-        packb(
-            {
-                "type": "frame_start",
-                "request_id": request_id,
-                "chunk_index": chunk_index,
-                "total_size": len(content),
-                "num_parts": num_parts,
-            }
-        )
-    )
-    for part_index in range(num_parts):
-        start = part_index * _FRAME_PART_SIZE
-        end = min(len(content), start + _FRAME_PART_SIZE)
-        await websocket.send_bytes(
-            packb(
-                {
-                    "type": "frame_part",
-                    "request_id": request_id,
-                    "chunk_index": chunk_index,
-                    "part_index": part_index,
-                    "content": content[start:end],
-                }
-            )
-        )
-    await websocket.send_bytes(
-        packb(
-            {
-                "type": "frame_end",
-                "request_id": request_id,
-                "chunk_index": chunk_index,
-            }
-        )
-    )
