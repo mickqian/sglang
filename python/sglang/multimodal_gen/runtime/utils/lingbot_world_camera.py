@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+"""LingBot World camera-control conditioning utilities."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -8,6 +10,7 @@ import numpy as np
 import torch
 
 from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+    REALTIME_SESSION_ID_EXTRA_KEY,
     BaseRealtimeState,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -338,7 +341,7 @@ def prepare_lingbot_world_condition(
     )
     logger.debug(
         "LingBot action condition prepared: session_id=%s, block_idx=%s, new_action_count=%s, total_history=%s",
-        batch.extra.get("realtime_session_id"),
+        batch.extra.get(REALTIME_SESSION_ID_EXTRA_KEY),
         batch.block_idx,
         len(normalized_actions),
         len(action_history),
