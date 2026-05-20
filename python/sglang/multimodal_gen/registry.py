@@ -731,8 +731,7 @@ def _register_configs():
     register_configs(
         sampling_param_cls=LingBotWorldSamplingParams,
         pipeline_config_cls=LingBotWorldCausalDMDConfig,
-        hf_model_paths=["FastVideo/lingbot-world-fast-diffusers"],
-        model_detectors=[lambda hf_id: "lingbot-world-fast" in hf_id.lower()],
+        hf_model_paths=["IPostYellow/lingbot-world-fast-diffusers"],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,
