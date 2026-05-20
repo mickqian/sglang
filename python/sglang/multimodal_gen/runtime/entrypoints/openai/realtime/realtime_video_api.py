@@ -6,11 +6,11 @@ import os
 import shutil
 import tempfile
 import time
+from typing import TypedDict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from msgpack import packb, unpackb
 from PIL import Image
-from pydantic import ValidationError
 
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeAction,
@@ -28,15 +28,47 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ReleaseRealtimeSessionReq,
     prepare_request,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+    REALTIME_SESSION_ID_EXTRA_KEY,
+    RETURN_ENCODED_FRAMES_EXTRA_KEY,
+)
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    RAW_RGB_CHANNELS,
+    RAW_RGB_CONTENT_TYPE,
+)
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _ACTIVE_SESSION_IDS: set[str] = set()
-RAW_RGB_CONTENT_TYPE = "application/x-raw-rgb"
-RAW_RGB_CHANNELS = 3
+
+
+class RealtimeFrameBatchHeader(TypedDict, total=False):
+    type: str
+    request_id: str
+    chunk_index: int
+    content_type: str
+    num_frames: int
+    total_size: int
+    format: str
+    width: int
+    height: int
+    channels: int
+    bytes_per_frame: int
+
+
+class RealtimeFrameSendStats(TypedDict):
+    msgpack_pack_ms: float
+    header_send_ms: float
+    raw_join_ms: float
+    raw_send_ms: float
+    ws_send_ms: float
+    raw_bytes: int
+    ws_payload_bytes: int
+    num_frames: int
+    num_batches: int
 
 
 def _raw_rgb_frame_metadata(batch) -> dict[str, int | str]:
@@ -69,7 +101,7 @@ async def _send_frame_batches(
     chunk_index_start: int,
     request_id: str,
     frame_metadata: dict[str, int | str] | None = None,
-) -> dict[str, float | int]:
+) -> RealtimeFrameSendStats:
     chunk_index = chunk_index_start
     metadata = frame_metadata or {}
     header_pack_ms = 0.0
@@ -82,7 +114,7 @@ async def _send_frame_batches(
     num_batches = 0
     for frames in frame_batches:
         frame_bytes = sum(len(frame) for frame in frames)
-        header = {
+        header: RealtimeFrameBatchHeader = {
             "type": "frame_batch_header",
             "request_id": request_id,
             "chunk_index": chunk_index,
@@ -155,7 +187,8 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 sampling_params=sampling_params,
             )
             batch.session = session.realtime_session
-            batch.extra["realtime_session_id"] = session.id
+            batch.extra[REALTIME_SESSION_ID_EXTRA_KEY] = session.id
+            batch.extra[RETURN_ENCODED_FRAMES_EXTRA_KEY] = True
             batch.block_idx = session.generate_chunk_cnt
             chunk_size = batch.extra.get("chunk_size", 1)
             control_chunk = session.sample_control_chunk(chunk_size)
@@ -178,7 +211,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 time.perf_counter() - stage_start
             ) * 1000.0
 
-            send_stats: dict[str, float | int] = {
+            send_stats: RealtimeFrameSendStats = {
                 "msgpack_pack_ms": 0.0,
                 "header_send_ms": 0.0,
                 "raw_join_ms": 0.0,
@@ -250,23 +283,39 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             )
 
         except asyncio.CancelledError:
-            logger.info(f"generation completed, session_id: {session.id}")
+            logger.info("generation completed, session_id=%s", session.id)
             break
         except Exception as e:
             err_msg = str(e).splitlines()[0]
-            logger.error(f"error during generate loop: {err_msg}")
+            logger.error("error during generate loop: %s", err_msg)
             try:
                 await write_error_msg(f"error during generate loop: {err_msg}", ws)
-            except Exception as e:
-                logger.error(f"error during sending complete msg: {e}")
-                pass
+            except Exception as send_error:
+                logger.error(
+                    "error during sending complete msg: %s",
+                    send_error,
+                )
             break
 
 
+async def _await_realtime_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    try:
+        await task
+    except (asyncio.CancelledError, WebSocketDisconnect):
+        pass
+    except Exception as e:
+        logger.debug("realtime task exited with error: %s", e)
+
+
 async def _listen_actions(ws: WebSocket, session: GenerateSession):
-    async for data in ws.iter_bytes():
-        data = unpackb(data, raw=False)
+    async for message in ws.iter_bytes():
+        data = None
         try:
+            data = unpackb(message, raw=False)
+            if not isinstance(data, dict):
+                raise ValueError("realtime action must be a map")
             realtime_action = RealtimeAction.model_validate(data)
             if realtime_action.type == "video":
                 if not session.is_v2v_enabled():
@@ -315,11 +364,13 @@ async def _listen_actions(ws: WebSocket, session: GenerateSession):
                     f"type=prompt, content_len={len(realtime_action.action_content)}"
                 )
             logger.debug(
-                f"receive realtime action, session_id: {session.id}, {action_log}"
+                "receive realtime action, session_id=%s, %s",
+                session.id,
+                action_log,
             )
-        except (ValidationError, ValueError) as e:
+        except Exception as e:
             action_type = data.get("type") if isinstance(data, dict) else None
-            logger.warning(f"invalid action, type={action_type}, error={e}")
+            logger.warning("invalid action, type=%s, error=%s", action_type, e)
             await write_error_msg("invalid action", ws)
             continue
 
@@ -376,7 +427,9 @@ async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
             break
         except Exception as e:
             logger.warning(
-                f"invalid generate request, session_id: {session.id}, error={e}"
+                "invalid generate request, session_id=%s, error=%s",
+                session.id,
+                e,
             )
             await write_error_msg("invalid generate request", ws)
             continue
@@ -415,14 +468,17 @@ async def generate(websocket: WebSocket):
         await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
     except WebSocketDisconnect:
-        logger.info(f"client disconnected, session_id: {session.id}")
+        logger.info("client disconnected, session_id=%s", session.id)
     finally:
-        logger.info(f"terminating session, session_id: {session.id}")
+        logger.info("terminating session, session_id=%s", session.id)
         _ACTIVE_SESSION_IDS.discard(session.id)
-        if generate_task and not generate_task.done():
-            generate_task.cancel()
-        if listen_task and not listen_task.done():
-            listen_task.cancel()
+        for task in (generate_task, listen_task):
+            if task and not task.done():
+                task.cancel()
+        for task in (generate_task, listen_task):
+            if task is None:
+                continue
+            await _await_realtime_task(task)
         try:
             await async_scheduler_client.forward(
                 ReleaseRealtimeSessionReq(session_id=session.id)

@@ -8,7 +8,6 @@ import os
 import time
 from typing import Any, List, Sequence, Union
 
-import numpy as np
 import torch
 from setproctitle import setproctitle
 
@@ -46,6 +45,7 @@ from sglang.multimodal_gen.runtime.pipelines_core import (
     build_pipeline,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+    RETURN_ENCODED_FRAMES_EXTRA_KEY,
     RealtimeSessionCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
@@ -64,6 +64,10 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import (
 from sglang.multimodal_gen.runtime.utils.perf_logger import (
     PerformanceLogger,
     capture_memory_snapshot,
+)
+from sglang.multimodal_gen.runtime.utils.realtime_video import (
+    RAW_RGB_CONTENT_TYPE,
+    build_raw_rgb_frame_batches,
 )
 from sglang.srt.utils.network import NetworkAddress
 
@@ -308,110 +312,25 @@ class GPUWorker:
                     upscaling_scale=req.upscaling_scale,
                 )
 
-            def _build_raw_rgb_frame_batches(
-                output: Any,
-                req: Req,
-                output_batch: OutputBatch,
-            ) -> tuple[list[list[bytes]], dict[str, Any]]:
-                start = time.monotonic()
-                postprocess_ms = 0.0
-                pack_bytes_ms = 0.0
-                raw_bytes = 0
-                num_frames = 0
-                frame_shape = None
-                frame_batches = []
-                if isinstance(output, torch.Tensor):
-                    outputs = list(output)
-                else:
-                    outputs = output if isinstance(output, Sequence) else [output]
-
-                for sample in outputs:
-                    stage_start = time.monotonic()
-                    frames = post_process_sample(
-                        sample,
-                        req.data_type,
-                        req.fps,
-                        False,
-                        None,
-                        audio_sample_rate=output_batch.audio_sample_rate,
-                        output_compression=req.output_compression,
-                        enable_frame_interpolation=req.enable_frame_interpolation,
-                        frame_interpolation_exp=req.frame_interpolation_exp,
-                        frame_interpolation_scale=req.frame_interpolation_scale,
-                        frame_interpolation_model_path=req.frame_interpolation_model_path,
-                        enable_upscaling=req.enable_upscaling,
-                        upscaling_model_path=req.upscaling_model_path,
-                        upscaling_scale=req.upscaling_scale,
-                    )
-                    postprocess_ms += (time.monotonic() - stage_start) * 1000.0
-
-                    stage_start = time.monotonic()
-                    raw_frames = []
-                    for frame in frames:
-                        if frame.ndim == 2:
-                            frame = frame[:, :, None]
-                        if frame.shape[-1] == 1:
-                            frame = np.repeat(frame, 3, axis=-1)
-                        elif frame.shape[-1] > 3:
-                            frame = frame[:, :, :3]
-                        frame = np.ascontiguousarray(frame)
-                        frame_shape = tuple(int(dim) for dim in frame.shape)
-                        frame_bytes = frame.tobytes()
-                        raw_bytes += len(frame_bytes)
-                        num_frames += 1
-                        raw_frames.append(frame_bytes)
-                    pack_bytes_ms += (time.monotonic() - stage_start) * 1000.0
-                    frame_batches.append(raw_frames)
-
-                total_ms = (time.monotonic() - start) * 1000.0
-                logger.info(
-                    "realtime raw RGB frame batches prepared: request_id=%s "
-                    "block_idx=%s postprocess=%.2fms pack_bytes=%.2fms "
-                    "total=%.2fms batches=%d frames=%d frame_shape=%s "
-                    "raw_bytes=%d content_type=application/x-raw-rgb",
-                    req.request_id,
-                    req.block_idx,
-                    postprocess_ms,
-                    pack_bytes_ms,
-                    total_ms,
-                    len(frame_batches),
-                    num_frames,
-                    frame_shape,
-                    raw_bytes,
-                )
-                frame_metadata: dict[str, Any] = {}
-                if frame_shape is not None and len(frame_shape) == 3:
-                    frame_height, frame_width, channels = frame_shape
-                    frame_metadata = {
-                        "format": "rgb24",
-                        "width": frame_width,
-                        "height": frame_height,
-                        "channels": channels,
-                        "bytes_per_frame": frame_width * frame_height * channels,
-                    }
-                return frame_batches, frame_metadata
-
-            realtime_session_id = req.extra.get("realtime_session_id", "")
-            should_direct_return_frames = bool(realtime_session_id)
+            should_direct_return_frames = bool(
+                req.extra.get(RETURN_ENCODED_FRAMES_EXTRA_KEY)
+            )
             should_return_file_paths = req.save_output and req.return_file_paths_only
 
             if (
-                (should_direct_return_frames or should_return_file_paths)
-                and req.return_file_paths_only
-                and self.rank == 0
-            ):
+                should_direct_return_frames or should_return_file_paths
+            ) and self.rank == 0:
                 if output_batch.output is not None:
                     if should_direct_return_frames:
-                        output_batch.encoded_frame_content_type = (
-                            "application/x-raw-rgb"
-                        )
+                        output_batch.encoded_frame_content_type = RAW_RGB_CONTENT_TYPE
                         (
                             output_batch.encoded_frame_batches,
                             output_batch.encoded_frame_metadata,
-                        ) = _build_raw_rgb_frame_batches(
+                        ) = build_raw_rgb_frame_batches(
                             output_batch.output,
                             req,
                             output_batch,
+                            post_process_sample,
                         )
                     else:
                         # handle sync save file
@@ -661,7 +580,7 @@ def run_scheduler_process(
             task_pipes_to_slaves=task_pipes_to_slaves,
             result_pipes_from_slaves=result_pipes_from_slaves,
         )
-        logger.info(f"Worker {rank}: Scheduler loop started.")
+        logger.info("Worker %s: Scheduler loop started.", rank)
         pipe_writer.send(
             {
                 "status": "ready",
@@ -680,4 +599,4 @@ def run_scheduler_process(
             torch.cuda.empty_cache()
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
-        logger.info(f"Worker {rank}: Shutdown complete.")
+        logger.info("Worker %s: Shutdown complete.", rank)

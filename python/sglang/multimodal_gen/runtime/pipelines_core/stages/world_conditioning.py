@@ -11,7 +11,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.lingbot_world import (
+from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import (
     prepare_lingbot_world_condition,
 )
 
