@@ -55,6 +55,9 @@ from sglang.multimodal_gen.runtime.layers.visual_embedding import (
     WanCamControlPatchEmbedding,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
+from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
+    LayerwiseOffloadableModuleMixin,
+)
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.models.dits.causal_wanvideo import (
     CausalWanSelfAttention,
@@ -72,7 +75,6 @@ from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
 )
-from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.utils import add_prefix
 
@@ -575,7 +577,7 @@ class LingBotWorldTransformerBlock(nn.Module):
         return hidden_states.to(orig_dtype)
 
 
-class LingBotWorldTransformer3DModel(CachableDiT, OffloadableDiTMixin):
+class LingBotWorldTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
     _fsdp_shard_conditions = LingBotWorldVideoConfig()._fsdp_shard_conditions
     _compile_conditions = LingBotWorldVideoConfig()._compile_conditions
     _supported_attention_backends = (
