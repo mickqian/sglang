@@ -46,6 +46,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.hunyuan3d_shape import 
 from sglang.multimodal_gen.runtime.pipelines_core.stages.image_encoding import (
     ImageEncodingStage,
     ImageVAEEncodingStage,
+    LTX2ImageEncodingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.input_validation import (
     InputValidationStage,
@@ -68,6 +69,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_realtime_
 from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_realtime_vae import (
     LingBotWorldCausalDecodingStage,
     LingBotWorldRealtimeImageVAEEncodingStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
+    LTX2DenoisingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
     LTX2TextConnectorStage,
@@ -96,6 +100,7 @@ __all__ = [
     "LTX2AVLatentPreparationStage",
     "DenoisingStage",
     "DmdDenoisingStage",
+    "LTX2DenoisingStage",
     "LTX2AVDenoisingStage",
     "CausalDMDDenoisingStage",
     "LingBotWorldInputValidationStage",
@@ -108,6 +113,7 @@ __all__ = [
     "LTX2AVDecodingStage",
     "ImageEncodingStage",
     "ImageVAEEncodingStage",
+    "LTX2ImageEncodingStage",
     "TextEncodingStage",
     "LTX2TextConnectorStage",
     # Hunyuan3D shape stages
