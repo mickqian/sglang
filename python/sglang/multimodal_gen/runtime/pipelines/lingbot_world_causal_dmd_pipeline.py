@@ -12,14 +12,14 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
     ComposedPipelineBase,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
-from sglang.multimodal_gen.runtime.pipelines_core.stages import (
-    ImageEncodingStage,
-    LingBotCausalDecodingStage,
-    LingBotCausalDMDDenoisingStage,
-    LingBotConditioningStage,
-    LingBotInputValidationStage,
-    LingBotRealtimeImageVAEEncodingStage,
-    LingBotRealtimeTextEncodingStage,
+from sglang.multimodal_gen.runtime.pipelines_core.stages import ImageEncodingStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot_world import (
+    LingBotWorldCausalDecodingStage,
+    LingBotWorldCausalDMDDenoisingStage,
+    LingBotWorldConditioningStage,
+    LingBotWorldInputValidationStage,
+    LingBotWorldRealtimeImageVAEEncodingStage,
+    LingBotWorldRealtimeTextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -46,9 +46,9 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
         )
 
     def create_pipeline_stages(self, server_args) -> None:
-        self.add_stage(LingBotInputValidationStage())
+        self.add_stage(LingBotWorldInputValidationStage())
         self.add_stage(
-            LingBotRealtimeTextEncodingStage(
+            LingBotWorldRealtimeTextEncodingStage(
                 text_encoders=[self.get_module("text_encoder")],
                 tokenizers=[self.get_module("tokenizer")],
             )
@@ -64,20 +64,20 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             ),
         )
 
-        self.add_stage(LingBotConditioningStage())
+        self.add_stage(LingBotWorldConditioningStage())
         self.add_stage(
-            LingBotRealtimeImageVAEEncodingStage(
+            LingBotWorldRealtimeImageVAEEncodingStage(
                 vae=self.get_module("vae"),
             )
         )
         self.add_stage(
-            LingBotCausalDMDDenoisingStage(
+            LingBotWorldCausalDMDDenoisingStage(
                 transformer=self.get_module("transformer"),
                 scheduler=self.get_module("scheduler"),
             ),
         )
         self.add_stage(
-            LingBotCausalDecodingStage(
+            LingBotWorldCausalDecodingStage(
                 vae=self.get_module("vae"),
                 pipeline=self,
             )
