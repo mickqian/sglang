@@ -201,9 +201,6 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                     len(control_chunk),
                 )
                 batch.extra["actions"] = control_chunk
-            batch.input_video = (
-                session.sample_video_frames() if session.is_v2v_enabled() else None
-            )
             timings["prepare_ms"] = (time.perf_counter() - stage_start) * 1000.0
             stage_start = time.perf_counter()
             _, result = await process_generation_batch(async_scheduler_client, batch)
