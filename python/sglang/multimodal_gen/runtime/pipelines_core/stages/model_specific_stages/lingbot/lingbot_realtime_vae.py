@@ -27,7 +27,7 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 
-class LingBotWorldRealtimeVAEState(BaseRealtimeState):
+class LingBotRealtimeVAEState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
         self.image_latent: torch.Tensor | None = None
@@ -37,7 +37,7 @@ class LingBotWorldRealtimeVAEState(BaseRealtimeState):
         self.image_latent = None
 
 
-class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
+class LingBotRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     """Reuse the first chunk's conditioning image latent across a realtime session."""
 
     def forward(
@@ -47,7 +47,7 @@ class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     ) -> Req:
         state = None
         if batch.session is not None:
-            state = batch.session.get_or_create_state(LingBotWorldRealtimeVAEState)
+            state = batch.session.get_or_create_state(LingBotRealtimeVAEState)
             if batch.block_idx == 0:
                 state.image_latent = None
             elif state.image_latent is not None:
@@ -66,7 +66,7 @@ class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
         return batch
 
 
-class LingBotWorldCausalDecodingStage(DecodingStage):
+class LingBotCausalDecodingStage(DecodingStage):
     """Decode LingBot realtime chunks with a persistent causal Wan VAE cache."""
 
     @torch.no_grad()

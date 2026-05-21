@@ -16,7 +16,7 @@ from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import (
 )
 
 
-class WorldConditioningStage(PipelineStage):
+class LingBotConditioningStage(PipelineStage):
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         c2ws_plucker_emb = prepare_lingbot_world_condition(
             batch=batch,

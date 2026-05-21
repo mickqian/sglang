@@ -57,21 +57,16 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation impo
 from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation_av import (
     LTX2AVLatentPreparationStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_causal_denoising import (
-    LingBotWorldCausalDMDDenoisingStage,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_input_validation import (
-    LingBotWorldInputValidationStage,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_realtime_text import (
-    LingBotWorldRealtimeTextEncodingStage,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.lingbot_world_realtime_vae import (
-    LingBotWorldCausalDecodingStage,
-    LingBotWorldRealtimeImageVAEEncodingStage,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
     LTX2DenoisingStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot import (
+    LingBotCausalDecodingStage,
+    LingBotCausalDMDDenoisingStage,
+    LingBotConditioningStage,
+    LingBotInputValidationStage,
+    LingBotRealtimeImageVAEEncodingStage,
+    LingBotRealtimeTextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
     LTX2TextConnectorStage,
@@ -87,9 +82,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
     LTX2LoRASwitchStage,
     LTX2UpsampleStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.world_conditioning import (
-    WorldConditioningStage,
-)
 
 __all__ = [
     "PipelineStage",
@@ -103,11 +95,12 @@ __all__ = [
     "LTX2DenoisingStage",
     "LTX2AVDenoisingStage",
     "CausalDMDDenoisingStage",
-    "LingBotWorldInputValidationStage",
-    "LingBotWorldCausalDMDDenoisingStage",
-    "LingBotWorldRealtimeTextEncodingStage",
-    "LingBotWorldRealtimeImageVAEEncodingStage",
-    "LingBotWorldCausalDecodingStage",
+    "LingBotInputValidationStage",
+    "LingBotCausalDMDDenoisingStage",
+    "LingBotRealtimeTextEncodingStage",
+    "LingBotRealtimeImageVAEEncodingStage",
+    "LingBotCausalDecodingStage",
+    "LingBotConditioningStage",
     "EncodingStage",
     "DecodingStage",
     "LTX2AVDecodingStage",
@@ -130,5 +123,4 @@ __all__ = [
     "LTX2HalveResolutionStage",
     "LTX2LoRASwitchStage",
     "LTX2UpsampleStage",
-    "WorldConditioningStage",
 ]

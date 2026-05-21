@@ -14,12 +14,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
 from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     ImageEncodingStage,
-    LingBotWorldCausalDecodingStage,
-    LingBotWorldCausalDMDDenoisingStage,
-    LingBotWorldInputValidationStage,
-    LingBotWorldRealtimeImageVAEEncodingStage,
-    LingBotWorldRealtimeTextEncodingStage,
-    WorldConditioningStage,
+    LingBotCausalDecodingStage,
+    LingBotCausalDMDDenoisingStage,
+    LingBotConditioningStage,
+    LingBotInputValidationStage,
+    LingBotRealtimeImageVAEEncodingStage,
+    LingBotRealtimeTextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -46,9 +46,9 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
         )
 
     def create_pipeline_stages(self, server_args) -> None:
-        self.add_stage(LingBotWorldInputValidationStage())
+        self.add_stage(LingBotInputValidationStage())
         self.add_stage(
-            LingBotWorldRealtimeTextEncodingStage(
+            LingBotRealtimeTextEncodingStage(
                 text_encoders=[self.get_module("text_encoder")],
                 tokenizers=[self.get_module("tokenizer")],
             )
@@ -64,20 +64,20 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             ),
         )
 
-        self.add_stage(WorldConditioningStage())
+        self.add_stage(LingBotConditioningStage())
         self.add_stage(
-            LingBotWorldRealtimeImageVAEEncodingStage(
+            LingBotRealtimeImageVAEEncodingStage(
                 vae=self.get_module("vae"),
             )
         )
         self.add_stage(
-            LingBotWorldCausalDMDDenoisingStage(
+            LingBotCausalDMDDenoisingStage(
                 transformer=self.get_module("transformer"),
                 scheduler=self.get_module("scheduler"),
             ),
         )
         self.add_stage(
-            LingBotWorldCausalDecodingStage(
+            LingBotCausalDecodingStage(
                 vae=self.get_module("vae"),
                 pipeline=self,
             )
