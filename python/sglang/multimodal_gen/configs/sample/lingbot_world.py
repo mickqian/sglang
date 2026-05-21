@@ -9,6 +9,7 @@ from sglang.multimodal_gen.configs.sample.wan import Wan2_2_I2V_A14B_SamplingPar
 
 @dataclass
 class LingBotWorldSamplingParams(Wan2_2_I2V_A14B_SamplingParam):
+    negative_prompt: str | None = None
     actions: list[list[str]] | None = None
     chunk_size: int | None = None
     guidance_scale: float = 5.0
