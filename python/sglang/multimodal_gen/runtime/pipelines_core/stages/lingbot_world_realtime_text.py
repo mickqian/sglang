@@ -39,6 +39,14 @@ def _copy_tensor_list(
     return list(value)
 
 
+def _copy_seq_lens(
+    value: list[list[int]] | None,
+) -> list[list[int]] | None:
+    if value is None:
+        return None
+    return [list(seq_lens) for seq_lens in value]
+
+
 class LingBotWorldRealtimeTextState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
@@ -46,18 +54,26 @@ class LingBotWorldRealtimeTextState(BaseRealtimeState):
         self.prompt_embeds: list[torch.Tensor] | None = None
         self.pooled_embeds: list[torch.Tensor] | None = None
         self.prompt_attention_mask: list[torch.Tensor] | None = None
+        self.prompt_embeds_mask: list[torch.Tensor] | None = None
+        self.prompt_seq_lens: list[list[int]] | None = None
         self.negative_prompt_embeds: list[torch.Tensor] | None = None
         self.neg_pooled_embeds: list[torch.Tensor] | None = None
         self.negative_attention_mask: list[torch.Tensor] | None = None
+        self.negative_prompt_embeds_mask: list[torch.Tensor] | None = None
+        self.negative_prompt_seq_lens: list[list[int]] | None = None
 
     def clear_text_cache(self):
         self.cache_key = None
         self.prompt_embeds = None
         self.pooled_embeds = None
         self.prompt_attention_mask = None
+        self.prompt_embeds_mask = None
+        self.prompt_seq_lens = None
         self.negative_prompt_embeds = None
         self.neg_pooled_embeds = None
         self.negative_attention_mask = None
+        self.negative_prompt_embeds_mask = None
+        self.negative_prompt_seq_lens = None
 
     def dispose(self):
         super().dispose()
@@ -82,18 +98,30 @@ class LingBotWorldRealtimeTextEncodingStage(TextEncodingStage):
         batch.prompt_embeds = _copy_tensor_list(state.prompt_embeds) or []
         batch.pooled_embeds = _copy_tensor_list(state.pooled_embeds) or []
         batch.prompt_attention_mask = _copy_tensor_list(state.prompt_attention_mask)
+        batch.prompt_embeds_mask = _copy_tensor_list(state.prompt_embeds_mask)
+        batch.prompt_seq_lens = _copy_seq_lens(state.prompt_seq_lens)
         batch.negative_prompt_embeds = _copy_tensor_list(state.negative_prompt_embeds)
         batch.neg_pooled_embeds = _copy_tensor_list(state.neg_pooled_embeds) or []
         batch.negative_attention_mask = _copy_tensor_list(state.negative_attention_mask)
+        batch.negative_prompt_embeds_mask = _copy_tensor_list(
+            state.negative_prompt_embeds_mask
+        )
+        batch.negative_prompt_seq_lens = _copy_seq_lens(state.negative_prompt_seq_lens)
         return batch
 
     def _store_outputs(self, batch: Req, state: LingBotWorldRealtimeTextState) -> None:
         state.prompt_embeds = _copy_tensor_list(batch.prompt_embeds)
         state.pooled_embeds = _copy_tensor_list(batch.pooled_embeds)
         state.prompt_attention_mask = _copy_tensor_list(batch.prompt_attention_mask)
+        state.prompt_embeds_mask = _copy_tensor_list(batch.prompt_embeds_mask)
+        state.prompt_seq_lens = _copy_seq_lens(batch.prompt_seq_lens)
         state.negative_prompt_embeds = _copy_tensor_list(batch.negative_prompt_embeds)
         state.neg_pooled_embeds = _copy_tensor_list(batch.neg_pooled_embeds)
         state.negative_attention_mask = _copy_tensor_list(batch.negative_attention_mask)
+        state.negative_prompt_embeds_mask = _copy_tensor_list(
+            batch.negative_prompt_embeds_mask
+        )
+        state.negative_prompt_seq_lens = _copy_seq_lens(batch.negative_prompt_seq_lens)
 
     @torch.no_grad()
     def forward(
