@@ -380,31 +380,32 @@ class GPUWorker:
             should_direct_return_frames = bool(
                 req.extra.get(RETURN_ENCODED_FRAMES_EXTRA_KEY)
             )
-            should_return_file_paths = req.save_output and req.return_file_paths_only
 
-            # File-path-only and realtime raw-frame responses avoid serializing
-            # generated tensors between scheduler_client and gpu_worker.
-            if (
-                should_direct_return_frames or should_return_file_paths
-            ) and self.rank == 0:
-                if output_batch.output is not None:
-                    if should_direct_return_frames:
-                        output_batch.encoded_frame_content_type = RAW_RGB_CONTENT_TYPE
-                        (
-                            output_batch.encoded_frame_batches,
-                            output_batch.encoded_frame_metadata,
-                        ) = build_raw_rgb_frame_batches(
-                            output_batch.output,
-                            req,
-                            output_batch,
-                            post_process_sample,
-                        )
-                    else:
-                        self._save_output_paths(req, output_batch)
-                    output_batch.output = None
+            # Realtime raw-frame responses avoid serializing generated tensors between
+            # scheduler_client and gpu_worker.
+            if should_direct_return_frames:
+                if self.rank == 0 and output_batch.output is not None:
+                    output_batch.encoded_frame_content_type = RAW_RGB_CONTENT_TYPE
+                    (
+                        output_batch.encoded_frame_batches,
+                        output_batch.encoded_frame_metadata,
+                    ) = build_raw_rgb_frame_batches(
+                        output_batch.output,
+                        req,
+                        output_batch,
+                        post_process_sample,
+                    )
+                output_batch.output = None
+                output_batch.audio = None
+                output_batch.audio_sample_rate = None
 
-                # No rank needs to hold on to generated tensors once the realtime
-                # frame batch or file-path response has been materialized.
+                if torch.cuda.is_initialized():
+                    torch.cuda.empty_cache()
+
+            # file-path-only responses avoid serializing generated tensors between
+            # scheduler_client and gpu_worker.
+            if req.save_output and req.return_file_paths_only:
+                save_output_paths(output_batch)
                 output_batch.output = None
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
@@ -547,15 +548,10 @@ class GPUWorker:
             dynamic_output_paths = None
 
         if dynamic_output_paths is not None:
-
-            def build_output_path(idx: int) -> str:
-                return dynamic_output_paths[idx]
-
+            build_output_path = lambda idx: dynamic_output_paths[idx]
         else:
             num_outputs = len(output_batch.output)
-
-            def build_output_path(idx: int) -> str:
-                return req.output_file_path(num_outputs, idx)
+            build_output_path = lambda idx: req.output_file_path(num_outputs, idx)
 
         output_batch.output_file_paths = save_outputs(
             output_batch.output,
@@ -994,7 +990,7 @@ def run_scheduler_process(
             result_pipes_from_slaves=result_pipes_from_slaves,
             local_rank=local_rank,
         )
-        logger.info("Worker %s: Scheduler loop started.", rank)
+        logger.info(f"Worker {rank}: Scheduler loop started.")
         pipe_writer.send(
             {
                 "status": "ready",
@@ -1013,4 +1009,4 @@ def run_scheduler_process(
             torch.cuda.empty_cache()
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
-        logger.info("Worker %s: Shutdown complete.", rank)
+        logger.info(f"Worker {rank}: Shutdown complete.")

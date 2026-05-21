@@ -43,7 +43,7 @@ def build_pipeline(
     """
     model_path = server_args.model_path
 
-    # Explicit pipeline selection is used for variants with different stage graphs.
+    # Check if pipeline class is explicitly specified
     if server_args.pipeline_class_name:
         from sglang.multimodal_gen.registry import (
             _PIPELINE_REGISTRY,

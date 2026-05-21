@@ -258,7 +258,6 @@ class ServerArgs(DisaggArgsMixin):
 
     output_path: str | None = "outputs/"
     input_save_path: str | None = "inputs/uploads"
-    realesrgan_half_precision: bool = False
 
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
@@ -1415,12 +1414,6 @@ class ServerArgs(DisaggArgsMixin):
             type=str,
             default=ServerArgs.input_save_path,
             help='Directory path to save uploaded input images/videos. Set to "" to disable persistent saving.',
-        )
-        parser.add_argument(
-            "--realesrgan-half-precision",
-            action="store_true",
-            default=ServerArgs.realesrgan_half_precision,
-            help="Run Real-ESRGAN upscaling in fp16 half precision.",
         )
 
         # LoRA
