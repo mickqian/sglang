@@ -19,7 +19,13 @@ class LingBotWorldSamplingParams(Wan2_2_I2V_A14B_SamplingParam):
     fps: int = 16
 
     def _adjust(self, server_args):
+        enable_sequence_shard = self.enable_sequence_shard
+        if enable_sequence_shard is None or enable_sequence_shard:
+            self.adjust_frames = False
         super()._adjust(server_args)
+        if enable_sequence_shard is None or enable_sequence_shard:
+            self.enable_sequence_shard = True
+            self.adjust_frames = False
         if self.chunk_size is None:
             self.chunk_size = max(
                 1,

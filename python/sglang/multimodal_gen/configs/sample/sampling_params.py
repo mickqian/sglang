@@ -510,7 +510,6 @@ class SamplingParams:
         if (
             "wan" in pipeline_name_lower
             or "helios" in pipeline_name_lower
-            or "lingbot" in pipeline_name_lower
             or "joy" in pipeline_name_lower
         ) and (self.enable_sequence_shard is None or self.enable_sequence_shard):
             self.enable_sequence_shard = True
@@ -521,13 +520,13 @@ class SamplingParams:
         if self.enable_sequence_shard:
             self.adjust_frames = False
             logger.info(
-                "Sequence dimension shard is enabled, disabling frame adjustment for better performance"
+                f"Sequence dimension shard is enabled, disabling frame adjustment for better performance"
             )
 
         if pipeline_config.task_type.is_image_gen():
             # settle num_frames
             if not server_args.pipeline_config.allow_set_num_frames():
-                logger.debug("Setting `num_frames` to 1 for image generation model")
+                logger.debug(f"Setting `num_frames` to 1 for image generation model")
                 self.num_frames = 1
 
         else:
@@ -1030,15 +1029,15 @@ class SamplingParams:
 
         # global switch: if True, allow overriding protected fields
         allow_override_protected = not user_params.no_override_protected_fields
-        for user_field in dataclasses.fields(user_params):
-            field_name = user_field.name
+        for field in dataclasses.fields(user_params):
+            field_name = field.name
             user_value = getattr(user_params, field_name)
             if hasattr(SamplingParams, field_name):
                 default_class_value = getattr(SamplingParams, field_name)
-            elif user_field.default is not dataclasses.MISSING:
-                default_class_value = user_field.default
-            elif user_field.default_factory is not dataclasses.MISSING:
-                default_class_value = user_field.default_factory()
+            elif field.default is not dataclasses.MISSING:
+                default_class_value = field.default
+            elif field.default_factory is not dataclasses.MISSING:
+                default_class_value = field.default_factory()
             else:
                 default_class_value = dataclasses.MISSING
 
