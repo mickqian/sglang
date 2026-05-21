@@ -228,16 +228,6 @@ class DiffGenerator:
                 sampling_params=sampling_params,
                 external_trace_header=external_trace_header,
             )
-            diffusers_kwargs = sampling_params_kwargs.get("diffusers_kwargs")
-            if diffusers_kwargs:
-                if hasattr(sampling_params, "normalize_diffusers_kwargs"):
-                    req.extra["diffusers_kwargs"] = (
-                        sampling_params.normalize_diffusers_kwargs(
-                            self.server_args, diffusers_kwargs
-                        )
-                    )
-                else:
-                    req.extra["diffusers_kwargs"] = diffusers_kwargs
             request_groups.append(
                 expand_request_outputs(
                     req,
