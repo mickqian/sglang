@@ -47,7 +47,7 @@ def _copy_seq_lens(
     return [list(seq_lens) for seq_lens in value]
 
 
-class LingBotRealtimeTextState(BaseRealtimeState):
+class LingBotWorldRealtimeTextState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
         self.cache_key: tuple[Any, ...] | None = None
@@ -80,7 +80,7 @@ class LingBotRealtimeTextState(BaseRealtimeState):
         self.clear_text_cache()
 
 
-class LingBotRealtimeTextEncodingStage(TextEncodingStage):
+class LingBotWorldRealtimeTextEncodingStage(TextEncodingStage):
     def _make_cache_key(self, batch: Req) -> tuple[Any, ...]:
         return (
             _normalize_prompt_value(batch.prompt),
@@ -93,7 +93,7 @@ class LingBotRealtimeTextEncodingStage(TextEncodingStage):
         )
 
     def _restore_cached_outputs(
-        self, batch: Req, state: LingBotRealtimeTextState
+        self, batch: Req, state: LingBotWorldRealtimeTextState
     ) -> Req:
         batch.prompt_embeds = _copy_tensor_list(state.prompt_embeds) or []
         batch.pooled_embeds = _copy_tensor_list(state.pooled_embeds) or []
@@ -109,7 +109,7 @@ class LingBotRealtimeTextEncodingStage(TextEncodingStage):
         batch.negative_prompt_seq_lens = _copy_seq_lens(state.negative_prompt_seq_lens)
         return batch
 
-    def _store_outputs(self, batch: Req, state: LingBotRealtimeTextState) -> None:
+    def _store_outputs(self, batch: Req, state: LingBotWorldRealtimeTextState) -> None:
         state.prompt_embeds = _copy_tensor_list(batch.prompt_embeds)
         state.pooled_embeds = _copy_tensor_list(batch.pooled_embeds)
         state.prompt_attention_mask = _copy_tensor_list(batch.prompt_attention_mask)
@@ -132,8 +132,8 @@ class LingBotRealtimeTextEncodingStage(TextEncodingStage):
         if batch.session is None:
             return super().forward(batch, server_args)
 
-        state = batch.session.get_or_create_state(LingBotRealtimeTextState)
-        assert isinstance(state, LingBotRealtimeTextState)
+        state = batch.session.get_or_create_state(LingBotWorldRealtimeTextState)
+        assert isinstance(state, LingBotWorldRealtimeTextState)
 
         cache_key = self._make_cache_key(batch)
         if state.cache_key == cache_key and state.prompt_embeds is not None:

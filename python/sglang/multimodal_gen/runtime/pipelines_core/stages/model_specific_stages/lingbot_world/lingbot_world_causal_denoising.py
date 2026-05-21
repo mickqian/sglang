@@ -41,7 +41,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
-class LingBotCausalDMDRealtimeState(BaseRealtimeState):
+class LingBotWorldCausalDMDRealtimeState(BaseRealtimeState):
     """Persists KV cache and frame position across chunks in a realtime session."""
 
     def __init__(self):
@@ -50,7 +50,7 @@ class LingBotCausalDMDRealtimeState(BaseRealtimeState):
         self.chunk_idx: int = 0
 
 
-class LingBotCausalDMDDenoisingStage(CausalDMDDenoisingStage):
+class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     """Causal DMD denoising with I2V condition concatenation for LingBot-World.
 
     The LingBot-World transformer has ``in_channels = 36`` and expects
@@ -61,11 +61,13 @@ class LingBotCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     def _get_cache_state(
         self,
         batch: Req,
-    ) -> tuple[LingBotCausalDMDRealtimeState, bool]:
+    ) -> tuple[LingBotWorldCausalDMDRealtimeState, bool]:
         if batch.session is not None:
-            state = batch.session.get_or_create_state(LingBotCausalDMDRealtimeState)
+            state = batch.session.get_or_create_state(
+                LingBotWorldCausalDMDRealtimeState
+            )
             return state, True
-        return LingBotCausalDMDRealtimeState(), False
+        return LingBotWorldCausalDMDRealtimeState(), False
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """LingBot generates latents internally; only require image_latent."""
