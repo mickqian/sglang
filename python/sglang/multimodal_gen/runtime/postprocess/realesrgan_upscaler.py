@@ -597,9 +597,8 @@ class ImageUpscaler:
         model = UpscalerModel(net=net, scale=native_scale)
         _MODEL_CACHE[resolved_path] = model
         logger.info(
-            "Real-ESRGAN model loaded on device: %s (dtype=%s, native_scale=%dx, outscale=%s)",
+            "Real-ESRGAN model loaded on device: %s (native_scale=%dx, outscale=%s)",
             device,
-            next(net.parameters()).dtype,
             native_scale,
             f"{self._scale}x" if self._scale != native_scale else "native",
         )
