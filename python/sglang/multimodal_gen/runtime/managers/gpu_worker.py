@@ -139,6 +139,9 @@ class GPUWorker:
             )
 
         released = self._realtime_sessions.release(session_id)
+        if released:
+            if torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
         return OutputBatch(output={"released": released, "session_id": session_id})
 
     def init_device_and_model(self) -> None:
@@ -413,7 +416,11 @@ class GPUWorker:
             # Keep return_frames payloads off the scheduler's tensor ZMQ path.
             self._materialize_frame_outputs_for_return(output_batch, req)
 
-            if torch.cuda.is_initialized() and output_batch.output is None:
+            if (
+                torch.cuda.is_initialized()
+                and output_batch.output is None
+                and not should_direct_return_frames
+            ):
                 torch.cuda.empty_cache()
 
             if req.perf_dump_path is not None or envs.SGLANG_DIFFUSION_STAGE_LOGGING:
