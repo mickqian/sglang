@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import os
 import shutil
-import tempfile
 import time
-from typing import TypedDict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from msgpack import packb, unpackb
@@ -17,143 +14,26 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
     GenerateSession,
 )
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter import (
+    get_realtime_model_adapter,
+)
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
+    empty_frame_send_stats,
+)
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     process_generation_batch,
-    save_image_to_path,
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     ReleaseRealtimeSessionReq,
     prepare_request,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
-    REALTIME_SESSION_ID_EXTRA_KEY,
-    RETURN_ENCODED_FRAMES_EXTRA_KEY,
-)
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.realtime_video import (
-    RAW_RGB_CHANNELS,
-    RAW_RGB_CONTENT_TYPE,
-)
 
 logger = init_logger(__name__)
 router = APIRouter(prefix="/v1/realtime_video", tags=["realtime"])
 _ACTIVE_SESSION_IDS: set[str] = set()
-
-
-class RealtimeFrameBatchHeader(TypedDict, total=False):
-    type: str
-    request_id: str
-    chunk_index: int
-    content_type: str
-    num_frames: int
-    total_size: int
-    format: str
-    width: int
-    height: int
-    channels: int
-    bytes_per_frame: int
-
-
-class RealtimeFrameSendStats(TypedDict):
-    msgpack_pack_ms: float
-    header_send_ms: float
-    raw_join_ms: float
-    raw_send_ms: float
-    ws_send_ms: float
-    raw_bytes: int
-    ws_payload_bytes: int
-    num_frames: int
-    num_batches: int
-
-
-def _raw_rgb_frame_metadata(batch) -> dict[str, int | str]:
-    frame_width = batch.width
-    frame_height = batch.height
-    if frame_width is None or frame_height is None:
-        return {}
-
-    frame_width = int(frame_width)
-    frame_height = int(frame_height)
-    if batch.enable_upscaling:
-        upscaling_scale = int(batch.upscaling_scale or 1)
-        frame_width *= upscaling_scale
-        frame_height *= upscaling_scale
-
-    return {
-        "format": "rgb24",
-        "width": frame_width,
-        "height": frame_height,
-        "channels": RAW_RGB_CHANNELS,
-        "bytes_per_frame": frame_width * frame_height * RAW_RGB_CHANNELS,
-    }
-
-
-async def _send_frame_batches(
-    ws: WebSocket,
-    frame_batches: list[list[bytes]],
-    *,
-    content_type: str,
-    chunk_index_start: int,
-    request_id: str,
-    frame_metadata: dict[str, int | str] | None = None,
-) -> RealtimeFrameSendStats:
-    chunk_index = chunk_index_start
-    metadata = frame_metadata or {}
-    header_pack_ms = 0.0
-    header_send_ms = 0.0
-    raw_join_ms = 0.0
-    raw_send_ms = 0.0
-    raw_bytes = 0
-    ws_payload_bytes = 0
-    num_frames = 0
-    num_batches = 0
-    for frames in frame_batches:
-        frame_bytes = sum(len(frame) for frame in frames)
-        header: RealtimeFrameBatchHeader = {
-            "type": "frame_batch_header",
-            "request_id": request_id,
-            "chunk_index": chunk_index,
-            "content_type": content_type,
-            "num_frames": len(frames),
-            "total_size": frame_bytes,
-        }
-        header.update(metadata)
-
-        stage_start = time.perf_counter()
-        header_payload = packb(header, use_bin_type=True)
-        header_pack_ms += (time.perf_counter() - stage_start) * 1000.0
-
-        stage_start = time.perf_counter()
-        await ws.send_bytes(header_payload)
-        header_send_ms += (time.perf_counter() - stage_start) * 1000.0
-
-        stage_start = time.perf_counter()
-        raw_payload = b"".join(frames)
-        raw_join_ms += (time.perf_counter() - stage_start) * 1000.0
-
-        stage_start = time.perf_counter()
-        await ws.send_bytes(raw_payload)
-        raw_send_ms += (time.perf_counter() - stage_start) * 1000.0
-
-        raw_bytes += frame_bytes
-        ws_payload_bytes += len(header_payload) + len(raw_payload)
-        num_frames += len(frames)
-        num_batches += 1
-        chunk_index += 1
-
-    return {
-        "msgpack_pack_ms": header_pack_ms,
-        "header_send_ms": header_send_ms,
-        "raw_join_ms": raw_join_ms,
-        "raw_send_ms": raw_send_ms,
-        "ws_send_ms": header_send_ms + raw_send_ms,
-        "raw_bytes": raw_bytes,
-        "ws_payload_bytes": ws_payload_bytes,
-        "num_frames": num_frames,
-        "num_batches": num_batches,
-    }
 
 
 async def _generate_loop(ws: WebSocket, session: GenerateSession):
@@ -171,21 +51,16 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 server_args=server_args,
                 sampling_params=sampling_params,
             )
-            batch.session = session.realtime_session
-            batch.extra[REALTIME_SESSION_ID_EXTRA_KEY] = session.id
-            batch.extra[RETURN_ENCODED_FRAMES_EXTRA_KEY] = True
-            batch.block_idx = session.generate_chunk_cnt
-            chunk_size = batch.extra.get("chunk_size", 1)
-            control_chunk = session.sample_control_chunk(chunk_size)
-            if control_chunk is not None:
+            if session.adapter is None:
+                raise ValueError("realtime adapter is not initialized")
+            batch = session.adapter.prepare_request(session, batch)
+            if "actions" in batch.extra:
                 logger.debug(
-                    "consume realtime control, session_id=%s, block_idx=%s, chunk_size=%s, num_control_frames=%s",
+                    "consume realtime actions, session_id=%s, block_idx=%s, num_action_frames=%s",
                     session.id,
                     batch.block_idx,
-                    chunk_size,
-                    len(control_chunk),
+                    len(batch.extra["actions"]),
                 )
-                batch.extra["actions"] = control_chunk
             timings["prepare_ms"] = (time.perf_counter() - stage_start) * 1000.0
             stage_start = time.perf_counter()
             _, result = await process_generation_batch(async_scheduler_client, batch)
@@ -193,31 +68,13 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 time.perf_counter() - stage_start
             ) * 1000.0
 
-            send_stats: RealtimeFrameSendStats = {
-                "msgpack_pack_ms": 0.0,
-                "header_send_ms": 0.0,
-                "raw_join_ms": 0.0,
-                "raw_send_ms": 0.0,
-                "ws_send_ms": 0.0,
-                "raw_bytes": 0,
-                "ws_payload_bytes": 0,
-                "num_frames": 0,
-                "num_batches": 0,
-            }
-            frame_metadata = {}
-            if result.encoded_frame_batches is not None:
-                frame_metadata = (
-                    result.encoded_frame_metadata or _raw_rgb_frame_metadata(batch)
-                    if result.encoded_frame_content_type == RAW_RGB_CONTENT_TYPE
-                    else {}
-                )
-                send_stats = await _send_frame_batches(
+            send_stats = empty_frame_send_stats(result.encoded_frame_content_type)
+            if session.adapter is not None:
+                send_stats = await session.adapter.send_output(
                     ws,
-                    result.encoded_frame_batches,
-                    content_type=result.encoded_frame_content_type,
-                    chunk_index_start=batch.block_idx,
-                    request_id=session.request_id,
-                    frame_metadata=frame_metadata,
+                    session,
+                    result,
+                    batch,
                 )
             timings["msgpack_pack_ms"] = float(send_stats["msgpack_pack_ms"])
             timings["header_send_ms"] = float(send_stats["header_send_ms"])
@@ -227,7 +84,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             timings["total_ms"] = (time.perf_counter() - start) * 1000.0
 
             # finish
-            session.generate_chunk_completed()
+            session.adapter.on_chunk_complete(session, result)
 
             logger.info(
                 "realtime video stage timing: session_id=%s request_id=%s "
@@ -249,18 +106,10 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                 timings["total_ms"],
                 send_stats["num_batches"],
                 send_stats["num_frames"],
-                (
-                    (
-                        int(frame_metadata["height"]),
-                        int(frame_metadata["width"]),
-                        int(frame_metadata["channels"]),
-                    )
-                    if frame_metadata
-                    else None
-                ),
+                send_stats["frame_shape"],
                 send_stats["raw_bytes"],
                 send_stats["ws_payload_bytes"],
-                result.encoded_frame_content_type,
+                send_stats["content_type"],
             )
 
         except asyncio.CancelledError:
@@ -298,22 +147,9 @@ async def _listen_actions(ws: WebSocket, session: GenerateSession):
             if not isinstance(data, dict):
                 raise ValueError("realtime action must be a map")
             realtime_action = RealtimeAction.model_validate(data)
-            if realtime_action.type == "control":
-                control_chunk = realtime_action.control_chunk
-                if control_chunk is not None:
-                    session.append_control_chunk(control_chunk)
-                    action_log = f"type=control, chunk_len={len(control_chunk)}"
-                else:
-                    raise ValueError("control action requires control_chunk")
-            elif realtime_action.type == "prompt":
-                if not realtime_action.action_content:
-                    raise ValueError("prompt action requires action_content")
-                session.append_prompt_action(realtime_action)
-                action_log = (
-                    f"type=prompt, content_len={len(realtime_action.action_content)}"
-                )
-            else:
-                raise ValueError(f"unsupported action type: {realtime_action.type}")
+            if session.adapter is None:
+                raise ValueError("realtime adapter is not initialized")
+            action_log = session.adapter.ingest_action(session, realtime_action)
             logger.debug(
                 "receive realtime action, session_id=%s, %s",
                 session.id,
@@ -334,25 +170,9 @@ async def _listen_generate_request(ws: WebSocket, session: GenerateSession):
                 raise ValueError("generate request must be a map")
 
             realtime_req = RealtimeVideoGenerationsRequest.model_validate(data)
-            # TODO(puf147): convert RGB for krea
-            # params.start_frame = Image.open(params.start_frame).convert("RGB")
-            if realtime_req.first_frame is not None:
-                server_args = get_global_server_args()
-                if server_args.input_save_path is not None:
-                    uploads_dir = server_args.input_save_path
-                    os.makedirs(uploads_dir, exist_ok=True)
-                else:
-                    if session.input_temp_dir is None:
-                        session.input_temp_dir = tempfile.mkdtemp(
-                            prefix="sglang_input_"
-                        )
-                    uploads_dir = session.input_temp_dir
-
-                target_path = os.path.join(uploads_dir, f"{session.id}_first_frame")
-                image_path = await save_image_to_path(
-                    realtime_req.first_frame, target_path
-                )
-                realtime_req.first_frame = image_path
+            adapter = get_realtime_model_adapter(get_global_server_args())
+            session.set_adapter(adapter)
+            await adapter.on_init(session, realtime_req)
 
             # Keep session state update atomic with validated request.
             session.set_request(realtime_req)
