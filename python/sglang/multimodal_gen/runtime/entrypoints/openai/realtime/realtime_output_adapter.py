@@ -38,11 +38,11 @@ class RealtimeFrameBatchHeader(TypedDict, total=False):
 
 
 class RealtimeFrameSendStats(TypedDict):
-    msgpack_pack_ms: float
-    header_send_ms: float
-    raw_join_ms: float
-    raw_send_ms: float
-    ws_send_ms: float
+    header_pack_ms: float
+    header_write_ms: float
+    raw_payload_build_ms: float
+    raw_write_ms: float
+    ws_write_ms: float
     raw_bytes: int
     ws_payload_bytes: int
     num_frames: int
@@ -53,11 +53,11 @@ class RealtimeFrameSendStats(TypedDict):
 
 def empty_frame_send_stats(content_type: str = "") -> RealtimeFrameSendStats:
     return {
-        "msgpack_pack_ms": 0.0,
-        "header_send_ms": 0.0,
-        "raw_join_ms": 0.0,
-        "raw_send_ms": 0.0,
-        "ws_send_ms": 0.0,
+        "header_pack_ms": 0.0,
+        "header_write_ms": 0.0,
+        "raw_payload_build_ms": 0.0,
+        "raw_write_ms": 0.0,
+        "ws_write_ms": 0.0,
         "raw_bytes": 0,
         "ws_payload_bytes": 0,
         "num_frames": 0,
@@ -156,19 +156,21 @@ class RawRGBRealtimeOutputAdapter:
 
             stage_start = time.perf_counter()
             header_payload = packb(header, use_bin_type=True)
-            stats["msgpack_pack_ms"] += (time.perf_counter() - stage_start) * 1000.0
+            stats["header_pack_ms"] += (time.perf_counter() - stage_start) * 1000.0
 
             stage_start = time.perf_counter()
             await ws.send_bytes(header_payload)
-            stats["header_send_ms"] += (time.perf_counter() - stage_start) * 1000.0
+            stats["header_write_ms"] += (time.perf_counter() - stage_start) * 1000.0
 
             stage_start = time.perf_counter()
             raw_payload = b"".join(frames)
-            stats["raw_join_ms"] += (time.perf_counter() - stage_start) * 1000.0
+            stats["raw_payload_build_ms"] += (
+                time.perf_counter() - stage_start
+            ) * 1000.0
 
             stage_start = time.perf_counter()
             await ws.send_bytes(raw_payload)
-            stats["raw_send_ms"] += (time.perf_counter() - stage_start) * 1000.0
+            stats["raw_write_ms"] += (time.perf_counter() - stage_start) * 1000.0
 
             stats["raw_bytes"] += frame_bytes
             stats["ws_payload_bytes"] += len(header_payload) + len(raw_payload)
@@ -176,5 +178,5 @@ class RawRGBRealtimeOutputAdapter:
             stats["num_batches"] += 1
             chunk_index += 1
 
-        stats["ws_send_ms"] = stats["header_send_ms"] + stats["raw_send_ms"]
+        stats["ws_write_ms"] = stats["header_write_ms"] + stats["raw_write_ms"]
         return stats

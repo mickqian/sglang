@@ -752,7 +752,6 @@ def batch_upscale_frames(
     frames: list[np.ndarray],
     model_path: Optional[str] = None,
     scale: int = 4,
-    half_precision: bool = False,
 ) -> list[np.ndarray]:
     """
     Batched Real-ESRGAN upscaling for realtime video paths.
@@ -764,6 +763,6 @@ def batch_upscale_frames(
     upscaler = ImageUpscaler(
         model_path=model_path,
         scale=scale,
-        half_precision=half_precision,
+        half_precision=current_platform.is_cuda(),
     )
     return upscaler.upscale_batched(frames)

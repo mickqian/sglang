@@ -64,7 +64,7 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             timings["prepare_ms"] = (time.perf_counter() - stage_start) * 1000.0
             stage_start = time.perf_counter()
             _, result = await process_generation_batch(async_scheduler_client, batch)
-            timings["process_generation_ms"] = (
+            timings["scheduler_forward_ms"] = (
                 time.perf_counter() - stage_start
             ) * 1000.0
 
@@ -76,33 +76,33 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
                     result,
                     batch,
                 )
-            timings["msgpack_pack_ms"] = float(send_stats["msgpack_pack_ms"])
-            timings["header_send_ms"] = float(send_stats["header_send_ms"])
-            timings["raw_join_ms"] = float(send_stats["raw_join_ms"])
-            timings["raw_send_ms"] = float(send_stats["raw_send_ms"])
-            timings["ws_send_ms"] = float(send_stats["ws_send_ms"])
+            timings["header_pack_ms"] = float(send_stats["header_pack_ms"])
+            timings["header_write_ms"] = float(send_stats["header_write_ms"])
+            timings["raw_payload_build_ms"] = float(send_stats["raw_payload_build_ms"])
+            timings["raw_write_ms"] = float(send_stats["raw_write_ms"])
+            timings["ws_write_ms"] = float(send_stats["ws_write_ms"])
             timings["total_ms"] = (time.perf_counter() - start) * 1000.0
 
             # finish
             session.adapter.on_chunk_complete(session, result)
 
             logger.info(
-                "realtime video stage timing: session_id=%s request_id=%s "
-                "chunk_idx=%s prepare=%.2fms process_generation=%.2fms "
-                "msgpack_pack=%.2fms "
-                "header_send=%.2fms raw_join=%.2fms raw_send=%.2fms "
-                "ws_send=%.2fms total=%.2fms batches=%d frames=%d "
+                "realtime chunk timing: session_id=%s request_id=%s "
+                "chunk_idx=%s request_prepare=%.2fms scheduler_forward=%.2fms "
+                "header_pack=%.2fms "
+                "header_write=%.2fms raw_payload_build=%.2fms raw_write=%.2fms "
+                "ws_write=%.2fms chunk_total=%.2fms batches=%d frames=%d "
                 "frame_shape=%s raw_bytes=%d ws_payload_bytes=%d content_type=%s",
                 session.id,
                 session.request_id,
                 batch.block_idx,
                 timings["prepare_ms"],
-                timings["process_generation_ms"],
-                timings["msgpack_pack_ms"],
-                timings["header_send_ms"],
-                timings["raw_join_ms"],
-                timings["raw_send_ms"],
-                timings["ws_send_ms"],
+                timings["scheduler_forward_ms"],
+                timings["header_pack_ms"],
+                timings["header_write_ms"],
+                timings["raw_payload_build_ms"],
+                timings["raw_write_ms"],
+                timings["ws_write_ms"],
                 timings["total_ms"],
                 send_stats["num_batches"],
                 send_stats["num_frames"],

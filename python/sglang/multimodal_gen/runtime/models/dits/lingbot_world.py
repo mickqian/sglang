@@ -48,8 +48,8 @@ from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     get_rotary_pos_embed,
 )
 from sglang.multimodal_gen.runtime.layers.usp import (
-    _usp_input_all_to_all_variable,
-    _usp_output_all_to_all_variable,
+    _usp_input_all_to_all_varlen,
+    _usp_output_all_to_all_varlen,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import (
     PatchEmbed,
@@ -100,7 +100,7 @@ def _sequence_shard_tensor(
     return x[:, start:end, ...].contiguous()
 
 
-def _sequence_all_gather_variable(
+def _sequence_all_gather_varlen(
     x: torch.Tensor,
     seq_splits: list[int],
     group: dist.ProcessGroup,
@@ -234,7 +234,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
             seq_splits = list(seq_splits)
             # Pack Q/K/V to avoid launching three Ulysses all-to-all collectives.
             qkv = torch.cat([roped_query, roped_key, v], dim=-1)
-            qkv = _usp_input_all_to_all_variable(qkv, seq_splits, head_dim=2)
+            qkv = _usp_input_all_to_all_varlen(qkv, seq_splits, head_dim=2)
             roped_query, roped_key, v = qkv.chunk(3, dim=-1)
 
         frame_seqlen = frame_seq_length or roped_query.shape[1]
@@ -327,7 +327,7 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
         )
         if sequence_shard_enabled:
             assert seq_splits is not None
-            x = _usp_output_all_to_all_variable(x, seq_splits, head_dim=2)
+            x = _usp_output_all_to_all_varlen(x, seq_splits, head_dim=2)
         kv_cache["global_end_index_int"] = visible_global_end
         kv_cache["local_end_index_int"] = visible_local_end
         kv_cache["global_end_index"].fill_(visible_global_end)
@@ -1325,7 +1325,7 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             )
 
         if sequence_shard_enabled:
-            hidden_states = _sequence_all_gather_variable(
+            hidden_states = _sequence_all_gather_varlen(
                 hidden_states.contiguous(),
                 list(forward_batch.sequence_shard_splits),
                 get_sp_group().device_group,

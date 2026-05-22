@@ -30,8 +30,8 @@ def build_raw_rgb_frame_batches(
     post_process_sample_fn: Callable[..., Any],
 ) -> tuple[list[list[bytes]], dict[str, Any]]:
     start = time.monotonic()
-    postprocess_ms = 0.0
-    pack_bytes_ms = 0.0
+    sample_to_frames_ms = 0.0
+    frames_to_bytes_ms = 0.0
     raw_bytes = 0
     num_frames = 0
     frame_shape = None
@@ -69,7 +69,7 @@ def build_raw_rgb_frame_batches(
                 model_path=req.upscaling_model_path,
                 scale=req.upscaling_scale,
             )
-        postprocess_ms += (time.monotonic() - stage_start) * 1000.0
+        sample_to_frames_ms += (time.monotonic() - stage_start) * 1000.0
 
         stage_start = time.monotonic()
         raw_frames = []
@@ -86,19 +86,19 @@ def build_raw_rgb_frame_batches(
             raw_bytes += len(frame_bytes)
             num_frames += 1
             raw_frames.append(frame_bytes)
-        pack_bytes_ms += (time.monotonic() - stage_start) * 1000.0
+        frames_to_bytes_ms += (time.monotonic() - stage_start) * 1000.0
         frame_batches.append(raw_frames)
 
     total_ms = (time.monotonic() - start) * 1000.0
     logger.info(
-        "realtime raw RGB frame batches prepared: request_id=%s "
-        "block_idx=%s postprocess=%.2fms pack_bytes=%.2fms "
+        "realtime raw RGB frame batch timing: request_id=%s "
+        "chunk_idx=%s sample_to_frames=%.2fms frames_to_bytes=%.2fms "
         "total=%.2fms batches=%d frames=%d frame_shape=%s "
         "raw_bytes=%d content_type=%s",
         req.request_id,
         req.block_idx,
-        postprocess_ms,
-        pack_bytes_ms,
+        sample_to_frames_ms,
+        frames_to_bytes_ms,
         total_ms,
         len(frame_batches),
         num_frames,

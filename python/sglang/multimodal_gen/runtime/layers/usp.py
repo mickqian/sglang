@@ -47,7 +47,7 @@ def _usp_all_to_all_single(x: torch.Tensor) -> torch.Tensor:
     return output.reshape(x_shape)
 
 
-def _usp_all_to_all_single_with_sizes(
+def _usp_all_to_all_single_varlen(
     x: torch.Tensor,
     output_split_sizes: list[int],
     input_split_sizes: list[int],
@@ -122,7 +122,7 @@ def _usp_input_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     return x
 
 
-def _usp_input_all_to_all_variable(
+def _usp_input_all_to_all_varlen(
     x: torch.Tensor, seq_lens: list[int], head_dim: int = 1
 ) -> torch.Tensor:
     """
@@ -179,7 +179,7 @@ def _usp_input_all_to_all_variable(
     x = x.reshape(world_size, h_local, b, s_local, d)
     input_split_sizes = [h_local * b * s_local * d] * world_size
     output_split_sizes = [h_local * b * seq_len * d for seq_len in seq_lens]
-    x = _usp_all_to_all_single_with_sizes(x, output_split_sizes, input_split_sizes)
+    x = _usp_all_to_all_single_varlen(x, output_split_sizes, input_split_sizes)
 
     chunks = []
     offset = 0
@@ -255,7 +255,7 @@ def _usp_output_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     return x
 
 
-def _usp_output_all_to_all_variable(
+def _usp_output_all_to_all_varlen(
     x: torch.Tensor, seq_lens: list[int], head_dim: int = 1
 ) -> torch.Tensor:
     """
@@ -315,7 +315,7 @@ def _usp_output_all_to_all_variable(
     x = torch.cat(input_chunks, dim=0)
     input_split_sizes = [h_local * b * seq_len * d for seq_len in seq_lens]
     output_split_sizes = [h_local * b * s_local * d] * world_size
-    x = _usp_all_to_all_single_with_sizes(x, output_split_sizes, input_split_sizes)
+    x = _usp_all_to_all_single_varlen(x, output_split_sizes, input_split_sizes)
 
     chunks = []
     offset = 0
