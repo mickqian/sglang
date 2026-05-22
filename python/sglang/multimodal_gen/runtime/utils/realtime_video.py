@@ -55,10 +55,20 @@ def build_raw_rgb_frame_batches(
             frame_interpolation_exp=req.frame_interpolation_exp,
             frame_interpolation_scale=req.frame_interpolation_scale,
             frame_interpolation_model_path=req.frame_interpolation_model_path,
-            enable_upscaling=req.enable_upscaling,
+            enable_upscaling=False,
             upscaling_model_path=req.upscaling_model_path,
             upscaling_scale=req.upscaling_scale,
         )
+        if req.enable_upscaling and frames:
+            from sglang.multimodal_gen.runtime.postprocess import (
+                batch_upscale_frames,
+            )
+
+            frames = batch_upscale_frames(
+                frames,
+                model_path=req.upscaling_model_path,
+                scale=req.upscaling_scale,
+            )
         postprocess_ms += (time.monotonic() - stage_start) * 1000.0
 
         stage_start = time.monotonic()

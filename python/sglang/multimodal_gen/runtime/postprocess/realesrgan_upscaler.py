@@ -195,19 +195,6 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
     """Detect architecture from checkpoint keys and return an unloaded network."""
     if "conv_first.weight" in state_dict:
         # RRDBNet (e.g., RealESRGAN_x4plus)
-        conv_first_weight = state_dict["conv_first.weight"]
-        in_ch = conv_first_weight.shape[1]
-        if in_ch == 3:
-            scale = 4
-        elif in_ch == 12:
-            scale = 2
-        elif in_ch == 48:
-            scale = 1
-        else:
-            raise ValueError(
-                "Unsupported RRDBNet checkpoint: conv_first.weight input channels "
-                f"{in_ch} do not match expected scale 1/2/4 layouts."
-            )
         num_feat = state_dict["conv_first.weight"].shape[0]
         num_block = sum(
             1
@@ -216,8 +203,7 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
         )
         num_grow_ch = state_dict["body.0.rdb1.conv1.weight"].shape[0]
         logger.info(
-            "Detected RRDBNet: scale=%d, num_feat=%d, num_block=%d, num_grow_ch=%d",
-            scale,
+            "Detected RRDBNet: num_feat=%d, num_block=%d, num_grow_ch=%d",
             num_feat,
             num_block,
             num_grow_ch,
@@ -225,7 +211,7 @@ def _build_net_from_state_dict(state_dict: dict) -> nn.Module:
         return RRDBNet(
             num_in_ch=3,
             num_out_ch=3,
-            scale=scale,
+            scale=4,
             num_feat=num_feat,
             num_block=num_block,
             num_grow_ch=num_grow_ch,
@@ -285,10 +271,6 @@ class UpscalerModel:
     def dtype(self) -> torch.dtype:
         return next(self.net.parameters()).dtype
 
-    def _prepare_input(self, frames: np.ndarray) -> torch.Tensor:
-        imgs_t = self._copy_input_to_device(frames)
-        return self._preprocess_input_tensor(imgs_t)
-
     def _copy_input_to_device(self, frames: np.ndarray) -> torch.Tensor:
         return torch.from_numpy(frames).to(self.device)
 
@@ -297,10 +279,6 @@ class UpscalerModel:
         if self.device.type == "cuda":
             imgs_t = imgs_t.contiguous(memory_format=torch.channels_last)
         return imgs_t
-
-    def _tensor_to_uint8_frames(self, out: torch.Tensor) -> np.ndarray:
-        out = self._postprocess_output_tensor(out)
-        return self._copy_output_to_host(out)
 
     @staticmethod
     def _postprocess_output_tensor(out: torch.Tensor) -> torch.Tensor:
@@ -393,8 +371,14 @@ class UpscalerModel:
                       ``None`` means use the model's native scale as-is.
         """
         h, w = frame.shape[:2]
-        img_t = self._prepare_input(frame[None, ...])
-        with torch.inference_mode():
+        img = frame.astype(np.float32) / 255.0
+        img_t = (
+            torch.from_numpy(img)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .to(device=self.device, dtype=self.dtype)
+        )
+        with torch.no_grad():
             if self._should_use_tiled_upscale(h, w):
                 logger.info(
                     "Using tiled Real-ESRGAN upscale for low GPU memory: "
@@ -426,7 +410,8 @@ class UpscalerModel:
                 out, size=(target_h, target_w), mode="bicubic", align_corners=False
             )
 
-        return self._tensor_to_uint8_frames(out)[0]
+        out_np = out.squeeze(0).permute(1, 2, 0).clamp(0.0, 1.0).cpu().numpy()
+        return (out_np * 255.0).astype(np.uint8)
 
     def upscale_batch(
         self, frames: list[np.ndarray], outscale: float | None = None
@@ -601,8 +586,6 @@ class ImageUpscaler:
         if self._half_precision:
             net = net.half()
         net = net.to(device)
-        if device.type == "cuda":
-            net = net.to(memory_format=torch.channels_last)
 
         # Detect the model's native scale from network architecture
         native_scale = 4  # sensible default
@@ -630,10 +613,18 @@ class ImageUpscaler:
         """
         if not frames:
             return frames
+        model = self._ensure_model_loaded()
+        outscale = self._scale if self._scale != model.scale else None
+        return [model.upscale(frame, outscale=outscale) for frame in frames]
+
+    def upscale_batched(self, frames: list[np.ndarray]) -> list[np.ndarray]:
+        """Upscale HWC uint8 frames with batched forwards grouped by resolution."""
+        if not frames:
+            return frames
         total_start_time = time.perf_counter()
         model = self._ensure_model_loaded()
         outscale = self._scale if self._scale != model.scale else None
-        output_frames: list[np.ndarray] = [None] * len(frames)
+        output_frames: list[np.ndarray | None] = [None] * len(frames)
         groups: dict[tuple[int, ...], list[int]] = {}
         for idx, frame in enumerate(frames):
             groups.setdefault(tuple(frame.shape), []).append(idx)
@@ -650,14 +641,17 @@ class ImageUpscaler:
             for idx, output in zip(indices, group_outputs):
                 output_frames[idx] = output
 
+        if any(frame is None for frame in output_frames):
+            raise RuntimeError("RealESRGAN batch upscale did not produce all frames")
+
         total_duration_s = time.perf_counter() - total_start_time
         logger.info(
-            "RealESRGAN upscale_frames completed in %.3f seconds for %d frames across %d groups",
+            "RealESRGAN batch_upscale_frames completed in %.3f seconds for %d frames across %d groups",
             total_duration_s,
             len(frames),
             len(groups),
         )
-        return output_frames
+        return [frame for frame in output_frames if frame is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -753,3 +747,24 @@ def upscale_frames(
         half_precision=half_precision,
     )
     return upscaler.upscale(frames)
+
+
+def batch_upscale_frames(
+    frames: list[np.ndarray],
+    model_path: Optional[str] = None,
+    scale: int = 4,
+    half_precision: bool = False,
+) -> list[np.ndarray]:
+    """
+    Batched Real-ESRGAN upscaling for realtime video paths.
+
+    The default ``upscale_frames`` API intentionally keeps its original
+    per-frame behavior. Call this helper only when the caller can tolerate
+    batched execution and same-shape grouping semantics.
+    """
+    upscaler = ImageUpscaler(
+        model_path=model_path,
+        scale=scale,
+        half_precision=half_precision,
+    )
+    return upscaler.upscale_batched(frames)
