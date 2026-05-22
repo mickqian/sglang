@@ -383,8 +383,8 @@ class GPUWorker:
 
             # Realtime raw-frame responses avoid serializing generated tensors between
             # scheduler_client and gpu_worker.
-            if should_direct_return_frames:
-                if self.rank == 0 and output_batch.output is not None:
+            if should_direct_return_frames and self.rank == 0:
+                if output_batch.output is not None:
                     output_batch.encoded_frame_content_type = RAW_RGB_CONTENT_TYPE
                     (
                         output_batch.encoded_frame_batches,
@@ -395,12 +395,9 @@ class GPUWorker:
                         output_batch,
                         post_process_sample,
                     )
-                output_batch.output = None
+                    output_batch.output = None
                 output_batch.audio = None
                 output_batch.audio_sample_rate = None
-
-                if torch.cuda.is_initialized():
-                    torch.cuda.empty_cache()
 
             # file-path-only responses avoid serializing generated tensors between
             # scheduler_client and gpu_worker.
@@ -548,10 +545,15 @@ class GPUWorker:
             dynamic_output_paths = None
 
         if dynamic_output_paths is not None:
-            build_output_path = lambda idx: dynamic_output_paths[idx]
+
+            def build_output_path(idx: int) -> str:
+                return dynamic_output_paths[idx]
+
         else:
             num_outputs = len(output_batch.output)
-            build_output_path = lambda idx: req.output_file_path(num_outputs, idx)
+
+            def build_output_path(idx: int) -> str:
+                return req.output_file_path(num_outputs, idx)
 
         output_batch.output_file_paths = save_outputs(
             output_batch.output,
