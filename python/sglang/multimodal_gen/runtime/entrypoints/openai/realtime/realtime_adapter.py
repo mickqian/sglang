@@ -112,8 +112,8 @@ class LingBotWorldRealtimeState:
         self.last_control_actions = []
         self.has_control_state = False
 
-    def append_prompt_action(self, action: RealtimeAction) -> None:
-        self.prompt_queue.append(action)
+    def append_prompt(self, prompt: str) -> None:
+        self.prompt_queue.append(prompt)
 
     def _append_control_frame(self, actions: list[str]) -> None:
         normalized = list(actions)
@@ -129,7 +129,7 @@ class LingBotWorldRealtimeState:
         for actions in control_chunk:
             self._append_control_frame(actions)
 
-    def sample_prompt_action(self) -> RealtimeAction:
+    def sample_prompt(self) -> str:
         return self.prompt_queue.popleft()
 
     def sample_control_chunk(self, chunk_size: int) -> list[list[str]] | None:
@@ -200,10 +200,10 @@ class LingBotWorldRealtimeAdapter:
             state.append_control_chunk(control_chunk)
             return f"type=control, chunk_len={len(control_chunk)}"
         if action.type == "prompt":
-            if not action.action_content:
-                raise ValueError("prompt action requires action_content")
-            state.append_prompt_action(action)
-            return f"type=prompt, content_len={len(action.action_content)}"
+            if not action.prompt:
+                raise ValueError("prompt action requires prompt")
+            state.append_prompt(action.prompt)
+            return f"type=prompt, prompt_len={len(action.prompt)}"
         raise ValueError(f"unsupported action type: {action.type}")
 
     def build_sampling_params(self, session: GenerateSession):
@@ -215,8 +215,7 @@ class LingBotWorldRealtimeAdapter:
         if session.generate_chunk_cnt == 0:
             prompt = request.prompt
         elif len(state.prompt_queue) > 0:
-            realtime_action = state.sample_prompt_action()
-            prompt = realtime_action.action_content
+            prompt = state.sample_prompt()
             request.prompt = prompt
         else:
             prompt = request.prompt

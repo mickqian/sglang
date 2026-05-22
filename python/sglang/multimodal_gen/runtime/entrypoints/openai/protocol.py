@@ -146,7 +146,7 @@ class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
 
 class RealtimeAction(BaseModel):
     type: Literal["prompt", "control"]
-    action_content: Optional[str] = None
+    prompt: Optional[str] = None
     control_chunk: Optional[List[List[str]]] = None
 
 
