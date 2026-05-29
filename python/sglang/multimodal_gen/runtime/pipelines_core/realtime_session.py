@@ -8,40 +8,24 @@ from typing import Any
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-REALTIME_SESSION_ID_EXTRA_KEY = "realtime_session_id"
-RETURN_ENCODED_FRAMES_EXTRA_KEY = "return_encoded_frames"
 
 
 class BaseRealtimeState:
-    def __init__(self):
-        self.kv_cache: Any = None
-        self.crossattn_cache: Any = None
+    """per-session state owned by pipeline stages"""
 
-    def dispose(self):
-        self.kv_cache = None
-        self.crossattn_cache = None
+    def dispose(self) -> None:
+        pass
 
 
 class RealtimeSession:
-    def __init__(self):
-        # Store independent per-session state objects by type.
+    """reusable state container across realtime request chunks"""
+
+    def __init__(self) -> None:
         self._states: dict[type[BaseRealtimeState], BaseRealtimeState] = {}
 
     @staticmethod
     def resolve_session_id(req: Any) -> str | None:
-        has_explicit_session_id = (
-            isinstance(req.extra, dict) and REALTIME_SESSION_ID_EXTRA_KEY in req.extra
-        )
-        if not has_explicit_session_id and req.session is None:
-            return None
-
-        session_id = None
-        if has_explicit_session_id:
-            session_id = req.extra.get(REALTIME_SESSION_ID_EXTRA_KEY)
-        elif isinstance(req.request_id, str) and "_" in req.request_id:
-            # Backward compatibility for callers that did not set realtime_session_id.
-            session_id = req.request_id.split("_", 1)[0]
-
+        session_id = req.realtime_session_id
         if isinstance(session_id, str) and session_id:
             return session_id
         return None
@@ -58,14 +42,16 @@ class RealtimeSession:
     def get_state(self, state_cls: type[BaseRealtimeState]) -> BaseRealtimeState | None:
         return self._states.get(state_cls)
 
-    def dispose(self):
+    def dispose(self) -> None:
         for state in self._states.values():
             state.dispose()
         self._states.clear()
 
 
 class RealtimeSessionCache:
-    def __init__(self, max_sessions: int = 64):
+    """lru cache that binds incoming chunks to persistent realtime sessions"""
+
+    def __init__(self, max_sessions: int = 64) -> None:
         self.max_sessions = max_sessions
         self._sessions: OrderedDict[str, RealtimeSession] = OrderedDict()
 
@@ -99,16 +85,20 @@ class RealtimeSessionCache:
         if session_id is None:
             return
 
-        if req.block_idx == 0 or session_id not in self._sessions:
+        if session_id not in self._sessions:
             if req.block_idx > 0:
-                logger.warning(
-                    "Missing realtime session state for session_id=%s (block_idx=%s). "
-                    "Resetting block_idx to 0.",
-                    session_id,
-                    req.block_idx,
+                raise ValueError(
+                    "Missing realtime session state for "
+                    f"session_id={session_id} block_idx={req.block_idx}."
                 )
-                req.block_idx = 0
             self._sessions[session_id] = req.session or RealtimeSession()
+        elif req.block_idx == 0:
+            old_session = self._sessions[session_id]
+            new_session = req.session or RealtimeSession()
+            if old_session is not new_session:
+                self._dispose_session(session_id, old_session)
+            self._sessions[session_id] = new_session
+            logger.info("Realtime session reset: session_id=%s", session_id)
 
         req.session = self._sessions[session_id]
         self._sessions.move_to_end(session_id)

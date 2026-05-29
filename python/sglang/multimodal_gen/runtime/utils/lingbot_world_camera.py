@@ -11,7 +11,6 @@ import numpy as np
 import torch
 
 from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
-    REALTIME_SESSION_ID_EXTRA_KEY,
     BaseRealtimeState,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -235,19 +234,19 @@ class LingBotWorldRealtimeState(BaseRealtimeState):
         self.action_history: list[list[str]] = []
         self.last_actions: list[str] = []
 
-    def reset_controls(self):
+    def reset_camera_actions(self):
         self.action_history.clear()
         self.last_actions = []
 
-    def append_control_chunk(self, control_chunk: list[list[str]]) -> None:
-        for actions in control_chunk:
+    def append_camera_actions(self, camera_actions: list[list[str]]) -> None:
+        for actions in camera_actions:
             normalized = list(actions)
             self.action_history.append(normalized)
             self.last_actions = normalized
 
     def dispose(self):
         super().dispose()
-        self.reset_controls()
+        self.reset_camera_actions()
 
 
 def _validate_actions(actions: Any) -> list[list[str]]:
@@ -261,6 +260,17 @@ def _validate_actions(actions: Any) -> list[list[str]]:
     return result
 
 
+def _pad_actions_to_chunk(
+    action_history: list[list[str]], chunk_size: int
+) -> list[list[str]]:
+    if len(action_history) >= chunk_size:
+        return action_history
+    fill_item = action_history[-1] if action_history else []
+    return action_history + [
+        list(fill_item) for _ in range(chunk_size - len(action_history))
+    ]
+
+
 def _build_camera_condition(
     *,
     action_history: list[list[str]],
@@ -271,6 +281,7 @@ def _build_camera_condition(
     dtype: torch.dtype,
     tail_chunk_size: int,
 ) -> torch.Tensor:
+    action_history = _pad_actions_to_chunk(action_history, tail_chunk_size)
     c2ws_prefix, Ks = get_camera_control(
         action_history,
         chunk_size=tail_chunk_size,
@@ -303,30 +314,28 @@ def prepare_lingbot_world_condition(
     if batch.c2ws_plucker_emb is not None:
         return batch.c2ws_plucker_emb.to(device=device, dtype=dtype)
 
-    actions = batch.extra.get("actions")
+    actions = batch.condition_inputs.get("camera_actions")
     if actions is None:
         return None
 
-    if batch.session is None:
-        raise ValueError(
-            "LingBot World actions are only supported in realtime sessions"
-        )
-
     spatial_scale = pipeline_config.vae_config.arch_config.spatial_compression_ratio
-    chunk_size = batch.extra.get(
-        "chunk_size",
-        max(1, int(pipeline_config.dit_config.arch_config.num_frames_per_block)),
+    chunk_size = batch.realtime_chunk_size or max(
+        1,
+        int(pipeline_config.dit_config.arch_config.num_frames_per_block),
     )
 
     normalized_actions = _validate_actions(actions)
     if len(normalized_actions) == 0:
         return None
 
-    state = batch.session.get_or_create_state(LingBotWorldRealtimeState)
-    if batch.block_idx == 0:
-        state.reset_controls()
-    state.append_control_chunk(normalized_actions)
-    action_history = state.action_history
+    if batch.session is None:
+        action_history = normalized_actions
+    else:
+        state = batch.session.get_or_create_state(LingBotWorldRealtimeState)
+        if batch.block_idx == 0:
+            state.reset_camera_actions()
+        state.append_camera_actions(normalized_actions)
+        action_history = state.action_history
 
     if len(action_history) == 0:
         return None
@@ -342,7 +351,7 @@ def prepare_lingbot_world_condition(
     )
     logger.debug(
         "LingBot action condition prepared: session_id=%s, block_idx=%s, new_action_count=%s, total_history=%s",
-        batch.extra.get(REALTIME_SESSION_ID_EXTRA_KEY),
+        batch.realtime_session_id,
         batch.block_idx,
         len(normalized_actions),
         len(action_history),

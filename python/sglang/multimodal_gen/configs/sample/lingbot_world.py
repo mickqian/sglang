@@ -3,7 +3,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Any
 
 from sglang.multimodal_gen.configs.sample.wan import Wan2_2_I2V_A14B_SamplingParam
 
@@ -34,11 +33,7 @@ class LingBotWorldSamplingParams(Wan2_2_I2V_A14B_SamplingParam):
                     server_args.pipeline_config.dit_config.arch_config.num_frames_per_block
                 ),
             )
-
-    def build_request_extra(self) -> dict[str, Any]:
-        extra = super().build_request_extra()
         if self.actions is not None:
-            extra["actions"] = self.actions
+            self.condition_inputs["camera_actions"] = self.actions
         if self.chunk_size is not None:
-            extra["chunk_size"] = self.chunk_size
-        return extra
+            self.realtime_chunk_size = self.chunk_size

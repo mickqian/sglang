@@ -5,8 +5,8 @@
 LingBot-World realtime text stages.
 
 The reference lingbot_fast_server initializes prompt embeddings once per session.
-Cache text encoder outputs across realtime chunks so control sampling stays closer
-to the actual denoising step.
+Cache text encoder outputs across realtime chunks so condition sampling stays
+closer to the actual denoising step.
 """
 
 from __future__ import annotations

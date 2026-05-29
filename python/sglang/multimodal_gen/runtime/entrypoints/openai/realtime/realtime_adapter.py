@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import WebSocket
 
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
-    RealtimeAction,
+    RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
@@ -36,10 +36,10 @@ class RealtimeModelAdapter(Protocol):
         request: RealtimeVideoGenerationsRequest,
     ) -> None: ...
 
-    def ingest_action(
+    def ingest_event(
         self,
         session: GenerateSession,
-        action: RealtimeAction,
+        event: RealtimeEvent,
     ) -> str: ...
 
     def build_sampling_params(self, session: GenerateSession): ...
