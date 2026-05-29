@@ -1,13 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from: https://github.com/Robbyant/lingbot-world
-
-"""
-LingBot-World realtime input validation.
-
-The generic input validation stage has to support all diffusion pipelines.  The
-LingBot realtime path repeatedly sends chunks for the same session, so the
-conditioning image and resolved dimensions can be reused after the first chunk.
-"""
 
 from __future__ import annotations
 
@@ -21,7 +12,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.input_validation import
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
-class LingBotWorldInputValidationState(BaseRealtimeState):
+class RealtimeInputValidationState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
         self.image_path = None
@@ -49,8 +40,8 @@ class LingBotWorldInputValidationState(BaseRealtimeState):
         self.num_outputs_per_prompt = None
 
 
-class LingBotWorldInputValidationStage(InputValidationStage):
-    """Reuse LingBot realtime conditioning image validation across chunks."""
+class RealtimeInputValidationStage(InputValidationStage):
+    """Reuse validated image and generator inputs across chunks in a realtime session."""
 
     def preprocess_condition_image(
         self,
@@ -59,20 +50,19 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         condition_image_width,
         condition_image_height,
     ):
-        del server_args, condition_image_width, condition_image_height
-
-        if batch.condition_image is None:
+        if server_args.pipeline_config.preprocess_realtime_condition_image(
+            batch,
+            self.vae_image_processor,
+        ):
             return
-        if isinstance(batch.condition_image, list):
-            batch.condition_image = batch.condition_image[0]
+        return super().preprocess_condition_image(
+            batch,
+            server_args,
+            condition_image_width,
+            condition_image_height,
+        )
 
-        width = int(batch.width or 832)
-        height = int(batch.height or 480)
-        batch.condition_image = batch.condition_image.resize((width, height))
-        batch.width = width
-        batch.height = height
-
-    def _cache_batch(self, batch: Req, state: LingBotWorldInputValidationState) -> None:
+    def _cache_batch(self, batch: Req, state: RealtimeInputValidationState) -> None:
         state.image_path = batch.image_path
         state.condition_image = batch.condition_image
         state.original_condition_image_size = batch.original_condition_image_size
@@ -80,7 +70,7 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         state.width = batch.width
 
     def _can_reuse_cached_image(
-        self, batch: Req, state: LingBotWorldInputValidationState
+        self, batch: Req, state: RealtimeInputValidationState
     ) -> bool:
         if batch.block_idx == 0 or state.condition_image is None:
             return False
@@ -91,7 +81,7 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         )
 
     def _cache_generator(
-        self, batch: Req, state: LingBotWorldInputValidationState
+        self, batch: Req, state: RealtimeInputValidationState
     ) -> None:
         state.generator = batch.generator
         state.seeds = batch.seeds
@@ -100,7 +90,7 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         state.num_outputs_per_prompt = batch.num_outputs_per_prompt
 
     def _can_reuse_generator(
-        self, batch: Req, state: LingBotWorldInputValidationState
+        self, batch: Req, state: RealtimeInputValidationState
     ) -> bool:
         if batch.block_idx == 0 or state.generator is None:
             return False
@@ -111,7 +101,7 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         )
 
     def _reuse_or_cache_generator(
-        self, batch: Req, state: LingBotWorldInputValidationState
+        self, batch: Req, state: RealtimeInputValidationState
     ) -> None:
         if self._can_reuse_generator(batch, state):
             batch.generator = state.generator
@@ -128,7 +118,7 @@ class LingBotWorldInputValidationStage(InputValidationStage):
         if batch.session is None:
             return super().forward(batch, server_args)
 
-        state = batch.session.get_or_create_state(LingBotWorldInputValidationState)
+        state = batch.session.get_or_create_state(RealtimeInputValidationState)
         if self._can_reuse_cached_image(batch, state):
             original_image_path = batch.image_path
             batch.image_path = None

@@ -144,10 +144,10 @@ class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
     profile_all_stages: Optional[bool] = False
 
 
-class RealtimeAction(BaseModel):
-    type: Literal["prompt", "control"]
-    prompt: Optional[str] = None
-    control_chunk: Optional[List[List[str]]] = None
+class RealtimeEvent(BaseModel):
+    type: Literal["event"]
+    kind: str
+    payload: Any = None
 
 
 # Mesh API protocol models

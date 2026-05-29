@@ -44,6 +44,34 @@ class LingBotWorldI2VConfig(Wan2_2_I2V_A14B_Config):
             )
         return kwargs
 
+    def preprocess_realtime_condition_image(self, batch, _vae_image_processor) -> bool:
+        if batch.condition_image is None:
+            return False
+        if isinstance(batch.condition_image, list):
+            batch.condition_image = batch.condition_image[0]
+
+        width = int(batch.width or 832)
+        height = int(batch.height or 480)
+        batch.condition_image = batch.condition_image.resize((width, height))
+        batch.width = width
+        batch.height = height
+        return True
+
+    def prepare_world_condition(self, batch, device, dtype):
+        from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import (
+            prepare_lingbot_world_condition,
+        )
+
+        c2ws_plucker_emb = prepare_lingbot_world_condition(
+            batch=batch,
+            pipeline_config=self,
+            device=device,
+            dtype=dtype,
+        )
+        if c2ws_plucker_emb is None:
+            return None
+        return {"c2ws_plucker_emb": c2ws_plucker_emb}
+
 
 @dataclass
 class LingBotWorldCausalDMDConfig(LingBotWorldI2VConfig):

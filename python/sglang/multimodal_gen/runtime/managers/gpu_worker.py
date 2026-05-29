@@ -52,7 +52,6 @@ from sglang.multimodal_gen.runtime.pipelines_core import (
     build_pipeline,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
-    RETURN_ENCODED_FRAMES_EXTRA_KEY,
     RealtimeSessionCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
@@ -380,13 +379,9 @@ class GPUWorker:
             for metrics in output_metrics:
                 metrics.total_duration_ms = duration_ms
 
-            should_direct_return_frames = bool(
-                req.extra.get(RETURN_ENCODED_FRAMES_EXTRA_KEY)
-            )
-
             # Realtime raw-frame responses avoid serializing generated tensors between
             # scheduler_client and gpu_worker.
-            if should_direct_return_frames and self.rank == 0:
+            if req.return_encoded_frames and self.rank == 0:
                 if output_batch.output is not None:
                     output_batch.encoded_frame_content_type = RAW_RGB_CONTENT_TYPE
                     (
@@ -419,7 +414,7 @@ class GPUWorker:
             if (
                 torch.cuda.is_initialized()
                 and output_batch.output is None
-                and not should_direct_return_frames
+                and not req.return_encoded_frames
             ):
                 torch.cuda.empty_cache()
 

@@ -20,12 +20,12 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.utils import pred_noise_to_pred_video
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
-    BaseRealtimeState,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import (
     CausalDMDDenoisingStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_dit import (
+    RealtimeCausalDiTState,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
@@ -43,15 +43,6 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
-class LingBotWorldCausalDMDRealtimeState(BaseRealtimeState):
-    """Persists KV cache and frame position across chunks in a realtime session."""
-
-    def __init__(self):
-        super().__init__()
-        self.current_chunk_start_frame: int = 0
-        self.chunk_idx: int = 0
-
-
 class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     """Causal DMD denoising with I2V condition concatenation for LingBot-World.
 
@@ -63,13 +54,11 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     def _get_cache_state(
         self,
         batch: Req,
-    ) -> tuple[LingBotWorldCausalDMDRealtimeState, bool]:
+    ) -> tuple[RealtimeCausalDiTState, bool]:
         if batch.session is not None:
-            state = batch.session.get_or_create_state(
-                LingBotWorldCausalDMDRealtimeState
-            )
+            state = batch.session.get_or_create_state(RealtimeCausalDiTState)
             return state, True
-        return LingBotWorldCausalDMDRealtimeState(), False
+        return RealtimeCausalDiTState(), False
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """LingBot generates latents internally; only require image_latent."""

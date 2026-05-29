@@ -8,13 +8,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from msgpack import packb, unpackb
 
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
-    RealtimeAction,
+    RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
     GenerateSession,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter import (
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
     get_realtime_model_adapter,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
@@ -54,12 +54,12 @@ async def _generate_loop(ws: WebSocket, session: GenerateSession):
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")
             batch = session.adapter.prepare_request(session, batch)
-            if "actions" in batch.extra:
+            if batch.condition_inputs:
                 logger.debug(
-                    "consume realtime actions, session_id=%s, block_idx=%s, num_action_frames=%s",
+                    "consume realtime conditions, session_id=%s, block_idx=%s, kinds=%s",
                     session.id,
                     batch.block_idx,
-                    len(batch.extra["actions"]),
+                    sorted(batch.condition_inputs),
                 )
             timings["prepare_ms"] = (time.perf_counter() - stage_start) * 1000.0
             stage_start = time.perf_counter()
@@ -139,26 +139,26 @@ async def _await_realtime_task(task: asyncio.Task | None) -> None:
         logger.debug("realtime task exited with error: %s", e)
 
 
-async def _listen_actions(ws: WebSocket, session: GenerateSession):
+async def _listen_events(ws: WebSocket, session: GenerateSession):
     async for message in ws.iter_bytes():
         data = None
         try:
             data = unpackb(message, raw=False)
             if not isinstance(data, dict):
-                raise ValueError("realtime action must be a map")
-            realtime_action = RealtimeAction.model_validate(data)
+                raise ValueError("realtime event must be a map")
+            realtime_event = RealtimeEvent.model_validate(data)
             if session.adapter is None:
                 raise ValueError("realtime adapter is not initialized")
-            action_log = session.adapter.ingest_action(session, realtime_action)
+            event_log = session.adapter.ingest_event(session, realtime_event)
             logger.debug(
-                "receive realtime action, session_id=%s, %s",
+                "receive realtime event, session_id=%s, %s",
                 session.id,
-                action_log,
+                event_log,
             )
         except Exception as e:
-            action_type = data.get("type") if isinstance(data, dict) else None
-            logger.warning("invalid action, type=%s, error=%s", action_type, e)
-            await write_error_msg("invalid action", ws)
+            event_kind = data.get("kind") if isinstance(data, dict) else None
+            logger.warning("invalid event, kind=%s, error=%s", event_kind, e)
+            await write_error_msg("invalid event", ws)
             continue
 
 
@@ -213,8 +213,8 @@ async def generate(websocket: WebSocket):
 
         # generate video chunk
         generate_task = asyncio.create_task(_generate_loop(websocket, session))
-        # listen for user actions
-        listen_task = asyncio.create_task(_listen_actions(websocket, session))
+        # listen for user events
+        listen_task = asyncio.create_task(_listen_events(websocket, session))
 
         wait_tasks = [generate_task, listen_task]
         await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)

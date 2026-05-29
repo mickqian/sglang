@@ -182,6 +182,7 @@ class Req:
 
     # Extra parameters that might be needed by specific pipeline implementations (e.g., LTX2.3 DenoisingAVStage)
     extra: dict[str, Any] = field(default_factory=dict)
+    condition_inputs: dict[str, Any] = field(default_factory=dict)
 
     is_warmup: bool = False
 
@@ -208,10 +209,11 @@ class Req:
     audio_sample_rate: int | None = None
 
     # realtime
+    realtime_session_id: str | None = None
     session: RealtimeSession | None = None
     block_idx: int = 0
-    num_blocks: int = 1
-    update_prompt_embeds: bool = False
+    realtime_chunk_size: int | None = None
+    return_encoded_frames: bool = False
 
     def __init__(self, **kwargs):
         # Initialize dataclass fields

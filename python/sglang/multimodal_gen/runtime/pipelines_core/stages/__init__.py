@@ -15,6 +15,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import
 from sglang.multimodal_gen.runtime.pipelines_core.stages.comfyui_latent_preparation import (
     ComfyUILatentPreparationStage,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.conditioning import (
+    ConditioningStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding import DecodingStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding_av import (
     LTX2AVDecodingStage,
@@ -60,6 +63,19 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation_av i
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
     LTX2DenoisingStage,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_dit import (
+    RealtimeCausalDiTState,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_input_validation import (
+    RealtimeInputValidationStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_text_encoding import (
+    RealtimeTextEncodingStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_vae import (
+    CausalVaeDecodingStage,
+    RealtimeImageVAEEncodingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
     LTX2TextConnectorStage,
 )
@@ -78,6 +94,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
 __all__ = [
     "PipelineStage",
     "InputValidationStage",
+    "RealtimeInputValidationStage",
     "TimestepPreparationStage",
     "LatentPreparationStage",
     "ComfyUILatentPreparationStage",
@@ -87,13 +104,18 @@ __all__ = [
     "LTX2DenoisingStage",
     "LTX2AVDenoisingStage",
     "CausalDMDDenoisingStage",
+    "RealtimeCausalDiTState",
     "EncodingStage",
+    "ConditioningStage",
     "DecodingStage",
+    "CausalVaeDecodingStage",
     "LTX2AVDecodingStage",
     "ImageEncodingStage",
     "ImageVAEEncodingStage",
+    "RealtimeImageVAEEncodingStage",
     "LTX2ImageEncodingStage",
     "TextEncodingStage",
+    "RealtimeTextEncodingStage",
     "LTX2TextConnectorStage",
     # Hunyuan3D shape stages
     "Hunyuan3DShapeBeforeDenoisingStage",

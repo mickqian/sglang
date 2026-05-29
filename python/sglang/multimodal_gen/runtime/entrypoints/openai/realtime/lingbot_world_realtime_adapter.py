@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket
 
-from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
-    LingBotWorldCausalDMDConfig,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
-    RealtimeAction,
+    RealtimeEvent,
     RealtimeVideoGenerationsRequest,
-)
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter import (
-    register_realtime_model_adapter,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_output_adapter import (
     RawRGBRealtimeOutputAdapter,
@@ -27,9 +20,10 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     build_sampling_params,
     save_image_to_path,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
-    REALTIME_SESSION_ID_EXTRA_KEY,
-    RETURN_ENCODED_FRAMES_EXTRA_KEY,
+from sglang.multimodal_gen.runtime.pipelines_core.condition_events import (
+    ConditionEvent,
+    ConditionEventQueue,
+    ConditionSamplingParams,
 )
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 
@@ -45,54 +39,37 @@ if TYPE_CHECKING:
 
 class LingBotWorldRealtimeState:
     def __init__(self):
-        self.prompt_queue = deque(maxlen=1)
-        self.control_queue = deque(maxlen=512)
-        self.last_control_actions: list[str] = []
-        self.has_control_state = False
+        self.events = ConditionEventQueue(
+            max_events={"prompt": 1, "camera_actions": 512}
+        )
 
     def clear(self) -> None:
-        self.prompt_queue.clear()
-        self.control_queue.clear()
-        self.last_control_actions = []
-        self.has_control_state = False
+        self.events.clear()
 
     def append_prompt(self, prompt: str) -> None:
-        self.prompt_queue.append(prompt)
+        self.events.push(ConditionEvent(kind="prompt", payload=prompt))
 
-    def _append_control_frame(self, actions: list[str]) -> None:
-        normalized = list(actions)
-        self.control_queue.append(normalized)
-        self.last_control_actions = normalized
-        self.has_control_state = True
-
-    def append_control_chunk(self, control_chunk: list[list[str]]) -> None:
-        if len(control_chunk) == 0:
-            self.last_control_actions = []
-            self.has_control_state = True
-            return
-        for actions in control_chunk:
-            self._append_control_frame(actions)
+    def append_camera_actions(self, camera_actions: list[list[str]]) -> None:
+        normalized = [list(actions) for actions in camera_actions]
+        self.events.push(ConditionEvent(kind="camera_actions", payload=normalized))
 
     def sample_prompt(self) -> str:
-        return self.prompt_queue.popleft()
+        prompt = self.events.pop_latest("prompt")
+        if not isinstance(prompt, str):
+            raise ValueError("prompt event payload must be a string")
+        return prompt
 
-    def sample_control_chunk(self, chunk_size: int) -> list[list[str]] | None:
-        if chunk_size <= 0:
+    def sample_camera_actions(self, chunk_size: int) -> list[list[str]] | None:
+        chunk = self.events.sample_chunk(
+            "camera_actions",
+            ConditionSamplingParams(chunk_size=chunk_size, default_item=[]),
+        )
+        if chunk is None:
             return None
+        return [list(actions) for actions in chunk]
 
-        chunk: list[list[str]] = []
-        while len(chunk) < chunk_size and len(self.control_queue) > 0:
-            chunk.append(list(self.control_queue.popleft()))
-
-        if len(chunk) == 0 and not self.has_control_state:
-            # Keep emitting an explicit no-op control chunk before any user
-            # control arrives.
-            return [[] for _ in range(chunk_size)]
-
-        pad_actions = list(self.last_control_actions)
-        while len(chunk) < chunk_size:
-            chunk.append(list(pad_actions))
-        return chunk
+    def has_prompt(self) -> bool:
+        return self.events.has_events("prompt")
 
 
 class LingBotWorldRealtimeAdapter:
@@ -131,24 +108,33 @@ class LingBotWorldRealtimeAdapter:
         image_path = await save_image_to_path(request.first_frame, target_path)
         request.first_frame = image_path
 
-    def ingest_action(
+    @staticmethod
+    def _validate_camera_actions(payload: Any) -> list[list[str]]:
+        if not isinstance(payload, list):
+            raise ValueError("camera_actions event payload must be list[list[str]]")
+        normalized = []
+        for frame_actions in payload:
+            if not isinstance(frame_actions, list):
+                raise ValueError("camera_actions event payload must be list[list[str]]")
+            normalized.append(list(frame_actions))
+        return normalized
+
+    def ingest_event(
         self,
         session: GenerateSession,
-        action: RealtimeAction,
+        event: RealtimeEvent,
     ) -> str:
         state = self._state(session)
-        if action.type == "control":
-            control_chunk = action.control_chunk
-            if control_chunk is None:
-                raise ValueError("control action requires control_chunk")
-            state.append_control_chunk(control_chunk)
-            return f"type=control, chunk_len={len(control_chunk)}"
-        if action.type == "prompt":
-            if not action.prompt:
-                raise ValueError("prompt action requires prompt")
-            state.append_prompt(action.prompt)
-            return f"type=prompt, prompt_len={len(action.prompt)}"
-        raise ValueError(f"unsupported action type: {action.type}")
+        if event.kind == "camera_actions":
+            camera_actions = self._validate_camera_actions(event.payload)
+            state.append_camera_actions(camera_actions)
+            return f"kind=camera_actions, frames={len(camera_actions)}"
+        if event.kind == "prompt":
+            if not isinstance(event.payload, str) or not event.payload:
+                raise ValueError("prompt event payload must be a non-empty string")
+            state.append_prompt(event.payload)
+            return f"kind=prompt, prompt_len={len(event.payload)}"
+        raise ValueError(f"unsupported event kind: {event.kind}")
 
     def build_sampling_params(self, session: GenerateSession):
         state = self._state(session)
@@ -158,7 +144,7 @@ class LingBotWorldRealtimeAdapter:
 
         if session.generate_chunk_cnt == 0:
             prompt = request.prompt
-        elif len(state.prompt_queue) > 0:
+        elif state.has_prompt():
             prompt = state.sample_prompt()
             request.prompt = prompt
         else:
@@ -200,13 +186,15 @@ class LingBotWorldRealtimeAdapter:
     def prepare_request(self, session: GenerateSession, batch: Req) -> Req:
         state = self._state(session)
         batch.session = session.realtime_session
-        batch.extra[REALTIME_SESSION_ID_EXTRA_KEY] = session.id
-        batch.extra[RETURN_ENCODED_FRAMES_EXTRA_KEY] = True
+        batch.realtime_session_id = session.id
+        batch.return_encoded_frames = True
         batch.block_idx = session.generate_chunk_cnt
-        chunk_size = batch.extra.get("chunk_size", 1)
-        control_chunk = state.sample_control_chunk(chunk_size)
-        if control_chunk is not None:
-            batch.extra["actions"] = control_chunk
+        pipeline_config = get_global_server_args().pipeline_config
+        chunk_size = int(pipeline_config.dit_config.arch_config.num_frames_per_block)
+        batch.realtime_chunk_size = chunk_size
+        camera_actions = state.sample_camera_actions(chunk_size)
+        if camera_actions is not None:
+            batch.condition_inputs["camera_actions"] = camera_actions
         return batch
 
     async def send_output(
@@ -226,9 +214,3 @@ class LingBotWorldRealtimeAdapter:
         state = session.adapter_state
         if isinstance(state, LingBotWorldRealtimeState):
             state.clear()
-
-
-register_realtime_model_adapter(
-    LingBotWorldCausalDMDConfig,
-    LingBotWorldRealtimeAdapter,
-)

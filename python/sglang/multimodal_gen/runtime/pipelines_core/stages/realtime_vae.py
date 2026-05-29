@@ -1,14 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from: https://github.com/Robbyant/lingbot-world
-
-"""
-LingBot-World realtime VAE stages.
-
-These stages align the realtime LingBot path with lingbot_fast_server:
-- cache the conditioning image latent per realtime session instead of re-encoding
-  it on every chunk
-- decode chunk latents with a persistent causal VAE cache
-"""
 
 import torch
 
@@ -29,7 +19,7 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 
-class LingBotWorldRealtimeVAEState(BaseRealtimeState):
+class RealtimeVAEState(BaseRealtimeState):
     def __init__(self):
         super().__init__()
         self.image_latent: torch.Tensor | None = None
@@ -39,7 +29,7 @@ class LingBotWorldRealtimeVAEState(BaseRealtimeState):
         self.image_latent = None
 
 
-class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
+class RealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     """Reuse the first chunk's conditioning image latent across a realtime session."""
 
     def forward(
@@ -49,7 +39,7 @@ class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
     ) -> Req:
         state = None
         if batch.session is not None:
-            state = batch.session.get_or_create_state(LingBotWorldRealtimeVAEState)
+            state = batch.session.get_or_create_state(RealtimeVAEState)
             if batch.block_idx == 0:
                 state.image_latent = None
             elif state.image_latent is not None:
@@ -68,8 +58,8 @@ class LingBotWorldRealtimeImageVAEEncodingStage(ImageVAEEncodingStage):
         return batch
 
 
-class LingBotWorldCausalDecodingStage(DecodingStage):
-    """Decode LingBot realtime chunks with a persistent causal Wan VAE cache."""
+class CausalVaeDecodingStage(DecodingStage):
+    """Decode realtime chunks with a persistent causal VAE cache when available."""
 
     @torch.no_grad()
     def decode_causal(
@@ -128,7 +118,7 @@ class LingBotWorldCausalDecodingStage(DecodingStage):
         frames = self.decode_causal(batch.latents, server_args)
         frames = server_args.pipeline_config.post_decoding(frames, server_args)
 
-        output_batch = OutputBatch(
+        return OutputBatch(
             output=frames,
             trajectory_timesteps=batch.trajectory_timesteps,
             trajectory_latents=batch.trajectory_latents,
@@ -137,5 +127,3 @@ class LingBotWorldCausalDecodingStage(DecodingStage):
             metrics=batch.metrics,
             noise_pred=None,
         )
-
-        return output_batch
