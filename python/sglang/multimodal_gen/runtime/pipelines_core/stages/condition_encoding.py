@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping
-from typing import Any
 
 import torch
 
@@ -10,8 +9,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineSta
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
-class ConditioningStage(PipelineStage):
-    """Apply pipeline-config prepared conditioning tensors to the request."""
+class ConditionEncodingStage(PipelineStage):
+    """Base class for stages that materialize denoiser conditions on the batch."""
+
+
+class AuxiliaryConditionEncodingStage(ConditionEncodingStage):
+    """Apply pipeline-config prepared auxiliary conditioning tensors to the request."""
 
     def __init__(self, dtype: torch.dtype = torch.bfloat16):
         super().__init__()

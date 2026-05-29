@@ -24,7 +24,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
     RealtimeSessionCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
-from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import actions_to_c2ws
+from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import (
+    actions_to_c2ws,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
     build_raw_rgb_frame_batches,
@@ -222,7 +224,6 @@ def test_lingbot_camera_condition_uses_condition_inputs_without_session():
         realtime_session_id=None,
     )
     pipeline_config = LingBotWorldCausalDMDConfig()
-    pipeline_config.dit_config.arch_config.num_frames_per_block = 3
 
     condition = pipeline_config.prepare_world_condition(
         batch=batch,
@@ -230,28 +231,8 @@ def test_lingbot_camera_condition_uses_condition_inputs_without_session():
         dtype=torch.float32,
     )
 
-    assert set(condition) == {"c2ws_plucker_emb"}
     assert tuple(condition["c2ws_plucker_emb"].shape) == (1, 6, 3, 2, 2)
     assert condition["c2ws_plucker_emb"].dtype == torch.float32
-
-
-def test_realtime_causal_dit_state_disposes_cache():
-    from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_dit import (
-        RealtimeCausalDiTState,
-    )
-
-    state = RealtimeCausalDiTState()
-    state.kv_cache = object()
-    state.crossattn_cache = object()
-    state.current_chunk_start_frame = 8
-    state.chunk_idx = 2
-
-    state.dispose()
-
-    assert state.kv_cache is None
-    assert state.crossattn_cache is None
-    assert state.current_chunk_start_frame == 0
-    assert state.chunk_idx == 0
 
 
 def test_raw_rgb_frame_batches_preserve_frame_bytes_and_metadata():

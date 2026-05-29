@@ -1,4 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# Adapted from: https://github.com/Robbyant/lingbot-world
+
+"""
+LingBot-World realtime text stages.
+
+The reference lingbot_fast_server initializes prompt embeddings once per session.
+Cache text encoder outputs across realtime chunks so condition sampling stays
+closer to the actual denoising step.
+"""
 
 from __future__ import annotations
 

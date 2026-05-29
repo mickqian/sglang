@@ -15,8 +15,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import
 from sglang.multimodal_gen.runtime.pipelines_core.stages.comfyui_latent_preparation import (
     ComfyUILatentPreparationStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.conditioning import (
-    ConditioningStage,
+from sglang.multimodal_gen.runtime.pipelines_core.stages.condition_encoding import (
+    AuxiliaryConditionEncodingStage,
+    ConditionEncodingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding import DecodingStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding_av import (
@@ -56,15 +57,13 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.input_validation import
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation import (
     LatentPreparationStage,
+    RealtimeChunkLatentPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation_av import (
     LTX2AVLatentPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
     LTX2DenoisingStage,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_dit import (
-    RealtimeCausalDiTState,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_input_validation import (
     RealtimeInputValidationStage,
@@ -83,6 +82,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.text_encoding import (
     TextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import (
+    DMDTimestepPreparationStage,
     TimestepPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
@@ -96,7 +96,9 @@ __all__ = [
     "InputValidationStage",
     "RealtimeInputValidationStage",
     "TimestepPreparationStage",
+    "DMDTimestepPreparationStage",
     "LatentPreparationStage",
+    "RealtimeChunkLatentPreparationStage",
     "ComfyUILatentPreparationStage",
     "LTX2AVLatentPreparationStage",
     "DenoisingStage",
@@ -104,9 +106,9 @@ __all__ = [
     "LTX2DenoisingStage",
     "LTX2AVDenoisingStage",
     "CausalDMDDenoisingStage",
-    "RealtimeCausalDiTState",
     "EncodingStage",
-    "ConditioningStage",
+    "ConditionEncodingStage",
+    "AuxiliaryConditionEncodingStage",
     "DecodingStage",
     "CausalVaeDecodingStage",
     "LTX2AVDecodingStage",

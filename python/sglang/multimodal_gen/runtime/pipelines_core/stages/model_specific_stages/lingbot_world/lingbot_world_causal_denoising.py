@@ -6,12 +6,10 @@ LingBot-World causal DMD denoising stage.
 
 Extends CausalDMDDenoisingStage with:
 - I2V condition concatenation ([noise, condition] along channel dim)
-- Per-chunk noise generation (no LatentPreparationStage needed)
 - Session-persistent KV cache with cumulative frame position tracking
 """
 
 import torch
-from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
@@ -24,7 +22,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import (
     CausalDMDDenoisingStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime_dit import (
+from sglang.multimodal_gen.runtime.pipelines_core.realtime_states import (
     RealtimeCausalDiTState,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
@@ -61,13 +59,14 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         return RealtimeCausalDiTState(), False
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
-        """LingBot generates latents internally; only require image_latent."""
         result = VerificationResult()
         result.add_check(
             "image_latent", batch.image_latent, [V.is_tensor, V.with_dims(5)]
         )
+        result.add_check("latents", batch.latents, [V.is_tensor, V.with_dims(5)])
+        result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.with_dims(1)])
+        result.add_check("scheduler", batch.scheduler, V.not_none)
         result.add_check("prompt_embeds", batch.prompt_embeds, V.list_not_empty)
-        result.add_check("generator", batch.generator, V.generator_or_list_generators)
         return result
 
     def _initialize_kv_cache(
@@ -166,12 +165,21 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             "LingBot-World causal DMD requires image_latent as condition. "
             "Ensure ImageVAEEncodingStage runs before this stage."
         )
+        latents = batch.latents
+        assert latents is not None, (
+            "LingBot-World causal DMD requires prepared chunk latents. "
+            "Ensure RealtimeChunkLatentPreparationStage runs before this stage."
+        )
+        scheduler = batch.scheduler
+        assert scheduler is not None, (
+            "LingBot-World causal DMD requires prepared DMD timesteps. "
+            "Ensure DMDTimestepPreparationStage runs before this stage."
+        )
+        timesteps = batch.timesteps
+        assert timesteps is not None
 
         b = condition_full.shape[0]
-        h = condition_full.shape[3]
-        w = condition_full.shape[4]
-        t = self.num_frames_per_block
-        num_channels_latents = self.transformer.config.arch_config.out_channels
+        _, _, t, h, w = latents.shape
 
         # frame_seq_length from spatial dims and patch size
         patch_ratio = (
@@ -180,25 +188,7 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         )
         self.frame_seq_length = (h * w) // patch_ratio
 
-        # --- Generate noise latent for this chunk ---
-        latents = randn_tensor(
-            (b, num_channels_latents, t, h, w),
-            generator=batch.generator,
-            device=device,
-            dtype=condition_full.dtype,
-        )
-
-        # --- Timesteps ---
-        timesteps = torch.tensor(
-            server_args.pipeline_config.dmd_denoising_steps, dtype=torch.long
-        ).cpu()
-        if server_args.pipeline_config.warp_denoising_step:
-            scheduler_timesteps = torch.cat(
-                (self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
-            )
-            timesteps = scheduler_timesteps[1000 - timesteps]
         timesteps = timesteps.to(device)
-        logger.debug("Using timesteps: %s", timesteps)
 
         # --- Transformer kwargs ---
         # Note: bypass prepare_extra_func_kwargs because
@@ -348,7 +338,7 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     pred_noise=pred_noise_btchw.flatten(0, 1),
                     noise_input_latent=noise_latents.flatten(0, 1),
                     timestep=t_expand,
-                    scheduler=self.scheduler,
+                    scheduler=scheduler,
                 ).unflatten(0, pred_noise_btchw.shape[:2])
 
                 if i < len(timesteps) - 1:
@@ -365,7 +355,7 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                         ),
                         device=device,
                     )
-                    noise_latents_btchw = self.scheduler.add_noise(
+                    noise_latents_btchw = scheduler.add_noise(
                         x0_btchw.flatten(0, 1),
                         noise.flatten(0, 1),
                         next_timestep,

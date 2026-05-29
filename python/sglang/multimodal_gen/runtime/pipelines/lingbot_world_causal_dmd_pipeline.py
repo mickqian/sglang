@@ -14,9 +14,11 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
 )
 from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.stages import (
+    AuxiliaryConditionEncodingStage,
     CausalVaeDecodingStage,
-    ConditioningStage,
+    DMDTimestepPreparationStage,
     ImageEncodingStage,
+    RealtimeChunkLatentPreparationStage,
     RealtimeImageVAEEncodingStage,
     RealtimeInputValidationStage,
     RealtimeTextEncodingStage,
@@ -67,10 +69,17 @@ class LingBotWorldCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             ),
         )
 
-        self.add_stage(ConditioningStage())
+        self.add_stage(AuxiliaryConditionEncodingStage())
         self.add_stage(
             RealtimeImageVAEEncodingStage(
                 vae=self.get_module("vae"),
+            )
+        )
+        self.add_stage(DMDTimestepPreparationStage(self.get_module("scheduler")))
+        self.add_stage(
+            RealtimeChunkLatentPreparationStage(
+                scheduler=self.get_module("scheduler"),
+                transformer=self.get_module("transformer"),
             )
         )
         self.add_stage(
