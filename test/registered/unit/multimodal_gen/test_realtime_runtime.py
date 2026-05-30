@@ -231,7 +231,15 @@ def test_lingbot_camera_condition_uses_condition_inputs_without_session():
         dtype=torch.float32,
     )
 
-    assert tuple(condition["c2ws_plucker_emb"].shape) == (1, 6, 3, 2, 2)
+    spatial_scale = pipeline_config.vae_config.arch_config.spatial_compression_ratio
+    expected_shape = (
+        1,
+        6 * spatial_scale * spatial_scale,
+        batch.realtime_chunk_size,
+        batch.height // spatial_scale,
+        batch.width // spatial_scale,
+    )
+    assert tuple(condition["c2ws_plucker_emb"].shape) == expected_shape
     assert condition["c2ws_plucker_emb"].dtype == torch.float32
 
 
