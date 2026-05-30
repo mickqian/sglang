@@ -8,7 +8,7 @@ from uuid import uuid4
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     RealtimeSession,
 )
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
 

@@ -23,7 +23,7 @@ import PIL.Image
 import torch
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     RealtimeSession,
 )
 from sglang.multimodal_gen.runtime.post_training.rl_dataclasses import (

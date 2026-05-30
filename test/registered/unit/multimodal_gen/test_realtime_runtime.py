@@ -19,7 +19,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.condition_events import (
     ConditionEventQueue,
     ConditionSamplingParams,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
     RealtimeSessionCache,
 )

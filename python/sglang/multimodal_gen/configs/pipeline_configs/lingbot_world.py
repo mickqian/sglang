@@ -13,7 +13,7 @@ import torch
 from sglang.multimodal_gen.configs.models import DiTConfig
 from sglang.multimodal_gen.configs.models.dits import LingBotWorldVideoConfig
 from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_I2V_A14B_Config
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
 )
 from sglang.multimodal_gen.runtime.utils.lingbot_world_camera import (

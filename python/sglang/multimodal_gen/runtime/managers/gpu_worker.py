@@ -51,7 +51,7 @@ from sglang.multimodal_gen.runtime.pipelines_core import (
     Req,
     build_pipeline,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.realtime_session import (
+from sglang.multimodal_gen.runtime.realtime.session import (
     RealtimeSessionCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
