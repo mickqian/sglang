@@ -663,6 +663,23 @@ class ServerArgs(DisaggArgsMixin):
         return None, None
 
     def _adjust_warmup(self):
+        from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
+            has_realtime_model_adapter,
+        )
+
+        if (
+            has_realtime_model_adapter(self)
+            and not self.is_arg_explicitly_set("warmup")
+            and not self.is_arg_explicitly_set("server_warmup")
+            and not self.is_arg_explicitly_set("warmup_resolutions")
+        ):
+            self.warmup = False
+            self.server_warmup = False
+            logger.info(
+                "Disable warmup by default for realtime pipeline %s",
+                type(self.pipeline_config).__name__,
+            )
+
         if self.warmup_resolutions is not None:
             self.warmup = True
             self.server_warmup = False
