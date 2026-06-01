@@ -8,6 +8,7 @@ template and embedded inside the transformer's UND pathway. The same
 from ``batch.data_type`` and the presence of ``batch.preprocessed_image``.
 """
 
+import sys
 from typing import Any
 
 import numpy as np
@@ -24,6 +25,7 @@ from sglang.multimodal_gen.runtime.distributed.communication_op import (
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_classifier_free_guidance_rank,
     get_classifier_free_guidance_world_size,
+    get_world_group,
     get_sp_parallel_rank,
     get_sp_world_size,
 )
@@ -237,6 +239,10 @@ class Cosmos3TokenizationStage(PipelineStage):
         batch.extra["cond_text_mask"] = cond_mask
         batch.extra["uncond_text_ids"] = uncond_ids
         batch.extra["uncond_text_mask"] = uncond_mask
+        batch.extra["cfg_text_ids_batched"] = torch.cat([uncond_ids, cond_ids], dim=0)
+        batch.extra["cfg_text_mask_batched"] = torch.cat(
+            [uncond_mask, cond_mask], dim=0
+        )
         batch.extra["cond_text_seq_len"] = cond_seq_len
         batch.extra["uncond_text_seq_len"] = uncond_seq_len
         batch.extra["fps"] = fps
@@ -575,6 +581,11 @@ class Cosmos3DenoisingStage(PipelineStage):
         video_shape = batch.extra["video_shape"]
         fps = batch.extra.get("fps", 24.0)
         velocity_mask = batch.extra.get("velocity_mask")
+        velocity_mask_batched = (
+            torch.cat([velocity_mask, velocity_mask], dim=0)
+            if velocity_mask is not None
+            else None
+        )
         image_latent = batch.image_latent
         guidance_interval = getattr(batch.sampling_params, "guidance_interval", None)
 
@@ -617,7 +628,9 @@ class Cosmos3DenoisingStage(PipelineStage):
             enumerate(zip(timesteps, timesteps_host)),
             total=len(timesteps),
             desc="Denoising",
-            disable=batch.is_warmup,
+            disable=batch.is_warmup
+            or get_world_group().local_rank != 0
+            or not sys.stderr.isatty(),
         )
 
         for i, (t, t_host) in progress_bar:
@@ -667,14 +680,12 @@ class Cosmos3DenoisingStage(PipelineStage):
                     noise_pred = self._predict_noise_cfg_batched(
                         latents=latents,
                         timestep=timestep,
-                        cond_text_ids=cond_text_ids,
-                        cond_text_mask=cond_text_mask,
-                        uncond_text_ids=uncond_text_ids,
-                        uncond_text_mask=uncond_text_mask,
+                        text_ids_batched=batch.extra["cfg_text_ids_batched"],
+                        text_mask_batched=batch.extra["cfg_text_mask_batched"],
                         video_shape=video_shape,
                         fps=fps,
                         guidance_scale=effective_scale,
-                        noisy_frame_mask=velocity_mask,
+                        noisy_frame_mask_batched=velocity_mask_batched,
                         max_text_seq_len=max(
                             batch.extra["cond_text_seq_len"],
                             batch.extra["uncond_text_seq_len"],
@@ -719,14 +730,12 @@ class Cosmos3DenoisingStage(PipelineStage):
         self,
         latents: torch.Tensor,
         timestep: torch.Tensor,
-        cond_text_ids: torch.Tensor,
-        cond_text_mask: torch.Tensor,
-        uncond_text_ids: torch.Tensor,
-        uncond_text_mask: torch.Tensor,
+        text_ids_batched: torch.Tensor,
+        text_mask_batched: torch.Tensor,
         video_shape: tuple[int, int, int],
         fps: float,
         guidance_scale: float,
-        noisy_frame_mask: torch.Tensor | None = None,
+        noisy_frame_mask_batched: torch.Tensor | None = None,
         max_text_seq_len: int | None = None,
         current_timestep: int | None = None,
     ) -> torch.Tensor:
@@ -737,14 +746,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         matches the standard CFG formula.
         """
         latents_batched = torch.cat([latents, latents], dim=0)
-        text_ids_batched = torch.cat([uncond_text_ids, cond_text_ids], dim=0)
-        text_mask_batched = torch.cat([uncond_text_mask, cond_text_mask], dim=0)
         timestep_batched = timestep.expand(2)
-        mask_batched = (
-            torch.cat([noisy_frame_mask, noisy_frame_mask], dim=0)
-            if noisy_frame_mask is not None
-            else None
-        )
 
         noise_pred = self._run_transformer(
             latents=latents_batched,
@@ -754,7 +756,7 @@ class Cosmos3DenoisingStage(PipelineStage):
             video_shape=video_shape,
             fps=fps,
             cache_key="cfg_batched",
-            noisy_frame_mask=mask_batched,
+            noisy_frame_mask=noisy_frame_mask_batched,
             max_text_seq_len=max_text_seq_len,
             current_timestep=current_timestep,
         )
