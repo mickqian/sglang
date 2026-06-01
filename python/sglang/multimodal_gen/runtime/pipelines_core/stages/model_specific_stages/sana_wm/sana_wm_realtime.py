@@ -621,6 +621,9 @@ class SanaWMRealtimeStage(PipelineStage):
         weight_dtype: torch.dtype,
         vae_dtype: torch.dtype,
         first_latent: torch.Tensor | None = None,
+        intrinsics_raw: np.ndarray | None = None,
+        translation_speed: float | None = None,
+        rotation_speed_deg: float | None = None,
     ) -> None:
         image, intrinsics_image, src_size, resized_size, crop_offset = self._prepare_image(batch)
         state.image = image
@@ -628,6 +631,9 @@ class SanaWMRealtimeStage(PipelineStage):
         state.src_size = src_size
         state.resized_size = resized_size
         state.crop_offset = crop_offset
+        state.intrinsics_raw = (
+            intrinsics_raw.copy() if intrinsics_raw is not None else None
+        )
         state.prompt = str(batch.prompt)
 
         num_frames = snap_num_frames(int(batch.num_frames), stride=8)
@@ -681,8 +687,16 @@ class SanaWMRealtimeStage(PipelineStage):
         else:
             mask = cond_mask
 
-        state.translation_speed = _motion_param(batch, "translation_speed", 0.04)
-        state.rotation_speed_deg = _motion_param(batch, "rotation_speed_deg", 1.2)
+        state.translation_speed = _motion_param(
+            batch,
+            "translation_speed",
+            0.04 if translation_speed is None else translation_speed,
+        )
+        state.rotation_speed_deg = _motion_param(
+            batch,
+            "rotation_speed_deg",
+            1.2 if rotation_speed_deg is None else rotation_speed_deg,
+        )
         state.static_c2w = self._prepare_static_camera(
             batch,
             num_frames=num_frames,
@@ -905,6 +919,13 @@ class SanaWMRealtimeStage(PipelineStage):
 
         if frames is None and state.rollover_first_latent is not None:
             first_latent = state.rollover_first_latent
+            intrinsics_raw = (
+                state.intrinsics_raw.copy()
+                if state.intrinsics_raw is not None
+                else None
+            )
+            translation_speed = state.translation_speed
+            rotation_speed_deg = state.rotation_speed_deg
             logger.info(
                 "SANA-WM realtime horizon rollover: block_idx=%s, latent_t=%s",
                 batch.block_idx,
@@ -919,6 +940,9 @@ class SanaWMRealtimeStage(PipelineStage):
                 weight_dtype=weight_dtype,
                 vae_dtype=vae_dtype,
                 first_latent=first_latent,
+                intrinsics_raw=intrinsics_raw,
+                translation_speed=translation_speed,
+                rotation_speed_deg=rotation_speed_deg,
             )
             if state.use_refiner:
                 frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
