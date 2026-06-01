@@ -796,7 +796,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 max_text_seq_len=cond_text_seq_len,
                 current_timestep=current_timestep,
             )
-            partial = noise_pred.mul_(guidance_scale)
+            partial = guidance_scale * noise_pred
         else:
             noise_pred = self._run_transformer(
                 latents=latents,
@@ -810,7 +810,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 max_text_seq_len=uncond_text_seq_len,
                 current_timestep=current_timestep,
             )
-            partial = noise_pred.mul_(1.0 - guidance_scale)
+            partial = (1.0 - guidance_scale) * noise_pred
 
         return cfg_model_parallel_all_reduce(partial)
 
