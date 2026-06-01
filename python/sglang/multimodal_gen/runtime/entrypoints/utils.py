@@ -561,8 +561,7 @@ def post_process_sample(
     if isinstance(sample, torch.Tensor):
         if sample.dim() == 3:
             sample = sample.unsqueeze(1)
-        if sample.dtype != torch.uint8:
-            sample = (sample * 255).clamp(0, 255).to(torch.uint8)
+        sample = (sample * 255).clamp(0, 255).to(torch.uint8)
         videos = sample.permute(1, 2, 3, 0).cpu().numpy()
         frames = list(videos)
     else:

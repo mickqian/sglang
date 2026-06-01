@@ -885,14 +885,6 @@ class Cosmos3DecodingStage(PipelineStage):
         return (decoded * 0.5 + 0.5).clamp(0, 1).float()
 
     @staticmethod
-    def _postprocess_uint8_tensor(decoded: torch.Tensor) -> torch.Tensor:
-        return (
-            ((decoded * 0.5 + 0.5).clamp(0, 1).float() * 255)
-            .clamp(0, 255)
-            .to(torch.uint8)
-        )
-
-    @staticmethod
     def _postprocess_video_np(video: torch.Tensor, is_image_gen: bool) -> np.ndarray:
         if is_image_gen:
             return video.squeeze(2).permute(0, 2, 3, 1).cpu().numpy()
@@ -922,13 +914,9 @@ class Cosmos3DecodingStage(PipelineStage):
             self.vae.to("cpu", non_blocking=True)
 
         self.log_info(f"Decoded tensor shape: {decoded.shape}")
-        needs_guardrails = self._guardrails and batch.use_guardrails is not False
-        if is_image_gen or needs_guardrails:
-            output = self._postprocess_tensor(decoded)
-        else:
-            output = self._postprocess_uint8_tensor(decoded)
+        output = self._postprocess_tensor(decoded)
 
-        if needs_guardrails:
+        if self._guardrails and batch.use_guardrails is not False:
             from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.cosmos3_guardrails import (
                 check_video_safety,
             )
