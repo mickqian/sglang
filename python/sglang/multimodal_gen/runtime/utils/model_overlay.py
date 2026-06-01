@@ -275,7 +275,6 @@ def ensure_overlay_source_dir_complete(
             allow_patterns=effective_allow_patterns,
             local_dir=local_dir,
             max_workers=8,
-            force_download=True,
         )
     missing_after_redownload = _find_missing_required_paths(
         source_dir, required_source_files
