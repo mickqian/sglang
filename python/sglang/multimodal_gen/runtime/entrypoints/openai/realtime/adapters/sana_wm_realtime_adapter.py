@@ -34,7 +34,6 @@ from sglang.multimodal_gen.runtime.realtime.condition_events import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.sana_wm.utils import (
     parse_action_string,
-    snap_num_frames,
 )
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
 
@@ -55,13 +54,14 @@ SANA_WM_DEFAULT_NUM_FRAMES = 1081
 SANA_WM_DEFAULT_FPS = 16
 SANA_WM_DEFAULT_STEPS = 4
 SANA_WM_DEFAULT_GUIDANCE = 1.0
+SANA_WM_CONTROL_PULSE_FRAMES = 8
 
 
 class SanaWMRealtimeAdapterState:
     def __init__(self):
         self.camera_state = ControlStateSamplingQueue(
             default_item=[],
-            min_pulse_items=1,
+            min_pulse_items=SANA_WM_CONTROL_PULSE_FRAMES,
             max_transitions=512,
         )
         self.camera_script_queue: deque[ControlSignal] = deque(maxlen=2048)
@@ -204,11 +204,6 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
         return normalized
 
     @staticmethod
-    def _default_max_chunks(num_frames: int) -> int:
-        latent_t = (snap_num_frames(int(num_frames), stride=8) - 1) // 8 + 1
-        return max(1, latent_t // 3)
-
-    @staticmethod
     def _raw_frame_count(result: OutputBatch) -> int | None:
         if result.raw_frame_batches is None:
             return None
@@ -235,8 +230,6 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
             request.negative_prompt = ""
         if request.generator_device is None:
             request.generator_device = "cuda"
-        if request.max_chunks is None:
-            request.max_chunks = self._default_max_chunks(request.num_frames)
 
         state = self._state(session)
         condition_inputs = dict(request.condition_inputs or {})

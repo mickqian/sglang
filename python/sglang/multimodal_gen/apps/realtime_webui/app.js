@@ -1212,12 +1212,13 @@ function sendEvent(kind, payload, historyText = null, options = {}) {
   }
   const awaitCutover = options.awaitCutover ?? true;
   const recordHistory = options.recordHistory ?? true;
+  const trimPlaybackQueue = options.trimPlaybackQueue ?? true;
   const eventId = nextEventId++;
   ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
   if (awaitCutover && (kind === "camera_actions" || kind === "action" || kind === "prompt")) {
     awaitedEventId = eventId;
     awaitedEventSentAt = performance.now();
-    trimQueueForPendingEvent();
+    if (trimPlaybackQueue) trimQueueForPendingEvent();
     updateStats();
     setStatus("Updating", "live");
   }
@@ -1240,7 +1241,7 @@ function sendCameraControlTransitions(transitions) {
     "camera_actions",
     payload,
     describeCameraStateEvent(transitions),
-    { awaitCutover: false, recordHistory: false },
+    { awaitCutover: true, recordHistory: false, trimPlaybackQueue: false },
   );
 }
 
