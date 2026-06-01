@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 SANA_WM_DEFAULT_SIZE = "1280x704"
 SANA_WM_DEFAULT_NUM_FRAMES = 961
 SANA_WM_DEFAULT_FPS = 16
-SANA_WM_DEFAULT_STEPS = 4
+SANA_WM_DEFAULT_STEPS = 1
 SANA_WM_DEFAULT_GUIDANCE = 1.0
 SANA_WM_DEFAULT_INTRINSICS = [900.0, 900.0, 640.0, 352.0]
 
@@ -229,9 +229,8 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
             request.negative_prompt = ""
         if request.generator_device is None:
             request.generator_device = "cuda"
-        min_chunks = self._default_max_chunks(request.num_frames)
-        if request.max_chunks is None or request.max_chunks < min_chunks:
-            request.max_chunks = min_chunks
+        if request.max_chunks is None:
+            request.max_chunks = self._default_max_chunks(request.num_frames)
 
         state = self._state(session)
         condition_inputs = dict(request.condition_inputs or {})

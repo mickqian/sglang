@@ -50,18 +50,23 @@ const CONTROL_ACTION_META = {
 
 const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
+const SANA_WM_CLAIM_ACTION = "w-80,jw-40,w-40,lw-60,w-100";
 
 const sanaWmPresets = [
   {
     name: "SANA-WM Smoke",
+    key: "sana-wm",
     tone: "blue",
     model: SANA_WM_MODEL_ID,
     size: "1280x704",
     fps: 16,
-    numFrames: 25,
+    numFrames: 961,
+    steps: 1,
+    guidance: 1,
     sinkSize: 1,
     windowFrames: "",
     prompt: "A controlled first-person camera move through a quiet mountain lake scene, stable geometry, realistic parallax, natural daylight, consistent reflections.",
+    actionScript: SANA_WM_CLAIM_ACTION,
     referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg",
     source: "SANA-WM smoke preset",
   },
@@ -1098,7 +1103,7 @@ function sendEvent(kind, payload, historyText = null) {
   }
   const eventId = nextEventId++;
   ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
-  if (kind === "camera_actions" || kind === "prompt") {
+  if (kind === "camera_actions" || kind === "action" || kind === "prompt") {
     awaitedEventId = eventId;
     awaitedEventSentAt = performance.now();
     trimQueueForPendingEvent();
@@ -1134,8 +1139,11 @@ async function applyPreset(preset, options = {}) {
   $("size").value = preset.size;
   $("fps").value = preset.fps;
   if (preset.numFrames) $("numFrames").value = preset.numFrames;
+  if (preset.steps !== undefined) $("steps").value = preset.steps;
+  if (preset.guidance !== undefined) $("guidance").value = preset.guidance;
   if (preset.sinkSize !== undefined) $("sinkSize").value = preset.sinkSize;
   if (preset.windowFrames !== undefined) $("windowFrames").value = preset.windowFrames;
+  if (preset.actionScript !== undefined) $("actionScript").value = preset.actionScript;
   await setPresetReference(preset);
   if (sendRuntimeEvents) {
     sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
@@ -1239,6 +1247,15 @@ function enhancePrompt() {
   }
 }
 
+function sendActionScript() {
+  const actionScript = $("actionScript").value.trim();
+  if (!actionScript) {
+    addHistory("action script empty");
+    return;
+  }
+  sendEvent("action", actionScript, `action script · ${actionScript}`);
+}
+
 function compact(obj) {
   return Object.fromEntries(
     Object.entries(obj).filter(([, v]) => v !== undefined && v !== "" && v !== null)
@@ -1307,8 +1324,9 @@ async function applyQueryParams() {
   if (presetKey) {
     const normalized = presetKey.toLowerCase();
     const preset = presets.find((item) => (
-      item.name.toLowerCase() === normalized
-      || item.name.toLowerCase().replaceAll(" ", "-") === normalized
+      item.key?.toLowerCase() === normalized
+      || item.name.toLowerCase() === normalized
+      || item.name.toLowerCase().replace(/\s+/g, "-") === normalized
     ));
     if (preset && preset !== selectedPreset) {
       await applyPreset(preset, { sendRuntimeEvents: false });
@@ -1319,6 +1337,8 @@ async function applyQueryParams() {
   if (server) $("serverUrl").value = server;
   const model = params.get("model");
   if (model) $("model").value = model;
+  const action = params.get("action");
+  if (action) $("actionScript").value = action;
   $("transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
   $("transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
   return {
@@ -1426,6 +1446,7 @@ requestAnimationFrame(renderLoop);
 $("connectBtn").onclick = connect;
 $("stopBtn").onclick = () => closeSession();
 $("sendPromptBtn").onclick = () => sendEvent("prompt", $("prompt").value);
+$("sendActionBtn").onclick = sendActionScript;
 $("enhanceBtn").onclick = enhancePrompt;
 $("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
 $("serverUrl").addEventListener("change", () => {

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sglang-diffusion Realtime Studio</title>
-    <link rel="stylesheet" href="./styles.css?v=realtime-fixes-v26" />
+    <link rel="stylesheet" href="./styles.css?v=realtime-fixes-v27" />
   </head>
   <body>
     <main class="shell">
@@ -58,6 +58,8 @@
           <button id="stopBtn">Close session</button>
         </div>
         <button id="sendPromptBtn" class="wide">Send prompt update</button>
+        <label>Action DSL<textarea id="actionScript" rows="2">w-80,jw-40,w-40,lw-60,w-100</textarea></label>
+        <button id="sendActionBtn" class="wide">Send action script</button>
       </section>
 
       <section class="stage" aria-label="Realtime preview">
