@@ -61,7 +61,7 @@ const sanaWmPresets = [
     size: "1280x704",
     fps: 16,
     numFrames: 961,
-    steps: 1,
+    steps: 4,
     guidance: 1,
     sinkSize: 1,
     windowFrames: "",
