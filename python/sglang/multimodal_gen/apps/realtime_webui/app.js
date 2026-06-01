@@ -49,7 +49,7 @@ const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
 const SANA_WM_DEMO_IMAGE_URL = "https://raw.githubusercontent.com/NVlabs/Sana/main/asset/sana_wm/demo_0.png";
 const SANA_WM_CLAIM_ACTION = "w-80,jw-40,w-40,lw-60,w-100";
-const SANA_WM_INTERACTIVE_NUM_FRAMES = 1921;
+const SANA_WM_INTERACTIVE_NUM_FRAMES = 1537;
 const SANA_WM_DEMO_INTRINSICS = [
   797.8787,
   830.0503,
