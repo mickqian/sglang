@@ -118,8 +118,8 @@ class SanaWMRealtimeConfig(PipelineConfig):
 
     def get_model_deployment_config(self) -> ModelDeploymentConfig:
         return ModelDeploymentConfig(
-            auto_disable_default_layerwise_offload_min_available_memory_gb=70,
-            auto_disable_component_offload_min_available_memory_gb=70,
+            auto_disable_default_layerwise_offload_min_available_memory_gb=45,
+            auto_disable_component_offload_min_available_memory_gb=45,
         )
 
     def tokenize_prompt(self, prompt: list[str], tokenizer, tok_kwargs) -> dict:
