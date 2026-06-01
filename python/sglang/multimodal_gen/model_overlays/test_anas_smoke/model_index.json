@@ -1,0 +1,20 @@
+{
+  "_class_name": "SanaWMRealtimePipeline",
+  "_diffusers_version": "0.35.0",
+  "text_encoder": [
+    "transformers",
+    "Gemma2Model"
+  ],
+  "tokenizer": [
+    "transformers",
+    "GemmaTokenizer"
+  ],
+  "transformer": [
+    "diffusers",
+    "SanaWM1600M"
+  ],
+  "vae": [
+    "diffusers",
+    "AutoencoderKLLTX2Video"
+  ]
+}

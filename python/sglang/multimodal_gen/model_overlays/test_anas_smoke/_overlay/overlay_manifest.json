@@ -1,0 +1,33 @@
+{
+  "source_model_id": "Hao-Zhe/test-anas-smoke",
+  "materializer_version": "sana-wm-realtime-v1",
+  "source_allow_patterns": [
+    "sana_dit/model.pt",
+    "sana_wm_streaming_1600m_720p.yaml",
+    "ltx2_causal_vae/**",
+    "refiner_diffusers/**",
+    "gemma3_12b/**"
+  ],
+  "required_source_files": [
+    "sana_dit/model.pt",
+    "ltx2_causal_vae/config.json"
+  ],
+  "file_mappings": [
+    {
+      "type": "tree",
+      "src": "ltx2_causal_vae",
+      "dst_dir": "vae"
+    },
+    {
+      "type": "tree",
+      "src": "refiner_diffusers",
+      "dst_dir": "refiner_diffusers"
+    },
+    {
+      "type": "tree",
+      "src": "gemma3_12b",
+      "dst_dir": "gemma3_12b"
+    }
+  ],
+  "custom_materializer": "_overlay/materialize.py"
+}
