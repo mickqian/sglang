@@ -218,7 +218,7 @@ class SanaWM1600M(nn.Module):
         return next(self.parameters()).dtype
 
     def post_load_weights(self) -> None:
-        return
+        self.rope.materialize_freqs()
 
     def initialize_weights(self) -> None:
         def init_linear(module: nn.Module) -> None:
