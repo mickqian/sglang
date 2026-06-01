@@ -51,6 +51,7 @@ def sana_wm_stage1_preprocess_text(prompt: str) -> str:
 class SanaWMRealtimeConfig(PipelineConfig):
     task_type: ModelTaskType = ModelTaskType.TI2V
     skip_input_image_preprocess: bool = True
+    is_realtime: bool = True
     should_use_guidance: bool = False
     generator_device: str = "cuda"
     dit_config: DiTConfig = field(default_factory=SanaWMConfig)

@@ -318,6 +318,7 @@ class LingBotWorldI2VConfig(Wan2_2_I2V_A14B_Config):
 
 @dataclass
 class LingBotWorldCausalDMDConfig(LingBotWorldI2VConfig):
+    is_realtime: bool = True
     is_causal: bool = True
     dmd_denoising_steps: list[int] | None = field(
         default_factory=lambda: [1000, 821, 642, 321]
