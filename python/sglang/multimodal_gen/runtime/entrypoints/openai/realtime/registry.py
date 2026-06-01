@@ -52,18 +52,30 @@ def _register_builtin_realtime_model_adapters() -> None:
     _BUILTIN_ADAPTERS_REGISTERED = True
 
 
-def get_realtime_model_adapter(
-    server_args: ServerArgs,
-) -> RealtimeModelAdapter:
+def _get_realtime_model_adapter_cls(
+    pipeline_config: object,
+) -> type[RealtimeModelAdapter] | None:
     _register_builtin_realtime_model_adapters()
 
-    pipeline_config = server_args.pipeline_config
     for config_cls in type(pipeline_config).__mro__:
         adapter_cls = _REALTIME_ADAPTER_REGISTRY.get(config_cls)
         if adapter_cls is not None:
-            return adapter_cls()
+            return adapter_cls
+    return None
+
+
+def has_realtime_model_adapter(server_args: ServerArgs) -> bool:
+    return _get_realtime_model_adapter_cls(server_args.pipeline_config) is not None
+
+
+def get_realtime_model_adapter(
+    server_args: ServerArgs,
+) -> RealtimeModelAdapter:
+    adapter_cls = _get_realtime_model_adapter_cls(server_args.pipeline_config)
+    if adapter_cls is not None:
+        return adapter_cls()
 
     raise ValueError(
         "Realtime video is not supported for pipeline config "
-        f"{type(pipeline_config).__name__}; no realtime adapter is registered."
+        f"{type(server_args.pipeline_config).__name__}; no realtime adapter is registered."
     )
