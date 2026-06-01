@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from collections import deque
@@ -207,7 +206,7 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
     @staticmethod
     def _default_max_chunks(num_frames: int) -> int:
         latent_t = (snap_num_frames(int(num_frames), stride=8) - 1) // 8 + 1
-        return math.ceil(latent_t / 3)
+        return max(1, latent_t // 3)
 
     async def on_init(
         self,
