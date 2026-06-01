@@ -237,6 +237,31 @@ ONE_GPU_CASES: list[DiffusionTestCase] = [
             model_path=DEFAULT_WAN_2_1_T2V_1_3B_MODEL_NAME_FOR_TEST,
         ),
     ),
+    DiffusionTestCase(
+        "cosmos3_nano_t2v",
+        DiffusionServerArgs(
+            model_path=DEFAULT_COSMOS3_NANO_MODEL_NAME_FOR_TEST,
+            modality="video",
+        ),
+        DiffusionSamplingParams(
+            prompt="A tiny warehouse robot moves a blue box across a clean floor.",
+            output_size="832x480",
+            seconds=1,
+            num_frames=9,
+            extras={
+                "num_inference_steps": 4,
+                "seed": 0,
+                "max_sequence_length": 128,
+                "flow_shift": 10.0,
+                "use_guardrails": False,
+                "use_duration_template": False,
+                "use_resolution_template": False,
+            },
+        ),
+        run_perf_check=False,
+        run_consistency_check=True,
+        run_component_accuracy_check=False,
+    ),
     # TeaCache acceleration test for Wan video model
     DiffusionTestCase(
         "wan2_1_t2v_1.3b_teacache_enabled",
