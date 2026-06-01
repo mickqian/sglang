@@ -14,6 +14,7 @@ class ModelDeploymentConfig:
     auto_dit_layerwise_offload: bool = False
     # if the available memory is bigger than this value, keep dit resident instead of apply layerwise-offload
     auto_dit_layerwise_offload_high_memory_disable_gb: float | None = None
+    auto_disable_default_layerwise_offload_min_available_memory_gb: float | None = None
     auto_disable_component_offload_min_available_memory_gb: float | None = None
     # keep this explicit because large encoders can OOM even when DiT fits resident
     auto_disable_component_offload_components: tuple[OffloadComponentName, ...] = (

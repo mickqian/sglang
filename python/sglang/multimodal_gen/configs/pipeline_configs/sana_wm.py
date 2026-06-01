@@ -12,6 +12,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ModelTaskType,
     PipelineConfig,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config import (
+    ModelDeploymentConfig,
+)
 
 
 CHI_PROMPT = "\n".join(
@@ -112,6 +115,12 @@ class SanaWMRealtimeConfig(PipelineConfig):
 
     def gather_latents_for_sp(self, latents):
         return latents
+
+    def get_model_deployment_config(self) -> ModelDeploymentConfig:
+        return ModelDeploymentConfig(
+            auto_disable_default_layerwise_offload_min_available_memory_gb=70,
+            auto_disable_component_offload_min_available_memory_gb=70,
+        )
 
     def tokenize_prompt(self, prompt: list[str], tokenizer, tok_kwargs) -> dict:
         tok_kwargs = dict(tok_kwargs)

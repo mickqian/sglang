@@ -215,6 +215,23 @@ class ServerArgsAutoTuner:
         if not current_platform.is_cuda():
             return
 
+        min_available_gb = self._get_min_available_device_memory_gb()
+        disable_threshold_gb = (
+            self._deployment_config()
+            .auto_disable_default_layerwise_offload_min_available_memory_gb
+        )
+        if (
+            min_available_gb is not None
+            and disable_threshold_gb is not None
+            and min_available_gb >= disable_threshold_gb
+        ):
+            logger.info(
+                "Skipping default layerwise offload for %s because minimum available memory on selected GPUs is %.2f GiB",
+                args.pipeline_config.__class__.__name__,
+                min_available_gb,
+            )
+            return
+
         layerwise_components = self._default_layerwise_components_for_unset_placement()
         if not layerwise_components:
             return
