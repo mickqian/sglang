@@ -306,6 +306,8 @@ class RawRGBRealtimeOutputAdapter:
         content_type = result.raw_frame_content_type
         if result.raw_frame_batches is None:
             return empty_frame_send_stats(content_type)
+        if not any(result.raw_frame_batches):
+            return empty_frame_send_stats(content_type)
         if batch.block_idx == 0:
             self.reset()
 

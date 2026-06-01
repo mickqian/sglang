@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 
 SANA_WM_DEFAULT_SIZE = "1280x704"
-SANA_WM_DEFAULT_NUM_FRAMES = 961
+SANA_WM_DEFAULT_NUM_FRAMES = 3841
 SANA_WM_DEFAULT_FPS = 16
 SANA_WM_DEFAULT_STEPS = 4
 SANA_WM_DEFAULT_GUIDANCE = 1.0
@@ -207,6 +207,12 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
     def _default_max_chunks(num_frames: int) -> int:
         latent_t = (snap_num_frames(int(num_frames), stride=8) - 1) // 8 + 1
         return max(1, latent_t // 3)
+
+    @staticmethod
+    def _raw_frame_count(result: OutputBatch) -> int | None:
+        if result.raw_frame_batches is None:
+            return None
+        return sum(len(frames) for frames in result.raw_frame_batches)
 
     async def on_init(
         self,
@@ -399,7 +405,8 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
         return await self.output_adapter.send(ws, session, result, batch)
 
     def on_chunk_complete(self, session: GenerateSession, result: OutputBatch) -> None:
-        del result
+        if session.request is not None and self._raw_frame_count(result) == 0:
+            session.request.max_chunks = session.generate_chunk_cnt + 1
         session.generate_chunk_completed()
 
     def dispose(self, session: GenerateSession) -> None:
