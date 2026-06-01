@@ -52,17 +52,42 @@ const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
 const SANA_WM_DEMO_IMAGE_URL = "https://raw.githubusercontent.com/NVlabs/Sana/main/asset/sana_wm/demo_0.png";
 const SANA_WM_CLAIM_ACTION = "w-80,jw-40,w-40,lw-60,w-100";
+const SANA_WM_INTERACTIVE_NUM_FRAMES = 3841;
 const SANA_WM_DEMO_INTRINSICS = [
   797.8787,
   830.0503,
   844.2675,
   463.7225,
 ];
+const SANA_WM_DEMO_PROMPT = "A first-person view from a strictly stationary observation point across an immense dry lakebed bordered by low mountain ranges. A black sports car occupies the central foreground on the pale, compacted surface, aligned toward the open horizon beneath a vast blue sky. The environment is broad and minimal, with flat beige desert crust, faint tire-worn texture, distant rocky ridgelines, and a few thin clouds stretching across the upper sky. Bright midday sunlight creates crisp shadows under the vehicle and a clean, high-visibility atmosphere of speed, openness, and isolation. The observer's perspective remains fixed, with no dynamic camera movement and no actions taken by the person recording. Autonomous motion belongs to the world itself: dust trails sweep low across the ground, heat haze shimmers near the horizon, clouds drift slowly, and the car's tires kick up fine desert grit.";
+const SANA_WM_INTERACTIVE_PROMPT = "A first-person controllable camera view across an immense dry lakebed bordered by low mountain ranges. A black sports car occupies the central foreground on the pale, compacted surface, aligned toward the open horizon beneath a vast blue sky. The environment is broad and minimal, with flat beige desert crust, faint tire-worn texture, distant rocky ridgelines, and a few thin clouds stretching across the upper sky. Bright midday sunlight creates crisp shadows under the vehicle and a clean, high-visibility atmosphere of speed, openness, and isolation. The camera motion is smooth and physically consistent, preserving the car, desert geometry, horizon, dust trails, heat haze, and slowly drifting clouds while responding to forward, strafe, yaw, and pitch controls.";
 
 const sanaWmPresets = [
   {
-    name: "SANA-WM Demo",
+    name: "SANA-WM Interactive",
     key: "sana-wm",
+    tone: "blue",
+    model: SANA_WM_MODEL_ID,
+    size: "1280x704",
+    fps: 16,
+    numFrames: SANA_WM_INTERACTIVE_NUM_FRAMES,
+    steps: 4,
+    guidance: 1,
+    sinkSize: 1,
+    windowFrames: "",
+    prompt: SANA_WM_INTERACTIVE_PROMPT,
+    actionScript: "",
+    conditionInputs: {
+      intrinsics: SANA_WM_DEMO_INTRINSICS,
+      translation_speed: 0.055,
+      rotation_speed_deg: 1.2,
+    },
+    referenceUrl: SANA_WM_DEMO_IMAGE_URL,
+    source: "SANA-WM interactive",
+  },
+  {
+    name: "SANA-WM Claim",
+    key: "sana-wm-claim",
     tone: "blue",
     model: SANA_WM_MODEL_ID,
     size: "1280x704",
@@ -72,7 +97,7 @@ const sanaWmPresets = [
     guidance: 1,
     sinkSize: 1,
     windowFrames: "",
-    prompt: "A first-person view from a strictly stationary observation point across an immense dry lakebed bordered by low mountain ranges. A black sports car occupies the central foreground on the pale, compacted surface, aligned toward the open horizon beneath a vast blue sky. The environment is broad and minimal, with flat beige desert crust, faint tire-worn texture, distant rocky ridgelines, and a few thin clouds stretching across the upper sky. Bright midday sunlight creates crisp shadows under the vehicle and a clean, high-visibility atmosphere of speed, openness, and isolation. The observer's perspective remains fixed, with no dynamic camera movement and no actions taken by the person recording. Autonomous motion belongs to the world itself: dust trails sweep low across the ground, heat haze shimmers near the horizon, clouds drift slowly, and the car's tires kick up fine desert grit.",
+    prompt: SANA_WM_DEMO_PROMPT,
     actionScript: SANA_WM_CLAIM_ACTION,
     conditionInputs: {
       intrinsics: SANA_WM_DEMO_INTRINSICS,
@@ -80,7 +105,7 @@ const sanaWmPresets = [
       rotation_speed_deg: 1.2,
     },
     referenceUrl: SANA_WM_DEMO_IMAGE_URL,
-    source: "SANA-WM official demo",
+    source: "SANA-WM official claim",
   },
 ];
 
@@ -957,6 +982,9 @@ async function connect() {
       } else if (socketHadError && !socketCloseExpected && !normalClose) {
         setStatus("Socket closed", "error");
         addHistory(`${closeText} · transport error`);
+      } else if (event.reason === "generation complete") {
+        setStatus("Complete");
+        addHistory(closeText);
       } else {
         setStatus("Closed");
         addHistory(closeText);
