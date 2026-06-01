@@ -29,6 +29,11 @@ BUILTIN_MODEL_OVERLAY_REGISTRY: dict[str, dict[str, Any]] = {
         "overlay_repo_id": "MickJ/LTX-2.3-overlay",
         "overlay_revision": "e0cc94f279ec16bb87c230134d40319f6ce40c5e",
     },
+    "Hao-Zhe/test-anas-smoke": {
+        "overlay_repo_id": "MickJ/test-anas-smoke-overlay",
+        "overlay_revision": "main",
+        "bundled_overlay_subdir": "test_anas_smoke",
+    },
 }
 
 

@@ -37,6 +37,7 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     HeliosT2VConfig,
     HunyuanConfig,
     LingBotWorldCausalDMDConfig,
+    SanaWMRealtimeConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
     WanT2V480PConfig,
@@ -127,6 +128,7 @@ from sglang.multimodal_gen.configs.sample.qwenimage import (
     QwenImageSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.sana import SanaSamplingParams
+from sglang.multimodal_gen.configs.sample.sana_wm import SanaWMSamplingParams
 from sglang.multimodal_gen.configs.sample.stablediffusion3 import (
     StableDiffusion3SamplingParams,
 )
@@ -763,6 +765,18 @@ def _register_configs():
         hf_model_paths=[
             "IPostYellow/lingbot-world-fast-diffusers",
             "robbyant/lingbot-world-fast-diffusers",
+        ],
+    )
+    register_configs(
+        sampling_param_cls=SanaWMSamplingParams,
+        pipeline_config_cls=SanaWMRealtimeConfig,
+        hf_model_paths=[
+            "Hao-Zhe/test-anas-smoke",
+        ],
+        model_detectors=[
+            lambda hf_id: "sana-wm" in hf_id.lower()
+            or "sanawm" in hf_id.lower()
+            or "test-anas-smoke" in hf_id.lower()
         ],
     )
     register_configs(
