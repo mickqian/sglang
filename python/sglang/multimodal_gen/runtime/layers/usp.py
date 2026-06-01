@@ -101,6 +101,63 @@ def _usp_input_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     return x
 
 
+def _usp_input_all_to_all_packed_qkv(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, head_dim: int = 2
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ulysses input all-to-all for GQA Q/K/V with different head counts."""
+    world_size = get_ulysses_parallel_world_size()
+    if world_size <= 1:
+        return q, k, v
+
+    assert q.ndim == 4 and k.ndim == 4 and v.ndim == 4
+    assert head_dim == 2
+    b, s_local, h_q, d = q.shape
+    assert k.shape[:2] == (b, s_local) and v.shape[:2] == (b, s_local)
+    assert k.shape[3] == d and v.shape[3] == d
+    h_k, h_v = k.shape[2], v.shape[2]
+    assert h_q % world_size == 0
+    assert h_k % world_size == 0
+    assert h_v % world_size == 0
+
+    h_q_local = h_q // world_size
+    h_k_local = h_k // world_size
+    h_v_local = h_v // world_size
+    s_global = s_local * world_size
+
+    def split_heads(x: torch.Tensor, h_local: int) -> torch.Tensor:
+        return (
+            x.permute(2, 0, 1, 3)
+            .contiguous()
+            .reshape(world_size, h_local, b, s_local, d)
+        )
+
+    # chunk dim 0 is the destination rank. Interleaving Q/K/V chunks keeps the
+    # output byte layout equivalent to three independent input all-to-alls.
+    packed = torch.cat(
+        [
+            split_heads(q, h_q_local),
+            split_heads(k, h_k_local),
+            split_heads(v, h_v_local),
+        ],
+        dim=1,
+    )
+    packed = _usp_all_to_all_single(packed)
+    q, k, v = packed.split([h_q_local, h_k_local, h_v_local], dim=1)
+
+    def merge_sequence(x: torch.Tensor, h_local: int) -> torch.Tensor:
+        return (
+            x.permute(2, 0, 3, 1, 4)
+            .contiguous()
+            .reshape(b, s_global, h_local, d)
+        )
+
+    return (
+        merge_sequence(q, h_q_local),
+        merge_sequence(k, h_k_local),
+        merge_sequence(v, h_v_local),
+    )
+
+
 def _usp_output_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     """
     Perform Ulysses-style output all-to-all over the head dimension (inverse of input).
