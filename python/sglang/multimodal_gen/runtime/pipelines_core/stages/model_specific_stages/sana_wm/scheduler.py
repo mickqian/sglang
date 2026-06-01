@@ -152,8 +152,12 @@ def _inject_sliced_extras(extra: dict[str, object], kwargs: dict[str, object], n
         if key in kwargs:
             continue
         if isinstance(value, torch.Tensor):
-            if value.ndim == 5 and value.shape[2] > num_chunk_frames:
-                kwargs[key] = value[:, :, begin_f:end_f]
+            if value.ndim == 5:
+                kwargs[key] = (
+                    value[:, :, begin_f:end_f]
+                    if value.shape[2] > num_chunk_frames
+                    else value
+                )
             elif value.ndim >= 3 and value.shape[1] > num_chunk_frames:
                 kwargs[key] = value[:, begin_f:end_f]
             else:
