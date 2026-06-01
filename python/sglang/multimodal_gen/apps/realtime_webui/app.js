@@ -64,7 +64,7 @@ const sanaWmPresets = [
     model: SANA_WM_MODEL_ID,
     size: "1280x704",
     fps: 16,
-    numFrames: 321,
+    numFrames: 961,
     steps: 4,
     guidance: 1,
     sinkSize: 1,

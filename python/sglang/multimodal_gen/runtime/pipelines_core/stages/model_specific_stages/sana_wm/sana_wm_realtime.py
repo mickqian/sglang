@@ -197,6 +197,7 @@ class SanaWMStreamingState(BaseRealtimeState):
         self.crop_offset: tuple[int, int] | None = None
         self.intrinsics_raw: np.ndarray | None = None
         self.camera_actions: list[list[str]] = []
+        self.max_camera_actions = 0
         self.static_c2w: np.ndarray | None = None
         self.latents: torch.Tensor | None = None
         self.latents_full: torch.Tensor | None = None
@@ -359,6 +360,11 @@ class SanaWMRealtimeStage(PipelineStage):
         )
         if actions:
             state.camera_actions.extend(actions)
+            if (
+                state.max_camera_actions > 0
+                and len(state.camera_actions) > state.max_camera_actions
+            ):
+                del state.camera_actions[state.max_camera_actions :]
 
     def _camera_from_state(
         self,
@@ -533,7 +539,6 @@ class SanaWMRealtimeStage(PipelineStage):
         weight_dtype: torch.dtype,
         vae_dtype: torch.dtype,
     ) -> None:
-        self._append_realtime_camera_actions(batch, state)
         image, intrinsics_image, src_size, resized_size, crop_offset = self._prepare_image(batch)
         state.image = image
         state.intrinsics_image = intrinsics_image
@@ -544,6 +549,8 @@ class SanaWMRealtimeStage(PipelineStage):
 
         num_frames = snap_num_frames(int(batch.num_frames), stride=8)
         batch.num_frames = num_frames
+        state.max_camera_actions = max(0, num_frames - 1)
+        self._append_realtime_camera_actions(batch, state)
         first_latent = self._encode_first_frame(
             image,
             device=device,
