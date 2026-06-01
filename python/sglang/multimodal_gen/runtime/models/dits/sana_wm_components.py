@@ -1608,8 +1608,16 @@ class WanRotaryPosEmbed(nn.Module):
             t_dim = attention_head_dim - h_dim - w_dim
         else:
             t_dim, h_dim, w_dim = fhw_dim
+        self.freq_dims = (t_dim, h_dim, w_dim)
+        self.theta = theta
+        self.materialize_freqs()
+
+    def materialize_freqs(self) -> None:
         self.freqs = torch.cat(
-            [get_1d_rotary_pos_embed(dim, max_seq_len, theta) for dim in (t_dim, h_dim, w_dim)],
+            [
+                get_1d_rotary_pos_embed(dim, self.max_seq_len, self.theta)
+                for dim in self.freq_dims
+            ],
             dim=1,
         )
 
