@@ -361,52 +361,30 @@ class RawRGBRealtimeOutputAdapter:
             )
             num_frame_batches = len(split_batches)
             transport_payloads: list[_TransportPayload | None] = [None] * num_frame_batches
-            remaining_payloads_task = None
-            remaining_payloads_timer = None
             if encoded_preview and split_batches:
                 build_timer = RealtimeStageTimer()
-                transport_payloads[0] = await asyncio.to_thread(
-                    _build_transport_payload,
-                    split_batches[0],
-                    content_type=content_type,
-                    metadata=metadata,
-                    output_format=output_format,
-                    output_quality=output_quality,
-                    reference_frame=None,
-                    event_id=event_id,
+                transport_payloads = await asyncio.gather(
+                    *(
+                        asyncio.to_thread(
+                            _build_transport_payload,
+                            transport_frames,
+                            content_type=content_type,
+                            metadata=metadata,
+                            output_format=output_format,
+                            output_quality=output_quality,
+                            reference_frame=None,
+                            event_id=event_id,
+                        )
+                        for transport_frames in split_batches
+                    )
                 )
                 stats["raw_payload_build_ms"] += build_timer.mark_ms()
-                if len(split_batches) > 1:
-                    remaining_payloads_timer = RealtimeStageTimer()
-                    remaining_payloads_task = asyncio.gather(
-                        *(
-                            asyncio.to_thread(
-                                _build_transport_payload,
-                                transport_frames,
-                                content_type=content_type,
-                                metadata=metadata,
-                                output_format=output_format,
-                                output_quality=output_quality,
-                                reference_frame=None,
-                                event_id=event_id,
-                            )
-                            for transport_frames in split_batches[1:]
-                        )
-                    )
             for frame_batch_index, transport_frames in enumerate(split_batches):
                 timer = RealtimeStageTimer()
                 transport_metadata = metadata
                 reference_frame = self._last_raw_rgb_frame
                 if event_id != self._last_event_id:
                     reference_frame = None
-                if frame_batch_index == 1 and remaining_payloads_task is not None:
-                    remaining_payloads = await remaining_payloads_task
-                    transport_payloads[1:] = remaining_payloads
-                    remaining_payloads_task = None
-                    if remaining_payloads_timer is not None:
-                        stats["raw_payload_build_ms"] += (
-                            remaining_payloads_timer.mark_ms()
-                        )
                 transport_payload = transport_payloads[frame_batch_index]
                 if transport_payload is None:
                     if _should_build_payload_off_loop(
