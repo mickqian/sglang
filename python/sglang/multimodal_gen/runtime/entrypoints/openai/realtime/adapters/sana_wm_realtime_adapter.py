@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket
@@ -26,11 +27,10 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     save_image_to_path,
 )
 from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
-from sglang.multimodal_gen.runtime.pipelines_core.condition_events import (
-    ConditionEvent,
-    ConditionEventQueue,
-    ConditionSamplingParams,
+from sglang.multimodal_gen.runtime.realtime.condition_events import (
     ControlSignal,
+    ControlStateSamplingQueue,
+    ControlStateTransition,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.sana_wm.utils import (
     parse_action_string,
@@ -50,42 +50,131 @@ if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
+SANA_WM_DEFAULT_SIZE = "1280x704"
+SANA_WM_DEFAULT_NUM_FRAMES = 961
+SANA_WM_DEFAULT_FPS = 16
+SANA_WM_DEFAULT_STEPS = 4
+SANA_WM_DEFAULT_GUIDANCE = 1.0
+SANA_WM_DEFAULT_INTRINSICS = [900.0, 900.0, 640.0, 352.0]
+
+
 class SanaWMRealtimeAdapterState:
     def __init__(self):
-        self.events = ConditionEventQueue(max_events={"camera_actions": 1024})
+        self.camera_state = ControlStateSamplingQueue(
+            default_item=[],
+            min_pulse_items=1,
+            max_transitions=512,
+        )
+        self.camera_script_queue: deque[ControlSignal] = deque(maxlen=2048)
         self.base_condition_inputs: dict[str, Any] = {}
-        self.latest_event_id: int | None = None
+        self.latest_sampled_event_id: int | None = None
 
     def clear(self) -> None:
-        self.events.clear()
+        self.camera_state.clear()
+        self.camera_script_queue.clear()
         self.base_condition_inputs.clear()
-        self.latest_event_id = None
+        self.latest_sampled_event_id = None
 
-    def receive_camera_actions(
+    def receive_camera_script(
         self,
         camera_actions: list[list[str]],
         *,
-        replace_pending: bool = False,
         event_id: int | None = None,
     ) -> None:
-        signals = [
-            ControlSignal(kind="camera_actions", payload=list(actions))
-            for actions in camera_actions
-        ]
-        event = ConditionEvent(kind="camera_actions", payload=signals)
-        if replace_pending:
-            self.events.replace(event)
-        else:
-            self.events.push(event)
-        self.latest_event_id = event_id
+        self.camera_state.clear()
+        self.camera_script_queue.clear()
+        for actions in camera_actions:
+            self.camera_script_queue.append(
+                ControlSignal(
+                    kind="camera_actions",
+                    payload=list(actions),
+                    seq_id=event_id,
+                )
+            )
+
+    def receive_camera_state_transitions(
+        self,
+        transitions: list[ControlStateTransition],
+    ) -> None:
+        self.camera_script_queue.clear()
+        self.camera_state.push_many(transitions)
+
+    def _camera_state_transition(
+        self,
+        actions: list[str],
+        *,
+        event_id: int | None,
+        timestamp_ms: int | None,
+    ) -> ControlStateTransition:
+        return ControlStateTransition(
+            payload=list(actions),
+            seq_id=event_id,
+            timestamp_ms=timestamp_ms,
+        )
+
+    def _camera_transitions_from_event_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_id: int | None,
+    ) -> list[ControlStateTransition]:
+        transitions = payload.get("transitions")
+        if not isinstance(transitions, list):
+            raise ValueError("camera_actions state payload requires transitions")
+        result = []
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                raise ValueError("camera_actions transition must be a map")
+            actions = transition.get("actions")
+            if not isinstance(actions, list):
+                raise ValueError("camera_actions transition actions must be a list")
+            timestamp_ms = transition.get("client_ts_ms")
+            if timestamp_ms is not None:
+                timestamp_ms = int(timestamp_ms)
+            result.append(
+                self._camera_state_transition(
+                    [str(action).lower() for action in actions],
+                    event_id=event_id,
+                    timestamp_ms=timestamp_ms,
+                )
+            )
+        return result
+
+    def receive_camera_event_payload(
+        self,
+        payload: Any,
+        *,
+        event_id: int | None,
+    ) -> str:
+        if isinstance(payload, dict) and payload.get("mode") == "state":
+            transitions = self._camera_transitions_from_event_payload(
+                payload,
+                event_id=event_id,
+            )
+            self.receive_camera_state_transitions(transitions)
+            return f"kind=camera_actions, mode=state, transitions={len(transitions)}"
+
+        camera_actions = SanaWMRealtimeAdapter._validate_camera_actions(payload)
+        self.receive_camera_script(camera_actions, event_id=event_id)
+        return f"kind=camera_actions, mode=script, frames={len(camera_actions)}"
 
     def sample_camera_actions(self, chunk_size: int) -> list[list[str]] | None:
-        action_list = self.events.sample_chunk(
-            "camera_actions",
-            ConditionSamplingParams(chunk_size=chunk_size, default_item=[]),
-        )
+        if self.camera_script_queue:
+            chunk: list[list[str]] = []
+            latest_event_id = self.latest_sampled_event_id
+            while self.camera_script_queue and len(chunk) < chunk_size:
+                signal = self.camera_script_queue.popleft()
+                chunk.append(list(signal.payload))
+                latest_event_id = signal.seq_id
+            while len(chunk) < chunk_size:
+                chunk.append([])
+            self.latest_sampled_event_id = latest_event_id
+            return chunk
+
+        action_list = self.camera_state.sample_chunk(chunk_size)
         if action_list is None:
             return None
+        self.latest_sampled_event_id = self.camera_state.latest_sampled_seq_id()
         return [list(actions) for actions in action_list]
 
 
@@ -129,23 +218,33 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
         if request.first_frame is None:
             raise ValueError("SANA-WM realtime requires first_frame")
 
-        request.size = "1280x704"
-        request.num_frames = int(request.num_frames or 961)
-        request.fps = int(request.fps or 16)
-        request.num_inference_steps = int(request.num_inference_steps or 4)
-        request.guidance_scale = float(request.guidance_scale or 1.0)
+        request.size = SANA_WM_DEFAULT_SIZE
+        request.num_frames = int(request.num_frames or SANA_WM_DEFAULT_NUM_FRAMES)
+        request.fps = int(request.fps or SANA_WM_DEFAULT_FPS)
+        request.num_inference_steps = int(
+            request.num_inference_steps or SANA_WM_DEFAULT_STEPS
+        )
+        request.guidance_scale = float(
+            request.guidance_scale or SANA_WM_DEFAULT_GUIDANCE
+        )
         if request.negative_prompt is None:
             request.negative_prompt = ""
         if request.generator_device is None:
             request.generator_device = "cuda"
-        if request.max_chunks is None:
-            request.max_chunks = self._default_max_chunks(request.num_frames)
+        min_chunks = self._default_max_chunks(request.num_frames)
+        if request.max_chunks is None or request.max_chunks < min_chunks:
+            request.max_chunks = min_chunks
 
         state = self._state(session)
         condition_inputs = dict(request.condition_inputs or {})
+        if (
+            condition_inputs.get("intrinsics") is None
+            and condition_inputs.get("intrinsics_path") is None
+        ):
+            condition_inputs["intrinsics"] = list(SANA_WM_DEFAULT_INTRINSICS)
         camera_actions = condition_inputs.pop("camera_actions", None)
         if camera_actions is not None:
-            state.receive_camera_actions(self._validate_camera_actions(camera_actions))
+            state.receive_camera_event_payload(camera_actions, event_id=None)
         state.base_condition_inputs = condition_inputs
 
         server_args = get_global_server_args()
@@ -171,22 +270,15 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
     ) -> str:
         state = self._state(session)
         if event.kind == "camera_actions":
-            camera_actions = self._validate_camera_actions(event.payload)
-            state.receive_camera_actions(
-                camera_actions,
-                replace_pending=True,
+            return state.receive_camera_event_payload(
+                event.payload,
                 event_id=event.event_id,
             )
-            return f"kind=camera_actions, frames={len(camera_actions)}"
         if event.kind == "action":
             if not isinstance(event.payload, str) or not event.payload:
                 raise ValueError("action event payload must be a non-empty string")
             camera_actions = parse_action_string(event.payload)
-            state.receive_camera_actions(
-                camera_actions,
-                replace_pending=True,
-                event_id=event.event_id,
-            )
+            state.receive_camera_script(camera_actions, event_id=event.event_id)
             return f"kind=action, frames={len(camera_actions)}"
         raise ValueError(f"unsupported event kind: {event.kind}")
 
@@ -194,7 +286,7 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
         self,
         session: GenerateSession,
         chunk: RealtimeChunkContext,
-        chunk_size: int,
+        action_chunk_size: int,
     ) -> RealtimeChunkInputs:
         state = self._state(session)
         request = session.request
@@ -202,7 +294,7 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
             raise ValueError("realtime request is not initialized")
 
         condition_inputs = dict(state.base_condition_inputs) if chunk.index == 0 else {}
-        camera_actions = state.sample_camera_actions(chunk_size)
+        camera_actions = state.sample_camera_actions(action_chunk_size)
         if camera_actions is not None:
             condition_inputs["camera_actions"] = camera_actions
         return RealtimeChunkInputs(
@@ -264,7 +356,11 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
     ) -> Req:
         arch_config = server_args.pipeline_config.dit_config.arch_config
         chunk_size = int(getattr(arch_config, "num_frames_per_block", 3))
-        chunk_inputs = self._sample_chunk_inputs(session, chunk, chunk_size)
+        temporal_compression = int(
+            server_args.pipeline_config.vae_config.arch_config.temporal_compression_ratio
+        )
+        action_chunk_size = chunk_size * temporal_compression
+        chunk_inputs = self._sample_chunk_inputs(session, chunk, action_chunk_size)
         sampling_params = self._build_sampling_params(
             session,
             chunk,
@@ -279,7 +375,7 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
         batch.realtime_session_id = session.id
         batch.return_raw_frames = True
         batch.block_idx = chunk.index
-        batch.realtime_event_id = self._state(session).latest_event_id
+        batch.realtime_event_id = self._state(session).latest_sampled_event_id
         if session.request is not None:
             batch.realtime_output_format = session.request.realtime_output_format
         return batch

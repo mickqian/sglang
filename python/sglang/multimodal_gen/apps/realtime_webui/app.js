@@ -46,6 +46,23 @@ const CONTROL_ACTION_META = {
 };
 
 const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
+const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
+
+const sanaWmPresets = [
+  {
+    name: "SANA-WM Smoke",
+    tone: "blue",
+    model: SANA_WM_MODEL_ID,
+    size: "1280x704",
+    fps: 16,
+    numFrames: 25,
+    sinkSize: 1,
+    windowFrames: "",
+    prompt: "A controlled first-person camera move through a quiet mountain lake scene, stable geometry, realistic parallax, natural daylight, consistent reflections.",
+    referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg",
+    source: "SANA-WM smoke preset",
+  },
+];
 
 const reactorPresets = [
   {
@@ -182,6 +199,7 @@ const examplePresets = [
 const presets = [
   ...reactorPresets,
   ...examplePresets,
+  ...sanaWmPresets,
 ];
 
 let ws = null;
@@ -1093,9 +1111,13 @@ async function applyPreset(preset, options = {}) {
   const sendRuntimeEvents = options.sendRuntimeEvents
     ?? Boolean(ws && ws.readyState === WebSocket.OPEN);
   selectedPreset = preset;
+  if (preset.model) $("model").value = preset.model;
   $("prompt").value = preset.prompt;
   $("size").value = preset.size;
   $("fps").value = preset.fps;
+  if (preset.numFrames) $("numFrames").value = preset.numFrames;
+  if (preset.sinkSize !== undefined) $("sinkSize").value = preset.sinkSize;
+  if (preset.windowFrames !== undefined) $("windowFrames").value = preset.windowFrames;
   await setPresetReference(preset);
   if (sendRuntimeEvents) {
     sendEvent("prompt", preset.prompt, `prompt update · ${preset.name}`);
@@ -1198,6 +1220,8 @@ function applyQueryParams() {
   const params = new URLSearchParams(window.location.search);
   const server = params.get("server");
   if (server) $("serverUrl").value = server;
+  const model = params.get("model");
+  if (model) $("model").value = model;
   $("transportFormat").value = params.get("transport") || DEFAULT_PREVIEW_OUTPUT_FORMAT;
   $("transportQuality").value = params.get("quality") || String(DEFAULT_PREVIEW_OUTPUT_QUALITY);
 }
@@ -1289,10 +1313,11 @@ function unpack(buf) {
   return read();
 }
 
-applyQueryParams();
 renderPresets();
 drawIdle();
-applyPreset(presets[0], { sendRuntimeEvents: false }).catch(showError);
+applyPreset(presets[0], { sendRuntimeEvents: false })
+  .then(applyQueryParams)
+  .catch(showError);
 requestAnimationFrame(renderLoop);
 $("connectBtn").onclick = connect;
 $("stopBtn").onclick = () => closeSession();
