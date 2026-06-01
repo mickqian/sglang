@@ -712,7 +712,6 @@ class SanaWMRealtimeStage(PipelineStage):
 
         self._advance_stage1(state)
 
-        refined_before_tick = state.next_ref_idx
         if (
             state.next_ref_idx < state.n_blocks
             and state.tick >= state.next_ref_idx + 1
@@ -742,10 +741,7 @@ class SanaWMRealtimeStage(PipelineStage):
                 )
 
         frames = None
-        if (
-            state.next_dec_idx < refined_before_tick
-            and state.tick >= state.next_dec_idx + 2
-        ):
+        if state.next_dec_idx < state.next_ref_idx:
             block_start = state.sink_size + state.next_dec_idx * state.refiner_block_size
             block_end = min(block_start + state.refiner_block_size, state.latent_t)
             z_slice = (
