@@ -36,6 +36,8 @@ class DiffusersLTX2Refiner(nn.Module):
         self.device = torch.device(device)
         self.text_max_sequence_length = int(text_max_sequence_length)
         self.transformer, self.connectors = self._load_diffusers_components()
+        self._prompt_cache_key: str | None = None
+        self._prompt_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def _load_diffusers_components(self) -> tuple[nn.Module, nn.Module]:
         from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
@@ -120,13 +122,17 @@ class DiffusersLTX2Refiner(nn.Module):
     def _encode_prompt(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
         from transformers import AutoTokenizer, Gemma3ForConditionalGeneration
 
+        prompt = prompt.strip()
+        if self._prompt_cache_key == prompt and self._prompt_cache is not None:
+            return self._prompt_cache
+
         tokenizer = AutoTokenizer.from_pretrained(self.gemma_root)
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         text_inputs = tokenizer(
-            [prompt.strip()],
+            [prompt],
             padding="max_length",
             max_length=self.text_max_sequence_length,
             truncation=True,
@@ -161,7 +167,12 @@ class DiffusersLTX2Refiner(nn.Module):
         self.connectors.to("cpu")
         del prompt_embeds, attention_mask
         _empty_cuda_cache()
-        return connector_embeds.to(device=self.device, dtype=self.dtype), connector_mask.to(device=self.device)
+        self._prompt_cache_key = prompt
+        self._prompt_cache = (
+            connector_embeds.to(device=self.device, dtype=self.dtype),
+            connector_mask.to(device=self.device),
+        )
+        return self._prompt_cache
 
     def _predict_current_x0(
         self,

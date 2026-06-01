@@ -249,6 +249,7 @@ class SanaWMRealtimeStage(PipelineStage):
         self.transformer = transformer
         self.vae = vae
         self.model_path = model_path
+        self.refiner: DiffusersLTX2Refiner | None = None
 
     @property
     def role_affinity(self):
@@ -495,6 +496,33 @@ class SanaWMRealtimeStage(PipelineStage):
             return refiner_root, gemma_root
         return None
 
+    def _get_refiner(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> DiffusersLTX2Refiner:
+        refiner_paths = self._refiner_paths()
+        if refiner_paths is None:
+            raise RuntimeError(
+                "SANA-WM realtime requires refiner_diffusers and gemma3_12b"
+            )
+        if (
+            self.refiner is not None
+            and self.refiner.device == device
+            and self.refiner.dtype == dtype
+        ):
+            return self.refiner
+
+        refiner_root, gemma_root = refiner_paths
+        self.refiner = DiffusersLTX2Refiner(
+            refiner_root,
+            gemma_root,
+            dtype=dtype,
+            device=device,
+        )
+        return self.refiner
+
     def _initialize_state(
         self,
         batch: Req,
@@ -612,19 +640,11 @@ class SanaWMRealtimeStage(PipelineStage):
         state.refined_full = torch.empty_like(latents)
         state.refined_full[:, :, : state.sink_size] = latents[:, :, : state.sink_size]
 
-        refiner_paths = self._refiner_paths()
-        if refiner_paths is None:
-            raise RuntimeError(
-                "SANA-WM realtime requires refiner_diffusers and gemma3_12b"
-            )
-        refiner_root, gemma_root = refiner_paths
-        state.refiner = DiffusersLTX2Refiner(
-            refiner_root,
-            gemma_root,
+        refiner = self._get_refiner(
             dtype=weight_dtype,
             device=device,
         )
-        state.refiner_runner = state.refiner.build_chunk_runner(
+        state.refiner_runner = refiner.build_chunk_runner(
             state.prompt,
             fps=float(batch.fps),
             source_sink_frames=state.sink_size,
