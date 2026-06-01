@@ -227,8 +227,13 @@ class DiffusersLTX2Refiner(nn.Module):
         spatial_shape: tuple[int, int],
         sigmas: tuple[float, ...] = STAGE_2_DISTILLED_SIGMA_VALUES,
     ) -> "RefinerChunkRunner":
-        self.transformer.to("cpu")
-        _empty_cuda_cache()
+        prompt_cache_hit = (
+            self._prompt_cache_key == prompt.strip()
+            and self._prompt_cache is not None
+        )
+        if not prompt_cache_hit:
+            self.transformer.to("cpu")
+            _empty_cuda_cache()
         prompt_embeds, prompt_attention_mask = self._encode_prompt(prompt)
         self.transformer.to(self.device)
         return RefinerChunkRunner(
