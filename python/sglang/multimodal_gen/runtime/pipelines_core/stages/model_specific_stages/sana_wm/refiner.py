@@ -480,7 +480,8 @@ def streaming_self_attention(
     from diffusers.models.attention_dispatch import dispatch_attention_fn
     from diffusers.models.transformers.transformer_ltx2 import apply_interleaved_rotary_emb, apply_split_rotary_emb
 
-    gate_logits = attn.to_gate_logits(hidden_states) if attn.to_gate_logits is not None else None
+    to_gate_logits = getattr(attn, "to_gate_logits", None)
+    gate_logits = to_gate_logits(hidden_states) if to_gate_logits is not None else None
     query = attn.to_q(hidden_states)
     key = attn.to_k(hidden_states)
     value = attn.to_v(hidden_states)
