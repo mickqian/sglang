@@ -54,7 +54,6 @@ SANA_WM_DEFAULT_NUM_FRAMES = 961
 SANA_WM_DEFAULT_FPS = 16
 SANA_WM_DEFAULT_STEPS = 4
 SANA_WM_DEFAULT_GUIDANCE = 1.0
-SANA_WM_DEFAULT_INTRINSICS = [900.0, 900.0, 640.0, 352.0]
 
 
 class SanaWMRealtimeAdapterState:
@@ -234,14 +233,16 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
 
         state = self._state(session)
         condition_inputs = dict(request.condition_inputs or {})
-        if (
-            condition_inputs.get("intrinsics") is None
-            and condition_inputs.get("intrinsics_path") is None
-        ):
-            condition_inputs["intrinsics"] = list(SANA_WM_DEFAULT_INTRINSICS)
         camera_actions = condition_inputs.pop("camera_actions", None)
+        action = condition_inputs.pop("action", None)
+        if camera_actions is not None and action is not None:
+            raise ValueError("pass only one of camera_actions or action")
         if camera_actions is not None:
             state.receive_camera_event_payload(camera_actions, event_id=None)
+        if action is not None:
+            if not isinstance(action, str) or not action:
+                raise ValueError("action condition input must be a non-empty string")
+            state.receive_camera_script(parse_action_string(action), event_id=None)
         state.base_condition_inputs = condition_inputs
 
         server_args = get_global_server_args()

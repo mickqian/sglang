@@ -32,43 +32,55 @@ const CONTROL_ACTION_META = {
     label: "Forward",
     type: "translation",
     axis: "+forward",
-    amount: "0.05/frame",
+    amount: "0.055/frame",
   },
-  a: { label: "Left", type: "translation", axis: "-right", amount: "0.05/frame" },
+  a: { label: "Left", type: "translation", axis: "-right", amount: "0.055/frame" },
   s: {
     label: "Back",
     type: "translation",
     axis: "-forward",
-    amount: "0.05/frame",
+    amount: "0.055/frame",
   },
-  d: { label: "Right", type: "translation", axis: "+right", amount: "0.05/frame" },
-  i: { label: "Pitch +", type: "rotation", axis: "+pitch", amount: "4deg/frame" },
-  j: { label: "Yaw -", type: "rotation", axis: "-yaw", amount: "6deg/frame" },
-  k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "4deg/frame" },
-  l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
+  d: { label: "Right", type: "translation", axis: "+right", amount: "0.055/frame" },
+  i: { label: "Pitch +", type: "rotation", axis: "+pitch", amount: "1.2deg/frame" },
+  j: { label: "Yaw -", type: "rotation", axis: "-yaw", amount: "1.2deg/frame" },
+  k: { label: "Pitch -", type: "rotation", axis: "-pitch", amount: "1.2deg/frame" },
+  l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "1.2deg/frame" },
 };
 
 const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
+const SANA_WM_DEMO_IMAGE_URL = "https://raw.githubusercontent.com/NVlabs/Sana/main/asset/sana_wm/demo_0.png";
 const SANA_WM_CLAIM_ACTION = "w-80,jw-40,w-40,lw-60,w-100";
+const SANA_WM_DEMO_INTRINSICS = [
+  797.8787,
+  830.0503,
+  844.2675,
+  463.7225,
+];
 
 const sanaWmPresets = [
   {
-    name: "SANA-WM Smoke",
+    name: "SANA-WM Demo",
     key: "sana-wm",
     tone: "blue",
     model: SANA_WM_MODEL_ID,
     size: "1280x704",
     fps: 16,
-    numFrames: 961,
+    numFrames: 321,
     steps: 4,
     guidance: 1,
     sinkSize: 1,
     windowFrames: "",
-    prompt: "A controlled first-person camera move through a quiet mountain lake scene, stable geometry, realistic parallax, natural daylight, consistent reflections.",
+    prompt: "A first-person view from a strictly stationary observation point across an immense dry lakebed bordered by low mountain ranges. A black sports car occupies the central foreground on the pale, compacted surface, aligned toward the open horizon beneath a vast blue sky. The environment is broad and minimal, with flat beige desert crust, faint tire-worn texture, distant rocky ridgelines, and a few thin clouds stretching across the upper sky. Bright midday sunlight creates crisp shadows under the vehicle and a clean, high-visibility atmosphere of speed, openness, and isolation. The observer's perspective remains fixed, with no dynamic camera movement and no actions taken by the person recording. Autonomous motion belongs to the world itself: dust trails sweep low across the ground, heat haze shimmers near the horizon, clouds drift slowly, and the car's tires kick up fine desert grit.",
     actionScript: SANA_WM_CLAIM_ACTION,
-    referenceUrl: "https://raw.githubusercontent.com/robbyant/lingbot-world/main/examples/03/image.jpg",
-    source: "SANA-WM smoke preset",
+    conditionInputs: {
+      intrinsics: SANA_WM_DEMO_INTRINSICS,
+      translation_speed: 0.055,
+      rotation_speed_deg: 1.2,
+    },
+    referenceUrl: SANA_WM_DEMO_IMAGE_URL,
+    source: "SANA-WM official demo",
   },
 ];
 
@@ -848,6 +860,19 @@ function waitForSocketClose(socket, timeoutMs = RECONNECT_CLOSE_TIMEOUT_MS) {
   });
 }
 
+function isSanaWmSession() {
+  const model = $("model").value.toLowerCase();
+  return model.includes("test-anas-smoke") || model.includes("sana-wm");
+}
+
+function buildConditionInputs() {
+  if (!isSanaWmSession()) return undefined;
+  const conditionInputs = { ...(selectedPreset?.conditionInputs || {}) };
+  const actionScript = $("actionScript").value.trim();
+  if (actionScript) conditionInputs.action = actionScript;
+  return Object.keys(conditionInputs).length ? conditionInputs : undefined;
+}
+
 async function connect() {
   $("connectBtn").disabled = true;
   setStatus("Preparing");
@@ -888,6 +913,7 @@ async function connect() {
       realtime_causal_kv_cache_num_frames: readOptionalInteger("windowFrames"),
       max_chunks: $("continuous").checked ? undefined : 1,
       first_frame: firstFrame,
+      condition_inputs: buildConditionInputs(),
       ...previewTransportParams,
       ...frameInterpolationParams,
     });
