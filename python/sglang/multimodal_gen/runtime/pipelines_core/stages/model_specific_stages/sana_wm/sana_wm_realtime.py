@@ -251,6 +251,7 @@ class SanaWMRealtimeStage(PipelineStage):
         self.vae = vae
         self.model_path = model_path
         self.refiner: DiffusersLTX2Refiner | None = None
+        self.first_frame_latent_cache = None
 
     @property
     def role_affinity(self):
@@ -453,6 +454,60 @@ class SanaWMRealtimeStage(PipelineStage):
         z = (z - mean) * scaling_factor / std
         return z.to(device=device, dtype=latent_dtype)
 
+    def _first_frame_cache_key(
+        self,
+        batch: Req,
+        *,
+        device: torch.device,
+        vae_dtype: torch.dtype,
+        latent_dtype: torch.dtype,
+    ) -> tuple | None:
+        if batch.image_path is None or not isinstance(batch.image_path, str):
+            return None
+        stat = os.stat(batch.image_path)
+        return (
+            batch.image_path,
+            stat.st_mtime_ns,
+            stat.st_size,
+            device.type,
+            device.index,
+            vae_dtype,
+            latent_dtype,
+        )
+
+    @torch.inference_mode()
+    def _get_first_frame_latent(
+        self,
+        batch: Req,
+        image: Image.Image,
+        *,
+        device: torch.device,
+        vae_dtype: torch.dtype,
+        latent_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        cache_key = self._first_frame_cache_key(
+            batch,
+            device=device,
+            vae_dtype=vae_dtype,
+            latent_dtype=latent_dtype,
+        )
+        if (
+            cache_key is not None
+            and self.first_frame_latent_cache is not None
+            and self.first_frame_latent_cache[0] == cache_key
+        ):
+            return self.first_frame_latent_cache[1]
+
+        first_latent = self._encode_first_frame(
+            image,
+            device=device,
+            vae_dtype=vae_dtype,
+            latent_dtype=latent_dtype,
+        )
+        if cache_key is not None:
+            self.first_frame_latent_cache = (cache_key, first_latent.detach())
+        return first_latent
+
     def _ensure_streaming_decoder(self, state: SanaWMStreamingState) -> None:
         if not hasattr(self.vae, "decode_per_frame_with_cache") or not hasattr(
             self.vae, "clear_decoder_cache"
@@ -551,7 +606,8 @@ class SanaWMRealtimeStage(PipelineStage):
         batch.num_frames = num_frames
         state.max_camera_actions = max(0, num_frames - 1)
         self._append_realtime_camera_actions(batch, state)
-        first_latent = self._encode_first_frame(
+        first_latent = self._get_first_frame_latent(
+            batch,
             image,
             device=device,
             vae_dtype=vae_dtype,
