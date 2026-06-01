@@ -219,6 +219,8 @@ class SanaWMStreamingState(BaseRealtimeState):
         self.decoder_first_chunk = True
         self.reset_decoder_cache = None
         self.latent_t = 0
+        self.translation_speed = 0.04
+        self.rotation_speed_deg = 1.2
 
     def dispose(self):
         reset_decoder_cache = self.reset_decoder_cache
@@ -392,13 +394,16 @@ class SanaWMRealtimeStage(PipelineStage):
             raise ValueError("SANA-WM crop metadata is not initialized")
 
         num_frames = int(batch.num_frames)
-        translation_speed = _motion_param(batch, "translation_speed", 0.04)
-        rotation_speed_deg = _motion_param(batch, "rotation_speed_deg", 1.2)
+        condition_inputs = batch.condition_inputs or {}
+        if "translation_speed" in condition_inputs:
+            state.translation_speed = float(condition_inputs["translation_speed"])
+        if "rotation_speed_deg" in condition_inputs:
+            state.rotation_speed_deg = float(condition_inputs["rotation_speed_deg"])
         c2w = self._camera_from_state(
             state,
             num_frames=num_frames,
-            translation_speed=translation_speed,
-            rotation_speed_deg=rotation_speed_deg,
+            translation_speed=state.translation_speed,
+            rotation_speed_deg=state.rotation_speed_deg,
         )
         intrinsics_raw = self._prepare_intrinsics(
             batch,
@@ -554,13 +559,13 @@ class SanaWMRealtimeStage(PipelineStage):
         else:
             mask = cond_mask
 
-        translation_speed = _motion_param(batch, "translation_speed", 0.04)
-        rotation_speed_deg = _motion_param(batch, "rotation_speed_deg", 1.2)
+        state.translation_speed = _motion_param(batch, "translation_speed", 0.04)
+        state.rotation_speed_deg = _motion_param(batch, "rotation_speed_deg", 1.2)
         state.static_c2w = self._prepare_static_camera(
             batch,
             num_frames=num_frames,
-            translation_speed=translation_speed,
-            rotation_speed_deg=rotation_speed_deg,
+            translation_speed=state.translation_speed,
+            rotation_speed_deg=state.rotation_speed_deg,
         )
 
         sampler = SelfForcingFlowEulerSampler(
@@ -607,9 +612,30 @@ class SanaWMRealtimeStage(PipelineStage):
         state.refined_full = torch.empty_like(latents)
         state.refined_full[:, :, : state.sink_size] = latents[:, :, : state.sink_size]
 
-        state.use_refiner = False
+        refiner_paths = self._refiner_paths()
+        if refiner_paths is None:
+            raise RuntimeError(
+                "SANA-WM realtime requires refiner_diffusers and gemma3_12b"
+            )
+        refiner_root, gemma_root = refiner_paths
+        state.refiner = DiffusersLTX2Refiner(
+            refiner_root,
+            gemma_root,
+            dtype=weight_dtype,
+            device=device,
+        )
+        state.refiner_runner = state.refiner.build_chunk_runner(
+            state.prompt,
+            fps=float(batch.fps),
+            source_sink_frames=state.sink_size,
+            block_size=state.refiner_block_size,
+            kv_max_frames=state.refiner_kv_max_frames,
+            seed=int(batch.extra.get("sana_wm_refiner_seed", batch.seed)),
+            spatial_shape=(int(latents.shape[3]), int(latents.shape[4])),
+        )
+        state.use_refiner = True
         logger.info(
-            "SANA-WM realtime decodes Stage-1 latents directly for low latency."
+            "SANA-WM realtime uses Stage-1 plus LTX-2 refiner streaming."
         )
 
         self._ensure_streaming_decoder(state)
