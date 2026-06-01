@@ -607,31 +607,10 @@ class SanaWMRealtimeStage(PipelineStage):
         state.refined_full = torch.empty_like(latents)
         state.refined_full[:, :, : state.sink_size] = latents[:, :, : state.sink_size]
 
-        refiner_paths = self._refiner_paths()
-        state.use_refiner = refiner_paths is not None
-        if refiner_paths is not None:
-            refiner_root, gemma_root = refiner_paths
-            state.refiner = DiffusersLTX2Refiner(
-                refiner_root,
-                gemma_root,
-                dtype=weight_dtype,
-                device=device,
-            )
-            state.refiner_runner = state.refiner.build_chunk_runner(
-                str(batch.prompt),
-                fps=float(batch.fps),
-                source_sink_frames=state.sink_size,
-                block_size=state.refiner_block_size,
-                kv_max_frames=state.refiner_kv_max_frames,
-                seed=int(batch.seed),
-                spatial_shape=(int(latents.shape[3]), int(latents.shape[4])),
-            )
-        else:
-            logger.warning(
-                "SANA-WM refiner directories are missing under %s; "
-                "realtime output will decode Stage-1 latents directly.",
-                self.model_path,
-            )
+        state.use_refiner = False
+        logger.info(
+            "SANA-WM realtime decodes Stage-1 latents directly for low latency."
+        )
 
         self._ensure_streaming_decoder(state)
         state.initialized = True
