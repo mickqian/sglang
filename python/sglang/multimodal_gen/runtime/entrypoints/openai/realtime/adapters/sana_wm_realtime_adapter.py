@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from collections import deque
@@ -254,7 +255,17 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
                 session.input_temp_dir = tempfile.mkdtemp(prefix="sglang_input_")
             uploads_dir = session.input_temp_dir
 
-        target_path = os.path.join(uploads_dir, f"{session.id}_first_frame")
+        if isinstance(request.first_frame, str) and request.first_frame.lower().startswith(
+            ("http://", "https://")
+        ):
+            suffix = os.path.splitext(request.first_frame.split("?", 1)[0])[1]
+            digest = hashlib.sha256(request.first_frame.encode("utf-8")).hexdigest()[:16]
+            target_path = os.path.join(uploads_dir, f"realtime_ref_{digest}{suffix}")
+            if os.path.exists(target_path):
+                request.first_frame = target_path
+                return
+        else:
+            target_path = os.path.join(uploads_dir, f"{session.id}_first_frame")
         image_path = await save_image_to_path(request.first_frame, target_path)
         request.first_frame = image_path
 

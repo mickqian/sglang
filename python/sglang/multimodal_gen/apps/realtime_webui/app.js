@@ -224,6 +224,7 @@ const referenceCache = new Map();
 let selectedPreset = null;
 let selectedReferenceBytes = null;
 let selectedReferenceLabel = "";
+let selectedReferenceUrl = "";
 let pendingHeader = null;
 let queue = [];
 let frames = 0;
@@ -736,6 +737,7 @@ function renderLoop(now) {
 async function readFirstFrame() {
   const file = $("firstFrame").files[0];
   if (file) return new Uint8Array(await file.arrayBuffer());
+  if (isSanaWmSession() && selectedReferenceUrl) return selectedReferenceUrl;
   return selectedReferenceBytes || undefined;
 }
 
@@ -761,6 +763,7 @@ function drawReferencePreviewFromImageSource(src, label) {
 
 function drawReferencePreview(file) {
   selectedReferenceBytes = null;
+  selectedReferenceUrl = "";
   selectedReferenceLabel = file ? file.name : "";
   if (!file) return;
   drawReferencePreviewFromImageSource(URL.createObjectURL(file), file.name);
@@ -782,6 +785,7 @@ async function fetchPresetReference(preset) {
 async function setPresetReference(preset) {
   selectedReferenceBytes = await fetchPresetReference(preset);
   selectedReferenceLabel = preset.source;
+  selectedReferenceUrl = preset.referenceUrl || "";
   $("firstFrame").value = "";
   const blob = new Blob([selectedReferenceBytes], { type: preset.mime || "image/jpeg" });
   drawReferencePreviewFromImageSource(URL.createObjectURL(blob), selectedReferenceLabel);
