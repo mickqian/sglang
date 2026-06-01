@@ -64,7 +64,4 @@ def cfg_model_parallel_all_reduce(
     """All-reduce the input tensor across CFG parallel group."""
     if not input_.is_contiguous():
         input_ = input_.contiguous()
-    cfg_group = get_cfg_group()
-    if cfg_group.world_size == 1:
-        return input_
-    return cfg_group.device_communicator.all_reduce(input_, op=op)
+    return get_cfg_group().all_reduce(input_, op=op)
