@@ -441,7 +441,8 @@ class GPUWorker:
         ):
             if output.dim() == 3:
                 output = output.unsqueeze(1)
-            output = (output * 255).clamp(0, 255).to(torch.uint8)
+            if output.dtype != torch.uint8:
+                output = (output * 255).clamp(0, 255).to(torch.uint8)
             return output.permute(1, 2, 3, 0).cpu().numpy()
 
         if (
