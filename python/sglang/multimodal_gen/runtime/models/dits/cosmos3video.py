@@ -558,10 +558,7 @@ class Cosmos3CrossAttention(nn.Module):
         # K/V = [text (replicated full on every SP rank) | image (sharded same as Q)].
         # USPAttention routes through the registered attention backend (FA, sage,
         # …) and handles the Ulysses all-to-all when SP > 1.
-        num_und = k_und.shape[1]
-        k = torch.cat([k_und, k], dim=1)
-        v = torch.cat([v_und, v], dim=1)
-        out = self.attn(q, k, v, num_replicated_kv_prefix=num_und)
+        out = self.attn.forward_with_replicated_kv_prefix(q, k_und, v_und, k, v)
         out = out.reshape(batch_size, seq_len_gen, -1)
         out, _ = self.to_out(out)
         return out
