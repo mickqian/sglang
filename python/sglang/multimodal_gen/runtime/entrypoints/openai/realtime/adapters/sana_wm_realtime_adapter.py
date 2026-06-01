@@ -207,8 +207,7 @@ class SanaWMRealtimeAdapter(RealtimeModelAdapter):
     @staticmethod
     def _default_max_chunks(num_frames: int) -> int:
         latent_t = (snap_num_frames(int(num_frames), stride=8) - 1) // 8 + 1
-        n_blocks = math.ceil((latent_t - 1) / 3)
-        return n_blocks + 2
+        return math.ceil(latent_t / 3)
 
     async def on_init(
         self,
