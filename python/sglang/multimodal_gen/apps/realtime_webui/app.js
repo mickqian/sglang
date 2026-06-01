@@ -49,7 +49,7 @@ const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 const SANA_WM_MODEL_ID = "Hao-Zhe/test-anas-smoke";
 const SANA_WM_DEMO_IMAGE_URL = "https://raw.githubusercontent.com/NVlabs/Sana/main/asset/sana_wm/demo_0.png";
 const SANA_WM_CLAIM_ACTION = "w-80,jw-40,w-40,lw-60,w-100";
-const SANA_WM_INTERACTIVE_NUM_FRAMES = 1537;
+const SANA_WM_INTERACTIVE_NUM_FRAMES = 1081;
 const SANA_WM_DEMO_INTRINSICS = [
   797.8787,
   830.0503,
@@ -281,6 +281,9 @@ let socketCloseExpected = false;
 let socketServerError = "";
 const decodeRequests = new Map();
 let controlStateController = null;
+let idleSocket = null;
+let idleSocketUrl = "";
+let idleSocketOpenPromise = null;
 
 const canvas = $("viewport");
 const ctx = canvas.getContext("2d", { alpha: false });
@@ -821,6 +824,49 @@ function showError(error) {
   addHistory(error.message || "reference load failed");
 }
 
+function clearIdleSocket(socket) {
+  if (idleSocket !== socket) return;
+  idleSocket = null;
+  idleSocketUrl = "";
+  idleSocketOpenPromise = null;
+}
+
+function closeIdleSocket(reason = "idle socket closed") {
+  const socket = idleSocket;
+  clearIdleSocket(socket);
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    socket.close(1000, reason.slice(0, 120));
+  }
+}
+
+function ensureIdleSocket() {
+  const url = $("serverUrl").value;
+  if (idleSocket && idleSocketUrl === url) {
+    if (idleSocket.readyState === WebSocket.OPEN) return Promise.resolve(idleSocket);
+    if (idleSocketOpenPromise) return idleSocketOpenPromise;
+  }
+  closeIdleSocket("replace idle socket");
+
+  const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+  idleSocket = socket;
+  idleSocketUrl = url;
+  idleSocketOpenPromise = new Promise((resolve, reject) => {
+    socket.onopen = () => resolve(socket);
+    socket.onerror = () => {
+      clearIdleSocket(socket);
+      reject(new Error("preconnect failed"));
+    };
+    socket.onclose = () => clearIdleSocket(socket);
+  });
+  return idleSocketOpenPromise;
+}
+
+function scheduleIdlePreconnect() {
+  if (ws && ws.readyState !== WebSocket.CLOSED) return;
+  ensureIdleSocket().catch(() => {});
+}
+
 function abortCurrentSession(reason = "session closed by client", {
   clearFrames = true,
   expectedClose = true,
@@ -891,6 +937,7 @@ async function connect() {
   setStatus("Preparing");
   addHistory("preparing session");
   try {
+    const socketPromise = ensureIdleSocket();
     if (ws && ws.readyState !== WebSocket.CLOSED) {
       setStatus("Replacing");
       const oldSocket = abortCurrentSession("closing previous socket before reconnect", {
@@ -931,21 +978,18 @@ async function connect() {
     document.activeElement?.blur?.();
     canvas.tabIndex = 0;
     canvas.focus();
-    const socket = new WebSocket($("serverUrl").value);
+    const socket = await socketPromise;
+    if (epoch !== streamEpoch) return;
+    clearIdleSocket(socket);
+    if (socket.readyState !== WebSocket.OPEN) {
+      throw new Error("socket not open");
+    }
     ws = socket;
     socket.binaryType = "arraybuffer";
     socketHadError = false;
     socketCloseExpected = false;
     socketServerError = "";
-    socket.onopen = () => {
-      if (epoch !== streamEpoch) return;
-      chunkWaitStartedAt = performance.now();
-      socket.send(pack(init));
-      setStatus("Starting", "live");
-      addHistory(
-        `session started with ${selectedReferenceLabel || "uploaded reference"}`
-      );
-    };
+    socket.onopen = null;
     socket.onclose = (event) => {
       if (epoch !== streamEpoch) return;
       if (ws === socket) ws = null;
@@ -972,6 +1016,7 @@ async function connect() {
         addHistory(closeText);
       }
       socketCloseExpected = false;
+      scheduleIdlePreconnect();
     };
     socket.onerror = () => {
       if (epoch !== streamEpoch) return;
@@ -988,6 +1033,12 @@ async function connect() {
         handleReceiveError(error, epoch);
       }
     };
+    chunkWaitStartedAt = performance.now();
+    socket.send(pack(init));
+    setStatus("Starting", "live");
+    addHistory(
+      `session started with ${selectedReferenceLabel || "uploaded reference"}`
+    );
   } catch (error) {
     $("connectBtn").disabled = false;
     setStatus("Init failed", "error");
@@ -1410,6 +1461,7 @@ renderPresets();
 drawIdle();
 applyPreset(presets[0], { sendRuntimeEvents: false })
   .then(applyQueryParams)
+  .then(scheduleIdlePreconnect)
   .catch(showError);
 requestAnimationFrame(renderLoop);
 $("connectBtn").onclick = connect;
@@ -1418,6 +1470,10 @@ $("sendPromptBtn").onclick = () => sendEvent("prompt", $("prompt").value);
 $("sendActionBtn").onclick = sendActionScript;
 $("enhanceBtn").onclick = enhancePrompt;
 $("firstFrame").onchange = () => drawReferencePreview($("firstFrame").files[0]);
+$("serverUrl").addEventListener("change", () => {
+  closeIdleSocket("server URL changed");
+  scheduleIdlePreconnect();
+});
 document.querySelectorAll("button").forEach((btn) => {
   btn.addEventListener("pointerdown", () => btn.classList.add("is-pressed"));
   ["pointerup", "pointercancel", "pointerleave", "blur"].forEach((eventName) => {
