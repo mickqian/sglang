@@ -1936,16 +1936,16 @@ def enable_ltx2_streaming_cache(vae: nn.Module) -> nn.Module:
 
     for module in vae.decoder.modules():
         name = module.__class__.__name__
-        if name == "LTX2VideoCausalConv3d":
+        if name in {"LTX2VideoCausalConv3d", "LTXVideoCausalConv3d"}:
             module.forward = types.MethodType(_ltx2_causal_conv_forward, module)
-        elif name == "LTX2VideoResnetBlock3d":
+        elif name in {"LTX2VideoResnetBlock3d", "LTXVideoResnetBlock3d"}:
             module.forward = types.MethodType(_ltx2_resnet_forward, module)
-        elif name == "LTX2VideoMidBlock3d":
+        elif name in {"LTX2VideoMidBlock3d", "LTXVideoMidBlock3d"}:
             module.forward = types.MethodType(_ltx2_mid_forward, module)
-        elif name == "LTX2VideoUpsampler3d":
+        elif name in {"LTX2VideoUpsampler3d", "LTXVideoUpsampler3d"}:
             module.forward = types.MethodType(_ltx2_upsampler_forward, module)
-        elif name == "LTX2VideoUpBlock3d":
+        elif name in {"LTX2VideoUpBlock3d", "LTXVideoUpBlock3d"}:
             module.forward = types.MethodType(_ltx2_up_block_forward, module)
-        elif name == "LTX2VideoDecoder3d":
+        elif name in {"LTX2VideoDecoder3d", "LTXVideoDecoder3d"}:
             module.forward = types.MethodType(_ltx2_decoder_forward, module)
     return vae
