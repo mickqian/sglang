@@ -958,6 +958,58 @@ class Cosmos3OmniTransformer(CachableDiT):
             x = x[:, :, :, :H, :W]
         return x
 
+    def prepare_latent_tokens(
+        self, latents: torch.Tensor, T: int, H: int, W: int
+    ) -> tuple[torch.Tensor, tuple[int, int, int, int, int, int, int, int, int]]:
+        """Patchify latents once and keep only this SP rank's token shard."""
+        batch_size = latents.shape[0]
+        Hp, Wp, _, _ = self._pad_to_patch_size(H, W)
+        tokens = self.patchify(latents, T, H, W)
+        seq_len_orig = tokens.shape[1]
+        seq_shard_pad = 0
+        local_seq_len = seq_len_orig
+
+        if self.sp_size > 1:
+            if seq_len_orig % self.sp_size != 0:
+                seq_shard_pad = self.sp_size - (seq_len_orig % self.sp_size)
+                pad = torch.zeros(
+                    (batch_size, seq_shard_pad, tokens.shape[2]),
+                    dtype=tokens.dtype,
+                    device=tokens.device,
+                )
+                tokens = torch.cat([tokens, pad], dim=1)
+            local_seq_len = tokens.shape[1] // self.sp_size
+            tokens = tokens.view(
+                batch_size, self.sp_size, local_seq_len, tokens.shape[2]
+            )
+            tokens = tokens[:, self.sp_rank, :, :]
+
+        token_state = (
+            batch_size,
+            T,
+            H,
+            W,
+            Hp,
+            Wp,
+            seq_len_orig,
+            seq_shard_pad,
+            local_seq_len,
+        )
+        return tokens, token_state
+
+    def restore_latent_tokens(
+        self,
+        tokens: torch.Tensor,
+        token_state: tuple[int, int, int, int, int, int, int, int, int],
+    ) -> torch.Tensor:
+        """Gather SP token shards and convert patch tokens back to latents."""
+        _, T, H, W, _, _, seq_len_orig, seq_shard_pad, _ = token_state
+        if self.sp_size > 1:
+            tokens = sequence_model_parallel_all_gather(tokens, dim=1)
+            if seq_shard_pad > 0:
+                tokens = tokens[:, :seq_len_orig, :]
+        return self.unpatchify(tokens, T, H, W)
+
     def _compute_rope_freqs(
         self,
         text_mask: torch.Tensor,
@@ -1043,6 +1095,88 @@ class Cosmos3OmniTransformer(CachableDiT):
             self.cached_kv = {}
         if not isinstance(self.cached_freqs_gen, dict):
             self.cached_freqs_gen = {}
+
+    def forward_latent_tokens(
+        self,
+        latent_tokens: torch.Tensor,
+        token_state: tuple[int, int, int, int, int, int, int, int, int],
+        timestep: torch.LongTensor,
+        text_ids: torch.Tensor,
+        text_mask: torch.Tensor,
+        fps: float | None = None,
+        cache_key: str = "default",
+        max_text_seq_len: int | None = None,
+    ) -> torch.Tensor:
+        """Forward denoising on this rank's local patch-token shard.
+
+        The scheduler can update these tokens directly because UniPC's default
+        Cosmos3 path is elementwise over the sample tensor. The final latent
+        tensor is restored once after the denoising loop.
+        """
+        (
+            batch_size,
+            T,
+            _H,
+            _W,
+            Hp,
+            Wp,
+            _seq_len_orig,
+            seq_shard_pad,
+            local_seq_len,
+        ) = token_state
+        if max_text_seq_len is None:
+            max_text_seq_len = int(text_mask.sum(dim=1).max().item())
+        if max_text_seq_len < text_ids.shape[1]:
+            text_ids = text_ids[:, :max_text_seq_len]
+            text_mask = text_mask[:, :max_text_seq_len]
+
+        hidden_gen, _ = self.proj_in(latent_tokens)
+        time_embed = self.time_embedder(timestep.float())
+        time_embed = time_embed.to(latent_tokens.dtype)
+        hidden_gen = hidden_gen + time_embed.unsqueeze(1)
+
+        self._ensure_cache_dicts()
+        sequence_shard_enabled = self.sp_size > 1
+        if cache_key not in self.cached_kv:
+            freqs_und, freqs_gen = self._compute_rope_freqs(
+                text_mask, T, Hp, Wp, fps, latent_tokens.device, latent_tokens.dtype
+            )
+            self.cached_kv[cache_key] = self.language_model(
+                text_ids, text_mask, freqs_und[0], freqs_und[1]
+            )
+            cos_gen, sin_gen = freqs_gen
+            if sequence_shard_enabled:
+                if seq_shard_pad > 0:
+                    pad_cos = cos_gen[:, -1:].expand(-1, seq_shard_pad, -1)
+                    pad_sin = sin_gen[:, -1:].expand(-1, seq_shard_pad, -1)
+                    cos_gen = torch.cat([cos_gen, pad_cos], dim=1)
+                    sin_gen = torch.cat([sin_gen, pad_sin], dim=1)
+                cos_gen = cos_gen.view(batch_size, self.sp_size, local_seq_len, -1)
+                sin_gen = sin_gen.view(batch_size, self.sp_size, local_seq_len, -1)
+                cos_gen = cos_gen[:, self.sp_rank, :, :]
+                sin_gen = sin_gen[:, self.sp_rank, :, :]
+            cos_gen = cos_gen.unsqueeze(2)
+            sin_gen = sin_gen.unsqueeze(2)
+            self.cached_freqs_gen[cache_key] = (cos_gen, sin_gen)
+
+        cos_gen, sin_gen = self.cached_freqs_gen[cache_key]
+        cached_kv_for_key = self.cached_kv[cache_key]
+        residual: torch.Tensor | None = None
+        for i, layer in enumerate(self.gen_layers):
+            k_und, v_und = cached_kv_for_key[i]
+            hidden_gen, residual = layer(
+                hidden_gen,
+                k_und,
+                v_und,
+                cos_gen,
+                sin_gen,
+                residual=residual,
+            )
+
+        hidden_gen = hidden_gen + residual
+        hidden_gen = self.norm_moe_gen(hidden_gen)
+        output, _ = self.proj_out(hidden_gen)
+        return output
 
     def forward(
         self,

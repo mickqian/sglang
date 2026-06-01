@@ -529,6 +529,33 @@ class Cosmos3DenoisingStage(PipelineStage):
                 max_text_seq_len=max_text_seq_len,
             )
 
+    def _run_transformer_tokens(
+        self,
+        latent_tokens: torch.Tensor,
+        token_state: tuple[int, int, int, int, int, int, int, int, int],
+        timestep: torch.Tensor,
+        text_ids: torch.Tensor,
+        text_mask: torch.Tensor,
+        fps: float,
+        cache_key: str = "default",
+        max_text_seq_len: int | None = None,
+        current_timestep: int | None = None,
+    ) -> torch.Tensor:
+        """Run transformer on local patch tokens and return local token noise."""
+        if current_timestep is None:
+            current_timestep = int(timestep.flatten()[0].item())
+        with set_forward_context(current_timestep=current_timestep, attn_metadata=None):
+            return self.transformer.forward_latent_tokens(
+                latent_tokens=latent_tokens,
+                token_state=token_state,
+                timestep=timestep,
+                text_ids=text_ids,
+                text_mask=text_mask,
+                fps=fps,
+                cache_key=cache_key,
+                max_text_seq_len=max_text_seq_len,
+            )
+
     def _manage_device_placement(self, server_args: ServerArgs):
         """Move transformer to GPU if CPU offload is enabled."""
         if not server_args.dit_cpu_offload:
@@ -610,6 +637,12 @@ class Cosmos3DenoisingStage(PipelineStage):
             f"CFG_parallel={enable_cfg_parallel}, cfg_rank={cfg_rank}"
         )
 
+        token_state = None
+        if enable_cfg_parallel and ulysses_enabled and velocity_mask is None:
+            latents, token_state = self.transformer.prepare_latent_tokens(
+                latents, *video_shape
+            )
+
         progress_bar = tqdm(
             enumerate(timesteps),
             total=len(timesteps),
@@ -627,22 +660,39 @@ class Cosmos3DenoisingStage(PipelineStage):
 
             if do_cfg:
                 if enable_cfg_parallel:
-                    noise_pred = self._predict_noise_cfg_parallel(
-                        latents=latents,
-                        timestep=timestep,
-                        cond_text_ids=cond_text_ids,
-                        cond_text_mask=cond_text_mask,
-                        uncond_text_ids=uncond_text_ids,
-                        uncond_text_mask=uncond_text_mask,
-                        video_shape=video_shape,
-                        fps=fps,
-                        guidance_scale=effective_scale,
-                        cfg_rank=cfg_rank,
-                        noisy_frame_mask=velocity_mask,
-                        cond_text_seq_len=batch.extra["cond_text_seq_len"],
-                        uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
-                        current_timestep=i,
-                    )
+                    if token_state is not None:
+                        noise_pred = self._predict_noise_cfg_parallel_tokens(
+                            latent_tokens=latents,
+                            token_state=token_state,
+                            timestep=timestep,
+                            cond_text_ids=cond_text_ids,
+                            cond_text_mask=cond_text_mask,
+                            uncond_text_ids=uncond_text_ids,
+                            uncond_text_mask=uncond_text_mask,
+                            fps=fps,
+                            guidance_scale=effective_scale,
+                            cfg_rank=cfg_rank,
+                            cond_text_seq_len=batch.extra["cond_text_seq_len"],
+                            uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
+                            current_timestep=i,
+                        )
+                    else:
+                        noise_pred = self._predict_noise_cfg_parallel(
+                            latents=latents,
+                            timestep=timestep,
+                            cond_text_ids=cond_text_ids,
+                            cond_text_mask=cond_text_mask,
+                            uncond_text_ids=uncond_text_ids,
+                            uncond_text_mask=uncond_text_mask,
+                            video_shape=video_shape,
+                            fps=fps,
+                            guidance_scale=effective_scale,
+                            cfg_rank=cfg_rank,
+                            noisy_frame_mask=velocity_mask,
+                            cond_text_seq_len=batch.extra["cond_text_seq_len"],
+                            uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
+                            current_timestep=i,
+                        )
                 elif effective_scale == 1.0:
                     noise_pred = self._run_transformer(
                         latents=latents,
@@ -703,6 +753,9 @@ class Cosmos3DenoisingStage(PipelineStage):
 
             if image_latent is not None:
                 latents[:, :, 0:1, :, :] = image_latent
+
+        if token_state is not None:
+            latents = self.transformer.restore_latent_tokens(latents, token_state)
 
         batch.latents = latents
         self.log_info("Denoising complete")
@@ -807,6 +860,52 @@ class Cosmos3DenoisingStage(PipelineStage):
                 fps=fps,
                 cache_key="uncond",
                 noisy_frame_mask=noisy_frame_mask,
+                max_text_seq_len=uncond_text_seq_len,
+                current_timestep=current_timestep,
+            )
+            partial = (1.0 - guidance_scale) * noise_pred
+
+        return cfg_model_parallel_all_reduce(partial)
+
+    def _predict_noise_cfg_parallel_tokens(
+        self,
+        latent_tokens: torch.Tensor,
+        token_state: tuple[int, int, int, int, int, int, int, int, int],
+        timestep: torch.Tensor,
+        cond_text_ids: torch.Tensor,
+        cond_text_mask: torch.Tensor,
+        uncond_text_ids: torch.Tensor,
+        uncond_text_mask: torch.Tensor,
+        fps: float,
+        guidance_scale: float,
+        cfg_rank: int,
+        cond_text_seq_len: int | None = None,
+        uncond_text_seq_len: int | None = None,
+        current_timestep: int | None = None,
+    ) -> torch.Tensor:
+        """Run CFG-parallel denoising on local patch tokens."""
+        if cfg_rank == 0:
+            noise_pred = self._run_transformer_tokens(
+                latent_tokens=latent_tokens,
+                token_state=token_state,
+                timestep=timestep,
+                text_ids=cond_text_ids,
+                text_mask=cond_text_mask,
+                fps=fps,
+                cache_key="cond",
+                max_text_seq_len=cond_text_seq_len,
+                current_timestep=current_timestep,
+            )
+            partial = guidance_scale * noise_pred
+        else:
+            noise_pred = self._run_transformer_tokens(
+                latent_tokens=latent_tokens,
+                token_state=token_state,
+                timestep=timestep,
+                text_ids=uncond_text_ids,
+                text_mask=uncond_text_mask,
+                fps=fps,
+                cache_key="uncond",
                 max_text_seq_len=uncond_text_seq_len,
                 current_timestep=current_timestep,
             )
