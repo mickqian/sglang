@@ -202,6 +202,7 @@ class SanaWMStreamingState(BaseRealtimeState):
         self.latents: torch.Tensor | None = None
         self.latents_full: torch.Tensor | None = None
         self.refined_full: torch.Tensor | None = None
+        self.rollover_first_latent: torch.Tensor | None = None
         self.sampler: SelfForcingFlowEulerSampler | None = None
         self.stage1_iter = None
         self.stage1_chunks = 0
@@ -229,13 +230,39 @@ class SanaWMStreamingState(BaseRealtimeState):
         if callable(reset_decoder_cache):
             reset_decoder_cache()
         self.initialized = False
+        self.prompt = ""
+        self.image = None
+        self.intrinsics_image = None
+        self.src_size = None
+        self.resized_size = None
+        self.crop_offset = None
+        self.intrinsics_raw = None
+        self.camera_actions = []
+        self.max_camera_actions = 0
+        self.static_c2w = None
         self.sampler = None
         self.stage1_iter = None
+        self.stage1_chunks = 0
+        self.stage1_idx = 0
+        self.produced_until = 0
+        self.tick = 0
+        self.use_refiner = False
         self.refiner = None
         self.refiner_runner = None
+        self.sink_size = 1
+        self.refiner_block_size = DEFAULT_REFINER_BLOCK_SIZE
+        self.refiner_kv_max_frames = DEFAULT_REFINER_KV_MAX_FRAMES
+        self.n_blocks = 0
+        self.next_ref_idx = 0
+        self.next_dec_idx = 0
+        self.decoder_first_chunk = True
+        self.latent_t = 0
+        self.translation_speed = 0.04
+        self.rotation_speed_deg = 1.2
         self.latents = None
         self.latents_full = None
         self.refined_full = None
+        self.rollover_first_latent = None
 
 
 class SanaWMRealtimeStage(PipelineStage):
@@ -593,6 +620,7 @@ class SanaWMRealtimeStage(PipelineStage):
         device: torch.device,
         weight_dtype: torch.dtype,
         vae_dtype: torch.dtype,
+        first_latent: torch.Tensor | None = None,
     ) -> None:
         image, intrinsics_image, src_size, resized_size, crop_offset = self._prepare_image(batch)
         state.image = image
@@ -606,13 +634,16 @@ class SanaWMRealtimeStage(PipelineStage):
         batch.num_frames = num_frames
         state.max_camera_actions = max(0, num_frames - 1)
         self._append_realtime_camera_actions(batch, state)
-        first_latent = self._get_first_frame_latent(
-            batch,
-            image,
-            device=device,
-            vae_dtype=vae_dtype,
-            latent_dtype=weight_dtype,
-        )
+        if first_latent is None:
+            first_latent = self._get_first_frame_latent(
+                batch,
+                image,
+                device=device,
+                vae_dtype=vae_dtype,
+                latent_dtype=weight_dtype,
+            )
+        else:
+            first_latent = first_latent.to(device=device, dtype=weight_dtype)
         latent_t = (num_frames - 1) // 8 + 1
         generator = batch.generator[0] if isinstance(batch.generator, list) else batch.generator
         if generator is None:
@@ -702,6 +733,7 @@ class SanaWMRealtimeStage(PipelineStage):
         state.latents_full[:, :, : state.sink_size] = latents[:, :, : state.sink_size]
         state.refined_full = torch.empty_like(latents)
         state.refined_full[:, :, : state.sink_size] = latents[:, :, : state.sink_size]
+        state.rollover_first_latent = first_latent.detach().clone()
 
         refiner = self._get_refiner(
             dtype=weight_dtype,
@@ -745,6 +777,16 @@ class SanaWMRealtimeStage(PipelineStage):
         state.stage1_idx += 1
         return latent_view, int(start_f), int(end_f)
 
+    def _store_rollover_first_latent(
+        self,
+        state: SanaWMStreamingState,
+        latents: torch.Tensor,
+        frame_idx: int,
+    ) -> None:
+        state.rollover_first_latent = (
+            latents[:, :, frame_idx : frame_idx + 1].detach().clone()
+        )
+
     def _run_stage1_only_tick(
         self,
         state: SanaWMStreamingState,
@@ -760,6 +802,7 @@ class SanaWMRealtimeStage(PipelineStage):
             return None
         z_slice = state.latents[:, :, :end_f] if start_f == 0 else state.latents[:, :, start_f:end_f]
         frames = self._decode_chunk(z_slice, state, vae_dtype=vae_dtype)
+        self._store_rollover_first_latent(state, state.latents, end_f - 1)
         if start_f == 0 and state.sink_size > 0:
             frames = frames[:, :, 1:]
         return frames
@@ -810,6 +853,11 @@ class SanaWMRealtimeStage(PipelineStage):
                 else state.refined_full[:, :, block_start:block_end]
             )
             frames = self._decode_chunk(z_slice, state, vae_dtype=vae_dtype)
+            self._store_rollover_first_latent(
+                state,
+                state.refined_full,
+                block_end - 1,
+            )
             if state.next_dec_idx == 0 and state.sink_size > 0:
                 frames = frames[:, :, 1:]
             state.next_dec_idx += 1
@@ -854,6 +902,28 @@ class SanaWMRealtimeStage(PipelineStage):
             frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
         else:
             frames = self._run_stage1_only_tick(state, vae_dtype=vae_dtype)
+
+        if frames is None and state.rollover_first_latent is not None:
+            first_latent = state.rollover_first_latent
+            logger.info(
+                "SANA-WM realtime horizon rollover: block_idx=%s, latent_t=%s",
+                batch.block_idx,
+                state.latent_t,
+            )
+            state.dispose()
+            self._initialize_state(
+                batch,
+                state,
+                transformer=transformer,
+                device=device,
+                weight_dtype=weight_dtype,
+                vae_dtype=vae_dtype,
+                first_latent=first_latent,
+            )
+            if state.use_refiner:
+                frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
+            else:
+                frames = self._run_stage1_only_tick(state, vae_dtype=vae_dtype)
 
         if frames is None:
             return self._empty_output(batch)
