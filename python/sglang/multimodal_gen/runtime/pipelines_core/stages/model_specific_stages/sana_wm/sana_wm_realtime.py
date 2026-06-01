@@ -719,10 +719,7 @@ class SanaWMRealtimeStage(PipelineStage):
 
         self._advance_stage1(state)
 
-        if (
-            state.next_ref_idx < state.n_blocks
-            and state.tick >= state.next_ref_idx + 1
-        ):
+        if state.next_ref_idx < state.n_blocks:
             block_start = state.sink_size + state.next_ref_idx * state.refiner_block_size
             block_end = min(block_start + state.refiner_block_size, state.latent_t)
             if block_end <= state.produced_until:
