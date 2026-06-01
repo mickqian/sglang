@@ -1104,21 +1104,25 @@ function updatePlaybackPace(header, now, frameCount) {
   currentReceiveChunkFrames = 0;
 }
 
-function sendEvent(kind, payload, historyText = null) {
+function sendEvent(kind, payload, historyText = null, options = {}) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     addHistory(`${historyText || `${kind} event`} · socket not open`);
     return null;
   }
+  const awaitCutover = options.awaitCutover ?? true;
+  const recordHistory = options.recordHistory ?? true;
   const eventId = nextEventId++;
   ws.send(pack({ type: "event", kind, payload, event_id: eventId }));
-  if (kind === "camera_actions" || kind === "action" || kind === "prompt") {
+  if (awaitCutover && (kind === "camera_actions" || kind === "action" || kind === "prompt")) {
     awaitedEventId = eventId;
     awaitedEventSentAt = performance.now();
     trimQueueForPendingEvent();
     updateStats();
     setStatus("Updating", "live");
   }
-  addHistory(`${historyText || `${kind} event sent`} · event#${eventId}`);
+  if (recordHistory) {
+    addHistory(`${historyText || `${kind} event sent`} · event#${eventId}`);
+  }
   return eventId;
 }
 
@@ -1135,6 +1139,7 @@ function sendCameraControlTransitions(transitions) {
     "camera_actions",
     payload,
     describeCameraStateEvent(transitions),
+    { awaitCutover: false, recordHistory: false },
   );
 }
 
