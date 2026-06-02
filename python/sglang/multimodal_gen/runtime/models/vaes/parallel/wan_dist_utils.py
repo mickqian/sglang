@@ -30,6 +30,8 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 
 
 def tensor_pad(x: torch.Tensor, len_to_pad: int, dim: int = -2):
+    if dim == -2 or dim == x.dim() - 2:
+        return F.pad(x, (0, 0, 0, len_to_pad, 0, 0))
     x = torch.cat(
         [
             x,
