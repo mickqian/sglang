@@ -202,7 +202,7 @@ ONE_GPU_CASES: list[DiffusionTestCase] = [
                 },
             },
         ),
-        run_perf_check=False,
+        run_perf_check=True,
         run_consistency_check=True,
         run_component_accuracy_check=False,
     ),
@@ -255,6 +255,59 @@ ONE_GPU_CASES: list[DiffusionTestCase] = [
         DiffusionServerArgs(
             model_path=DEFAULT_WAN_2_1_T2V_1_3B_MODEL_NAME_FOR_TEST,
         ),
+    ),
+    DiffusionTestCase(
+        "cosmos3_nano_t2v",
+        DiffusionServerArgs(
+            model_path=DEFAULT_COSMOS3_NANO_MODEL_NAME_FOR_TEST,
+            modality="video",
+            env_vars={"SGLANG_DISABLE_COSMOS3_GUARDRAILS": "1"},
+        ),
+        DiffusionSamplingParams(
+            prompt="A blue box slides across a clean warehouse floor.",
+            output_size="832x480",
+            seconds=1,
+            num_frames=9,
+            extras={
+                "num_inference_steps": 4,
+                "seed": 0,
+                "max_sequence_length": 128,
+                "flow_shift": 10.0,
+                "use_guardrails": False,
+                "use_duration_template": False,
+                "use_resolution_template": False,
+            },
+        ),
+        run_perf_check=True,
+        run_consistency_check=True,
+        run_component_accuracy_check=False,
+    ),
+    DiffusionTestCase(
+        "cosmos3_nano_i2v",
+        DiffusionServerArgs(
+            model_path=DEFAULT_COSMOS3_NANO_MODEL_NAME_FOR_TEST,
+            modality="video",
+            env_vars={"SGLANG_DISABLE_COSMOS3_GUARDRAILS": "1"},
+        ),
+        DiffusionSamplingParams(
+            prompt="The image becomes a short cinematic shot with gentle camera motion.",
+            image_path="https://github.com/lm-sys/lm-sys.github.io/releases/download/test/TI2I_Qwen_Image_Edit_Input.jpg",
+            output_size="832x480",
+            seconds=1,
+            num_frames=9,
+            extras={
+                "num_inference_steps": 4,
+                "seed": 0,
+                "max_sequence_length": 128,
+                "flow_shift": 10.0,
+                "use_guardrails": False,
+                "use_duration_template": False,
+                "use_resolution_template": False,
+            },
+        ),
+        run_perf_check=True,
+        run_consistency_check=True,
+        run_component_accuracy_check=False,
     ),
     # TeaCache acceleration test for Wan video model
     DiffusionTestCase(
