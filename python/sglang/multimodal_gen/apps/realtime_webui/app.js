@@ -262,6 +262,7 @@ let playbackFps = 0;
 let droppedFrames = 0;
 let decodeChain = Promise.resolve();
 let pendingDecodeBatches = 0;
+let latestReceivedFrameKey = -1;
 let nextEventId = 1;
 let awaitedEventId = 0;
 let awaitedEventSentAt = 0;
@@ -331,6 +332,7 @@ function resetStreamStats() {
   droppedFrames = 0;
   decodeChain = Promise.resolve();
   pendingDecodeBatches = 0;
+  latestReceivedFrameKey = -1;
   awaitedEventId = 0;
   awaitedEventSentAt = 0;
   chunkReceiveStartedAt = 0;
@@ -487,12 +489,16 @@ function updateStats(header) {
   $("byteText").textContent = `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-function trimLiveQueue(latestFrameCount) {
-  const targetFps = Number($("fps").value || 16);
-  const maxQueue = Math.max(
+function maxLiveBufferedFrames(latestFrameCount = 0) {
+  const targetFps = playbackFps || Number($("fps").value || 16);
+  return Math.max(
     Number(latestFrameCount || 0),
     Math.round(targetFps * LIVE_QUEUE_SECONDS),
   );
+}
+
+function trimLiveQueue(latestFrameCount) {
+  const maxQueue = maxLiveBufferedFrames(latestFrameCount);
   if (queue.length <= maxQueue) return;
   const dropCount = queue.length - maxQueue;
   dropQueuedFrames(dropCount);
@@ -1073,6 +1079,7 @@ function receive(data, epoch) {
     if (message.type === "frame_batch") {
       const payload = message.payload;
       delete message.payload;
+      markFrameBatchReceived(message);
       pendingDecodeBatches += 1;
       decodeChain = decodeChain
         .then(() => decodeAndEnqueueFrameBatch(message, payload, epoch))
@@ -1084,6 +1091,7 @@ function receive(data, epoch) {
       return;
     }
     pendingHeader = message;
+    markFrameBatchReceived(pendingHeader);
     if (pendingHeader) setStatus("Live", "live");
     return;
   }
@@ -1103,6 +1111,12 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   const chunkFrameCount = Number(header.num_frames || 0);
   const payloadBytes = data.byteLength || data.size || 0;
   const isEventCutover = awaitedEventId && eventId >= awaitedEventId;
+  if (shouldSkipStaleFrameBatchDecode(header)) {
+    droppedFrames += chunkFrameCount;
+    bytes += payloadBytes;
+    updateStats(header);
+    return;
+  }
   let decodedFrames;
   try {
     decodedFrames = await decodeFrameBatch(header, data);
@@ -1136,6 +1150,27 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
   updatePlaybackPace(header, performance.now(), chunkFrameCount);
   setStatus("Live", "live");
   updateStats(header);
+}
+
+function markFrameBatchReceived(header) {
+  const key = frameBatchKey(header);
+  if (key > latestReceivedFrameKey) latestReceivedFrameKey = key;
+}
+
+function shouldSkipStaleFrameBatchDecode(header) {
+  const key = frameBatchKey(header);
+  if (key < 0 || latestReceivedFrameKey < 0) return false;
+  const eventId = Number(header.event_id || 0);
+  if (awaitedEventId && eventId >= awaitedEventId) return false;
+  const keepFrames = maxLiveBufferedFrames(Number(header.num_frames || 0));
+  return key < latestReceivedFrameKey - keepFrames + 1;
+}
+
+function frameBatchKey(header) {
+  const chunk = Number(header.chunk_index);
+  const batch = Number(header.frame_batch_index || 0);
+  if (!Number.isFinite(chunk) || !Number.isFinite(batch)) return -1;
+  return chunk * 100000 + batch;
 }
 
 function updateServerChunkStats(stats) {
