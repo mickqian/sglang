@@ -32,7 +32,6 @@ from sglang.multimodal_gen.runtime.layers.linear import (
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
 )
-from sglang.multimodal_gen.runtime.layers.visual_embedding import timestep_embedding
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -276,6 +275,13 @@ class Cosmos3TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
         self.hidden_size = hidden_size
         self.max_period = max_period
+        half = frequency_embedding_size // 2
+        freqs = torch.exp(
+            -math.log(max_period)
+            * torch.arange(start=0, end=half, dtype=torch.float32)
+            / half
+        )
+        self.register_buffer("timestep_freqs", freqs, persistent=False)
 
         # Use ReplicatedLinear for consistency (typically excluded from quantization)
         self.linear_1 = ReplicatedLinear(
@@ -307,12 +313,11 @@ class Cosmos3TimestepEmbedder(nn.Module):
         t_scaled = t * self.timestep_scale
 
         # Compute sinusoidal embeddings in fp32
-        t_freq = timestep_embedding(
-            t_scaled,
-            self.frequency_embedding_size,
-            self.max_period,
-            dtype=torch.float32,
-        )
+        freqs = self.timestep_freqs.to(device=t.device)
+        args = t_scaled[:, None].float() * freqs[None]
+        t_freq = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if self.frequency_embedding_size % 2:
+            t_freq = torch.cat([t_freq, torch.zeros_like(t_freq[:, :1])], dim=-1)
 
         # Project through MLP
         # When fp8-quantized, weight.dtype is float8_e4m3fn — keep input in
