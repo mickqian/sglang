@@ -8,6 +8,9 @@ import msgspec.msgpack
 import numpy as np
 import pytest
 
+from sglang.multimodal_gen.configs.models.dits.lingbot_world import (
+    LingBotWorldArchConfig,
+)
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
     RAW_RGB_DELTA_GZIP_CONTENT_TYPE,
@@ -506,6 +509,7 @@ def test_lingbot_realtime_plastic_beach_params_are_lossless_gt_ready():
     assert params.realtime_perf_thresholds["p95_scheduler_forward_ms"] == 4500.0
     assert params.realtime_events[0]["kind"] == "camera_actions"
     assert params.realtime_events[0]["payload"]["mode"] == "state"
+    assert LingBotWorldArchConfig().num_frames_per_block == 3
 
 
 def test_lingbot_realtime_case_is_registered_by_default():
