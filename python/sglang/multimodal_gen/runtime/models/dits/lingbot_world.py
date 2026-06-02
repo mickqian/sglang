@@ -52,7 +52,9 @@ from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     get_rotary_pos_embed,
 )
 from sglang.multimodal_gen.runtime.layers.usp import (
+    _usp_input_all_to_all,
     _usp_input_all_to_all_varlen,
+    _usp_output_all_to_all,
     _usp_output_all_to_all_varlen,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import (
@@ -95,6 +97,10 @@ def _compute_sequence_splits(total_len: int, world_size: int) -> list[int]:
     base = total_len // world_size
     remainder = total_len % world_size
     return [base + (1 if rank < remainder else 0) for rank in range(world_size)]
+
+
+def _sequence_splits_are_uniform(seq_splits: list[int]) -> bool:
+    return bool(seq_splits) and all(seq_len == seq_splits[0] for seq_len in seq_splits)
 
 
 def _sequence_shard_tensor(
@@ -236,7 +242,10 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
             seq_splits = list(seq_splits)
             # Pack Q/K/V to avoid launching three Ulysses all-to-all collectives.
             qkv = torch.cat([roped_query, roped_key, v], dim=-1)
-            qkv = _usp_input_all_to_all_varlen(qkv, seq_splits, head_dim=2)
+            if _sequence_splits_are_uniform(seq_splits):
+                qkv = _usp_input_all_to_all(qkv, head_dim=2)
+            else:
+                qkv = _usp_input_all_to_all_varlen(qkv, seq_splits, head_dim=2)
             roped_query, roped_key, v = qkv.chunk(3, dim=-1)
 
         cache_view = kv_cache.update_and_get_attention_kv(
@@ -255,7 +264,10 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
         )
         if sequence_shard_enabled:
             assert seq_splits is not None
-            x = _usp_output_all_to_all_varlen(x, seq_splits, head_dim=2)
+            if _sequence_splits_are_uniform(seq_splits):
+                x = _usp_output_all_to_all(x, head_dim=2)
+            else:
+                x = _usp_output_all_to_all_varlen(x, seq_splits, head_dim=2)
         return x
 
 
@@ -1417,11 +1429,17 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         hidden_states = self.norm_out(hidden_states, shift, scale)
         hidden_states = self.proj_out(hidden_states)
         if sequence_shard_enabled:
-            hidden_states = _sequence_all_gather_varlen(
-                hidden_states.contiguous(),
-                list(forward_batch.sequence_shard_splits),
-                get_sp_group().device_group,
-            )
+            seq_shard_splits = list(forward_batch.sequence_shard_splits)
+            if _sequence_splits_are_uniform(seq_shard_splits):
+                hidden_states = sequence_model_parallel_all_gather(
+                    hidden_states.contiguous(), dim=1
+                )
+            else:
+                hidden_states = _sequence_all_gather_varlen(
+                    hidden_states.contiguous(),
+                    seq_shard_splits,
+                    get_sp_group().device_group,
+                )
         hidden_states = hidden_states.reshape(
             batch_size,
             post_patch_num_frames,
