@@ -1045,11 +1045,17 @@ class Cosmos3OmniTransformer(CachableDiT):
         if not isinstance(self.cached_freqs_gen, dict):
             self.cached_freqs_gen = {}
 
+    def compute_timestep_embeddings(
+        self, timesteps: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        return self.time_embedder(timesteps.float()).to(dtype)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | list[torch.Tensor],
         timestep: torch.LongTensor,
+        timestep_embed: torch.Tensor | None = None,
         encoder_hidden_states_image: torch.Tensor | list[torch.Tensor] | None = None,
         guidance=None,
         text_ids: torch.Tensor | None = None,
@@ -1141,10 +1147,10 @@ class Cosmos3OmniTransformer(CachableDiT):
                 )[:, self.sp_rank, :, :]
 
         # Add timestep embedding (computed in float32 for numerical stability, then cast back)
-        time_embed = self.time_embedder(timestep.float())
-        time_embed = time_embed.to(
-            hidden_states.dtype
-        )  # Cast to match hidden_gen dtype
+        if timestep_embed is None:
+            time_embed = self.compute_timestep_embeddings(timestep, hidden_states.dtype)
+        else:
+            time_embed = timestep_embed
         if token_noisy_mask is not None:
             hidden_gen = hidden_gen + time_embed.unsqueeze(1) * token_noisy_mask
         else:

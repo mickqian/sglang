@@ -491,6 +491,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         self,
         latents: torch.Tensor,
         timestep: torch.Tensor,
+        timestep_embed: torch.Tensor | None,
         text_ids: torch.Tensor,
         text_mask: torch.Tensor,
         video_shape: tuple[int, int, int],
@@ -520,6 +521,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 hidden_states=latents,
                 encoder_hidden_states=None,  # Not used by Cosmos3
                 timestep=timestep,
+                timestep_embed=timestep_embed,
                 text_ids=text_ids,
                 text_mask=text_mask,
                 fps=fps,
@@ -615,9 +617,13 @@ class Cosmos3DenoisingStage(PipelineStage):
             desc="Denoising",
             disable=batch.is_warmup,
         )
+        timestep_embeds = self.transformer.compute_timestep_embeddings(
+            timesteps, latents.dtype
+        )
 
         for i, t in progress_bar:
             timestep = t.unsqueeze(0) if t.dim() == 0 else t
+            timestep_embed = timestep_embeds[i : i + 1]
             # Outside the CFG window the effective scale collapses to 1.0,
             # which reduces CFG to the cond branch (cfg-parallel safe).
             effective_scale = (
@@ -629,6 +635,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                     noise_pred = self._predict_noise_cfg_parallel(
                         latents=latents,
                         timestep=timestep,
+                        timestep_embed=timestep_embed,
                         cond_text_ids=cond_text_ids,
                         cond_text_mask=cond_text_mask,
                         uncond_text_ids=uncond_text_ids,
@@ -646,6 +653,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                     noise_pred = self._run_transformer(
                         latents=latents,
                         timestep=timestep,
+                        timestep_embed=timestep_embed,
                         text_ids=cond_text_ids,
                         text_mask=cond_text_mask,
                         video_shape=video_shape,
@@ -659,6 +667,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                     noise_pred = self._predict_noise_cfg_batched(
                         latents=latents,
                         timestep=timestep,
+                        timestep_embed=timestep_embed,
                         cond_text_ids=cond_text_ids,
                         cond_text_mask=cond_text_mask,
                         uncond_text_ids=uncond_text_ids,
@@ -677,6 +686,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 noise_pred = self._run_transformer(
                     latents=latents,
                     timestep=timestep,
+                    timestep_embed=timestep_embed,
                     text_ids=cond_text_ids,
                     text_mask=cond_text_mask,
                     video_shape=video_shape,
@@ -711,6 +721,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         self,
         latents: torch.Tensor,
         timestep: torch.Tensor,
+        timestep_embed: torch.Tensor | None,
         cond_text_ids: torch.Tensor,
         cond_text_mask: torch.Tensor,
         uncond_text_ids: torch.Tensor,
@@ -732,6 +743,9 @@ class Cosmos3DenoisingStage(PipelineStage):
         text_ids_batched = torch.cat([uncond_text_ids, cond_text_ids], dim=0)
         text_mask_batched = torch.cat([uncond_text_mask, cond_text_mask], dim=0)
         timestep_batched = timestep.expand(2)
+        timestep_embed_batched = (
+            timestep_embed.expand(2, -1) if timestep_embed is not None else None
+        )
         mask_batched = (
             torch.cat([noisy_frame_mask, noisy_frame_mask], dim=0)
             if noisy_frame_mask is not None
@@ -741,6 +755,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         noise_pred = self._run_transformer(
             latents=latents_batched,
             timestep=timestep_batched,
+            timestep_embed=timestep_embed_batched,
             text_ids=text_ids_batched,
             text_mask=text_mask_batched,
             video_shape=video_shape,
@@ -761,6 +776,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         self,
         latents: torch.Tensor,
         timestep: torch.Tensor,
+        timestep_embed: torch.Tensor | None,
         cond_text_ids: torch.Tensor,
         cond_text_mask: torch.Tensor,
         uncond_text_ids: torch.Tensor,
@@ -786,6 +802,7 @@ class Cosmos3DenoisingStage(PipelineStage):
             noise_pred = self._run_transformer(
                 latents=latents,
                 timestep=timestep,
+                timestep_embed=timestep_embed,
                 text_ids=cond_text_ids,
                 text_mask=cond_text_mask,
                 video_shape=video_shape,
@@ -800,6 +817,7 @@ class Cosmos3DenoisingStage(PipelineStage):
             noise_pred = self._run_transformer(
                 latents=latents,
                 timestep=timestep,
+                timestep_embed=timestep_embed,
                 text_ids=uncond_text_ids,
                 text_mask=uncond_text_mask,
                 video_shape=video_shape,
