@@ -336,7 +336,7 @@ def resample_forward(self, x):
 def residual_block_forward(self, x):
     _ensure_bound()
     # Apply shortcut connection
-    h = self.conv_shortcut(x)
+    h = self.conv_shortcut(x) if self.in_dim != self.out_dim else x
 
     # First normalization and activation
     x = self.norm1(x)
@@ -369,7 +369,8 @@ def residual_block_forward(self, x):
     x = self.nonlinearity(x)
 
     # Dropout
-    x = self.dropout(x)
+    if self.dropout.p != 0:
+        x = self.dropout(x)
 
     _feat_cache = feat_cache.get()
     _feat_idx = feat_idx.get()
