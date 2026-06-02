@@ -41,6 +41,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 from sglang.srt.utils.common import get_compiler_backend
 
 logger = init_logger(__name__)
@@ -616,33 +617,76 @@ class Cosmos3DenoisingStage(PipelineStage):
             disable=batch.is_warmup,
         )
 
-        for i, t in progress_bar:
-            timestep = t.unsqueeze(0) if t.dim() == 0 else t
-            # Outside the CFG window the effective scale collapses to 1.0,
-            # which reduces CFG to the cond branch (cfg-parallel safe).
-            effective_scale = (
-                guidance_scale if self._cfg_active_at(t, guidance_interval) else 1.0
-            )
+        metrics = getattr(batch, "metrics", None)
+        perf_dump_path_provided = getattr(batch, "perf_dump_path", None) is not None
 
-            if do_cfg:
-                if enable_cfg_parallel:
-                    noise_pred = self._predict_noise_cfg_parallel(
-                        latents=latents,
-                        timestep=timestep,
-                        cond_text_ids=cond_text_ids,
-                        cond_text_mask=cond_text_mask,
-                        uncond_text_ids=uncond_text_ids,
-                        uncond_text_mask=uncond_text_mask,
-                        video_shape=video_shape,
-                        fps=fps,
-                        guidance_scale=effective_scale,
-                        cfg_rank=cfg_rank,
-                        noisy_frame_mask=velocity_mask,
-                        cond_text_seq_len=batch.extra["cond_text_seq_len"],
-                        uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
-                        current_timestep=i,
-                    )
-                elif effective_scale == 1.0:
+        for i, t in progress_bar:
+            with StageProfiler(
+                f"denoising_step_{i}",
+                logger=logger,
+                metrics=metrics,
+                perf_dump_path_provided=perf_dump_path_provided,
+                record_as_step=True,
+            ):
+                timestep = t.unsqueeze(0) if t.dim() == 0 else t
+                # Outside the CFG window the effective scale collapses to 1.0,
+                # which reduces CFG to the cond branch (cfg-parallel safe).
+                effective_scale = (
+                    guidance_scale
+                    if self._cfg_active_at(t, guidance_interval)
+                    else 1.0
+                )
+
+                if do_cfg:
+                    if enable_cfg_parallel:
+                        noise_pred = self._predict_noise_cfg_parallel(
+                            latents=latents,
+                            timestep=timestep,
+                            cond_text_ids=cond_text_ids,
+                            cond_text_mask=cond_text_mask,
+                            uncond_text_ids=uncond_text_ids,
+                            uncond_text_mask=uncond_text_mask,
+                            video_shape=video_shape,
+                            fps=fps,
+                            guidance_scale=effective_scale,
+                            cfg_rank=cfg_rank,
+                            noisy_frame_mask=velocity_mask,
+                            cond_text_seq_len=batch.extra["cond_text_seq_len"],
+                            uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
+                            current_timestep=i,
+                        )
+                    elif effective_scale == 1.0:
+                        noise_pred = self._run_transformer(
+                            latents=latents,
+                            timestep=timestep,
+                            text_ids=cond_text_ids,
+                            text_mask=cond_text_mask,
+                            video_shape=video_shape,
+                            fps=fps,
+                            cache_key="cond",
+                            noisy_frame_mask=velocity_mask,
+                            max_text_seq_len=batch.extra["cond_text_seq_len"],
+                            current_timestep=i,
+                        )
+                    else:
+                        noise_pred = self._predict_noise_cfg_batched(
+                            latents=latents,
+                            timestep=timestep,
+                            cond_text_ids=cond_text_ids,
+                            cond_text_mask=cond_text_mask,
+                            uncond_text_ids=uncond_text_ids,
+                            uncond_text_mask=uncond_text_mask,
+                            video_shape=video_shape,
+                            fps=fps,
+                            guidance_scale=effective_scale,
+                            noisy_frame_mask=velocity_mask,
+                            max_text_seq_len=max(
+                                batch.extra["cond_text_seq_len"],
+                                batch.extra["uncond_text_seq_len"],
+                            ),
+                            current_timestep=i,
+                        )
+                else:
                     noise_pred = self._run_transformer(
                         latents=latents,
                         timestep=timestep,
@@ -655,53 +699,22 @@ class Cosmos3DenoisingStage(PipelineStage):
                         max_text_seq_len=batch.extra["cond_text_seq_len"],
                         current_timestep=i,
                     )
-                else:
-                    noise_pred = self._predict_noise_cfg_batched(
-                        latents=latents,
-                        timestep=timestep,
-                        cond_text_ids=cond_text_ids,
-                        cond_text_mask=cond_text_mask,
-                        uncond_text_ids=uncond_text_ids,
-                        uncond_text_mask=uncond_text_mask,
-                        video_shape=video_shape,
-                        fps=fps,
-                        guidance_scale=effective_scale,
-                        noisy_frame_mask=velocity_mask,
-                        max_text_seq_len=max(
-                            batch.extra["cond_text_seq_len"],
-                            batch.extra["uncond_text_seq_len"],
-                        ),
-                        current_timestep=i,
-                    )
-            else:
-                noise_pred = self._run_transformer(
-                    latents=latents,
-                    timestep=timestep,
-                    text_ids=cond_text_ids,
-                    text_mask=cond_text_mask,
-                    video_shape=video_shape,
-                    fps=fps,
-                    cache_key="cond",
-                    noisy_frame_mask=velocity_mask,
-                    max_text_seq_len=batch.extra["cond_text_seq_len"],
-                    current_timestep=i,
-                )
 
-            # I2V: zero-velocity at conditioned frames so the scheduler keeps
-            # them clean; UniPC's predictor-corrector still rescales the
-            # sample, so we re-inject the clean image latent below.
-            if velocity_mask is not None:
-                noise_pred = noise_pred * velocity_mask
+                # I2V: zero-velocity at conditioned frames so the scheduler keeps
+                # them clean; UniPC's predictor-corrector still rescales the
+                # sample, so we re-inject the clean image latent below.
+                if velocity_mask is not None:
+                    noise_pred = noise_pred * velocity_mask
 
-            latents = self.scheduler.step(
-                noise_pred,
-                t,
-                latents,
-                return_dict=False,
-            )[0]
+                latents = self.scheduler.step(
+                    noise_pred,
+                    t,
+                    latents,
+                    return_dict=False,
+                )[0]
 
-            if image_latent is not None:
-                latents[:, :, 0:1, :, :] = image_latent
+                if image_latent is not None:
+                    latents[:, :, 0:1, :, :] = image_latent
 
         batch.latents = latents
         self.log_info("Denoising complete")
