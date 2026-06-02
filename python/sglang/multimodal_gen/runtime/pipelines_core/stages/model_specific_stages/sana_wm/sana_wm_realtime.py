@@ -16,6 +16,7 @@ from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
 )
+from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.dits.sana_wm_components import (
     enable_ltx2_streaming_cache,
 )
@@ -24,13 +25,16 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
     StageParallelismType,
 )
+from sglang.multimodal_gen.runtime.models.schedulers.scheduling_sana_wm_self_forcing import (
+    SelfForcingFlowEulerSampler,
+    SelfForcingSamplerConfig,
+)
 from sglang.multimodal_gen.runtime.realtime.session import BaseRealtimeState
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 from .refiner import DiffusersLTX2Refiner
-from .scheduler import SelfForcingFlowEulerSampler, SelfForcingSamplerConfig
 from .utils import (
     action_string_to_c2w,
     estimate_intrinsics_with_pi3x,
@@ -286,7 +290,8 @@ class SanaWMRealtimeStage(PipelineStage):
 
     @property
     def parallelism_type(self) -> StageParallelismType:
-        return StageParallelismType.MAIN_RANK_ONLY
+        # realtime session state contains runtime-only iterators and runners
+        return StageParallelismType.REPLICATED
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -667,12 +672,6 @@ class SanaWMRealtimeStage(PipelineStage):
         latents[:, :, :1] = first_latent
 
         cond = batch.prompt_embeds[0].to(device=device, dtype=weight_dtype)
-        neg = (
-            batch.negative_prompt_embeds[0].to(device=device, dtype=weight_dtype)
-            if batch.do_classifier_free_guidance
-            and batch.negative_prompt_embeds
-            else torch.zeros_like(cond)
-        )
         cond_mask = (
             batch.prompt_attention_mask[0]
             if isinstance(batch.prompt_attention_mask, list)
@@ -681,8 +680,21 @@ class SanaWMRealtimeStage(PipelineStage):
         if cond_mask is None:
             cond_mask = torch.ones(cond.shape[0], cond.shape[2], device=device)
         cond_mask = cond_mask.to(device=device)
-        if batch.do_classifier_free_guidance and batch.negative_attention_mask:
-            neg_mask = batch.negative_attention_mask[0].to(device=device)
+        neg = None
+        if batch.do_classifier_free_guidance and batch.negative_prompt_embeds:
+            neg = batch.negative_prompt_embeds[0].to(device=device, dtype=weight_dtype)
+            if neg.shape[0] == 0:
+                neg = None
+        if neg is None:
+            neg = torch.zeros_like(cond)
+        if batch.do_classifier_free_guidance:
+            neg_mask = None
+            if batch.negative_attention_mask:
+                neg_mask = batch.negative_attention_mask[0].to(device=device)
+                if neg_mask.shape[0] == 0:
+                    neg_mask = None
+            if neg_mask is None:
+                neg_mask = torch.ones_like(cond_mask)
             mask = torch.cat([neg_mask, cond_mask], dim=0)
         else:
             mask = cond_mask
@@ -892,63 +904,69 @@ class SanaWMRealtimeStage(PipelineStage):
         vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
         transformer = self.transformer.to(device=device, dtype=weight_dtype).eval()
         self.vae = self.vae.to(device=device, dtype=vae_dtype).eval()
+        batch.enable_sequence_shard = int(server_args.sp_degree or 1) > 1
 
-        if batch.block_idx == 0 or not state.initialized:
-            state.dispose()
-            self._initialize_state(
-                batch,
-                state,
-                transformer=transformer,
-                device=device,
-                weight_dtype=weight_dtype,
-                vae_dtype=vae_dtype,
-            )
-        else:
-            self._append_realtime_camera_actions(batch, state)
-            self._update_camera_tensors(
-                batch,
-                state,
-                device=device,
-                dtype=weight_dtype,
-            )
+        with set_forward_context(
+            current_timestep=batch.block_idx,
+            attn_metadata=None,
+            forward_batch=batch,
+        ):
+            if batch.block_idx == 0 or not state.initialized:
+                state.dispose()
+                self._initialize_state(
+                    batch,
+                    state,
+                    transformer=transformer,
+                    device=device,
+                    weight_dtype=weight_dtype,
+                    vae_dtype=vae_dtype,
+                )
+            else:
+                self._append_realtime_camera_actions(batch, state)
+                self._update_camera_tensors(
+                    batch,
+                    state,
+                    device=device,
+                    dtype=weight_dtype,
+                )
 
-        if state.use_refiner:
-            frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
-        else:
-            frames = self._run_stage1_only_tick(state, vae_dtype=vae_dtype)
-
-        if frames is None and state.rollover_first_latent is not None:
-            first_latent = state.rollover_first_latent
-            intrinsics_raw = (
-                state.intrinsics_raw.copy()
-                if state.intrinsics_raw is not None
-                else None
-            )
-            translation_speed = state.translation_speed
-            rotation_speed_deg = state.rotation_speed_deg
-            logger.info(
-                "SANA-WM realtime horizon rollover: block_idx=%s, latent_t=%s",
-                batch.block_idx,
-                state.latent_t,
-            )
-            state.dispose()
-            self._initialize_state(
-                batch,
-                state,
-                transformer=transformer,
-                device=device,
-                weight_dtype=weight_dtype,
-                vae_dtype=vae_dtype,
-                first_latent=first_latent,
-                intrinsics_raw=intrinsics_raw,
-                translation_speed=translation_speed,
-                rotation_speed_deg=rotation_speed_deg,
-            )
             if state.use_refiner:
                 frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
             else:
                 frames = self._run_stage1_only_tick(state, vae_dtype=vae_dtype)
 
-        if frames is None:
-            return self._empty_output(batch)
-        return OutputBatch(output=frames.to(torch.float32), metrics=batch.metrics)
+            if frames is None and state.rollover_first_latent is not None:
+                first_latent = state.rollover_first_latent
+                intrinsics_raw = (
+                    state.intrinsics_raw.copy()
+                    if state.intrinsics_raw is not None
+                    else None
+                )
+                translation_speed = state.translation_speed
+                rotation_speed_deg = state.rotation_speed_deg
+                logger.info(
+                    "SANA-WM realtime horizon rollover: block_idx=%s, latent_t=%s",
+                    batch.block_idx,
+                    state.latent_t,
+                )
+                state.dispose()
+                self._initialize_state(
+                    batch,
+                    state,
+                    transformer=transformer,
+                    device=device,
+                    weight_dtype=weight_dtype,
+                    vae_dtype=vae_dtype,
+                    first_latent=first_latent,
+                    intrinsics_raw=intrinsics_raw,
+                    translation_speed=translation_speed,
+                    rotation_speed_deg=rotation_speed_deg,
+                )
+                if state.use_refiner:
+                    frames = self._run_refiner_tick(state, vae_dtype=vae_dtype)
+                else:
+                    frames = self._run_stage1_only_tick(state, vae_dtype=vae_dtype)
+
+            if frames is None:
+                return self._empty_output(batch)
+            return OutputBatch(output=frames.to(torch.float32), metrics=batch.metrics)
