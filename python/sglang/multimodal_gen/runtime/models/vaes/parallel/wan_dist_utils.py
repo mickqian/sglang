@@ -108,7 +108,7 @@ def gather_and_trim_height(x: torch.Tensor, expected_height: int | None):
         return x
     x = get_sp_group().all_gather(_maybe_contiguous_for_sp_gather(x), dim=-2)
     if x.shape[-2] != expected_height:
-        x = x[..., :expected_height, :].contiguous()
+        x = x[..., :expected_height, :]
     return x
 
 
