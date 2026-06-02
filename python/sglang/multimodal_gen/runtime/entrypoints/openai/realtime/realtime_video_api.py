@@ -273,7 +273,7 @@ async def _await_realtime_task(task: asyncio.Task | None) -> None:
     except (asyncio.CancelledError, WebSocketDisconnect):
         pass
     except Exception as e:
-        logger.debug("realtime task exited with error: %s", e)
+        logger.debug("realtime task exited with error: %s", e, exc_info=True)
 
 
 async def _listen_events(ws: WebSocket, session: GenerateSession):
