@@ -51,12 +51,19 @@ def tensor_chunk(x: torch.Tensor, dim: int = -2, world_size: int = 1, rank: int 
         return None
     if world_size <= 1:
         return x
-    len_to_padding = (int(math.ceil(x.shape[dim] / world_size)) * world_size) - x.shape[
-        dim
-    ]
+
+    dim = dim if dim >= 0 else x.dim() + dim
+    chunk_size = int(math.ceil(x.shape[dim] / world_size))
+    start = rank * chunk_size
+    if start >= x.shape[dim]:
+        chunk = x.narrow(dim, x.shape[dim], 0)
+    else:
+        chunk = x.narrow(dim, start, min(chunk_size, x.shape[dim] - start))
+
+    len_to_padding = chunk_size - chunk.shape[dim]
     if len_to_padding != 0:
-        x = tensor_pad(x, len_to_padding, dim=dim)
-    return torch.chunk(x, world_size, dim=dim)[rank]
+        chunk = tensor_pad(chunk, len_to_padding, dim=dim)
+    return chunk
 
 
 def split_for_parallel_encode(
