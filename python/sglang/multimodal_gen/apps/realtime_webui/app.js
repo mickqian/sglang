@@ -1241,7 +1241,7 @@ function sendCameraControlTransitions(transitions) {
     "camera_actions",
     payload,
     describeCameraStateEvent(transitions),
-    { awaitCutover: true, recordHistory: false, trimPlaybackQueue: false },
+    { awaitCutover: false, recordHistory: false, trimPlaybackQueue: false },
   );
 }
 
