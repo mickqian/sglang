@@ -266,7 +266,7 @@ def resample_forward(self, x):
                 _feat_cache[idx] = "Rep"
                 _feat_idx += 1
             else:
-                cache_x = x[:, :, -cache_t:, :, :].clone()
+                cache_x = x[:, :, -cache_t:, :, :].contiguous()
                 if (
                     cache_x.shape[2] < 2
                     and _feat_cache[idx] is not None
@@ -346,7 +346,7 @@ def residual_block_forward(self, x):
     _feat_idx = feat_idx.get()
     if _feat_cache is not None:
         idx = _feat_idx
-        cache_x = x[:, :, -cache_t:, :, :].clone()
+        cache_x = x[:, :, -cache_t:, :, :].contiguous()
         if cache_x.shape[2] < 2 and _feat_cache[idx] is not None:
             cache_x = torch.cat(
                 [
@@ -375,7 +375,7 @@ def residual_block_forward(self, x):
     _feat_idx = feat_idx.get()
     if _feat_cache is not None:
         idx = _feat_idx
-        cache_x = x[:, :, -cache_t:, :, :].clone()
+        cache_x = x[:, :, -cache_t:, :, :].contiguous()
         if cache_x.shape[2] < 2 and _feat_cache[idx] is not None:
             cache_x = torch.cat(
                 [
