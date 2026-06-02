@@ -864,10 +864,10 @@ class Cosmos3DecodingStage(PipelineStage):
                     .view(1, -1, 1, 1, 1)
                     .to(device, vae_dtype)
                 )
-            latents = (latents * self._latents_std) + self._latents_mean
+            latents.mul_(self._latents_std).add_(self._latents_mean)
         else:
             scaling_factor = getattr(self.vae.config, "scaling_factor", 1.0)
-            latents = latents / scaling_factor
+            latents.div_(scaling_factor)
 
         # Decode - returns [B, C, T, H, W]
         video = self.vae.decode(latents)
