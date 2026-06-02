@@ -149,16 +149,16 @@ def qwen3_apply_rotary_pos_emb(
     half = q.shape[-1] // 2
     q1 = q[..., :half]
     q2 = q[..., half:]
-    q_embed = torch.empty_like(q)
-    q_embed[..., :half] = q1 * cos[..., :half] - q2 * sin[..., :half]
-    q_embed[..., half:] = q2 * cos[..., half:] + q1 * sin[..., half:]
+    q_embed = q * cos
+    q_embed[..., :half].sub_(q2 * sin[..., :half])
+    q_embed[..., half:].add_(q1 * sin[..., half:])
 
     half = k.shape[-1] // 2
     k1 = k[..., :half]
     k2 = k[..., half:]
-    k_embed = torch.empty_like(k)
-    k_embed[..., :half] = k1 * cos[..., :half] - k2 * sin[..., :half]
-    k_embed[..., half:] = k2 * cos[..., half:] + k1 * sin[..., half:]
+    k_embed = k * cos
+    k_embed[..., :half].sub_(k2 * sin[..., :half])
+    k_embed[..., half:].add_(k1 * sin[..., half:])
     return q_embed, k_embed
 
 
