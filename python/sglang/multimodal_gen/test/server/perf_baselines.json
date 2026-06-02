@@ -2654,6 +2654,99 @@
             "expected_avg_denoise_ms": 1325.11,
             "expected_median_denoise_ms": 1547.31,
             "estimated_full_test_time_s": 363.2
+        },
+        "cosmos3_nano_t2i": {
+            "stages_ms": {
+                "Cosmos3ImagePreprocessStage": 0.01,
+                "Cosmos3TokenizationStage": 155.89,
+                "Cosmos3LatentPreparationStage": 0.15,
+                "Cosmos3TimestepPreparationStage": 0.64,
+                "Cosmos3DenoisingStage": 846.85,
+                "Cosmos3DecodingStage": 12.14
+            },
+            "denoise_step_ms": {
+                "0": 58.61,
+                "1": 21.71,
+                "2": 44.31,
+                "3": 22.05,
+                "4": 21.79,
+                "5": 21.78,
+                "6": 21.79,
+                "7": 22.25,
+                "8": 22.59,
+                "9": 22.73,
+                "10": 22.75,
+                "11": 22.71,
+                "12": 24.63,
+                "13": 22.43,
+                "14": 21.97,
+                "15": 22.74,
+                "16": 22.93,
+                "17": 22.74,
+                "18": 22.68,
+                "19": 22.55,
+                "20": 22.52,
+                "21": 22.37,
+                "22": 22.29,
+                "23": 22.45,
+                "24": 22.63,
+                "25": 22.64,
+                "26": 22.53,
+                "27": 22.48,
+                "28": 22.41,
+                "29": 22.18,
+                "30": 22.19,
+                "31": 22.48,
+                "32": 22.68,
+                "33": 22.65,
+                "34": 22.37
+            },
+            "expected_e2e_ms": 1019.02,
+            "expected_avg_denoise_ms": 24.13,
+            "expected_median_denoise_ms": 22.52,
+            "estimated_full_test_time_s": 65.0
+        },
+        "cosmos3_nano_t2v": {
+            "stages_ms": {
+                "Cosmos3ImagePreprocessStage": 0.01,
+                "Cosmos3TokenizationStage": 152.97,
+                "Cosmos3LatentPreparationStage": 0.17,
+                "Cosmos3TimestepPreparationStage": 0.64,
+                "Cosmos3DenoisingStage": 294.92,
+                "Cosmos3DecodingStage": 47.82,
+                "per_frame_generation": null
+            },
+            "denoise_step_ms": {
+                "0": 89.22,
+                "1": 61.52,
+                "2": 85.06,
+                "3": 58.08
+            },
+            "expected_e2e_ms": 499.70,
+            "expected_avg_denoise_ms": 73.47,
+            "expected_median_denoise_ms": 73.29,
+            "estimated_full_test_time_s": 65.0
+        },
+        "cosmos3_nano_i2v": {
+            "stages_ms": {
+                "Cosmos3ImagePreprocessStage": 33.05,
+                "Cosmos3TokenizationStage": 121.41,
+                "Cosmos3LatentPreparationStage": 68.93,
+                "Cosmos3TimestepPreparationStage": 0.37,
+                "Cosmos3DenoisingStage": 290.88,
+                "Cosmos3DecodingStage": 48.12,
+                "per_frame_generation": null
+            },
+            "denoise_step_ms": {
+                "0": 92.05,
+                "1": 62.31,
+                "2": 77.54,
+                "3": 58.15
+            },
+            "expected_e2e_ms": 565.77,
+            "expected_avg_denoise_ms": 72.51,
+            "expected_median_denoise_ms": 69.93,
+            "estimated_full_test_time_s": 65.0
         }
     }
 }
