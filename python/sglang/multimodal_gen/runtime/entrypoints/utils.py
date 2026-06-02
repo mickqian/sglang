@@ -497,8 +497,10 @@ def _sample_to_uint8_frames(sample: Any) -> list[Any]:
         # sample is raw tensor
         if sample.dim() == 3:
             sample = sample.unsqueeze(1)
-        sample = (sample * 255).clamp(0, 255).to(torch.uint8)
-        videos = sample.permute(1, 2, 3, 0).contiguous().cpu().numpy()
+        videos = sample.permute(1, 2, 3, 0)
+        videos = (
+            (videos * 255).clamp(0, 255).to(torch.uint8).contiguous().cpu().numpy()
+        )
         return list(videos)
 
     if not isinstance(sample, np.ndarray):
