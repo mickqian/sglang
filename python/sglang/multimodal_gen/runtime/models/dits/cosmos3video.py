@@ -120,10 +120,12 @@ def compute_mrope_position_ids_vision(
         mrope_ids = torch.stack(
             [t_index, h_index.to(torch.float32), w_index.to(torch.float32)], dim=0
         )
+        temporal_max = (grid_t - 1) / tps * base_tps + temporal_offset
     else:
         mrope_ids = torch.stack([t_index, h_index, w_index], dim=0)
+        temporal_max = grid_t - 1 + int(temporal_offset)
 
-    next_offset = math.ceil(mrope_ids.max().item()) + 1
+    next_offset = math.ceil(max(temporal_max, grid_h - 1, grid_w - 1)) + 1
     return mrope_ids, next_offset
 
 
