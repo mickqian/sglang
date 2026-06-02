@@ -13,12 +13,11 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from enum import Enum, auto
+from typing import Any
 
 import torch
-from tqdm.auto import tqdm
 
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
-from sglang.multimodal_gen.runtime.distributed.parallel_state import get_world_rank
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
 )
@@ -31,6 +30,7 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
+from sglang.multimodal_gen.runtime.utils.progress import rank_zero_tqdm
 
 logger = init_logger(__name__)
 
@@ -96,11 +96,11 @@ class PipelineStage(StageDedupMixin, ABC):
         *,
         disable: bool = False,
         **kwargs,
-    ) -> tqdm:
-        return tqdm(
+    ) -> Any:
+        return rank_zero_tqdm(
             iterable=iterable,
             total=total,
-            disable=disable or get_world_rank() != 0,
+            disable=disable,
             **kwargs,
         )
 

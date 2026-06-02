@@ -12,7 +12,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, cast
 
 import torch
-from tqdm import tqdm
 
 from sglang.multimodal_gen.runtime.disaggregation.roles import (
     RoleType,
@@ -55,6 +54,7 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     verify_model_config_and_directory,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.progress import rank_zero_tqdm
 
 logger = init_logger(__name__)
 
@@ -491,7 +491,7 @@ class ComposedPipelineBase(ABC):
             [spec.module_name for spec in component_load_specs],
         )
 
-        for spec in tqdm(
+        for spec in rank_zero_tqdm(
             iterable=component_load_specs, desc="Loading required modules"
         ):
             module_name: str = spec.module_name

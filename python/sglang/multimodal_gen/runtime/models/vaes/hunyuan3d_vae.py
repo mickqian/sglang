@@ -10,12 +10,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from tqdm import tqdm
 
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     LayerwiseOffloadableModuleMixin,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.progress import rank_zero_tqdm
 
 logger = init_logger(__name__)
 
@@ -656,7 +656,7 @@ class VanillaVolumeDecoder:
         )
 
         batch_logits = []
-        for start in tqdm(
+        for start in rank_zero_tqdm(
             range(0, xyz_samples.shape[0], num_chunks),
             desc="Volume Decoding",
             disable=not enable_pbar,
@@ -729,7 +729,7 @@ class HierarchicalVolumeDecoding:
         # 2. latents to 3d volume
         batch_logits = []
         batch_size = latents.shape[0]
-        for start in tqdm(
+        for start in rank_zero_tqdm(
             range(0, xyz_samples.shape[0], num_chunks),
             desc=f"Hierarchical Volume Decoding [r{resolutions[0] + 1}]",
             disable=not enable_pbar,
@@ -781,7 +781,7 @@ class HierarchicalVolumeDecoding:
                 continue
 
             batch_logits = []
-            for start in tqdm(
+            for start in rank_zero_tqdm(
                 range(0, next_points.shape[0], num_chunks),
                 desc=f"Hierarchical Volume Decoding [r{octree_depth_now + 1}]",
                 disable=not enable_pbar,
@@ -885,7 +885,7 @@ class FlashVDMVolumeDecoding:
 
         batch_logits = []
         num_batchs = max(num_chunks // xyz_samples.shape[1], 1)
-        for start in tqdm(
+        for start in rank_zero_tqdm(
             range(0, xyz_samples.shape[0], num_batchs),
             desc="FlashVDM Volume Decoding",
             disable=not enable_pbar,
