@@ -294,9 +294,11 @@ def timestep_embedding(
         / half
     )
     args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    embedding = torch.empty(t.shape[0], dim, dtype=args.dtype, device=t.device)
+    torch.cos(args, out=embedding[:, :half])
+    torch.sin(args, out=embedding[:, half : half * 2])
     if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        embedding[:, -1].zero_()
     return embedding
 
 
