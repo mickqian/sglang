@@ -20,6 +20,14 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import r
 from diffusers.utils.torch_utils import randn_tensor
 from tqdm import tqdm
 
+from sglang.multimodal_gen.runtime.distributed.communication_op import (
+    cfg_model_parallel_all_reduce,
+)
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_classifier_free_guidance_rank,
+    get_classifier_free_guidance_world_size,
+)
+
 
 def _stream_debug_dump(name: str, tensor: torch.Tensor) -> None:
     root = os.getenv("SANAWM_STREAM_DEBUG_DIR")
@@ -232,6 +240,9 @@ class SelfForcingFlowEulerSampler:
         explicit_sigmas = [float(t) / 1000.0 for t in schedule[:-1]]
         scheduler = FlowMatchEulerDiscreteScheduler(shift=1.0)
         use_cfg = self.config.cfg_scale > 1.0
+        cfg_world_size = get_classifier_free_guidance_world_size()
+        cfg_parallel = use_cfg and cfg_world_size > 1
+        cfg_rank = get_classifier_free_guidance_rank() if cfg_parallel else 0
         batch_size, channels, total_frames, height, width = latents.shape
         if total_frames <= self.config.num_frame_per_block:
             raise ValueError("streaming self-forcing requires more than one latent chunk")
@@ -250,12 +261,32 @@ class SelfForcingFlowEulerSampler:
             start_f = chunk_indices[chunk_idx]
             end_f = chunk_indices[chunk_idx + 1]
             chunk_frames = end_f - start_f
-            prompt_embeds = self.condition[chunk_idx : chunk_idx + 1] if self.condition.shape[0] == num_chunks else self.condition
-            if use_cfg:
-                prompt_embeds = torch.cat([self.uncondition, prompt_embeds], dim=0)
+            cond_prompt_embeds = self.condition[chunk_idx : chunk_idx + 1] if self.condition.shape[0] == num_chunks else self.condition
+            uncond_prompt_embeds = self.uncondition[chunk_idx : chunk_idx + 1] if self.uncondition.shape[0] == num_chunks else self.uncondition
+            prompt_embeds = cond_prompt_embeds
+            if cfg_parallel:
+                prompt_embeds = uncond_prompt_embeds if cfg_rank == 0 else cond_prompt_embeds
+            elif use_cfg:
+                prompt_embeds = torch.cat([uncond_prompt_embeds, prompt_embeds], dim=0)
             mask = self.mask
-            if isinstance(mask, torch.Tensor) and mask.shape[0] == num_chunks:
-                mask = mask[chunk_idx : chunk_idx + 1]
+            if isinstance(mask, torch.Tensor):
+                cfg_mask_batch = self.uncondition.shape[0] + self.condition.shape[0]
+                if use_cfg and mask.shape[0] == cfg_mask_batch:
+                    uncond_mask = mask[: self.uncondition.shape[0]]
+                    cond_mask = mask[self.uncondition.shape[0] :]
+                    if self.uncondition.shape[0] == num_chunks:
+                        uncond_mask = uncond_mask[chunk_idx : chunk_idx + 1]
+                    if self.condition.shape[0] == num_chunks:
+                        cond_mask = cond_mask[chunk_idx : chunk_idx + 1]
+                    mask = (
+                        uncond_mask
+                        if cfg_parallel and cfg_rank == 0
+                        else cond_mask
+                        if cfg_parallel
+                        else torch.cat([uncond_mask, cond_mask], dim=0)
+                    )
+                elif mask.shape[0] == num_chunks:
+                    mask = mask[chunk_idx : chunk_idx + 1]
 
             frame_index = torch.arange(start_f, end_f, device=device, dtype=torch.long) if sink_num > 0 else None
             local_data_info = dict(data_info)
@@ -280,9 +311,21 @@ class SelfForcingFlowEulerSampler:
             scheduler.set_timesteps(sigmas=explicit_sigmas, device=device)
             iterator = tqdm(list(scheduler.timesteps), disable=os.getenv("DPM_TQDM", "False") == "True", desc=f"stage1 chunk {chunk_idx}")
             for step_idx, timestep_scalar in enumerate(iterator):
-                latent_model_input = torch.cat([latents[:, :, start_f:end_f]] * 2) if use_cfg else latents[:, :, start_f:end_f]
+                latent_model_input = (
+                    latents[:, :, start_f:end_f]
+                    if cfg_parallel
+                    else torch.cat([latents[:, :, start_f:end_f]] * 2)
+                    if use_cfg
+                    else latents[:, :, start_f:end_f]
+                )
                 timestep_tensor = (1.0 - condition_mask_chunk) * timestep_scalar.to(device=device, dtype=torch.float32).view(1, 1, 1, 1, 1)
-                timestep_model = torch.cat([timestep_tensor, timestep_tensor], dim=0) if use_cfg else timestep_tensor
+                timestep_model = (
+                    timestep_tensor
+                    if cfg_parallel
+                    else torch.cat([timestep_tensor, timestep_tensor], dim=0)
+                    if use_cfg
+                    else timestep_tensor
+                )
                 if chunk_idx == 0 and step_idx == 0:
                     _stream_debug_dump("stage1_input_000_000", latent_model_input)
                     _stream_debug_dump("stage1_timestep_000_000", timestep_model)
@@ -302,7 +345,15 @@ class SelfForcingFlowEulerSampler:
                 )
                 if isinstance(noise_pred, Transformer2DModelOutput):
                     noise_pred = noise_pred[0]
-                if use_cfg:
+                if cfg_parallel:
+                    if cfg_rank == 0:
+                        partial = (1.0 - self.config.cfg_scale) * noise_pred
+                    elif cfg_rank == 1:
+                        partial = self.config.cfg_scale * noise_pred
+                    else:
+                        partial = torch.zeros_like(noise_pred)
+                    noise_pred = cfg_model_parallel_all_reduce(partial.contiguous())
+                elif use_cfg:
                     noise_uncond, noise_text = noise_pred.chunk(2)
                     noise_pred = noise_uncond + self.config.cfg_scale * (noise_text - noise_uncond)
                 if chunk_idx == 0 and step_idx == 0:
@@ -320,7 +371,13 @@ class SelfForcingFlowEulerSampler:
                 for loc in cond_local_indices:
                     latents[:, :, start_f + loc] = init_latents[:, :, start_f + loc]
 
-            latent_model_input = torch.cat([latents[:, :, start_f:end_f]] * 2) if use_cfg else latents[:, :, start_f:end_f]
+            latent_model_input = (
+                latents[:, :, start_f:end_f]
+                if cfg_parallel
+                else torch.cat([latents[:, :, start_f:end_f]] * 2)
+                if use_cfg
+                else latents[:, :, start_f:end_f]
+            )
             timestep_zero = torch.zeros(latent_model_input.shape[0], 1, chunk_frames, device=device, dtype=torch.float32)
             call_kwargs = {"mask": mask, "data_info": local_data_info}
             _inject_sliced_extras(self.extra_model_kwargs, call_kwargs, chunk_frames, end_f)

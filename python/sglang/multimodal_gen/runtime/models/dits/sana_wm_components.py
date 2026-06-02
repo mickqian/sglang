@@ -22,6 +22,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.multimodal_gen.runtime.distributed.communication_op import (
+    sequence_model_parallel_all_reduce,
+)
+from sglang.multimodal_gen.runtime.distributed.parallel_state import get_sp_world_size
+
 
 def create_grid(height: int, width: int, *, batch: int | None = None, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     ys, xs = torch.meshgrid(
@@ -332,6 +337,22 @@ _CACHE_TYPE_CONCAT = 0.0
 _CACHE_TYPE_STATE = 1.0
 
 
+def _global_spatial_size(local_spatial: int, sequence_parallel: bool) -> int:
+    return int(local_spatial) * (get_sp_world_size() if sequence_parallel else 1)
+
+
+def _mean_over_spatial(
+    tensor: torch.Tensor,
+    *,
+    local_spatial: int,
+    sequence_parallel: bool,
+) -> torch.Tensor:
+    tensor = tensor.sum(dim=-1)
+    if sequence_parallel:
+        tensor = sequence_model_parallel_all_reduce(tensor.contiguous())
+    return tensor / float(_global_spatial_size(local_spatial, sequence_parallel))
+
+
 def _stream_debug_dump_once(owner: object, name: str, tensor: torch.Tensor) -> None:
     debug_dir = os.environ.get("SANAWM_STREAM_DEBUG_DIR")
     if not debug_dir or getattr(owner, f"_stream_debug_dumped_{name}", False):
@@ -433,6 +454,7 @@ def _recurrent_gdn_components(
     *,
     kv_state: torch.Tensor | None = None,
     z_state: torch.Tensor | None = None,
+    sequence_parallel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     b, heads, dim, n = q.shape
     frames = beta.shape[2]
@@ -461,9 +483,15 @@ def _recurrent_gdn_components(
         kv_state = kv_state * gt
         z_state = z_state * gt
         delta_v = (vt - torch.matmul(kv_state, krt)) * bt
-        kv_state = kv_state + torch.matmul(delta_v, krt.transpose(-1, -2))
+        kv_update = torch.matmul(delta_v, krt.transpose(-1, -2))
+        if sequence_parallel:
+            kv_update = sequence_model_parallel_all_reduce(kv_update.contiguous())
+        kv_state = kv_state + kv_update
         delta_z = (1.0 - torch.matmul(z_state.transpose(-1, -2), kt)) * bt
-        z_state = z_state + torch.matmul(kt, delta_z.transpose(-1, -2))
+        z_update = torch.matmul(kt, delta_z.transpose(-1, -2))
+        if sequence_parallel:
+            z_update = sequence_model_parallel_all_reduce(z_update.contiguous())
+        z_state = z_state + z_update
         nums.append(torch.matmul(kv_state, qrt))
         dens.append(torch.matmul(z_state.transpose(-1, -2), qt))
 
@@ -483,14 +511,32 @@ def recurrent_gdn(
     *,
     eps: float,
     return_components: bool = False,
+    sequence_parallel: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    num, den, _, _ = _recurrent_gdn_components(q, k, v, q_rot, k_rot, beta, decay)
+    num, den, _, _ = _recurrent_gdn_components(
+        q,
+        k,
+        v,
+        q_rot,
+        k_rot,
+        beta,
+        decay,
+        sequence_parallel=sequence_parallel,
+    )
     if return_components:
         return num, den
     return num / (den + eps)
 
 
-def recurrent_delta(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor, decay: torch.Tensor) -> torch.Tensor:
+def recurrent_delta(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    decay: torch.Tensor,
+    *,
+    sequence_parallel: bool = False,
+) -> torch.Tensor:
     b, heads, dim, n = q.shape
     frames = beta.shape[2]
     spatial = n // frames
@@ -507,7 +553,12 @@ def recurrent_delta(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: tor
         qt, kt, vt = q[:, :, frame], k[:, :, frame], v[:, :, frame]
         state = state * decay[:, :, frame]
         delta_v = (vt - torch.matmul(state, kt)) * beta[:, :, frame]
-        state = state + torch.matmul(delta_v, kt.transpose(-1, -2))
+        state_update = torch.matmul(delta_v, kt.transpose(-1, -2))
+        if sequence_parallel:
+            state_update = sequence_model_parallel_all_reduce(
+                state_update.contiguous()
+            )
+        state = state + state_update
         outs.append(torch.matmul(state, qt))
     return torch.stack(outs, dim=2).permute(0, 1, 3, 2, 4).reshape(b, heads, dim, n)
 
@@ -524,6 +575,7 @@ def recurrent_gdn_cached(
     eps: float,
     kv_state: torch.Tensor | None,
     z_state: torch.Tensor | None,
+    sequence_parallel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     b, heads, dim, n = q.shape
     frames = beta.shape[2]
@@ -548,6 +600,7 @@ def recurrent_gdn_cached(
         decay,
         kv_state=kv_state,
         z_state=z_state,
+        sequence_parallel=sequence_parallel,
     )
 
     num_b, den_b, _, _ = _recurrent_gdn_components(
@@ -558,6 +611,7 @@ def recurrent_gdn_cached(
         from_time(flip_and_shift(to_time(k_rot_flat), dim=2, shift_val=0.0)),
         flip_and_shift(beta_flat, dim=2, shift_val=0.0),
         flip_and_shift(decay_flat, dim=2, shift_val=1.0),
+        sequence_parallel=sequence_parallel,
     )
     num_b = torch.flip(num_b.view(b, heads, dim, frames, spatial), dims=[3]).reshape_as(num_f)
     den_b = torch.flip(den_b.view(b, heads, 1, frames, spatial), dims=[3]).reshape_as(den_f)
@@ -573,6 +627,7 @@ def recurrent_delta_cached(
     decay: torch.Tensor,
     *,
     state: torch.Tensor | None,
+    sequence_parallel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     b, heads, dim, n = q.shape
     frames = beta.shape[2]
@@ -598,7 +653,12 @@ def recurrent_delta_cached(
         qt, kt, vt = q[:, :, frame], k[:, :, frame], v[:, :, frame]
         state = state * decay[:, :, frame]
         delta_v = (vt - torch.matmul(state, kt)) * beta[:, :, frame]
-        state = state + torch.matmul(delta_v, kt.transpose(-1, -2))
+        state_update = torch.matmul(delta_v, kt.transpose(-1, -2))
+        if sequence_parallel:
+            state_update = sequence_model_parallel_all_reduce(
+                state_update.contiguous()
+            )
+        state = state + state_update
         outs.append(torch.matmul(state, qt))
     out_f = torch.stack(outs, dim=2).permute(0, 1, 3, 2, 4).reshape(b, heads, dim, n)
     out_b = recurrent_delta(
@@ -607,6 +667,7 @@ def recurrent_delta_cached(
         from_time(flip_and_shift(to_time(v_flat), dim=2, shift_val=0.0)),
         flip_and_shift(beta_flat, dim=2, shift_val=0.0),
         flip_and_shift(decay_flat, dim=2, shift_val=1.0),
+        sequence_parallel=sequence_parallel,
     )
     out_b = torch.flip(out_b.view(b, heads, dim, frames, spatial), dims=[3]).reshape_as(out_f)
     out = out_f + out_b
@@ -739,12 +800,22 @@ class SanaWMGDNAttention(nn.Module):
             kv_cache[_SLOT_SHORTCONV] = x_temporal[:, -pad:].detach().clone()
         return self._reshape_from_temporal(y, b, spatial, frames)
 
-    def _compute_frame_gates(self, x: torch.Tensor, HW: tuple[int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_frame_gates(
+        self,
+        x: torch.Tensor,
+        HW: tuple[int, int, int],
+        *,
+        sequence_parallel: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         b, _, c = x.shape
         frames, h, w = HW
         spatial = h * w
         beta = self.beta_proj(x).sigmoid().reshape(b, frames, spatial, self.heads).permute(0, 3, 1, 2)
-        pooled = x.reshape(b, frames, spatial, c).mean(dim=2)
+        pooled = _mean_over_spatial(
+            x.reshape(b, frames, spatial, c).transpose(2, 3),
+            local_spatial=spatial,
+            sequence_parallel=sequence_parallel,
+        )
         decay = (-self.A_log.float().exp().view(1, 1, -1) * F.softplus(self.gate_proj(pooled).float() + self.dt_bias.float().view(1, 1, -1))).exp()
         return beta, decay.transpose(1, 2)
 
@@ -797,12 +868,14 @@ class SanaWMGDNAttention(nn.Module):
         rotary_emb: torch.Tensor | None,
         apply_output_gate: bool = True,
         precomputed_gates: tuple[torch.Tensor, torch.Tensor] | None = None,
+        sequence_parallel: bool = False,
         **_: object,
     ) -> torch.Tensor:
         b, n, c = x.shape
         frames, h, w = HW
         q, k, v = self._qkv(x, HW)
-        k = k * ((self.dim**-0.5) * ((h * w) ** -0.5))
+        spatial_size = _global_spatial_size(h * w, sequence_parallel)
+        k = k * ((self.dim**-0.5) * (spatial_size**-0.5))
         q = q.permute(0, 2, 3, 1)
         k = k.permute(0, 2, 3, 1)
         v = v.permute(0, 2, 3, 1)
@@ -812,7 +885,18 @@ class SanaWMGDNAttention(nn.Module):
         qf, kf, vf = q.float(), k.float(), v.float()
         qrf, krf = q_rot.float(), k_rot.float()
         beta, decay = beta.float(), decay.float()
-        num_f, den_f = recurrent_gdn(qf, kf, vf, qrf, krf, beta, decay, eps=self.eps, return_components=True)
+        num_f, den_f = recurrent_gdn(
+            qf,
+            kf,
+            vf,
+            qrf,
+            krf,
+            beta,
+            decay,
+            eps=self.eps,
+            return_components=True,
+            sequence_parallel=sequence_parallel,
+        )
 
         def to_time(tensor: torch.Tensor, dim_actual: int) -> torch.Tensor:
             return tensor.view(b, self.heads, dim_actual, frames, h * w).permute(0, 1, 3, 2, 4)
@@ -830,6 +914,7 @@ class SanaWMGDNAttention(nn.Module):
             flip_and_shift(decay, dim=2, shift_val=1.0),
             eps=self.eps,
             return_components=True,
+            sequence_parallel=sequence_parallel,
         )
         num_b = torch.flip(num_b.view(b, self.heads, self.dim, frames, h * w), dims=[3]).reshape_as(num_f)
         den_b = torch.flip(den_b.view(b, self.heads, 1, frames, h * w), dims=[3]).reshape_as(den_f)
@@ -877,6 +962,7 @@ class SanaWMGDNAttention(nn.Module):
         rotary_emb: torch.Tensor | None,
         HW: tuple[int, int, int],
         raymats: torch.Tensor | None = None,
+        sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
         b, n, heads, dim = q_raw.shape
         _, h, w = HW
@@ -892,7 +978,7 @@ class SanaWMGDNAttention(nn.Module):
         k_inv = torch.rsqrt(k_raw.float().square().sum(dim=(-1, -2)) / (heads * dim) + self.k_norm_cam.eps)
         q_w = self.q_norm_cam.weight.float().reshape(heads, dim)
         k_w = self.k_norm_cam.weight.float().reshape(heads, dim)
-        k_scale = (dim**-0.5) * ((h * w) ** -0.5)
+        k_scale = (dim**-0.5) * (_global_spatial_size(h * w, sequence_parallel) ** -0.5)
         q = (q_raw.float() * q_inv[:, :, None, None] * q_w[None, None]).clamp_min(0.0)
         k = (k_raw.float() * k_inv[:, :, None, None] * k_w[None, None]).clamp_min(0.0) * k_scale
         v = v_raw.float()
@@ -949,6 +1035,7 @@ class SanaWMGDNAttention(nn.Module):
         kv_cache: list[torch.Tensor | None],
         save_kv_cache: bool,
         gates: tuple[torch.Tensor, torch.Tensor],
+        sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, list[torch.Tensor | None]]:
         b, n, c = x.shape
         _, h, w = HW
@@ -958,7 +1045,8 @@ class SanaWMGDNAttention(nn.Module):
             _stream_debug_dump_once(self, f"{debug_prefix}_main_q", q.permute(0, 2, 3, 1))
             _stream_debug_dump_once(self, f"{debug_prefix}_main_k_unscaled", k.permute(0, 2, 3, 1))
             _stream_debug_dump_once(self, f"{debug_prefix}_main_v", v.permute(0, 2, 3, 1))
-        k = k * ((self.dim**-0.5) * ((h * w) ** -0.5))
+        spatial_size = _global_spatial_size(h * w, sequence_parallel)
+        k = k * ((self.dim**-0.5) * (spatial_size**-0.5))
         q = q.permute(0, 2, 3, 1)
         k = k.permute(0, 2, 3, 1)
         v = v.permute(0, 2, 3, 1)
@@ -984,6 +1072,7 @@ class SanaWMGDNAttention(nn.Module):
             eps=self.eps,
             kv_state=kv_cache[_SLOT_K],
             z_state=kv_cache[_SLOT_V],
+            sequence_parallel=sequence_parallel,
         )
         if save_kv_cache:
             kv_cache[_SLOT_K] = kv_state.detach().clone()
@@ -999,11 +1088,13 @@ class SanaWMGDNAttention(nn.Module):
         rotary_emb: torch.Tensor | None,
         precomputed_gates: tuple[torch.Tensor, torch.Tensor],
         raymats: torch.Tensor | None = None,
+        sequence_parallel: bool = False,
     ) -> torch.Tensor:
         b, n, _ = x.shape
         _, h, w = HW
         q, k, v = self._cam_qkv(x, HW)
-        k = k * ((self.cam_head_dim**-0.5) * ((h * w) ** -0.5))
+        spatial_size = _global_spatial_size(h * w, sequence_parallel)
+        k = k * ((self.cam_head_dim**-0.5) * (spatial_size**-0.5))
         pre_k_norm = torch.linalg.vector_norm(k, dim=2, keepdim=True).clamp_min(1e-6)
         apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb, raymats=raymats)
         q_t = apply_q(q.transpose(-1, -2)).transpose(-1, -2).contiguous()
@@ -1012,9 +1103,20 @@ class SanaWMGDNAttention(nn.Module):
         post_k_norm = torch.linalg.vector_norm(k_t, dim=2, keepdim=True).clamp_min(1e-6)
         inflation_sq = (post_k_norm / pre_k_norm) ** 2
         beta, decay = precomputed_gates
-        frame_inflation_sq = inflation_sq.view(b, self.cam_heads, HW[0], h * w).mean(dim=-1)
+        frame_inflation_sq = _mean_over_spatial(
+            inflation_sq.view(b, self.cam_heads, HW[0], h * w),
+            local_spatial=h * w,
+            sequence_parallel=sequence_parallel,
+        )
         beta = beta / frame_inflation_sq.unsqueeze(-1).clamp_min(1.0)
-        out_f = recurrent_delta(q_t.float(), k_t.float(), v_t.float(), beta.float(), decay.float())
+        out_f = recurrent_delta(
+            q_t.float(),
+            k_t.float(),
+            v_t.float(),
+            beta.float(),
+            decay.float(),
+            sequence_parallel=sequence_parallel,
+        )
 
         def to_time(tensor: torch.Tensor) -> torch.Tensor:
             return tensor.view(b, self.cam_heads, self.cam_head_dim, HW[0], h * w).permute(0, 1, 3, 2, 4)
@@ -1028,6 +1130,7 @@ class SanaWMGDNAttention(nn.Module):
             from_time(flip_and_shift(to_time(v_t.float()), dim=2, shift_val=0.0)),
             flip_and_shift(beta.float(), dim=2, shift_val=0.0),
             flip_and_shift(decay.float(), dim=2, shift_val=1.0),
+            sequence_parallel=sequence_parallel,
         )
         out_b = torch.flip(out_b.view(b, self.cam_heads, self.cam_head_dim, HW[0], h * w), dims=[3]).reshape_as(out_f)
         out = (out_f + out_b).to(x.dtype)
@@ -1044,6 +1147,7 @@ class SanaWMGDNAttention(nn.Module):
         save_kv_cache: bool,
         gates: tuple[torch.Tensor, torch.Tensor],
         raymats: torch.Tensor | None = None,
+        sequence_parallel: bool = False,
     ) -> torch.Tensor:
         b, n, _ = x.shape
         _, h, w = HW
@@ -1056,6 +1160,7 @@ class SanaWMGDNAttention(nn.Module):
             rotary_emb,
             HW,
             raymats=raymats,
+            sequence_parallel=sequence_parallel,
         )
         debug_prefix = _stream_debug_prefix(self, "attn")
         if debug_prefix is not None:
@@ -1064,7 +1169,11 @@ class SanaWMGDNAttention(nn.Module):
             _stream_debug_dump_once(self, f"{debug_prefix}_cam_v_trans", v_t)
             _stream_debug_dump_once(self, f"{debug_prefix}_cam_inflation_sq", inflation_sq)
         beta, decay = gates
-        frame_inflation_sq = inflation_sq.view(b, self.cam_heads, HW[0], h * w).mean(dim=-1)
+        frame_inflation_sq = _mean_over_spatial(
+            inflation_sq.view(b, self.cam_heads, HW[0], h * w),
+            local_spatial=h * w,
+            sequence_parallel=sequence_parallel,
+        )
         beta = beta / frame_inflation_sq.unsqueeze(-1).clamp_min(1.0)
         if debug_prefix is not None:
             _stream_debug_dump_once(self, f"{debug_prefix}_cam_beta_adj", beta)
@@ -1076,6 +1185,7 @@ class SanaWMGDNAttention(nn.Module):
             beta.float(),
             decay.float(),
             state=kv_cache[_SLOT_CAM_K],
+            sequence_parallel=sequence_parallel,
         )
         if save_kv_cache:
             kv_cache[_SLOT_CAM_K] = cam_state.detach().clone()
@@ -1093,10 +1203,33 @@ class SanaWMGDNAttention(nn.Module):
         kv_cache = kwargs.get("kv_cache")
         save_kv_cache = bool(kwargs.get("save_kv_cache", False))
         camera_raymats = kwargs.get("camera_raymats")
-        gates = self._compute_frame_gates(x, HW)
+        sequence_parallel = bool(kwargs.get("sequence_parallel", False))
+        gates = self._compute_frame_gates(
+            x,
+            HW,
+            sequence_parallel=sequence_parallel,
+        )
         if kv_cache is not None:
-            main, kv_cache = self._cached_main(x, HW, rotary_emb, kv_cache, save_kv_cache, gates)
-            cam_raw = self._cached_camera_branch(x, HW, camera_conditions, rotary_emb, kv_cache, save_kv_cache, gates, raymats=camera_raymats)
+            main, kv_cache = self._cached_main(
+                x,
+                HW,
+                rotary_emb,
+                kv_cache,
+                save_kv_cache,
+                gates,
+                sequence_parallel=sequence_parallel,
+            )
+            cam_raw = self._cached_camera_branch(
+                x,
+                HW,
+                camera_conditions,
+                rotary_emb,
+                kv_cache,
+                save_kv_cache,
+                gates,
+                raymats=camera_raymats,
+                sequence_parallel=sequence_parallel,
+            )
             cam = self.out_proj_cam(cam_raw)
             debug_prefix = _stream_debug_prefix(self, "attn")
             if debug_prefix is not None:
@@ -1109,8 +1242,25 @@ class SanaWMGDNAttention(nn.Module):
                 _stream_debug_dump_once(self, f"{debug_prefix}_after_gate", out)
                 _stream_debug_dump_once(self, f"{debug_prefix}_proj", proj)
             return proj, kv_cache
-        main = self._bidirectional_main(x, HW=HW, rotary_emb=rotary_emb, apply_output_gate=False, precomputed_gates=gates)
-        cam = self.out_proj_cam(self._camera_branch(x, HW, camera_conditions, rotary_emb, gates, raymats=camera_raymats))
+        main = self._bidirectional_main(
+            x,
+            HW=HW,
+            rotary_emb=rotary_emb,
+            apply_output_gate=False,
+            precomputed_gates=gates,
+            sequence_parallel=sequence_parallel,
+        )
+        cam = self.out_proj_cam(
+            self._camera_branch(
+                x,
+                HW,
+                camera_conditions,
+                rotary_emb,
+                gates,
+                raymats=camera_raymats,
+                sequence_parallel=sequence_parallel,
+            )
+        )
         out = self._apply_output_gate(main + cam, x)
         return self.proj(out.to(self.proj.weight.dtype))
 
