@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +9,7 @@ import torch.nn.functional as F
 from sglang.multimodal_gen.runtime.platforms import current_platform
 
 
+@lru_cache(maxsize=1)
 def _channels_last_3d_supported_by_platform() -> bool:
     return hasattr(torch, "channels_last_3d") and (
         current_platform.is_cuda() or current_platform.is_rocm()
