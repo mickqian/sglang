@@ -202,23 +202,24 @@ class WanDistConv2d(nn.Conv2d):
 
         self.padding: tuple[int, int]
         if self.height_halo_size > 0:
-            self._padding = (self.padding[1], self.padding[1], 0, 0)
+            self._padding = (0, 0, 0, 0)
         else:
             self._padding = (
-                self.padding[1],
-                self.padding[1],
+                0,
+                0,
                 self.padding[0],
                 self.padding[0],
             )
 
-        self.padding = (0, 0)
+        self.padding = (0, self.padding[1])
         self._halo_recv_top_buf: torch.Tensor | None = None
         self._halo_recv_bottom_buf: torch.Tensor | None = None
         self.rank = get_sp_parallel_rank()
         self.world_size = get_sp_world_size()
 
     def forward(self, x):
-        x = F.pad(x, self._padding)
+        if any(self._padding):
+            x = F.pad(x, self._padding)
 
         x_padded, self._halo_recv_top_buf, self._halo_recv_bottom_buf = halo_exchange(
             x,
@@ -284,8 +285,8 @@ class WanDistCausalConv3d(nn.Conv3d):
         # Set up causal padding, let the halo to control height padding
         if self.height_halo_size > 0:
             self._padding: tuple[int, ...] = (
-                self.padding[2],
-                self.padding[2],
+                0,
+                0,
                 0,
                 0,
                 2 * self.padding[0],
@@ -293,14 +294,14 @@ class WanDistCausalConv3d(nn.Conv3d):
             )
         else:
             self._padding: tuple[int, ...] = (
-                self.padding[2],
-                self.padding[2],
+                0,
+                0,
                 self.padding[1],
                 self.padding[1],
                 2 * self.padding[0],
                 0,
             )
-        self.padding = (0, 0, 0)
+        self.padding = (0, 0, self.padding[2])
         self._halo_recv_top_buf: torch.Tensor | None = None
         self._halo_recv_bottom_buf: torch.Tensor | None = None
         self.rank = get_sp_parallel_rank()
@@ -313,7 +314,8 @@ class WanDistCausalConv3d(nn.Conv3d):
             x = torch.cat([cache_x, x], dim=2)
             padding[4] -= cache_x.shape[2]
 
-        x = F.pad(x, padding)
+        if any(padding):
+            x = F.pad(x, padding)
 
         x = (
             x if current_platform.is_amp_supported() else x.to(self.weight.dtype)
