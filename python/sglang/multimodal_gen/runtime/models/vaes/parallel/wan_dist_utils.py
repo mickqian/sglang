@@ -125,14 +125,30 @@ def _ensure_recv_buf(
     return recv_buf
 
 
+def _ensure_halo_concat_buf(
+    concat_buf: torch.Tensor | None, x: torch.Tensor, height_halo_size: int
+) -> torch.Tensor:
+    shape = list(x.shape)
+    shape[-2] += 2 * height_halo_size
+    if (
+        concat_buf is None
+        or tuple(concat_buf.shape) != tuple(shape)
+        or concat_buf.dtype != x.dtype
+        or concat_buf.device != x.device
+    ):
+        return x.new_empty(shape)
+    return concat_buf
+
+
 def halo_exchange(
     x: torch.Tensor,
     height_halo_size: int = 1,
     recv_top_buf: torch.Tensor | None = None,
     recv_bottom_buf: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    concat_buf: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if height_halo_size == 0:
-        return x, recv_top_buf, recv_bottom_buf
+        return x, recv_top_buf, recv_bottom_buf, concat_buf
 
     sp_group = get_sp_group()
     rank = get_sp_parallel_rank()
@@ -170,11 +186,11 @@ def halo_exchange(
         for req in reqs:
             req.wait()
 
-    return (
-        torch.concat([recv_top_buf, x, recv_bottom_buf], dim=-2),
-        recv_top_buf,
-        recv_bottom_buf,
-    )
+    concat_buf = _ensure_halo_concat_buf(concat_buf, x, height_halo_size)
+    concat_buf[..., :height_halo_size, :].copy_(recv_top_buf)
+    concat_buf[..., height_halo_size : height_halo_size + x.shape[-2], :].copy_(x)
+    concat_buf[..., height_halo_size + x.shape[-2] :, :].copy_(recv_bottom_buf)
+    return concat_buf, recv_top_buf, recv_bottom_buf, concat_buf
 
 
 class WanDistConv2d(nn.Conv2d):
@@ -214,17 +230,24 @@ class WanDistConv2d(nn.Conv2d):
         self.padding = (0, 0)
         self._halo_recv_top_buf: torch.Tensor | None = None
         self._halo_recv_bottom_buf: torch.Tensor | None = None
+        self._halo_concat_buf: torch.Tensor | None = None
         self.rank = get_sp_parallel_rank()
         self.world_size = get_sp_world_size()
 
     def forward(self, x):
         x = F.pad(x, self._padding)
 
-        x_padded, self._halo_recv_top_buf, self._halo_recv_bottom_buf = halo_exchange(
+        (
+            x_padded,
+            self._halo_recv_top_buf,
+            self._halo_recv_bottom_buf,
+            self._halo_concat_buf,
+        ) = halo_exchange(
             x,
             height_halo_size=self.height_halo_size,
             recv_top_buf=self._halo_recv_top_buf,
             recv_bottom_buf=self._halo_recv_bottom_buf,
+            concat_buf=self._halo_concat_buf,
         )
 
         pad_top = self.height_pad_top
@@ -303,6 +326,7 @@ class WanDistCausalConv3d(nn.Conv3d):
         self.padding = (0, 0, 0)
         self._halo_recv_top_buf: torch.Tensor | None = None
         self._halo_recv_bottom_buf: torch.Tensor | None = None
+        self._halo_concat_buf: torch.Tensor | None = None
         self.rank = get_sp_parallel_rank()
         self.world_size = get_sp_world_size()
 
@@ -319,11 +343,17 @@ class WanDistCausalConv3d(nn.Conv3d):
             x if current_platform.is_amp_supported() else x.to(self.weight.dtype)
         )  # casting needed if amp isn't supported
 
-        x_padded, self._halo_recv_top_buf, self._halo_recv_bottom_buf = halo_exchange(
+        (
+            x_padded,
+            self._halo_recv_top_buf,
+            self._halo_recv_bottom_buf,
+            self._halo_concat_buf,
+        ) = halo_exchange(
             x,
             height_halo_size=self.height_halo_size,
             recv_top_buf=self._halo_recv_top_buf,
             recv_bottom_buf=self._halo_recv_bottom_buf,
+            concat_buf=self._halo_concat_buf,
         )
 
         pad_top = self.height_pad_top
