@@ -26,6 +26,7 @@ from sglang.multimodal_gen.runtime.models.dits.sana_wm_components import (
     T2IFinalLayer,
     TimestepEmbedder,
     WanRotaryPosEmbed,
+    process_camera_raymats_ucpe,
     t2i_modulate,
 )
 
@@ -100,6 +101,7 @@ class SanaWMBlock(nn.Module):
         rotary_emb: torch.Tensor,
         camera_conditions: torch.Tensor,
         plucker_emb: torch.Tensor,
+        camera_raymats: torch.Tensor | None = None,
         kv_cache: list[torch.Tensor | None] | None = None,
         save_kv_cache: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor | None]]:
@@ -122,6 +124,7 @@ class SanaWMBlock(nn.Module):
             HW=token_shape,
             rotary_emb=rotary_emb,
             camera_conditions=camera_conditions,
+            camera_raymats=camera_raymats,
             kv_cache=kv_cache,
             save_kv_cache=save_kv_cache,
         )
@@ -279,9 +282,11 @@ class SanaWM1600M(nn.Module):
 
         x = x.to(self.dtype)
         y = y.to(self.dtype)
+        camera_conditions = camera_conditions.to(self.dtype)
         timestep = timestep.float()
         frames, height, width = x.shape[-3:]
         token_shape = (frames // self.patch_size[0], height // self.patch_size[1], width // self.patch_size[2])
+        camera_raymats = process_camera_raymats_ucpe(camera_conditions, token_shape, self.patch_size)
 
         x = self.x_embedder(x)
         plucker_emb = self.plucker_embedder(chunk_plucker.to(self.dtype))
@@ -306,8 +311,9 @@ class SanaWM1600M(nn.Module):
                 mask,
                 token_shape,
                 rotary_emb,
-                camera_conditions.to(self.dtype),
+                camera_conditions,
                 plucker_emb,
+                camera_raymats=camera_raymats,
             )
 
         x = self.final_layer(x, t)
@@ -350,6 +356,8 @@ class SanaWM1600M(nn.Module):
             camera_conditions = camera_conditions.repeat(x.shape[0] // camera_conditions.shape[0], 1, 1)
         if chunk_plucker.shape[0] != x.shape[0]:
             chunk_plucker = chunk_plucker.repeat(x.shape[0] // chunk_plucker.shape[0], 1, 1, 1, 1)
+        camera_conditions = camera_conditions.to(self.dtype)
+        camera_raymats = process_camera_raymats_ucpe(camera_conditions, token_shape, self.patch_size)
 
         x = self.x_embedder(x)
         plucker_emb = self.plucker_embedder(chunk_plucker.to(self.dtype))
@@ -380,8 +388,9 @@ class SanaWM1600M(nn.Module):
                 mask,
                 token_shape,
                 rotary_emb,
-                camera_conditions.to(self.dtype),
+                camera_conditions,
                 plucker_emb,
+                camera_raymats=camera_raymats,
                 kv_cache=kv_cache[block_idx],
                 save_kv_cache=save_kv_cache,
             )

@@ -208,6 +208,24 @@ def process_camera_conditions_ucpe(
     token_shape: tuple[int, int, int],
     patch_size: tuple[int, int, int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    raymats = process_camera_raymats_ucpe(camera_conditions, token_shape, patch_size)
+    b, frames = camera_conditions.shape[:2]
+    c2w = camera_conditions[..., :16].view(b, frames, 4, 4)
+    fx, fy, cx, cy = [camera_conditions[..., i] for i in range(16, 20)]
+    _, h, w = token_shape
+    image_h, image_w = h * patch_size[1], w * patch_size[2]
+    xi = torch.zeros((b, frames), device=camera_conditions.device, dtype=camera_conditions.dtype)
+    x_fov = compute_fov_from_fx_xi(fx, xi, image_w, dtype=camera_conditions.dtype, device=camera_conditions.device).view(b, frames)
+    y_fov = compute_fov_from_fx_xi(fy, xi, image_h, dtype=camera_conditions.dtype, device=camera_conditions.device).view(b, frames)
+    absmap = compute_absmap(c2w, x_fov, y_fov, xi, image_h, image_w, cx, cy)
+    return raymats, absmap
+
+
+def process_camera_raymats_ucpe(
+    camera_conditions: torch.Tensor,
+    token_shape: tuple[int, int, int],
+    patch_size: tuple[int, int, int],
+) -> torch.Tensor:
     b, frames = camera_conditions.shape[:2]
     c2w = camera_conditions[..., :16].view(b, frames, 4, 4)
     fx, fy, cx, cy = [camera_conditions[..., i] for i in range(16, 20)]
@@ -227,9 +245,7 @@ def process_camera_conditions_ucpe(
         dtype=camera_conditions.dtype,
         device=camera_conditions.device,
     ).view(b, frames, h, w, 3)
-    raymats = world_to_ray_mats(d_cam, c2w)
-    absmap = compute_absmap(c2w, x_fov, y_fov, xi, image_h, image_w, cx, cy)
-    return raymats, absmap
+    return world_to_ray_mats(d_cam, c2w)
 
 
 def invert_se3(transforms: torch.Tensor) -> torch.Tensor:
@@ -289,7 +305,7 @@ def prepare_prope_fns(
 ) -> tuple[Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]:
     b = camera_conditions.shape[0]
     if raymats is None:
-        raymats, _ = process_camera_conditions_ucpe(camera_conditions, token_shape, patch_size)
+        raymats = process_camera_raymats_ucpe(camera_conditions, token_shape, patch_size)
     p = raymats.reshape(b, -1, 4, 4)
     p_t = p.transpose(-1, -2)
     p_inv = invert_se3(p)
@@ -860,13 +876,15 @@ class SanaWMGDNAttention(nn.Module):
         camera_conditions: torch.Tensor,
         rotary_emb: torch.Tensor | None,
         HW: tuple[int, int, int],
+        raymats: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
         b, n, heads, dim = q_raw.shape
         _, h, w = HW
         half = dim // 2
         groups = half // 4
         dtype = q_raw.dtype
-        raymats, _ = process_camera_conditions_ucpe(camera_conditions, HW, self.patch_size)
+        if raymats is None:
+            raymats = process_camera_raymats_ucpe(camera_conditions, HW, self.patch_size)
         p = raymats.reshape(b, n, 4, 4)
         p_t = p.transpose(-1, -2).float()
         p_inv = invert_se3(p).float()
@@ -973,13 +991,21 @@ class SanaWMGDNAttention(nn.Module):
             kv_cache[_SLOT_TYPE_FLAG] = torch.tensor([_CACHE_TYPE_STATE], device=x.device)
         return out.to(x.dtype).permute(0, 3, 1, 2).reshape(b, n, c), kv_cache
 
-    def _camera_branch(self, x: torch.Tensor, HW: tuple[int, int, int], camera_conditions: torch.Tensor, rotary_emb: torch.Tensor | None, precomputed_gates: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def _camera_branch(
+        self,
+        x: torch.Tensor,
+        HW: tuple[int, int, int],
+        camera_conditions: torch.Tensor,
+        rotary_emb: torch.Tensor | None,
+        precomputed_gates: tuple[torch.Tensor, torch.Tensor],
+        raymats: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         b, n, _ = x.shape
         _, h, w = HW
         q, k, v = self._cam_qkv(x, HW)
         k = k * ((self.cam_head_dim**-0.5) * ((h * w) ** -0.5))
         pre_k_norm = torch.linalg.vector_norm(k, dim=2, keepdim=True).clamp_min(1e-6)
-        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb)
+        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb, raymats=raymats)
         q_t = apply_q(q.transpose(-1, -2)).transpose(-1, -2).contiguous()
         kv_t = apply_kv(torch.cat([k, v], dim=1).transpose(-1, -2)).transpose(-1, -2).contiguous()
         k_t, v_t = torch.chunk(kv_t, 2, dim=1)
@@ -1017,11 +1043,20 @@ class SanaWMGDNAttention(nn.Module):
         kv_cache: list[torch.Tensor | None],
         save_kv_cache: bool,
         gates: tuple[torch.Tensor, torch.Tensor],
+        raymats: torch.Tensor | None = None,
     ) -> torch.Tensor:
         b, n, _ = x.shape
         _, h, w = HW
         q_raw, k_raw, v_raw = self._cam_qkv_raw(x, HW)
-        q_t, k_t, v_t, inflation_sq, apply_out = self._cam_prep_fused_order(q_raw, k_raw, v_raw, camera_conditions, rotary_emb, HW)
+        q_t, k_t, v_t, inflation_sq, apply_out = self._cam_prep_fused_order(
+            q_raw,
+            k_raw,
+            v_raw,
+            camera_conditions,
+            rotary_emb,
+            HW,
+            raymats=raymats,
+        )
         debug_prefix = _stream_debug_prefix(self, "attn")
         if debug_prefix is not None:
             _stream_debug_dump_once(self, f"{debug_prefix}_cam_q_trans", q_t)
@@ -1057,10 +1092,11 @@ class SanaWMGDNAttention(nn.Module):
             raise ValueError("SANA-WM inference requires camera_conditions")
         kv_cache = kwargs.get("kv_cache")
         save_kv_cache = bool(kwargs.get("save_kv_cache", False))
+        camera_raymats = kwargs.get("camera_raymats")
         gates = self._compute_frame_gates(x, HW)
         if kv_cache is not None:
             main, kv_cache = self._cached_main(x, HW, rotary_emb, kv_cache, save_kv_cache, gates)
-            cam_raw = self._cached_camera_branch(x, HW, camera_conditions, rotary_emb, kv_cache, save_kv_cache, gates)
+            cam_raw = self._cached_camera_branch(x, HW, camera_conditions, rotary_emb, kv_cache, save_kv_cache, gates, raymats=camera_raymats)
             cam = self.out_proj_cam(cam_raw)
             debug_prefix = _stream_debug_prefix(self, "attn")
             if debug_prefix is not None:
@@ -1074,7 +1110,7 @@ class SanaWMGDNAttention(nn.Module):
                 _stream_debug_dump_once(self, f"{debug_prefix}_proj", proj)
             return proj, kv_cache
         main = self._bidirectional_main(x, HW=HW, rotary_emb=rotary_emb, apply_output_gate=False, precomputed_gates=gates)
-        cam = self.out_proj_cam(self._camera_branch(x, HW, camera_conditions, rotary_emb, gates))
+        cam = self.out_proj_cam(self._camera_branch(x, HW, camera_conditions, rotary_emb, gates, raymats=camera_raymats))
         out = self._apply_output_gate(main + cam, x)
         return self.proj(out.to(self.proj.weight.dtype))
 
@@ -1128,11 +1164,19 @@ class SanaWMSoftmaxAttention(SanaWMGDNAttention):
         out = sdpa_with_head_padding(q, k, v)
         return out.transpose(1, 2).reshape(b, n, c), kv_cache
 
-    def _camera_branch(self, x: torch.Tensor, HW: tuple[int, int, int], camera_conditions: torch.Tensor, rotary_emb: torch.Tensor | None, precomputed_gates: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def _camera_branch(
+        self,
+        x: torch.Tensor,
+        HW: tuple[int, int, int],
+        camera_conditions: torch.Tensor,
+        rotary_emb: torch.Tensor | None,
+        precomputed_gates: tuple[torch.Tensor, torch.Tensor],
+        raymats: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         del precomputed_gates
         b, n, _ = x.shape
         q, k, v = self._cam_qkv_softmax(x, HW)
-        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb)
+        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb, raymats=raymats)
         q_t = apply_q(q.transpose(-1, -2)).transpose(-1, -2).contiguous()
         kv_t = apply_kv(torch.cat([k, v], dim=1).transpose(-1, -2)).transpose(-1, -2).contiguous()
         k_t, v_t = torch.chunk(kv_t, 2, dim=1)
@@ -1162,11 +1206,12 @@ class SanaWMSoftmaxAttention(SanaWMGDNAttention):
         rotary_emb: torch.Tensor | None,
         kv_cache: list[torch.Tensor | None],
         save_kv_cache: bool,
+        raymats: torch.Tensor | None = None,
     ) -> torch.Tensor:
         b, n, _ = x.shape
         q, k, v = self._cam_qkv_softmax(x, HW)
         rotary_emb = _slice_rope_to_current_chunk(rotary_emb, n)
-        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb)
+        apply_q, apply_kv, apply_out = prepare_prope_fns(self.cam_head_dim, camera_conditions, HW, self.patch_size, rotary_emb, raymats=raymats)
         q_t = apply_q(q.transpose(-1, -2)).transpose(-1, -2).contiguous()
         kv_t = apply_kv(torch.cat([k, v], dim=1).transpose(-1, -2)).transpose(-1, -2).contiguous()
         k_t, v_t = torch.chunk(kv_t, 2, dim=1)
@@ -1190,9 +1235,10 @@ class SanaWMSoftmaxAttention(SanaWMGDNAttention):
             raise ValueError("SANA-WM inference requires camera_conditions")
         kv_cache = kwargs.get("kv_cache")
         save_kv_cache = bool(kwargs.get("save_kv_cache", False))
+        camera_raymats = kwargs.get("camera_raymats")
         if kv_cache is not None:
             main, kv_cache = self._softmax_main_cached(x, rotary_emb, kv_cache, save_kv_cache)
-            cam_raw = self._camera_branch_softmax_cached(x, HW, camera_conditions, rotary_emb, kv_cache, save_kv_cache)
+            cam_raw = self._camera_branch_softmax_cached(x, HW, camera_conditions, rotary_emb, kv_cache, save_kv_cache, raymats=camera_raymats)
             cam = self.out_proj_cam(cam_raw)
             out = self._apply_output_gate(main + cam, x)
             proj = self.proj(out.to(self.proj.weight.dtype))
@@ -1205,7 +1251,7 @@ class SanaWMSoftmaxAttention(SanaWMGDNAttention):
                 _stream_debug_dump_once(self, f"{debug_prefix}_proj", proj)
             return proj, kv_cache
         main = self._softmax_main(x, HW, rotary_emb)
-        cam = self.out_proj_cam(self._camera_branch(x, HW, camera_conditions, rotary_emb, self._compute_frame_gates(x, HW)))
+        cam = self.out_proj_cam(self._camera_branch(x, HW, camera_conditions, rotary_emb, self._compute_frame_gates(x, HW), raymats=camera_raymats))
         out = self._apply_output_gate(main + cam, x)
         return self.proj(out.to(self.proj.weight.dtype))
 
