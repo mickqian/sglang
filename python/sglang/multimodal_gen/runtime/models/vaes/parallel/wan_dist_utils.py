@@ -140,11 +140,31 @@ def halo_exchange(
     group = sp_group.device_group
     group_ranks = sp_group.ranks
 
-    top_row = x[..., :height_halo_size, :].contiguous()
-    bottom_row = x[..., -height_halo_size:, :].contiguous()
+    halo_shape = (*x.shape[:-2], height_halo_size, x.shape[-1])
+    top_row = None
+    bottom_row = None
 
-    recv_top_buf = _ensure_recv_buf(recv_top_buf, top_row)
-    recv_bottom_buf = _ensure_recv_buf(recv_bottom_buf, bottom_row)
+    if rank > 0:
+        top_row = x[..., :height_halo_size, :].contiguous()
+        recv_top_buf = _ensure_recv_buf(recv_top_buf, top_row)
+    elif (
+        recv_top_buf is None
+        or recv_top_buf.shape != halo_shape
+        or recv_top_buf.dtype != x.dtype
+        or recv_top_buf.device != x.device
+    ):
+        recv_top_buf = x.new_empty(halo_shape)
+
+    if rank < world_size - 1:
+        bottom_row = x[..., -height_halo_size:, :].contiguous()
+        recv_bottom_buf = _ensure_recv_buf(recv_bottom_buf, bottom_row)
+    elif (
+        recv_bottom_buf is None
+        or recv_bottom_buf.shape != halo_shape
+        or recv_bottom_buf.dtype != x.dtype
+        or recv_bottom_buf.device != x.device
+    ):
+        recv_bottom_buf = x.new_empty(halo_shape)
 
     # use batched P2P operations
     p2p_ops = []
