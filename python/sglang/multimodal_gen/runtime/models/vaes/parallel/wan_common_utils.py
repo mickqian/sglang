@@ -167,7 +167,8 @@ class WanCausalConv3d(nn.Conv3d):
             cache_x = cache_x.to(x.device)
             x = torch.cat([cache_x, x], dim=2)
             padding[4] -= cache_x.shape[2]
-        x = F.pad(x, padding)
+        if any(padding):
+            x = F.pad(x, padding)
         x = (
             x if current_platform.is_amp_supported() else x.to(self.weight.dtype)
         )  # casting needed if amp isn't supported

@@ -218,7 +218,8 @@ class WanDistConv2d(nn.Conv2d):
         self.world_size = get_sp_world_size()
 
     def forward(self, x):
-        x = F.pad(x, self._padding)
+        if any(self._padding):
+            x = F.pad(x, self._padding)
 
         x_padded, self._halo_recv_top_buf, self._halo_recv_bottom_buf = halo_exchange(
             x,
