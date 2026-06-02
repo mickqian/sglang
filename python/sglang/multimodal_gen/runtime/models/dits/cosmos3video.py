@@ -275,13 +275,7 @@ class Cosmos3TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
         self.hidden_size = hidden_size
         self.max_period = max_period
-        half = frequency_embedding_size // 2
-        freqs = torch.exp(
-            -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
-            / half
-        )
-        self.register_buffer("timestep_freqs", freqs, persistent=False)
+        self._timestep_freqs: torch.Tensor | None = None
 
         # Use ReplicatedLinear for consistency (typically excluded from quantization)
         self.linear_1 = ReplicatedLinear(
@@ -313,7 +307,15 @@ class Cosmos3TimestepEmbedder(nn.Module):
         t_scaled = t * self.timestep_scale
 
         # Compute sinusoidal embeddings in fp32
-        freqs = self.timestep_freqs.to(device=t.device)
+        freqs = self._timestep_freqs
+        if freqs is None or freqs.device != t.device:
+            half = self.frequency_embedding_size // 2
+            freqs = torch.exp(
+                -math.log(self.max_period)
+                * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device)
+                / half
+            )
+            self._timestep_freqs = freqs
         args = t_scaled[:, None].float() * freqs[None]
         t_freq = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if self.frequency_embedding_size % 2:
