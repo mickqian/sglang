@@ -150,15 +150,29 @@ def qwen3_apply_rotary_pos_emb(
     q1 = q[..., :half]
     q2 = q[..., half:]
     q_embed = torch.empty_like(q)
-    q_embed[..., :half] = q1 * cos[..., :half] - q2 * sin[..., :half]
-    q_embed[..., half:] = q2 * cos[..., half:] + q1 * sin[..., half:]
+    q_first = q_embed[..., :half]
+    q_second = q_embed[..., half:]
+    q_tmp = torch.empty_like(q_first)
+    torch.mul(q1, cos[..., :half], out=q_first)
+    torch.mul(q2, sin[..., :half], out=q_tmp)
+    q_first.sub_(q_tmp)
+    torch.mul(q2, cos[..., half:], out=q_second)
+    torch.mul(q1, sin[..., half:], out=q_tmp)
+    q_second.add_(q_tmp)
 
     half = k.shape[-1] // 2
     k1 = k[..., :half]
     k2 = k[..., half:]
     k_embed = torch.empty_like(k)
-    k_embed[..., :half] = k1 * cos[..., :half] - k2 * sin[..., :half]
-    k_embed[..., half:] = k2 * cos[..., half:] + k1 * sin[..., half:]
+    k_first = k_embed[..., :half]
+    k_second = k_embed[..., half:]
+    k_tmp = torch.empty_like(k_first)
+    torch.mul(k1, cos[..., :half], out=k_first)
+    torch.mul(k2, sin[..., :half], out=k_tmp)
+    k_first.sub_(k_tmp)
+    torch.mul(k2, cos[..., half:], out=k_second)
+    torch.mul(k1, sin[..., half:], out=k_tmp)
+    k_second.add_(k_tmp)
     return q_embed, k_embed
 
 
