@@ -496,6 +496,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         noisy_frame_mask: torch.Tensor | None = None,
         max_text_seq_len: int | None = None,
         current_timestep: int | None = None,
+        time_embed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run transformer forward pass.
 
@@ -523,6 +524,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 cache_key=cache_key,
                 noisy_frame_mask=noisy_frame_mask,
                 max_text_seq_len=max_text_seq_len,
+                time_embed=time_embed,
             )
 
     def _manage_device_placement(self, server_args: ServerArgs):
@@ -571,6 +573,11 @@ class Cosmos3DenoisingStage(PipelineStage):
         velocity_mask = batch.extra.get("velocity_mask")
         image_latent = batch.image_latent
         guidance_interval = getattr(batch.sampling_params, "guidance_interval", None)
+        time_embeds = (
+            None
+            if server_args.dit_cpu_offload
+            else self.transformer.time_embedder(timesteps.float())
+        )
 
         do_cfg = guidance_scale > 1.0
 
@@ -615,6 +622,7 @@ class Cosmos3DenoisingStage(PipelineStage):
 
         for i, t in progress_bar:
             timestep = t.unsqueeze(0) if t.dim() == 0 else t
+            time_embed = None if time_embeds is None else time_embeds[i : i + 1]
             # Outside the CFG window the effective scale collapses to 1.0,
             # which reduces CFG to the cond branch (cfg-parallel safe).
             effective_scale = (
@@ -638,6 +646,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                         cond_text_seq_len=batch.extra["cond_text_seq_len"],
                         uncond_text_seq_len=batch.extra["uncond_text_seq_len"],
                         current_timestep=i,
+                        time_embed=time_embed,
                     )
                 elif effective_scale == 1.0:
                     noise_pred = self._run_transformer(
@@ -651,6 +660,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                         noisy_frame_mask=velocity_mask,
                         max_text_seq_len=batch.extra["cond_text_seq_len"],
                         current_timestep=i,
+                        time_embed=time_embed,
                     )
                 else:
                     noise_pred = self._predict_noise_cfg_batched(
@@ -669,6 +679,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                             batch.extra["uncond_text_seq_len"],
                         ),
                         current_timestep=i,
+                        time_embed=time_embed,
                     )
             else:
                 noise_pred = self._run_transformer(
@@ -682,6 +693,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                     noisy_frame_mask=velocity_mask,
                     max_text_seq_len=batch.extra["cond_text_seq_len"],
                     current_timestep=i,
+                    time_embed=time_embed,
                 )
 
             # I2V: zero-velocity at conditioned frames so the scheduler keeps
@@ -718,6 +730,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         noisy_frame_mask: torch.Tensor | None = None,
         max_text_seq_len: int | None = None,
         current_timestep: int | None = None,
+        time_embed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run CFG by stacking both branches into a batch_size=2 forward.
 
@@ -746,6 +759,7 @@ class Cosmos3DenoisingStage(PipelineStage):
             noisy_frame_mask=mask_batched,
             max_text_seq_len=max_text_seq_len,
             current_timestep=current_timestep,
+            time_embed=time_embed,
         )
 
         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
@@ -770,6 +784,7 @@ class Cosmos3DenoisingStage(PipelineStage):
         cond_text_seq_len: int | None = None,
         uncond_text_seq_len: int | None = None,
         current_timestep: int | None = None,
+        time_embed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run CFG with one branch per CFG rank, combined by all-reduce.
 
@@ -791,6 +806,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 noisy_frame_mask=noisy_frame_mask,
                 max_text_seq_len=cond_text_seq_len,
                 current_timestep=current_timestep,
+                time_embed=time_embed,
             )
             partial = guidance_scale * noise_pred
         else:
@@ -805,6 +821,7 @@ class Cosmos3DenoisingStage(PipelineStage):
                 noisy_frame_mask=noisy_frame_mask,
                 max_text_seq_len=uncond_text_seq_len,
                 current_timestep=current_timestep,
+                time_embed=time_embed,
             )
             partial = (1.0 - guidance_scale) * noise_pred
 

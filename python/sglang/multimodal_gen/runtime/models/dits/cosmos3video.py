@@ -1058,6 +1058,7 @@ class Cosmos3OmniTransformer(CachableDiT):
         cache_key: str = "default",
         noisy_frame_mask: torch.Tensor | None = None,
         max_text_seq_len: int | None = None,
+        time_embed: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Forward pass for denoising.
@@ -1141,7 +1142,8 @@ class Cosmos3OmniTransformer(CachableDiT):
                 )[:, self.sp_rank, :, :]
 
         # Add timestep embedding (computed in float32 for numerical stability, then cast back)
-        time_embed = self.time_embedder(timestep.float())
+        if time_embed is None:
+            time_embed = self.time_embedder(timestep.float())
         time_embed = time_embed.to(
             hidden_states.dtype
         )  # Cast to match hidden_gen dtype
