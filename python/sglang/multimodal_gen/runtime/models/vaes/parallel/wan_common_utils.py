@@ -253,6 +253,19 @@ def _ensure_bound():
         raise RuntimeError("common_utils.bind_context() must be called before use.")
 
 
+def _store_feat_cache(cache, idx, value):
+    cached = cache[idx]
+    if (
+        isinstance(cached, torch.Tensor)
+        and cached.shape == value.shape
+        and cached.dtype == value.dtype
+        and cached.device == value.device
+    ):
+        cached.copy_(value)
+    else:
+        cache[idx] = value.clone()
+
+
 def resample_forward(self, x):
     _ensure_bound()
     b, c, t, h, w = x.size()
@@ -268,7 +281,7 @@ def resample_forward(self, x):
                 _feat_cache[idx] = "Rep"
                 _feat_idx += 1
             else:
-                cache_x = x[:, :, -cache_t:, :, :].clone()
+                cache_x = x[:, :, -cache_t:, :, :]
                 if (
                     cache_x.shape[2] < 2
                     and _feat_cache[idx] is not None
@@ -297,7 +310,7 @@ def resample_forward(self, x):
                     x = self.time_conv(x)
                 else:
                     x = self.time_conv(x, _feat_cache[idx])
-                _feat_cache[idx] = cache_x
+                _store_feat_cache(_feat_cache, idx, cache_x)
                 _feat_idx += 1
 
                 x = x.reshape(b, 2, c, t, h, w)
@@ -321,12 +334,12 @@ def resample_forward(self, x):
         if _feat_cache is not None:
             idx = _feat_idx
             if _feat_cache[idx] is None:
-                _feat_cache[idx] = x.clone()
+                _store_feat_cache(_feat_cache, idx, x)
                 _feat_idx += 1
             else:
-                cache_x = x[:, :, -1:, :, :].clone()
+                cache_x = x[:, :, -1:, :, :]
                 x = self.time_conv(torch.cat([_feat_cache[idx][:, :, -1:, :, :], x], 2))
-                _feat_cache[idx] = cache_x
+                _store_feat_cache(_feat_cache, idx, cache_x)
                 _feat_idx += 1
             feat_cache.set(_feat_cache)
             feat_idx.set(_feat_idx)
@@ -348,7 +361,7 @@ def residual_block_forward(self, x):
     _feat_idx = feat_idx.get()
     if _feat_cache is not None:
         idx = _feat_idx
-        cache_x = x[:, :, -cache_t:, :, :].clone()
+        cache_x = x[:, :, -cache_t:, :, :]
         if cache_x.shape[2] < 2 and _feat_cache[idx] is not None:
             cache_x = torch.cat(
                 [
@@ -359,7 +372,7 @@ def residual_block_forward(self, x):
             )
 
         x = self.conv1(x, _feat_cache[idx])
-        _feat_cache[idx] = cache_x
+        _store_feat_cache(_feat_cache, idx, cache_x)
         _feat_idx += 1
         feat_cache.set(_feat_cache)
         feat_idx.set(_feat_idx)
@@ -377,7 +390,7 @@ def residual_block_forward(self, x):
     _feat_idx = feat_idx.get()
     if _feat_cache is not None:
         idx = _feat_idx
-        cache_x = x[:, :, -cache_t:, :, :].clone()
+        cache_x = x[:, :, -cache_t:, :, :]
         if cache_x.shape[2] < 2 and _feat_cache[idx] is not None:
             cache_x = torch.cat(
                 [
@@ -388,7 +401,7 @@ def residual_block_forward(self, x):
             )
 
         x = self.conv2(x, _feat_cache[idx])
-        _feat_cache[idx] = cache_x
+        _store_feat_cache(_feat_cache, idx, cache_x)
         _feat_idx += 1
         feat_cache.set(_feat_cache)
         feat_idx.set(_feat_idx)
