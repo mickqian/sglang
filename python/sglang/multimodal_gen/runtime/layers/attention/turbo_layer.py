@@ -28,13 +28,45 @@ from sglang.multimodal_gen.utils import get_compute_dtype
 logger = init_logger(__name__)
 
 
+def _seq_to_head_shards(input: Tensor, world_size: int) -> Tensor:
+    bs, seq_len, num_heads, head_dim = input.shape
+    return (
+        input.reshape(bs, seq_len, world_size, num_heads // world_size, head_dim)
+        .permute(2, 0, 1, 3, 4)
+        .contiguous()
+    )
+
+
+def _head_shards_to_seq(input: Tensor, world_size: int) -> Tensor:
+    bs, seq_len, num_heads, head_dim = input.shape[1:]
+    return input.permute(1, 0, 2, 3, 4).reshape(
+        bs, world_size * seq_len, num_heads, head_dim
+    )
+
+
+def _seq_to_seq_shards(input: Tensor, world_size: int) -> Tensor:
+    bs, seq_len, num_heads, head_dim = input.shape
+    return (
+        input.reshape(bs, world_size, seq_len // world_size, num_heads, head_dim)
+        .permute(1, 0, 2, 3, 4)
+        .contiguous()
+    )
+
+
+def _seq_shards_to_heads(input: Tensor, world_size: int) -> Tensor:
+    bs, seq_len, num_heads, head_dim = input.shape[1:]
+    return input.permute(1, 2, 0, 3, 4).reshape(
+        bs, seq_len, world_size * num_heads, head_dim
+    )
+
+
 def post_all2all(local_seq_2_local_head, seq_world_size):
     def post_func(input):
         # b, s, n, h
         if local_seq_2_local_head:
-            output = rearrange(input, "w bs seq h d -> bs (w seq) h d")
+            output = _head_shards_to_seq(input, seq_world_size)
         else:
-            output = rearrange(input, "w bs s h d -> bs s (w h) d", w=seq_world_size)
+            output = _seq_shards_to_heads(input, seq_world_size)
 
         return output
 
@@ -46,25 +78,14 @@ def single_all_to_all(input, local_seq_2_local_head, group, async_op=False):
 
     # b, s, n, h
     if local_seq_2_local_head:
-        bs, local_seq_len, num_total_head, head_dim = input.shape
+        num_total_head = input.shape[2]
         assert (
             num_total_head % seq_world_size == 0
         ), f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
-        input_t = rearrange(
-            input,
-            "bs seq_len (w h) d -> w bs seq_len h d",
-            w=seq_world_size,
-            h=num_total_head // seq_world_size,
-        ).contiguous()
+        input_t = _seq_to_head_shards(input, seq_world_size)
         post_all2all_fun = post_all2all(local_seq_2_local_head, seq_world_size)
     else:
-        bs, global_seq_len, num_local_head, head_dim = input.shape
-        input_t = rearrange(
-            input,
-            "bs (w s) h d -> w bs s h d",
-            w=seq_world_size,
-            s=global_seq_len // seq_world_size,
-        ).contiguous()
+        input_t = _seq_to_seq_shards(input, seq_world_size)
         post_all2all_fun = post_all2all(local_seq_2_local_head, seq_world_size)
 
     output = torch.empty_like(input_t)
@@ -101,9 +122,7 @@ def async_a2a_communicate(
                     a2a_reqs[i - 2].wait()
                     a2a_outputs[i - 2] = a2a_post_fns[i - 2](a2a_outputs[i - 2])
             if i < len(a2a_inputs):
-                a2a_inputs[i] = rearrange(
-                    a2a_inputs[i], "bs seq_len (w h) d -> w bs seq_len h d", w=cp_size
-                ).contiguous()
+                a2a_inputs[i] = _seq_to_head_shards(a2a_inputs[i], cp_size)
     else:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
@@ -113,9 +132,7 @@ def async_a2a_communicate(
                 )
                 a2a_post_fns[i - 1] = post_all2all(local_seq_2_local_head, cp_size)
             if i < len(a2a_inputs):
-                a2a_inputs[i] = rearrange(
-                    a2a_inputs[i], "bs (w s) h d -> w bs s h d", w=cp_size
-                ).contiguous()
+                a2a_inputs[i] = _seq_to_seq_shards(a2a_inputs[i], cp_size)
             if i > 1:
                 with torch.get_device_module().stream(cp_stream):
                     a2a_reqs[i - 2].wait()
