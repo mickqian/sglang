@@ -833,10 +833,8 @@ class USPAttention(nn.Module):
                 get_sp_group().ulysses_group,
                 self._get_usp_a2a_stream(),
                 local_seq_2_local_head=True,
+                post_contiguous=True,
             )
-            q = q.contiguous()
-            k_shard = k_shard.contiguous()
-            v_shard = v_shard.contiguous()
         else:
             q = _usp_input_all_to_all(q, head_dim=2)
             k_shard = _usp_input_all_to_all(k_shard, head_dim=2)

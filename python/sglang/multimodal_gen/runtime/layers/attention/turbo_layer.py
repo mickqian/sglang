@@ -28,7 +28,7 @@ from sglang.multimodal_gen.utils import get_compute_dtype
 logger = init_logger(__name__)
 
 
-def post_all2all(local_seq_2_local_head, seq_world_size):
+def post_all2all(local_seq_2_local_head, seq_world_size, post_contiguous=False):
     def post_func(input):
         # b, s, n, h
         if local_seq_2_local_head:
@@ -36,6 +36,8 @@ def post_all2all(local_seq_2_local_head, seq_world_size):
         else:
             output = rearrange(input, "w bs s h d -> bs s (w h) d", w=seq_world_size)
 
+        if post_contiguous:
+            output = output.contiguous()
         return output
 
     return post_func
@@ -80,6 +82,7 @@ def async_a2a_communicate(
     cp_group: ProcessGroup,
     cp_stream: torch.get_device_module().Stream,
     local_seq_2_local_head: bool,
+    post_contiguous: bool = False,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
     A2A communication for context parallelism. best used in communicate qkv
@@ -95,7 +98,9 @@ def async_a2a_communicate(
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
                 )
-                a2a_post_fns[i - 1] = post_all2all(local_seq_2_local_head, cp_size)
+                a2a_post_fns[i - 1] = post_all2all(
+                    local_seq_2_local_head, cp_size, post_contiguous
+                )
             if i > 1:
                 with torch.get_device_module().stream(cp_stream):
                     a2a_reqs[i - 2].wait()
@@ -111,7 +116,9 @@ def async_a2a_communicate(
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
                 )
-                a2a_post_fns[i - 1] = post_all2all(local_seq_2_local_head, cp_size)
+                a2a_post_fns[i - 1] = post_all2all(
+                    local_seq_2_local_head, cp_size, post_contiguous
+                )
             if i < len(a2a_inputs):
                 a2a_inputs[i] = rearrange(
                     a2a_inputs[i], "bs (w s) h d -> w bs s h d", w=cp_size
