@@ -852,6 +852,14 @@ class USPAttention(nn.Module):
         v = torch.cat([v_rep, v_shard], dim=1)
 
         out = self.attn_impl.forward(q, k, v, ctx_attn_metadata)
+        if out.device.type == "cuda":
+            return async_a2a_communicate(
+                out,
+                get_ulysses_parallel_world_size(),
+                get_sp_group().ulysses_group,
+                self._get_usp_a2a_stream(),
+                local_seq_2_local_head=False,
+            ).contiguous()
         return _usp_output_all_to_all(out, head_dim=2)
 
     def _forward_with_replicated_suffix(
