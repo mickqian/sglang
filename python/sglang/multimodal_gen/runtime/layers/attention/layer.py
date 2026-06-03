@@ -37,6 +37,7 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.usp import (
     _usp_input_all_to_all,
+    _usp_input_all_to_all_pair,
     _usp_output_all_to_all,
     ring_attn,
 )
@@ -817,8 +818,9 @@ class USPAttention(nn.Module):
         sp_rank = get_sp_parallel_rank()
 
         q = _usp_input_all_to_all(q, head_dim=2)
-        k_shard = _usp_input_all_to_all(k_shard, head_dim=2)
-        v_shard = _usp_input_all_to_all(v_shard, head_dim=2)
+        k_shard, v_shard = _usp_input_all_to_all_pair(
+            k_shard, v_shard, head_dim=2
+        )
 
         h_kv_local = k_shard.shape[2]
         h_start = sp_rank * h_kv_local

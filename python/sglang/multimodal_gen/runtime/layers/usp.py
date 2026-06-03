@@ -122,6 +122,49 @@ def _usp_input_all_to_all(x: torch.Tensor, head_dim: int = 1) -> torch.Tensor:
     return x
 
 
+def _usp_input_all_to_all_pair(
+    x0: torch.Tensor, x1: torch.Tensor, head_dim: int = 1
+) -> tuple[torch.Tensor, torch.Tensor]:
+    world_size = get_ulysses_parallel_world_size()
+    if world_size <= 1:
+        return x0, x1
+
+    assert x0.shape == x1.shape, f"x0 shape {x0.shape} must match x1 shape {x1.shape}"
+    assert x0.ndim == 4, f"x0 must have 4 dimensions, got {x0.ndim}"
+    assert head_dim in (1, 2), f"head_dim must be 1 or 2, got {head_dim}"
+
+    if head_dim == 1:
+        b, h_global, s_local, d = x0.shape
+        permute_order = (1, 0, 2, 3)
+    else:
+        b, s_local, h_global, d = x0.shape
+        permute_order = (2, 0, 1, 3)
+
+    assert (
+        h_global % world_size == 0
+    ), f"h_global ({h_global}) must be divisible by world_size ({world_size})"
+
+    h_local, s_global = h_global // world_size, s_local * world_size
+    x = torch.empty(
+        (h_global, b * 2, s_local, d), dtype=x0.dtype, device=x0.device
+    )
+    x[:, :b].copy_(x0.permute(permute_order))
+    x[:, b:].copy_(x1.permute(permute_order))
+    x = _usp_all_to_all_single(x)
+    x = x.reshape(world_size, h_local, b * 2, s_local, d)
+
+    if head_dim == 1:
+        x = x.permute(2, 1, 0, 3, 4).contiguous().reshape(
+            b * 2, h_local, s_global, d
+        )
+    else:
+        x = x.permute(2, 0, 3, 1, 4).contiguous().reshape(
+            b * 2, s_global, h_local, d
+        )
+
+    return x[:b], x[b:]
+
+
 def _usp_input_all_to_all_varlen(
     x: torch.Tensor, seq_lens: list[int], head_dim: int = 1
 ) -> torch.Tensor:
