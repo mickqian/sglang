@@ -13,6 +13,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from enum import Enum, auto
+import sys
 
 import torch
 from tqdm.auto import tqdm
@@ -100,7 +101,7 @@ class PipelineStage(StageDedupMixin, ABC):
         return tqdm(
             iterable=iterable,
             total=total,
-            disable=disable or get_world_rank() != 0,
+            disable=disable or get_world_rank() != 0 or not sys.stderr.isatty(),
             **kwargs,
         )
 
