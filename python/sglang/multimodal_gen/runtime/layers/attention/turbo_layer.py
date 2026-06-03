@@ -87,7 +87,7 @@ def async_a2a_communicate(
     """
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
-    a2a_post_fns = [None] * len(a2a_inputs)
+    a2a_post_fn = post_all2all(local_seq_2_local_head, cp_size)
     if local_seq_2_local_head:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
@@ -95,11 +95,10 @@ def async_a2a_communicate(
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
                 )
-                a2a_post_fns[i - 1] = post_all2all(local_seq_2_local_head, cp_size)
             if i > 1:
                 with torch.get_device_module().stream(cp_stream):
                     a2a_reqs[i - 2].wait()
-                    a2a_outputs[i - 2] = a2a_post_fns[i - 2](a2a_outputs[i - 2])
+                    a2a_outputs[i - 2] = a2a_post_fn(a2a_outputs[i - 2])
             if i < len(a2a_inputs):
                 a2a_inputs[i] = rearrange(
                     a2a_inputs[i], "bs seq_len (w h) d -> w bs seq_len h d", w=cp_size
@@ -111,7 +110,6 @@ def async_a2a_communicate(
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
                 )
-                a2a_post_fns[i - 1] = post_all2all(local_seq_2_local_head, cp_size)
             if i < len(a2a_inputs):
                 a2a_inputs[i] = rearrange(
                     a2a_inputs[i], "bs (w s) h d -> w bs s h d", w=cp_size
@@ -119,7 +117,7 @@ def async_a2a_communicate(
             if i > 1:
                 with torch.get_device_module().stream(cp_stream):
                     a2a_reqs[i - 2].wait()
-                    a2a_outputs[i - 2] = a2a_post_fns[i - 2](a2a_outputs[i - 2])
+                    a2a_outputs[i - 2] = a2a_post_fn(a2a_outputs[i - 2])
     torch.get_device_module().current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
