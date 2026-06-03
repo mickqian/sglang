@@ -530,6 +530,7 @@ class Cosmos3CrossAttention(nn.Module):
         v_und: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
+        prefix_kv_head_sharded: bool = False,
     ) -> torch.Tensor:
         """Cross-attention from GEN to cached UND K/V.
 
@@ -567,7 +568,14 @@ class Cosmos3CrossAttention(nn.Module):
         # K/V = [text (replicated full on every SP rank) | image (sharded same as Q)].
         # USPAttention routes through the registered attention backend (FA, sage,
         # …) and handles the Ulysses all-to-all when SP > 1.
-        out = self.attn.forward_with_replicated_kv_prefix(q, k_und, v_und, k, v)
+        out = self.attn.forward_with_replicated_kv_prefix(
+            q,
+            k_und,
+            v_und,
+            k,
+            v,
+            prefix_kv_head_sharded=prefix_kv_head_sharded,
+        )
         out = out.reshape(batch_size, seq_len_gen, -1)
         out, _ = self.to_out(out)
         return out
@@ -687,6 +695,7 @@ class Cosmos3GenDecoderLayer(nn.Module):
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         residual: torch.Tensor | None = None,
+        prefix_kv_head_sharded: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Fused add+rmsnorm: each `(hidden_states, residual) = norm(...)`
         # collapses the residual add and RMSNorm into one kernel. The
@@ -699,7 +708,12 @@ class Cosmos3GenDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.cross_attention(
-            hidden_states, k_und, v_und, freqs_cos, freqs_sin
+            hidden_states,
+            k_und,
+            v_und,
+            freqs_cos,
+            freqs_sin,
+            prefix_kv_head_sharded=prefix_kv_head_sharded,
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -1158,12 +1172,24 @@ class Cosmos3OmniTransformer(CachableDiT):
             freqs_und, freqs_gen = self._compute_rope_freqs(
                 text_mask, T, Hp, Wp, fps, hidden_states.device, hidden_states.dtype
             )
-            # UND K/V cache is kept FULL on all ranks (not sharded). Text
-            # sequence is short, so memory impact is minimal, and the GEN
-            # cross-attention needs the full K/V on every SP rank.
-            self.cached_kv[cache_key] = self.language_model(
+            # UND K/V is replicated across ranks. In SP mode, cache only the
+            # local KV-head slice used by GEN cross-attention to avoid slicing
+            # the same text prefix on every denoising step.
+            cached_kv = self.language_model(
                 text_ids, text_mask, freqs_und[0], freqs_und[1]
             )
+            if sequence_shard_enabled:
+                h_kv_local = cached_kv[0][0].shape[2] // self.sp_size
+                h_start = self.sp_rank * h_kv_local
+                h_end = h_start + h_kv_local
+                cached_kv = [
+                    (
+                        k[:, :, h_start:h_end, :].contiguous(),
+                        v[:, :, h_start:h_end, :].contiguous(),
+                    )
+                    for k, v in cached_kv
+                ]
+            self.cached_kv[cache_key] = cached_kv
             cos_gen, sin_gen = freqs_gen
             if sequence_shard_enabled:
                 if seq_shard_pad > 0:
@@ -1196,6 +1222,7 @@ class Cosmos3OmniTransformer(CachableDiT):
                 cos_gen,
                 sin_gen,
                 residual=residual,
+                prefix_kv_head_sharded=sequence_shard_enabled,
             )
 
         # Collapse the trailing residual carry. RMSNorm and the linear
