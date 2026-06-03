@@ -845,8 +845,8 @@ class USPAttention(nn.Module):
         h_kv_local = k_shard.shape[2]
         h_start = sp_rank * h_kv_local
         h_end = h_start + h_kv_local
-        k_rep = k_rep[:, :, h_start:h_end, :].contiguous()
-        v_rep = v_rep[:, :, h_start:h_end, :].contiguous()
+        k_rep = k_rep[:, :, h_start:h_end, :]
+        v_rep = v_rep[:, :, h_start:h_end, :]
 
         k = torch.cat([k_rep, k_shard], dim=1)
         v = torch.cat([v_rep, v_shard], dim=1)
