@@ -749,21 +749,22 @@ async function stopRecording() {
   }
 }
 
-function recordPlaybackFrame(image, playbackSnapshot = {}) {
+function recordPostprocessedFrameBatch(decodedFrames) {
   if (!recordingActive || recordingSaving) return;
-  const duration = recordingFrameDurationUs(playbackSnapshot);
-  const timestamp = recordingLastTimestampUs < 0 ? 0 : recordingLastTimestampUs + duration;
-  recordFrame(image, timestamp, duration);
+  const duration = recordingFrameDurationUs();
+  for (const item of decodedFrames) {
+    if (!recordingActive) break;
+    const timestamp = recordingLastTimestampUs < 0 ? 0 : recordingLastTimestampUs + duration;
+    recordFrame(item.image, timestamp, duration);
+  }
   updateRecordButton();
 }
 
-function recordingFrameDurationUs(playbackSnapshot = {}) {
+function recordingFrameDurationUs() {
   let fps = Math.max(1, recordingFps);
   if (recordingMode === "realtime") {
     if (latestServerChunkDurationMs > 0 && latestServerChunkFrames > 0) {
       fps = latestServerChunkFrames / (latestServerChunkDurationMs / 1000);
-    } else if (Number(playbackSnapshot.sourceFps || 0) > 0) {
-      fps = Number(playbackSnapshot.sourceFps);
     }
   }
   return Math.max(1, Math.round(1_000_000 / Math.max(1, fps)));
@@ -1443,7 +1444,6 @@ function renderLoop(now) {
   closeFrames(decision.droppedFrames);
   if (decision.action === "draw") {
     const item = decision.frame;
-    recordPlaybackFrame(item.image, decision.snapshot);
     drawFrame(item.image);
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
@@ -1731,6 +1731,7 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     return;
   }
   const now = performance.now();
+  recordPostprocessedFrameBatch(decodedFrames);
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
   if (enqueueResult.cutover?.latencyMs) {
