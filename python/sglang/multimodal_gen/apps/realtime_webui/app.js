@@ -356,8 +356,7 @@ let recordingEncoder = null;
 let recordingEncoderReady = null;
 let recordingEncoderConfig = null;
 let recordingFrameIndex = 0;
-let recordingStartedAt = 0;
-let recordingFirstFrameAt = 0;
+let recordingFps = DEFAULT_TARGET_FPS;
 let recordingTimer = 0;
 let recordingSaving = false;
 let recordingEncodeChain = Promise.resolve();
@@ -370,6 +369,8 @@ const canvas = $("viewport");
 const ctx = canvas.getContext("2d", { alpha: false });
 const scratchCanvas = document.createElement("canvas");
 const scratchCtx = scratchCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+const recordingCanvas = document.createElement("canvas");
+const recordingCtx = recordingCanvas.getContext("2d", { alpha: false });
 const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
 });
@@ -628,7 +629,7 @@ function updateRecordButton() {
   $("recordLabel").textContent = recordingSaving
     ? "Saving"
     : recordingActive ? "Stop" : "Record";
-  const elapsedMs = recordingActive ? performance.now() - recordingStartedAt : 0;
+  const elapsedMs = recordingActive ? recordingFrameIndex / Math.max(1, recordingFps) * 1000 : 0;
   $("recordDuration").textContent = formatRecordingDuration(elapsedMs);
 }
 
@@ -652,8 +653,7 @@ function startRecording() {
   recordingEncoderReady = null;
   recordingEncoderConfig = null;
   recordingFrameIndex = 0;
-  recordingStartedAt = performance.now();
-  recordingFirstFrameAt = 0;
+  recordingFps = Math.max(1, previewPlaybackTargetFps());
   recordingEncodeChain = Promise.resolve();
   recordingTimer = window.setInterval(updateRecordButton, 250);
   updateRecordButton();
@@ -711,25 +711,34 @@ async function stopRecording() {
   }
 }
 
-function captureRecordingFrame(item, now) {
-  if (!recordingActive) return;
-  if (!recordingFirstFrameAt) recordingFirstFrameAt = now;
-  const timestamp = Math.max(0, Math.round((now - recordingFirstFrameAt) * 1000));
-  const duration = Math.round(1_000_000 / Math.max(1, previewPlaybackTargetFps()));
+function recordDecodedFrameBatch(decodedFrames) {
+  if (!recordingActive || recordingSaving) return;
+  for (const item of decodedFrames) {
+    if (!recordingActive) break;
+    recordDecodedFrame(item.image);
+  }
+  updateRecordButton();
+}
+
+function recordDecodedFrame(image) {
+  if (!recordingActive || recordingSaving) return;
+  const frameIndex = recordingFrameIndex;
+  const duration = Math.round(1_000_000 / Math.max(1, recordingFps));
+  const timestamp = frameIndex * duration;
   let frame;
   try {
-    frame = new VideoFrame(canvas, { timestamp, duration });
+    frame = createRecordingFrame(image, timestamp, duration);
   } catch (error) {
     recordingActive = false;
     addHistory(error.message || "recording frame capture failed");
     updateRecordButton();
     return;
   }
-  const index = recordingFrameIndex++;
+  recordingFrameIndex += 1;
   recordingEncodeChain = recordingEncodeChain
     .then(async () => {
       await ensureRecordingEncoder(frame.displayWidth, frame.displayHeight);
-      recordingEncoder.encode(frame, { keyFrame: index === 0 || index % 120 === 0 });
+      recordingEncoder.encode(frame, { keyFrame: frameIndex === 0 || frameIndex % 120 === 0 });
       frame.close();
     })
     .catch((error) => {
@@ -740,6 +749,18 @@ function captureRecordingFrame(item, now) {
     });
 }
 
+function createRecordingFrame(image, timestamp, duration) {
+  if (image instanceof ImageData) {
+    if (recordingCanvas.width !== image.width || recordingCanvas.height !== image.height) {
+      recordingCanvas.width = image.width;
+      recordingCanvas.height = image.height;
+    }
+    recordingCtx.putImageData(image, 0, 0);
+    return new VideoFrame(recordingCanvas, { timestamp, duration });
+  }
+  return new VideoFrame(image, { timestamp, duration });
+}
+
 async function ensureRecordingEncoder(width, height) {
   if (recordingEncoderReady) return recordingEncoderReady;
   recordingEncoderReady = createRecordingEncoder(width, height);
@@ -747,7 +768,7 @@ async function ensureRecordingEncoder(width, height) {
 }
 
 async function createRecordingEncoder(width, height) {
-  const fps = Math.max(1, previewPlaybackTargetFps());
+  const fps = Math.max(1, recordingFps);
   const bitrate = Math.round(Math.min(
     180_000_000,
     Math.max(24_000_000, width * height * fps * 0.8),
@@ -834,7 +855,7 @@ function buildRecordingMp4() {
 function normalizeRecordingSamples(samples) {
   const ordered = [...samples].sort((left, right) => left.timestamp - right.timestamp);
   const timescale = 90_000;
-  const fallbackDuration = Math.round(timescale / Math.max(1, previewPlaybackTargetFps()));
+  const fallbackDuration = Math.round(timescale / Math.max(1, recordingFps));
   const normalized = ordered.map((sample) => ({
     ...sample,
     time: Math.round(sample.timestamp * timescale / 1_000_000),
@@ -1085,6 +1106,7 @@ function enqueueDecodeBatch(header, data, epoch) {
 }
 
 function trimDecodeQueue() {
+  if (recordingActive) return;
   if (!decodeQueue.length) return;
   const playback = playbackController.snapshot();
   const decodeWindowSeconds = renderedPreviewFrames
@@ -1373,7 +1395,6 @@ function renderLoop(now) {
   if (decision.action === "draw") {
     const item = decision.frame;
     drawFrame(item.image);
-    captureRecordingFrame(item, now);
     fpsSamples.push(now);
     fpsSamples = fpsSamples.filter((t) => now - t < 1000);
     const renderedFps = String(fpsSamples.length);
@@ -1660,6 +1681,8 @@ async function decodeAndEnqueueFrameBatch(header, data, epoch) {
     return;
   }
   const now = performance.now();
+  // record source frames before preview playback can hold or drop for latency
+  recordDecodedFrameBatch(decodedFrames);
   const enqueueResult = playbackController.enqueueDecodedFrames(header, decodedFrames, now);
   closeFrames(enqueueResult.droppedFrames);
   if (enqueueResult.cutover?.latencyMs) {
