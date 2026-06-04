@@ -68,6 +68,7 @@ var RealtimePlaybackController = globalThis.RealtimePlaybackController || class 
     this.latestChunkDurationMs = 1000 / this.targetFps;
     this.queue = [];
     this.buffering = true;
+    this.firstQueuedAt = 0;
     this.lastDrawAt = 0;
     this.lastDropAt = 0;
     this.lastDropCount = 0;
@@ -88,6 +89,7 @@ var RealtimePlaybackController = globalThis.RealtimePlaybackController || class 
     const frames = this.queue.splice(0);
     this.buffering = true;
     this.lastDrawAt = 0;
+    this.firstQueuedAt = 0;
     return frames;
   }
 
@@ -125,6 +127,7 @@ var RealtimePlaybackController = globalThis.RealtimePlaybackController || class 
       this.pendingEventId = 0;
       this.pendingEventSentAt = 0;
     }
+    if (!this.queue.length && preparedFrames.length) this.firstQueuedAt = now;
     this.queue.push(...preparedFrames);
     return { droppedFrames: [], cutover, snapshot: this.snapshot() };
   }
@@ -132,9 +135,15 @@ var RealtimePlaybackController = globalThis.RealtimePlaybackController || class 
   render(now) {
     if (!this.queue.length) {
       this.buffering = true;
+      this.firstQueuedAt = 0;
       return { action: "hold", droppedFrames: [], snapshot: this.snapshot() };
     }
-    if (this.buffering && this.queue.length < Math.max(2, Math.ceil(this.sourceFps * 0.25))) {
+    const startupHoldExpired = this.firstQueuedAt && now - this.firstQueuedAt >= 900;
+    if (
+      this.buffering &&
+      this.queue.length < Math.max(2, Math.ceil(this.sourceFps * 0.25)) &&
+      !startupHoldExpired
+    ) {
       return { action: "hold", droppedFrames: [], snapshot: this.snapshot() };
     }
     this.buffering = false;
@@ -360,7 +369,7 @@ const previewFrame = document.querySelector(".preview-frame");
 const canvas = $("viewport");
 const ctx = canvas.getContext("2d", { alpha: false });
 const scratchCanvas = document.createElement("canvas");
-const scratchCtx = scratchCanvas.getContext("2d", { alpha: false });
+const scratchCtx = scratchCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
 const playbackController = new RealtimePlaybackController({
   targetFps: DEFAULT_TARGET_FPS,
 });
@@ -1224,6 +1233,22 @@ function isEncodedPreviewContentType(contentType) {
 
 async function encodedImageToImageData(header, payload) {
   const framePayloads = splitEncodedPayload(header, payload);
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await Promise.all(framePayloads.map(async (framePayload) => ({
+        image: await createImageBitmap(new Blob([framePayload], { type: header.content_type })),
+        chunk: header.chunk_index,
+      })));
+    } catch (error) {
+      return Promise.all(framePayloads.map((framePayload) => (
+        encodedImageElementFallback(
+          new Blob([framePayload], { type: header.content_type }),
+          header,
+          error,
+        )
+      )));
+    }
+  }
   return Promise.all(framePayloads.map((framePayload) => (
     encodedImageElementFallback(
       new Blob([framePayload], { type: header.content_type }),
@@ -1848,7 +1873,10 @@ function readPreviewTransportParams() {
   };
   if (outputFormat === "webp" || outputFormat === "jpeg") {
     params.output_compression = outputQuality;
-    if ($("superResolution").checked && $("frameInterpolation").checked) {
+    const previewMaxWidth = Number(new URLSearchParams(window.location.search).get("preview_max_width") || 0);
+    if (previewMaxWidth > 0) {
+      params.realtime_preview_max_width = previewMaxWidth;
+    } else if ($("superResolution").checked && $("frameInterpolation").checked) {
       const baseSize = parseSizeValue($("size").value);
       if (baseSize?.width) params.realtime_preview_max_width = baseSize.width;
     }
