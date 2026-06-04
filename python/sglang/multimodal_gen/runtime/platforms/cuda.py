@@ -180,6 +180,13 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
+    def optimize_vae(cls, vae: torch.nn.Module) -> torch.nn.Module:
+        if not torch.backends.cudnn.benchmark:
+            torch.backends.cudnn.benchmark = True
+            logger.info("Enabled cudnn.benchmark for CUDA VAE conv layers")
+        return vae
+
+    @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
