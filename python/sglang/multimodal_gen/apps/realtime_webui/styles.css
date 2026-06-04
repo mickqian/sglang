@@ -450,11 +450,11 @@ button:focus-visible {
 .preview-overlay {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: 4;
   display: none;
   place-items: center;
   pointer-events: none;
-  background: transparent;
+  background: rgba(17, 20, 15, 0.04);
 }
 
 .stage[data-preview-state="waiting"] .preview-overlay {
@@ -462,12 +462,13 @@ button:focus-visible {
 }
 
 .preview-loader {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
-  border: 2px solid rgba(238, 241, 236, 0.22);
-  border-top-color: rgba(238, 241, 236, 0.82);
-  animation: previewProgressSpin 0.8s linear infinite;
+  border: 2px solid rgba(238, 241, 236, 0.26);
+  border-top-color: rgba(238, 241, 236, 0.94);
+  animation: previewProgressSpin 0.72s linear infinite;
+  will-change: transform;
 }
 
 .stage-controls {

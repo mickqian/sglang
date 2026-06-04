@@ -430,10 +430,7 @@ async function decodeFrameBatch(header, data) {
 }
 
 function isWorkerDecodableContentType(contentType) {
-  return (
-    isWorkerDecodableRawContentType(contentType) ||
-    isEncodedPreviewContentType(contentType)
-  );
+  return isWorkerDecodableRawContentType(contentType);
 }
 
 function isWorkerDecodableRawContentType(contentType) {
@@ -1109,27 +1106,11 @@ function isEncodedPreviewContentType(contentType) {
 
 async function encodedImageToImageData(header, payload) {
   const framePayloads = splitEncodedPayload(header, payload);
-  if (typeof createImageBitmap === "function") {
-    try {
-      return await Promise.all(framePayloads.map(async (framePayload) => ({
-        image: await createImageBitmap(new Blob([framePayload], { type: header.content_type })),
-        chunk: header.chunk_index,
-      })));
-    } catch (error) {
-      return Promise.all(framePayloads.map((framePayload) => (
-        encodedImageElementFallback(
-          new Blob([framePayload], { type: header.content_type }),
-          header,
-          error,
-        )
-      )));
-    }
-  }
   return Promise.all(framePayloads.map((framePayload) => (
     encodedImageElementFallback(
       new Blob([framePayload], { type: header.content_type }),
       header,
-      new Error("createImageBitmap unavailable"),
+      new Error("encoded preview image decode failed"),
     )
   )));
 }
