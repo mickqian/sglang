@@ -351,6 +351,8 @@ let socketCloseExpected = false;
 let socketServerError = "";
 let renderedPreviewFrames = 0;
 let previewScaleFrame = 0;
+let latestServerChunkDurationMs = 0;
+let latestServerChunkFrames = 0;
 let recordingActive = false;
 let recordingSamples = [];
 let recordingEncoder = null;
@@ -427,6 +429,8 @@ function resetStreamStats() {
   lastDecodeDropCount = 0;
   encodedDecodeErrors = 0;
   renderedPreviewFrames = 0;
+  latestServerChunkDurationMs = 0;
+  latestServerChunkFrames = 0;
   controlStateController?.reset({ sendRelease: false });
   resetDecoderState();
   updateStats();
@@ -749,10 +753,10 @@ function recordDecodedFrameBatch(decodedFrames, header = {}) {
   if (!recordingActive || recordingSaving) return;
   let duration = Math.round(1_000_000 / Math.max(1, recordingFps));
   if (recordingMode === "realtime") {
-    const chunkDurationMs =
-      Number(header.chunk_total_ms || 0) || playbackController.snapshot().latestChunkDurationMs || 0;
+    const chunkDurationMs = Number(header.chunk_total_ms || 0) || latestServerChunkDurationMs;
+    const chunkFrameCount = Number(header.num_frames || 0) || latestServerChunkFrames || decodedFrames.length;
     if (chunkDurationMs > 0 && decodedFrames.length) {
-      duration = Math.max(1, Math.round(chunkDurationMs * 1000 / decodedFrames.length));
+      duration = Math.max(1, Math.round(chunkDurationMs * 1000 / Math.max(1, chunkFrameCount)));
     }
     for (let i = 0; i < decodedFrames.length; i++) {
       if (!recordingActive) break;
@@ -1751,6 +1755,10 @@ function updateServerChunkStats(stats) {
   const chunkTotal = Number(stats.chunk_total_ms || 0) / 1000;
   const numFrames = Number(stats.num_frames || 0);
   const chunkIndex = Number(stats.chunk_index || 0);
+  if (stats.chunk_total_ms > 0 && numFrames > 0) {
+    latestServerChunkDurationMs = Number(stats.chunk_total_ms);
+    latestServerChunkFrames = numFrames;
+  }
   const targetFps = previewPlaybackTargetFps();
   const theoreticalFps = chunkTotal > 0 ? numFrames / chunkTotal : 0;
   const playback = playbackController.observeServerStats(stats, performance.now());
