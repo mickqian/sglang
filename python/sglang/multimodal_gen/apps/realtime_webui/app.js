@@ -380,6 +380,9 @@ async function decodeFrameBatch(header, data) {
   }
 
   const payload = await payloadToArrayBuffer(data);
+  const fallbackPayload = isWorkerDecodableRawContentType(header.content_type)
+    ? payload.slice(0)
+    : null;
   const id = decodeRequestId++;
   const decodeHeader = { ...header, __decode_id: id };
   const useTransfer =
@@ -414,8 +417,8 @@ async function decodeFrameBatch(header, data) {
       }
     });
   } catch (error) {
-    if (isEncodedPreviewContentType(header.content_type) && !useTransfer) {
-      const items = await framePayloadToImageData(header, data);
+    if (fallbackPayload) {
+      const items = await framePayloadToImageData(header, fallbackPayload);
       const decodedAt = performance.now();
       lastDecodeMs = decodedAt - decodeStartedAt;
       return items.map((item) => ({
