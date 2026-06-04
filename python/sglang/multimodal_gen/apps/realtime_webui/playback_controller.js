@@ -20,6 +20,7 @@
     deliveryLeadBoostDecayMsPerSecond: 80,
     maxDeliveryLeadBoostMs: 2000,
     deliveryStallExpectedMultiplier: 1.25,
+    startupMaxHoldMs: 900,
     receiveStallPlaybackRateMin: 0.65,
     receiveStallPlaybackRateSlewPerSecond: 0.5,
     lowWaterRatio: 0.4,
@@ -68,6 +69,7 @@
       this.renderedFrames = 0;
       this.droppedFrames = 0;
       this.buffering = true;
+      this.firstQueuedAt = 0;
       this.pendingEventId = 0;
       this.pendingEventSentAt = 0;
       this.pendingEventCutoverMode = "motion";
@@ -103,6 +105,7 @@
       const frames = this.queue.splice(0);
       this.lastDrawAt = 0;
       this.buffering = true;
+      this.firstQueuedAt = 0;
       return frames;
     }
 
@@ -169,6 +172,7 @@
         this.pendingEventCutoverMode = "motion";
       }
 
+      if (!this.queue.length && preparedFrames.length) this.firstQueuedAt = now;
       this.queue.push(...preparedFrames);
       this.#observeChunkArrival(header, preparedFrames.length, receivedAt, now);
       droppedFrames.push(...this.#trimBacklog(now));
@@ -180,6 +184,7 @@
       this.#updateReceiveStallGuard(now);
       const droppedFrames = this.#trimBacklog(now);
       if (!this.queue.length) {
+        this.firstQueuedAt = 0;
         if (this.renderedFrames && hasPendingInput && !this.buffering) {
           this.buffering = true;
           this.rebufferLeadBoostMs = Math.max(
@@ -205,7 +210,8 @@
       if (
         hasPendingInput &&
         this.buffering &&
-        bufferMs < (this.renderedFrames ? this.#resumeLeadMs() : this.#startLeadMs())
+        bufferMs < (this.renderedFrames ? this.#resumeLeadMs() : this.#startLeadMs()) &&
+        !this.#startupHoldExpired(now)
       ) {
         this.buffering = true;
         this.lastDrawAt = 0;
@@ -478,6 +484,14 @@
         this.config.minStartLeadMs,
         this.latestChunkDurationMs * this.config.startLeadChunkRatio,
         this.targetLeadMs,
+      );
+    }
+
+    #startupHoldExpired(now) {
+      return (
+        !this.renderedFrames &&
+        this.firstQueuedAt &&
+        now - this.firstQueuedAt >= this.config.startupMaxHoldMs
       );
     }
 
