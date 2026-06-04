@@ -55,6 +55,121 @@ const CONTROL_ACTION_META = {
   l: { label: "Yaw +", type: "rotation", axis: "+yaw", amount: "6deg/frame" },
 };
 
+var RealtimePlaybackController = globalThis.RealtimePlaybackController || class RealtimePlaybackController {
+  constructor({ targetFps = DEFAULT_TARGET_FPS } = {}) {
+    this.reset({ targetFps });
+  }
+
+  reset({ targetFps = DEFAULT_TARGET_FPS } = {}) {
+    this.targetFps = Math.max(1, Number(targetFps || DEFAULT_TARGET_FPS));
+    this.sourceFps = this.targetFps;
+    this.renderFps = this.targetFps;
+    this.playbackRate = 1;
+    this.latestChunkDurationMs = 1000 / this.targetFps;
+    this.queue = [];
+    this.buffering = true;
+    this.lastDrawAt = 0;
+    this.lastDropAt = 0;
+    this.lastDropCount = 0;
+    this.lastDropReason = "";
+    this.pendingEventId = 0;
+    this.pendingEventSentAt = 0;
+  }
+
+  setTargetFps(targetFps) {
+    this.targetFps = Math.max(1, Number(targetFps || DEFAULT_TARGET_FPS));
+    if (!this.queue.length) {
+      this.sourceFps = this.targetFps;
+      this.renderFps = this.targetFps;
+    }
+  }
+
+  clear() {
+    const frames = this.queue.splice(0);
+    this.buffering = true;
+    this.lastDrawAt = 0;
+    return frames;
+  }
+
+  noteInputEvent(eventId, now) {
+    this.pendingEventId = Number(eventId || 0);
+    this.pendingEventSentAt = Number(now || 0);
+  }
+
+  observeServerStats(stats) {
+    const frameCount = Number(stats.num_frames || 0);
+    const chunkTotalMs = Number(stats.chunk_total_ms || 0);
+    if (frameCount > 0 && chunkTotalMs > 0) {
+      this.sourceFps = Math.max(1, frameCount / (chunkTotalMs / 1000));
+      this.renderFps = this.sourceFps;
+      this.latestChunkDurationMs = chunkTotalMs;
+    }
+    return this.snapshot();
+  }
+
+  enqueueDecodedFrames(header, frames, now) {
+    const chunkIndex = Number(header.chunk_index || 0);
+    const eventId = Number(header.event_id || 0);
+    const preparedFrames = frames.map((frame) => ({
+      ...frame,
+      chunk: Number(frame.chunk ?? chunkIndex),
+      chunkIndex,
+      eventId,
+    }));
+    let cutover = null;
+    if (this.pendingEventId && eventId >= this.pendingEventId) {
+      cutover = {
+        eventId,
+        latencyMs: this.pendingEventSentAt ? now - this.pendingEventSentAt : 0,
+      };
+      this.pendingEventId = 0;
+      this.pendingEventSentAt = 0;
+    }
+    this.queue.push(...preparedFrames);
+    return { droppedFrames: [], cutover, snapshot: this.snapshot() };
+  }
+
+  render(now) {
+    if (!this.queue.length) {
+      this.buffering = true;
+      return { action: "hold", droppedFrames: [], snapshot: this.snapshot() };
+    }
+    if (this.buffering && this.queue.length < Math.max(2, Math.ceil(this.sourceFps * 0.25))) {
+      return { action: "hold", droppedFrames: [], snapshot: this.snapshot() };
+    }
+    this.buffering = false;
+    const targetMs = 1000 / Math.max(1, this.renderFps);
+    if (this.lastDrawAt && now - this.lastDrawAt < targetMs) {
+      return { action: "wait", droppedFrames: [], snapshot: this.snapshot() };
+    }
+    this.lastDrawAt = now;
+    return {
+      action: "draw",
+      frame: this.queue.shift(),
+      droppedFrames: [],
+      snapshot: this.snapshot(),
+    };
+  }
+
+  snapshot() {
+    const bufferMs = this.queue.length / Math.max(1, this.sourceFps) * 1000;
+    const targetLeadMs = Math.max(450, this.latestChunkDurationMs * 1.5);
+    return {
+      bufferMs,
+      targetLeadMs,
+      maxLeadMs: targetLeadMs * 2,
+      queueFrames: this.queue.length,
+      buffering: this.buffering,
+      sourceFps: this.sourceFps,
+      renderFps: this.renderFps,
+      playbackRate: this.playbackRate,
+      lastDropAt: this.lastDropAt,
+      lastDropCount: this.lastDropCount,
+      lastDropReason: this.lastDropReason,
+    };
+  }
+};
+
 const REACTOR_PRESET_BASE_URL = "https://www.reactor.inc/lingbot-world-fast-v1";
 
 const reactorPresets = [
