@@ -51,6 +51,9 @@ from sglang.multimodal_gen.registry import (
     get_non_diffusers_pipeline_name,
     is_known_non_diffusers_multimodal_model,
 )
+from sglang.multimodal_gen.runtime.acceleration_policy import (
+    KERNEL_COMPILE_POLICY_ENV,
+)
 from sglang.multimodal_gen.runtime.models.dits.qwen_image import (
     QwenImageTransformer2DModel,
 )
@@ -175,6 +178,26 @@ class TestServerArgsPathExpansion(unittest.TestCase):
 
         self.assertEqual(backend.name, "TORCH_SDPA")
         self.assertEqual(matched_key, "text_encoder")
+
+    def test_attention_backend_auto_is_accepted(self):
+        args = self._from_dict_without_model_resolution(
+            {"model_path": "/data/my-model", "attention_backend": "auto"}
+        )
+
+        self.assertNotEqual(args.attention_backend, "auto")
+
+    def test_acceleration_config_sets_kernel_compile_policy(self):
+        with patch.dict(os.environ, {}, clear=False):
+            args = self._from_dict_without_model_resolution(
+                {
+                    "model_path": "/data/my-model",
+                    "acceleration_config": "kernel_compile_policy=auto,allow_cudnn_sdp=true",
+                }
+            )
+
+            self.assertEqual(args.acceleration_config.kernel_compile_policy, "auto")
+            self.assertTrue(args.acceleration_config.allow_cudnn_sdp)
+            self.assertEqual(os.environ[KERNEL_COMPILE_POLICY_ENV], "auto")
 
     def test_invalid_component_attention_backend_raises(self):
         with self.assertRaises(ValueError):

@@ -20,6 +20,9 @@ from sglang.kernels.ops.diffusion.triton.varlen_pack_pad import (
 from sglang.multimodal_gen.runtime.breakable_cuda_graph.replay_token import (
     get_current_replay_token,
 )
+from sglang.multimodal_gen.runtime.acceleration_policy import (
+    attention_allows_cudnn_sdp,
+)
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
     sequence_model_parallel_all_to_all_4D,
@@ -558,7 +561,7 @@ class LocalAttention(nn.Module):
             head_size, dtype, supported_attention_backends=supported_attention_backends
         )
         impl_cls = attn_backend.get_impl_cls()
-        self.allow_cudnn_sdp = bool(extra_impl_args.get("allow_cudnn_sdp", False))
+        self.allow_cudnn_sdp = attention_allows_cudnn_sdp(extra_impl_args)
         self.attn_impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -701,7 +704,7 @@ class USPAttention(nn.Module):
                     f"(see AttentionBackend.supports_ring_rotation)."
                 )
         impl_cls: Type[AttentionImpl] = attn_backend.get_impl_cls()
-        self.allow_cudnn_sdp = bool(extra_impl_args.get("allow_cudnn_sdp", False))
+        self.allow_cudnn_sdp = attention_allows_cudnn_sdp(extra_impl_args)
         self.attn_impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
