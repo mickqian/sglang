@@ -1420,6 +1420,75 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             scale_shifts.append(scale_shift)
         return scale_shifts
 
+    def _project_patch_channels(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        channel_start: int,
+        channel_count: int,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        batch_size, channels, num_frames, height, width = hidden_states.shape
+        p_t, p_h, p_w = self.patch_size
+        post_patch_num_frames = num_frames // p_t
+        post_patch_height = height // p_h
+        post_patch_width = width // p_w
+
+        hidden_states = hidden_states.reshape(
+            batch_size,
+            channels,
+            post_patch_num_frames,
+            p_t,
+            post_patch_height,
+            p_h,
+            post_patch_width,
+            p_w,
+        )
+        hidden_states = hidden_states.permute(
+            0, 2, 4, 6, 1, 3, 5, 7
+        ).contiguous()
+        hidden_states = hidden_states.reshape(
+            batch_size,
+            post_patch_num_frames * post_patch_height * post_patch_width,
+            channel_count * p_t * p_h * p_w,
+        )
+
+        features_per_channel = p_t * p_h * p_w
+        weight_start = channel_start * features_per_channel
+        weight_end = weight_start + channel_count * features_per_channel
+        weight = self.patch_embedding.proj.weight.reshape(
+            self.patch_embedding.proj.weight.shape[0], -1
+        )[:, weight_start:weight_end]
+        return F.linear(hidden_states, weight, bias)
+
+    def prepare_i2v_condition_patch_embedding(
+        self, condition: torch.Tensor
+    ) -> torch.Tensor:
+        return self._project_patch_channels(
+            condition,
+            channel_start=self.num_channels_latents,
+            channel_count=condition.shape[1],
+            bias=None,
+        )
+
+    def _patch_i2v_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        i2v_condition_patch_embedding: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if i2v_condition_patch_embedding is None:
+            return self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+
+        latent_channels = self.num_channels_latents
+        hidden_states = self._project_patch_channels(
+            hidden_states[:, :latent_channels],
+            channel_start=0,
+            channel_count=latent_channels,
+            bias=self.patch_embedding.proj.bias,
+        )
+        hidden_states = hidden_states + i2v_condition_patch_embedding
+        return self.patch_embedding.norm(hidden_states)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1432,6 +1501,7 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         cache_start: int = 0,
         start_frame: int = 0,
         c2ws_plucker_emb: torch.Tensor | None = None,
+        i2v_condition_patch_embedding: torch.Tensor | None = None,
         skip_final_projection: bool = False,
     ) -> torch.Tensor:
         forward_batch = get_forward_context().forward_batch
@@ -1481,7 +1551,9 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 device=hidden_states.device,
             )
 
-        hidden_states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+        hidden_states = self._patch_i2v_hidden_states(
+            hidden_states, i2v_condition_patch_embedding
+        )
         c2ws_plucker_emb = self._prepare_c2ws_plucker_emb(
             hidden_states, c2ws_plucker_emb, forward_batch
         )

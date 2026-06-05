@@ -7,6 +7,7 @@ import torch
 from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import (
     CrossAttentionKVCache,
 )
+from sglang.multimodal_gen.runtime.layers.visual_embedding import PatchEmbed
 from sglang.multimodal_gen.runtime.models.dits import (
     lingbot_world as lingbot_world_module,
 )
@@ -199,6 +200,32 @@ def test_lingbot_i2v_model_input_writer_reuses_buffer():
     assert second.shape == (1, 36, 3, 2, 2)
     assert torch.equal(second[:, :16], latents + 3.0)
     assert torch.equal(second[:, 16:], condition)
+
+
+def test_lingbot_i2v_condition_patch_embedding_matches_full_projection():
+    model = CausalLingBotWorldTransformer3DModel.__new__(
+        CausalLingBotWorldTransformer3DModel
+    )
+    model.patch_size = (1, 2, 2)
+    model.in_channels = 36
+    model.num_channels_latents = 16
+    model.patch_embedding = PatchEmbed(
+        in_chans=36,
+        embed_dim=8,
+        patch_size=model.patch_size,
+        flatten=False,
+    )
+
+    hidden_states = torch.randn(2, 36, 3, 4, 4)
+    expected = model.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+    condition_patch_embedding = model.prepare_i2v_condition_patch_embedding(
+        hidden_states[:, 16:]
+    )
+    actual = model._patch_i2v_hidden_states(
+        hidden_states, condition_patch_embedding
+    )
+
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
 
 
 def test_lingbot_cam_conditioner_scale_shift_matches_forward():

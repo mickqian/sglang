@@ -284,6 +284,11 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             cache_ctx.chunk_idx,
             ctx.num_frames,
         )
+        condition = condition.to(device=ctx.device, dtype=ctx.target_dtype)
+        ctx.image_kwargs = dict(ctx.image_kwargs)
+        ctx.image_kwargs["i2v_condition_patch_embedding"] = (
+            self.transformer.prepare_i2v_condition_patch_embedding(condition)
+        )
 
         # --- Denoising loop (single chunk) ---
         current_latents = latents
