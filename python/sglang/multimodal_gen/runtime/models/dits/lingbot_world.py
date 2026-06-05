@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import contextlib
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -88,9 +90,60 @@ from sglang.srt.utils import add_prefix
 
 logger = init_logger(__name__)
 _is_cuda = current_platform.is_cuda()
+_lingbot_profile_pending = []
 
 if _use_aiter:
     from aiter.ops.rope import rope_cached_2c_fwd_inplace
+
+
+def _lingbot_block_profile_enabled() -> bool:
+    if os.environ.get("SGLANG_LINGBOT_BLOCK_PROFILE") != "1":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return get_sp_parallel_rank() == 0
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def _lingbot_profile_section(name: str):
+    if not _lingbot_block_profile_enabled():
+        yield
+        return
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    try:
+        yield
+    finally:
+        end.record()
+        _lingbot_profile_pending.append((name, start, end))
+
+
+def _lingbot_profile_flush(label: str) -> None:
+    if not _lingbot_block_profile_enabled() or not _lingbot_profile_pending:
+        return
+    torch.cuda.synchronize()
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    while _lingbot_profile_pending:
+        name, start, end = _lingbot_profile_pending.pop(0)
+        elapsed_ms = start.elapsed_time(end)
+        totals[name] = totals.get(name, 0.0) + elapsed_ms
+        counts[name] = counts.get(name, 0) + 1
+    total_ms = sum(totals.values())
+    parts = [
+        f"{name}={totals[name]:.2f}ms/{counts[name]}"
+        for name in sorted(totals, key=totals.get, reverse=True)
+    ]
+    logger.info(
+        "LingBot block profile %s total=%.2fms %s",
+        label,
+        total_ms,
+        " | ".join(parts),
+    )
 
 
 def _compute_sequence_splits(total_len: int, world_size: int) -> list[int]:
@@ -207,23 +260,28 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
     ):
         cos, sin = freqs_cis[:2]
         cos_sin_cache = freqs_cis[2] if len(freqs_cis) > 2 else None
-        if _is_cuda and q.dim() == 4 and q.shape == k.shape:
-            if cos_sin_cache is None:
-                cos_sin_cache = torch.cat(
-                    [
-                        cos.to(dtype=torch.float32).contiguous(),
-                        sin.to(dtype=torch.float32).contiguous(),
-                    ],
-                    dim=-1,
+        with _lingbot_profile_section("attn.rope"):
+            if _is_cuda and q.dim() == 4 and q.shape == k.shape:
+                if cos_sin_cache is None:
+                    cos_sin_cache = torch.cat(
+                        [
+                            cos.to(dtype=torch.float32).contiguous(),
+                            sin.to(dtype=torch.float32).contiguous(),
+                        ],
+                        dim=-1,
+                    )
+                roped_query, roped_key = apply_flashinfer_rope_qk_inplace(
+                    q, k, cos_sin_cache, is_neox=False
                 )
-            roped_query, roped_key = apply_flashinfer_rope_qk_inplace(
-                q, k, cos_sin_cache, is_neox=False
-            )
-            roped_query = roped_query.type_as(v)
-            roped_key = roped_key.type_as(v)
-        else:
-            roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
-            roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
+                roped_query = roped_query.type_as(v)
+                roped_key = roped_key.type_as(v)
+            else:
+                roped_query = _apply_rotary_emb(
+                    q, cos, sin, is_neox_style=False
+                ).type_as(v)
+                roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(
+                    v
+                )
         forward_batch = get_forward_context().forward_batch
         seq_splits = None
         uniform_seq_splits = False
@@ -258,36 +316,40 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
                 )
             seq_splits = list(seq_splits)
             uniform_seq_splits = _sequence_splits_are_uniform(seq_splits)
-            # Pack Q/K/V to avoid launching three Ulysses all-to-all collectives.
-            qkv = torch.cat([roped_query, roped_key, v], dim=-1)
-            qkv = (
-                _usp_input_all_to_all(qkv, head_dim=2)
-                if uniform_seq_splits
-                else _usp_input_all_to_all_varlen(qkv, seq_splits, head_dim=2)
-            )
-            roped_query, roped_key, v = qkv.chunk(3, dim=-1)
+            with _lingbot_profile_section("attn.usp_in"):
+                # Pack Q/K/V to avoid launching three Ulysses all-to-all collectives.
+                qkv = torch.cat([roped_query, roped_key, v], dim=-1)
+                qkv = (
+                    _usp_input_all_to_all(qkv, head_dim=2)
+                    if uniform_seq_splits
+                    else _usp_input_all_to_all_varlen(qkv, seq_splits, head_dim=2)
+                )
+                roped_query, roped_key, v = qkv.chunk(3, dim=-1)
 
-        cache_view = kv_cache.update_and_get_attention_kv(
-            key=roped_key,
-            value=v,
-            current_chunk_start=current_start,
-            debug_name="LingBot KV cache",
-        )
+        with _lingbot_profile_section("attn.kv_update"):
+            cache_view = kv_cache.update_and_get_attention_kv(
+                key=roped_key,
+                value=v,
+                current_chunk_start=current_start,
+                debug_name="LingBot KV cache",
+            )
         if update_cache_only:
             return v
         attn_impl = self.ulysses_attn if sequence_shard_enabled else self.attn
-        x = attn_impl(
-            roped_query,
-            cache_view.k,
-            cache_view.v,
-        )
+        with _lingbot_profile_section("attn.attn"):
+            x = attn_impl(
+                roped_query,
+                cache_view.k,
+                cache_view.v,
+            )
         if sequence_shard_enabled:
             assert seq_splits is not None
-            x = (
-                _usp_output_all_to_all(x, head_dim=2)
-                if uniform_seq_splits
-                else _usp_output_all_to_all_varlen(x, seq_splits, head_dim=2)
-            )
+            with _lingbot_profile_section("attn.usp_out"):
+                x = (
+                    _usp_output_all_to_all(x, head_dim=2)
+                    if uniform_seq_splits
+                    else _usp_output_all_to_all_varlen(x, seq_splits, head_dim=2)
+                )
         return x
 
 
@@ -1012,74 +1074,79 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
         num_frames = temb.shape[1]
         seqlen_per_frame = hidden_states.shape[1] // num_frames
         orig_dtype = hidden_states.dtype
-        e = self.scale_shift_table + temb.float()
-        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = e.chunk(
-            6, dim=2
-        )
-        norm_hidden_states = (
-            (
-                self.norm1(hidden_states.float()).unflatten(
-                    dim=1, sizes=(num_frames, seqlen_per_frame)
-                )
-                * (1 + scale_msa)
-                + shift_msa
+        with _lingbot_profile_section("block.norm_qkv"):
+            e = self.scale_shift_table + temb.float()
+            shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+                e.chunk(6, dim=2)
             )
-            .flatten(1, 2)
-            .to(orig_dtype)
-        )
-        query, key, value = self._project_qkv(norm_hidden_states)
-        query = self.norm_q(query)
-        key = self.norm_k(key)
-        query = query.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
-        key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
-        value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
+            norm_hidden_states = (
+                (
+                    self.norm1(hidden_states.float()).unflatten(
+                        dim=1, sizes=(num_frames, seqlen_per_frame)
+                    )
+                    * (1 + scale_msa)
+                    + shift_msa
+                )
+                .flatten(1, 2)
+                .to(orig_dtype)
+            )
+            query, key, value = self._project_qkv(norm_hidden_states)
+            query = self.norm_q(query)
+            key = self.norm_k(key)
+            query = query.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
+            key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
+            value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
-        attn_output = self.attn1(
-            query,
-            key,
-            value,
-            freqs_cis,
-            block_mask,
-            kv_cache,
-            current_start,
-            cache_start,
-            update_cache_only=update_cache_only,
-        )
+        with _lingbot_profile_section("block.self_attn"):
+            attn_output = self.attn1(
+                query,
+                key,
+                value,
+                freqs_cis,
+                block_mask,
+                kv_cache,
+                current_start,
+                cache_start,
+                update_cache_only=update_cache_only,
+            )
         if update_cache_only:
             return hidden_states
-        attn_output = attn_output.flatten(2)
-        attn_output, _ = self.to_out(attn_output)
-        attn_output = attn_output.squeeze(1)
+        with _lingbot_profile_section("block.post_self"):
+            attn_output = attn_output.flatten(2)
+            attn_output, _ = self.to_out(attn_output)
+            attn_output = attn_output.squeeze(1)
 
-        residual_zero = torch.zeros(
-            (1,), device=hidden_states.device, dtype=hidden_states.dtype
-        )
-        norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, residual_zero, residual_zero
-        )
-        hidden_states = self.cam_conditioner(
-            hidden_states.to(orig_dtype),
-            c2ws_plucker_emb,
-            (
-                cam_conditioner_scale_shift
-                if cam_conditioner_scale_shift is not None
-                else self._cam_conditioner_scale_shift(c2ws_plucker_emb)
-            ),
-        )
-        norm_hidden_states = self.self_attn_residual_norm.norm(hidden_states).to(
-            orig_dtype
-        )
+            residual_zero = torch.zeros(
+                (1,), device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            norm_hidden_states, hidden_states = self.self_attn_residual_norm(
+                hidden_states, attn_output, gate_msa, residual_zero, residual_zero
+            )
+            hidden_states = self.cam_conditioner(
+                hidden_states.to(orig_dtype),
+                c2ws_plucker_emb,
+                (
+                    cam_conditioner_scale_shift
+                    if cam_conditioner_scale_shift is not None
+                    else self._cam_conditioner_scale_shift(c2ws_plucker_emb)
+                ),
+            )
+            norm_hidden_states = self.self_attn_residual_norm.norm(hidden_states).to(
+                orig_dtype
+            )
 
-        attn_output = self._cross_attn_with_cache(
-            norm_hidden_states, encoder_hidden_states, crossattn_cache
-        )
-        norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
-            hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
-        )
-        ff_output = self.ffn(norm_hidden_states.to(orig_dtype))
-        hidden_states = self.mlp_residual(
-            ff_output, c_gate_msa, hidden_states.to(orig_dtype)
-        )
+        with _lingbot_profile_section("block.cross_attn"):
+            attn_output = self._cross_attn_with_cache(
+                norm_hidden_states, encoder_hidden_states, crossattn_cache
+            )
+            norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
+                hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
+            )
+        with _lingbot_profile_section("block.ffn"):
+            ff_output = self.ffn(norm_hidden_states.to(orig_dtype))
+            hidden_states = self.mlp_residual(
+                ff_output, c_gate_msa, hidden_states.to(orig_dtype)
+            )
         return hidden_states.to(orig_dtype)
 
 
@@ -1553,6 +1620,7 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             )
 
         if skip_final_projection:
+            _lingbot_profile_flush("context")
             return hidden_states
 
         temb = temb.unflatten(dim=0, sizes=timestep.shape).unsqueeze(2)
@@ -1576,7 +1644,9 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             -1,
         )
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
-        return hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+        output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
+        _lingbot_profile_flush("denoise")
+        return output
 
 
 EntryClass = [
