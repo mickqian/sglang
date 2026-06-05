@@ -193,6 +193,62 @@ class LingBotWorldCausalSelfAttention(CausalWanSelfAttention):
             ),
         )
 
+    def update_kv_cache_only(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        freqs_cis: tuple[torch.Tensor, ...],
+        kv_cache: CausalSelfAttentionKVCache,
+        current_start: int = 0,
+    ) -> torch.Tensor:
+        cos, sin = freqs_cis[:2]
+        cos_sin_cache = freqs_cis[2] if len(freqs_cis) > 2 else None
+        if _is_cuda and k.dim() == 4:
+            if cos_sin_cache is None:
+                cos_sin_cache = torch.cat(
+                    [
+                        cos.to(dtype=torch.float32).contiguous(),
+                        sin.to(dtype=torch.float32).contiguous(),
+                    ],
+                    dim=-1,
+                )
+            rope_query = torch.empty_like(k)
+            _, roped_key = apply_flashinfer_rope_qk_inplace(
+                rope_query, k, cos_sin_cache, is_neox=False
+            )
+            roped_key = roped_key.type_as(v)
+        else:
+            roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
+
+        forward_batch = get_forward_context().forward_batch
+        sequence_shard_enabled = (
+            forward_batch is not None
+            and getattr(forward_batch, "enable_sequence_shard", False)
+            and get_ulysses_parallel_world_size() > 1
+        )
+        if sequence_shard_enabled:
+            seq_splits = getattr(forward_batch, "sequence_shard_splits", None)
+            if seq_splits is None:
+                raise ValueError(
+                    "LingBot causal sequence sharding requires forward_batch.sequence_shard_splits."
+                )
+            seq_splits = list(seq_splits)
+            kv = torch.cat([roped_key, v], dim=-1)
+            kv = (
+                _usp_input_all_to_all(kv, head_dim=2)
+                if _sequence_splits_are_uniform(seq_splits)
+                else _usp_input_all_to_all_varlen(kv, seq_splits, head_dim=2)
+            )
+            roped_key, v = kv.chunk(2, dim=-1)
+
+        kv_cache.update_and_get_attention_kv(
+            key=roped_key,
+            value=v,
+            current_chunk_start=current_start,
+            debug_name="LingBot KV cache",
+        )
+        return v
+
     def forward(
         self,
         q: torch.Tensor,
@@ -1028,6 +1084,20 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
             .to(orig_dtype)
         )
         query, key, value = self._project_qkv(norm_hidden_states)
+        if update_cache_only:
+            assert kv_cache is not None
+            key = self.norm_k(key)
+            key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
+            value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
+            self.attn1.update_kv_cache_only(
+                key,
+                value,
+                freqs_cis,
+                kv_cache,
+                current_start,
+            )
+            return hidden_states
+
         query = self.norm_q(query)
         key = self.norm_k(key)
         query = query.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
@@ -1045,8 +1115,6 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
             cache_start,
             update_cache_only=update_cache_only,
         )
-        if update_cache_only:
-            return hidden_states
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
