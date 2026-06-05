@@ -67,6 +67,11 @@ class CausalSelfAttentionKVCache:
             self.global_end_index_int = global_end_index
         if self.local_end_index_int is not None:
             self.local_end_index_int = local_end_index
+        if (
+            self.global_end_index_int is not None
+            and self.local_end_index_int is not None
+        ):
+            return
         self.global_end_index.fill_(global_end_index)
         self.local_end_index.fill_(local_end_index)
 
