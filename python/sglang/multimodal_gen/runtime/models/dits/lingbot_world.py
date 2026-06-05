@@ -850,6 +850,12 @@ class LingBotWorldTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixi
 class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.norm1 = LayerNormScaleShift(
+            self.hidden_dim,
+            eps=self.norm1.eps,
+            elementwise_affine=False,
+            dtype=torch.float32,
+        )
         self.attn1 = LingBotWorldCausalSelfAttention(
             dim=self.hidden_dim,
             num_heads=self.num_attention_heads,
@@ -1009,24 +1015,12 @@ class CausalLingBotWorldTransformerBlock(CausalWanTransformerBlock):
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
-        num_frames = temb.shape[1]
-        seqlen_per_frame = hidden_states.shape[1] // num_frames
         orig_dtype = hidden_states.dtype
         e = self.scale_shift_table + temb.float()
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = e.chunk(
             6, dim=2
         )
-        norm_hidden_states = (
-            (
-                self.norm1(hidden_states.float()).unflatten(
-                    dim=1, sizes=(num_frames, seqlen_per_frame)
-                )
-                * (1 + scale_msa)
-                + shift_msa
-            )
-            .flatten(1, 2)
-            .to(orig_dtype)
-        )
+        norm_hidden_states = self.norm1(hidden_states, shift_msa, scale_msa)
         query, key, value = self._project_qkv(norm_hidden_states)
         query = self.norm_q(query)
         key = self.norm_k(key)
