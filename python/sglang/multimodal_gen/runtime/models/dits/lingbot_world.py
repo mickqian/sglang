@@ -113,6 +113,52 @@ def _sequence_shard_tensor(
     return x[:, start:end, ...].contiguous()
 
 
+def _patchify_sequence_slice(
+    x: torch.Tensor,
+    patch_size: tuple[int, int, int],
+    seq_start: int,
+    seq_len: int,
+) -> torch.Tensor | None:
+    if x.dim() != 5:
+        return None
+
+    bsz, channels, frames, height, width = x.shape
+    pt, ph, pw = patch_size
+    if (frames % pt) != 0 or (height % ph) != 0 or (width % pw) != 0:
+        return None
+
+    x = x.reshape(
+        bsz,
+        channels,
+        frames // pt,
+        pt,
+        height // ph,
+        ph,
+        width // pw,
+        pw,
+    )
+    x = x.permute(0, 2, 4, 6, 1, 3, 5, 7).contiguous()
+    x = x.reshape(bsz, -1, channels * pt * ph * pw)
+    return x[:, seq_start : seq_start + seq_len, :].contiguous()
+
+
+def _patch_embedding_sequence_slice(
+    patch_embedding: PatchEmbed,
+    x: torch.Tensor,
+    seq_start: int,
+    seq_len: int,
+) -> torch.Tensor | None:
+    if not isinstance(patch_embedding.norm, nn.Identity):
+        return None
+    x = _patchify_sequence_slice(x, patch_embedding.patch_size, seq_start, seq_len)
+    if x is None:
+        return None
+    weight = patch_embedding.proj.weight.reshape(
+        patch_embedding.proj.weight.shape[0], -1
+    )
+    return F.linear(x, weight, patch_embedding.proj.bias)
+
+
 def _sequence_all_gather_varlen(
     x: torch.Tensor,
     seq_splits: list[int],
@@ -1171,6 +1217,8 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         hidden_states: torch.Tensor,
         c2ws_plucker_emb: torch.Tensor | None,
         forward_batch=None,
+        seq_start: int | None = None,
+        seq_len: int | None = None,
     ) -> torch.Tensor | None:
         if c2ws_plucker_emb is None:
             return None
@@ -1185,13 +1233,33 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
             hidden_states.dtype,
             hidden_states.device.type,
             hidden_states.device.index,
+            seq_start,
+            seq_len,
         )
         if cache is not None and cache_key in cache:
             return cache[cache_key]
 
-        c2ws_plucker_emb = self.patch_embedding_wancamctrl(
-            c2ws_plucker_emb.to(device=hidden_states.device, dtype=hidden_states.dtype)
+        c2ws_plucker_emb = c2ws_plucker_emb.to(
+            device=hidden_states.device, dtype=hidden_states.dtype
         )
+        if seq_start is not None and seq_len is not None:
+            local_c2ws_plucker_emb = _patchify_sequence_slice(
+                c2ws_plucker_emb,
+                self.patch_embedding_wancamctrl.patch_size,
+                seq_start,
+                seq_len,
+            )
+            if local_c2ws_plucker_emb is not None:
+                c2ws_plucker_emb = self.patch_embedding_wancamctrl.proj(
+                    local_c2ws_plucker_emb
+                )
+            else:
+                c2ws_plucker_emb = self.patch_embedding_wancamctrl(c2ws_plucker_emb)
+                c2ws_plucker_emb = c2ws_plucker_emb[
+                    :, seq_start : seq_start + seq_len, :
+                ].contiguous()
+        else:
+            c2ws_plucker_emb = self.patch_embedding_wancamctrl(c2ws_plucker_emb)
         c2ws_plucker_emb = c2ws_plucker_emb + self.c2ws_mlp(c2ws_plucker_emb)
         if cache is not None:
             cache.clear()
@@ -1465,12 +1533,19 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
+        seq_shard_splits = None
+        sp_rank = None
+        local_seq_len = None
+        seq_start = None
         if sequence_shard_enabled:
             seq_shard_splits = _compute_sequence_splits(
                 post_patch_num_frames * post_patch_height * post_patch_width,
                 self.sp_size,
             )
             forward_batch.sequence_shard_splits = tuple(seq_shard_splits)
+            sp_rank = get_sp_parallel_rank()
+            local_seq_len = seq_shard_splits[sp_rank]
+            seq_start = sum(seq_shard_splits[:sp_rank])
         if not sequence_shard_enabled:
             freqs_cis = self._prepare_cached_rope(
                 forward_batch=forward_batch,
@@ -1481,23 +1556,37 @@ class CausalLingBotWorldTransformer3DModel(CausalWanTransformer3DModel):
                 device=hidden_states.device,
             )
 
-        hidden_states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+        if sequence_shard_enabled:
+            assert local_seq_len is not None and seq_start is not None
+            assert seq_shard_splits is not None and sp_rank is not None
+            local_hidden_states = _patch_embedding_sequence_slice(
+                self.patch_embedding, hidden_states, seq_start, local_seq_len
+            )
+            if local_hidden_states is None:
+                hidden_states = (
+                    self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+                )
+                hidden_states = _sequence_shard_tensor(
+                    hidden_states, seq_shard_splits, sp_rank
+                )
+            else:
+                hidden_states = local_hidden_states
+        else:
+            hidden_states = (
+                self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
+            )
         c2ws_plucker_emb = self._prepare_c2ws_plucker_emb(
-            hidden_states, c2ws_plucker_emb, forward_batch
+            hidden_states,
+            c2ws_plucker_emb,
+            forward_batch,
+            seq_start=seq_start,
+            seq_len=local_seq_len,
         )
         if sequence_shard_enabled:
-            sp_rank = get_sp_parallel_rank()
-            seq_shard_splits = list(forward_batch.sequence_shard_splits)
-            local_seq_len = seq_shard_splits[sp_rank]
-            hidden_states = _sequence_shard_tensor(
-                hidden_states, seq_shard_splits, sp_rank
-            )
-            if c2ws_plucker_emb is not None:
-                c2ws_plucker_emb = _sequence_shard_tensor(
-                    c2ws_plucker_emb, seq_shard_splits, sp_rank
-                )
+            assert sp_rank is not None and local_seq_len is not None
+            assert seq_shard_splits is not None and seq_start is not None
             frame_stride = post_patch_height * post_patch_width
-            token_start = start_frame * frame_stride + sum(seq_shard_splits[:sp_rank])
+            token_start = start_frame * frame_stride + seq_start
             freqs_cis = self._prepare_cached_rope_for_sequence_shard(
                 forward_batch=forward_batch,
                 local_seq_len=local_seq_len,
