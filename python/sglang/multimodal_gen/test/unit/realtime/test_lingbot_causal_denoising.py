@@ -222,7 +222,7 @@ def test_lingbot_i2v_condition_patch_embedding_matches_full_projection():
         hidden_states[:, 16:]
     )
     actual = model._patch_i2v_hidden_states(
-        hidden_states, condition_patch_embedding
+        hidden_states[:, :16], condition_patch_embedding
     )
 
     assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)

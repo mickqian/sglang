@@ -292,12 +292,9 @@ class LingBotWorldCausalDMDDenoisingStage(CausalDMDDenoisingStage):
 
         # --- Denoising loop (single chunk) ---
         current_latents = latents
-        prepare_model_input = self._build_i2v_model_input_writer(
-            latents=current_latents,
-            condition=condition,
-            target_dtype=ctx.target_dtype,
-            device=ctx.device,
-        )
+
+        def prepare_model_input(current_latents: torch.Tensor) -> torch.Tensor:
+            return current_latents
 
         current_latents = self._denoise_realtime_causal_chunk(
             batch,
