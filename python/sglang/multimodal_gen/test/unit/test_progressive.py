@@ -38,6 +38,7 @@ from sglang.multimodal_gen.runtime.pipelines.qwen_image_progressive import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.denoising import (
     ProgressiveDenoisingStage,
+    ProgressiveDenoisingStageRouter,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.scheduler_utils import (
     compute_stage_transitions,
@@ -54,6 +55,79 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.
     apply_upsample,
     dct_upsample_2d,
 )
+
+
+class _DummyDenoisingStage:
+    parallelism_type = None
+
+    def __init__(self, route_name: str):
+        self.route_name = route_name
+
+    def set_component_residency_manager(self, manager):
+        self.manager = manager
+
+    def set_registered_stage_name(self, stage_name: str):
+        self.registered_stage_name = stage_name
+
+    def set_profile_stage_name(self, stage_name: str):
+        self.profile_stage_name = stage_name
+
+    def component_uses(self, server_args, stage_name=None):
+        return []
+
+    def forward(self, batch, server_args):
+        batch.route_name = self.route_name
+        return batch
+
+
+class TestProgressiveDenoisingStageRouter(unittest.TestCase):
+    def test_fullres_does_not_construct_progressive_stage(self):
+        calls = []
+
+        def create_progressive_stage():
+            calls.append(1)
+            return _DummyDenoisingStage("progressive")
+
+        router = ProgressiveDenoisingStageRouter(
+            standard_stage=_DummyDenoisingStage("standard"),
+            progressive_stage_factory=create_progressive_stage,
+        )
+        batch = SimpleNamespace(progressive_mode="fullres")
+
+        out = router.forward(batch, SimpleNamespace())
+
+        self.assertEqual(out.route_name, "standard")
+        self.assertEqual(calls, [])
+
+    def test_progressive_stage_is_constructed_once(self):
+        calls = []
+
+        def create_progressive_stage():
+            calls.append(1)
+            return _DummyDenoisingStage("progressive")
+
+        router = ProgressiveDenoisingStageRouter(
+            standard_stage=_DummyDenoisingStage("standard"),
+            progressive_stage_factory=create_progressive_stage,
+        )
+        batch = SimpleNamespace(progressive_mode="dct_rewind")
+
+        router.forward(batch, SimpleNamespace())
+        router.forward(batch, SimpleNamespace())
+
+        self.assertEqual(batch.route_name, "progressive")
+        self.assertEqual(len(calls), 1)
+
+    def test_invalid_mode_raises(self):
+        router = ProgressiveDenoisingStageRouter(
+            standard_stage=_DummyDenoisingStage("standard"),
+            progressive_stage_factory=lambda: _DummyDenoisingStage("progressive"),
+        )
+        batch = SimpleNamespace(progressive_mode="wavelet")
+
+        with self.assertRaises(ValueError):
+            router.forward(batch, SimpleNamespace())
+
 
 # ---------------------------------------------------------------------------
 # DCT-II / IDCT-II correctness
@@ -1610,21 +1684,19 @@ class TestQwenImageProgressiveStage(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# QwenImagePipeline now carries QwenImageProgressiveDenoisingStage
+# QwenImagePipeline uses the shared progressive denoising helper
 # ---------------------------------------------------------------------------
 
 
 class TestQwenImagePipelineUsesProgressiveStage(unittest.TestCase):
-    """QwenImagePipeline is modified to always use QwenImageProgressiveDenoisingStage
-    (following the same pattern as FluxPipeline and ZImagePipeline).
-    """
+    """QwenImagePipeline should not carry a model-local router helper."""
 
     def test_pipeline_name(self):
         self.assertEqual(QwenImagePipeline.pipeline_name, "QwenImagePipeline")
 
-    def test_has_add_qwen_denoising_stage_method(self):
-        """QwenImagePipeline must expose _add_qwen_denoising_stage."""
-        self.assertTrue(hasattr(QwenImagePipeline, "_add_qwen_denoising_stage"))
+    def test_uses_shared_progressive_helper(self):
+        self.assertTrue(hasattr(QwenImagePipeline, "add_progressive_denoising_stage"))
+        self.assertFalse(hasattr(QwenImagePipeline, "_add_qwen_denoising_stage"))
 
     def test_required_config_modules(self):
         self.assertIn("transformer", QwenImagePipeline._required_config_modules)
