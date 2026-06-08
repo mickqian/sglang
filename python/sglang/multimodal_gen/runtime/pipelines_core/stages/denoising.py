@@ -43,6 +43,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import (
     FluxPipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.zimage import ZImagePipelineConfig
+from sglang.multimodal_gen.runtime.acceleration_policy import (
+    torch_compile_autotune_config,
+)
 from sglang.multimodal_gen.runtime.breakable_cuda_graph import (
     prompt_padding as bcg_utils,
 )
@@ -79,6 +82,9 @@ from sglang.multimodal_gen.runtime.distributed.communication_op import (
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     world_group_is_initialized,
+)
+from sglang.multimodal_gen.runtime.compile_autotune import (
+    install_torch_compile_autotune,
 )
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.attention.STA_configuration import (
@@ -287,10 +293,6 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             self._maybe_offload_during_compile(transformer)
             self._maybe_torch_compile(transformer)
 
-        self.scheduler = scheduler
-        self.vae = vae
-        self.pipeline = weakref.ref(pipeline) if pipeline else None
-
         selected_attention_backend = self._infer_transformer_attention_backend()
         # precision-constraint: attention backend metadata allocation currently assumes fp16;
         # do not replace with user precision policy without auditing backend support.
@@ -434,8 +436,10 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
 
     def _maybe_torch_compile(self, module: object) -> None:
         """
-        Compile a module with torch.compile, and enable inductor overlap tweak if available.
-        No-op if torch compile is disabled or the object is not a nn.Module.
+        Install torch.compile acceleration for a transformer module.
+
+        CUDA uses a forward trampoline so warmup requests can compare eager
+        and compiled execution for the real shape before serving traffic.
         """
         if self.server_args.enable_breakable_cuda_graph:
             # BCG captures the eager kernel stream itself; compiling first
@@ -449,6 +453,18 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             logger.debug("Deferring torch.compile until cache-dit is enabled")
             return
         if self._torch_compile_registry.is_compiled(module):
+            return
+
+        module_id = id(module)
+        autotune_config = torch_compile_autotune_config(
+            self.server_args.acceleration_config
+        )
+        if autotune_config.policy in {"off", "force_eager"}:
+            self._torch_compile_registry.module_ids.add(module_id)
+            logger.info(
+                "Skipping transformer torch.compile because torch_compile_policy=%s",
+                autotune_config.policy,
+            )
             return
 
         if current_platform.is_npu():
@@ -477,10 +493,31 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             )
         else:
             # TODO(triple-mu): support customized fullgraph and dynamic in the future
-            self._torch_compile_registry.compile_once(
-                module,
-                compile_kwargs=compile_kwargs,
-            )
+            if current_platform.is_cuda():
+                module_name = self._component_name_for_stage_module(
+                    module, module.__class__.__name__
+                )
+                install_torch_compile_autotune(
+                    module,
+                    compile_kwargs,
+                    autotune_config,
+                    module_name,
+                )
+                self._torch_compile_registry.module_ids.add(module_id)
+                logger.info(
+                    "Installed torch.compile autotune for %s with policy=%s, warmup=%d, iters=%d, min_speedup=%.3f, live_miss=%s",
+                    module_name,
+                    autotune_config.policy,
+                    autotune_config.warmup,
+                    autotune_config.iters,
+                    autotune_config.min_speedup,
+                    autotune_config.live_miss,
+                )
+            else:
+                self._torch_compile_registry.compile_once(
+                    module,
+                    compile_kwargs=compile_kwargs,
+                )
 
     def _maybe_enable_cache_dit_and_torch_compile(
         self, num_inference_steps: int | tuple[int, int], batch: Req
@@ -1775,6 +1812,8 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
 
         # Unwrap any decorators (e.g. functools.wraps)
         target_func = inspect.unwrap(func)
+        if isinstance(target_func, functools.partial) and target_func.args:
+            target_func = getattr(target_func.args[0], "_original_forward", target_func)
         cache_target = (
             target_func.__func__ if inspect.ismethod(target_func) else target_func
         )
