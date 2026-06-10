@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from sglang.cli.utils import get_is_diffusion_model
-from sglang.cli.generate import _has_registered_pipeline_class
 from sglang.multimodal_gen.configs.models.fsdp import (
     is_module_list_entry,
     is_module_list_entry_in,
@@ -51,6 +50,9 @@ from sglang.multimodal_gen.registry import (
     _get_config_info,
     get_non_diffusers_pipeline_name,
     is_known_non_diffusers_multimodal_model,
+from sglang.multimodal_gen.runtime.entrypoints.cli.generate_routing import (
+    _has_registered_pipeline_class,
+)
 )
 from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     KERNEL_COMPILE_ITERS_ENV,
