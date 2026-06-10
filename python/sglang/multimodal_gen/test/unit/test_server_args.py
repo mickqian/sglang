@@ -50,9 +50,8 @@ from sglang.multimodal_gen.registry import (
     _get_config_info,
     get_non_diffusers_pipeline_name,
     is_known_non_diffusers_multimodal_model,
-from sglang.multimodal_gen.runtime.entrypoints.cli.generate_routing import (
-    _has_registered_pipeline_class,
-)
+from sglang.multimodal_gen.runtime.entrypoints.cli.routing import (
+    has_registered_pipeline_class,
 )
 from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     KERNEL_COMPILE_ITERS_ENV,
@@ -247,7 +246,7 @@ class TestServerArgsPathExpansion(unittest.TestCase):
 
     def test_generate_cli_accepts_registered_pipeline_class(self):
         self.assertTrue(
-            _has_registered_pipeline_class(
+            has_registered_pipeline_class(
                 [
                     "--model-path",
                     "/data/LTX-2.3",
@@ -257,18 +256,29 @@ class TestServerArgsPathExpansion(unittest.TestCase):
             )
         )
         self.assertTrue(
-            _has_registered_pipeline_class(
+            has_registered_pipeline_class(
                 ["--model-path", "/data/LTX-2.3", "--pipeline-class-name=LTX2Pipeline"]
             )
         )
         self.assertFalse(
-            _has_registered_pipeline_class(
+            has_registered_pipeline_class(
                 [
                     "--model-path",
                     "/data/LTX-2.3",
                     "--pipeline-class-name",
                     "MissingPipeline",
                 ]
+            )
+        )
+        self.assertTrue(
+            get_is_diffusion_model(
+                "/data/LTX-2.3",
+                [
+                    "--model-path",
+                    "/data/LTX-2.3",
+                    "--pipeline-class-name",
+                    "LTX2Pipeline",
+                ],
             )
         )
 
