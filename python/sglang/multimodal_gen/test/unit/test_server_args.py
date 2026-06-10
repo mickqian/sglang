@@ -52,7 +52,7 @@ from sglang.multimodal_gen.registry import (
     get_non_diffusers_pipeline_name,
     is_known_non_diffusers_multimodal_model,
 )
-from sglang.multimodal_gen.runtime.acceleration_policy import (
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     KERNEL_COMPILE_ITERS_ENV,
     KERNEL_COMPILE_LIVE_MISS_ENV,
     KERNEL_COMPILE_MIN_SPEEDUP_ENV,
