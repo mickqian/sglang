@@ -55,7 +55,9 @@ def _is_gated_diffusion_repo(repo_id: str) -> bool:
         return False
 
 
-def get_is_diffusion_model(model_path: str) -> bool:
+def get_is_diffusion_model(
+    model_path: str, extra_argv: list[str] | None = None
+) -> bool:
     """Detect whether model_path points to a diffusion model.
 
     For registered models, consults the diffusion registry first.
@@ -74,6 +76,17 @@ def get_is_diffusion_model(model_path: str) -> bool:
     # local directories without a top-level model_index.json
     if _is_diffusion_model_from_registry(model_path):
         return True
+
+    if extra_argv is not None:
+        try:
+            from sglang.multimodal_gen.runtime.entrypoints.cli.routing import (
+                has_registered_pipeline_class,
+            )
+        except ImportError:
+            pass
+        else:
+            if has_registered_pipeline_class(extra_argv):
+                return True
 
     if os.path.isdir(model_path):
         return _is_diffusers_model_dir(model_path)
