@@ -71,6 +71,56 @@ if _use_aiter:
     from aiter.ops.rope import rope_cached_2c_fwd_inplace
 
 
+WanRotaryInputs = tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+
+
+def _pack_wan_rotary_inputs(
+    freqs_cos: torch.Tensor | None, freqs_sin: torch.Tensor | None
+) -> WanRotaryInputs | None:
+    if freqs_cos is None:
+        return None
+
+    cos = freqs_cos.float()
+    sin = freqs_sin.float()
+    cos_sin_cache = None
+    if _is_cuda:
+        cos_sin_cache = torch.cat((cos.contiguous(), sin.contiguous()), dim=-1)
+    return cos, sin, cos_sin_cache
+
+
+def _apply_wan_rotary_emb(
+    query: torch.Tensor, key: torch.Tensor, freqs_cis: WanRotaryInputs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos, sin, cos_sin_cache = freqs_cis
+    if cos_sin_cache is not None and query.shape == key.shape:
+        return apply_flashinfer_rope_qk_inplace(
+            query, key, cos_sin_cache, is_neox=False
+        )
+
+    if _use_aiter:
+        query_shape = query.shape
+        key_shape = key.shape
+        num_tokens = query.shape[:-2].numel()
+        q_sbhd = query.view(num_tokens, 1, query_shape[-2], query_shape[-1])
+        k_sbhd = key.view(num_tokens, 1, key_shape[-2], key_shape[-1])
+        cos_sbhd = cos.contiguous().view(num_tokens, 1, 1, -1)
+        sin_sbhd = sin.contiguous().view(num_tokens, 1, 1, -1)
+        rope_cached_2c_fwd_inplace(
+            q_sbhd,
+            k_sbhd,
+            cos_sbhd,
+            sin_sbhd,
+            1,  # GPTJ rotate style
+            True,  # reuse_freqs_front_part
+            False,  # nope_first
+        )
+        return q_sbhd.view(query_shape), k_sbhd.view(key_shape)
+
+    return _apply_rotary_emb(
+        query, cos, sin, is_neox_style=False
+    ), _apply_rotary_emb(key, cos, sin, is_neox_style=False)
+
+
 class WanImageEmbedding(torch.nn.Module):
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
@@ -484,13 +534,14 @@ class WanTransformerBlock(nn.Module):
         self.mlp_residual = MulAdd()
 
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.register_buffer("null_shift_scale", torch.zeros(1), persistent=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: WanRotaryInputs,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -542,52 +593,22 @@ class WanTransformerBlock(nn.Module):
         key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
         value = value.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
 
-        # Apply rotary embeddings
-        cos, sin = freqs_cis
-        if _is_cuda and query.shape == key.shape:
-            cos_sin_cache = torch.cat(
-                [
-                    cos.to(dtype=torch.float32).contiguous(),
-                    sin.to(dtype=torch.float32).contiguous(),
-                ],
-                dim=-1,
-            )
-            query, key = apply_flashinfer_rope_qk_inplace(
-                query, key, cos_sin_cache, is_neox=False
-            )
-        elif _use_aiter:
-            query_shape = query.shape
-            key_shape = key.shape
-            num_tokens = query.shape[:-2].numel()
-            q_sbhd = query.view(num_tokens, 1, query_shape[-2], query_shape[-1])
-            k_sbhd = key.view(num_tokens, 1, key_shape[-2], key_shape[-1])
-            cos_sbhd = cos.contiguous().view(num_tokens, 1, 1, -1)
-            sin_sbhd = sin.contiguous().view(num_tokens, 1, 1, -1)
-            rope_cached_2c_fwd_inplace(
-                q_sbhd,
-                k_sbhd,
-                cos_sbhd,
-                sin_sbhd,
-                1,  # GPTJ rotate style
-                True,  # reuse_freqs_front_part
-                False,  # nope_first
-            )
-            query = q_sbhd.view(query_shape)
-            key = k_sbhd.view(key_shape)
-        else:
-            query, key = _apply_rotary_emb(
-                query, cos, sin, is_neox_style=False
-            ), _apply_rotary_emb(key, cos, sin, is_neox_style=False)
+        query, key = _apply_wan_rotary_emb(query, key, freqs_cis)
         attn_output = self.attn1(query, key, value)
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift = null_scale = torch.zeros(
-            (1,), device=hidden_states.device, dtype=hidden_states.dtype
-        )
+        null_shift_scale = self.null_shift_scale
+        if (
+            null_shift_scale.device != hidden_states.device
+            or null_shift_scale.dtype != hidden_states.dtype
+        ):
+            null_shift_scale = null_shift_scale.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift, null_scale
+            hidden_states, attn_output, gate_msa, null_shift_scale, null_shift_scale
         )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype
@@ -751,13 +772,14 @@ class WanTransformerBlock_VSA(nn.Module):
         self.mlp_residual = MulAdd()
 
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.register_buffer("null_shift_scale", torch.zeros(1), persistent=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        freqs_cis: WanRotaryInputs,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -789,51 +811,23 @@ class WanTransformerBlock_VSA(nn.Module):
             2, (self.num_attention_heads, -1)
         )
 
-        # Apply rotary embeddings
-        cos, sin = freqs_cis
-        if _is_cuda and query.shape == key.shape:
-            cos_sin_cache = torch.cat(
-                [
-                    cos.to(dtype=torch.float32).contiguous(),
-                    sin.to(dtype=torch.float32).contiguous(),
-                ],
-                dim=-1,
-            )
-            query, key = apply_flashinfer_rope_qk_inplace(
-                query, key, cos_sin_cache, is_neox=False
-            )
-        elif _use_aiter:
-            query_shape = query.shape
-            key_shape = key.shape
-            num_tokens = query.shape[:-2].numel()
-            q_sbhd = query.view(num_tokens, 1, query_shape[-2], query_shape[-1])
-            k_sbhd = key.view(num_tokens, 1, key_shape[-2], key_shape[-1])
-            cos_sbhd = cos.contiguous().view(num_tokens, 1, 1, -1)
-            sin_sbhd = sin.contiguous().view(num_tokens, 1, 1, -1)
-            rope_cached_2c_fwd_inplace(
-                q_sbhd,
-                k_sbhd,
-                cos_sbhd,
-                sin_sbhd,
-                1,  # GPTJ rotate style
-                True,  # reuse_freqs_front_part
-                False,  # nope_first
-            )
-            query = q_sbhd.view(query_shape)
-            key = k_sbhd.view(key_shape)
-        else:
-            query, key = _apply_rotary_emb(
-                query, cos, sin, is_neox_style=False
-            ), _apply_rotary_emb(key, cos, sin, is_neox_style=False)
+        query, key = _apply_wan_rotary_emb(query, key, freqs_cis)
 
         attn_output = self.attn1(query, key, value, gate_compress=gate_compress)
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift = null_scale = torch.zeros((1,), device=hidden_states.device)
+        null_shift_scale = self.null_shift_scale
+        if (
+            null_shift_scale.device != hidden_states.device
+            or null_shift_scale.dtype != hidden_states.dtype
+        ):
+            null_shift_scale = null_shift_scale.to(
+                device=hidden_states.device, dtype=hidden_states.dtype
+            )
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift, null_scale
+            hidden_states, attn_output, gate_msa, null_shift_scale, null_shift_scale
         )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype
@@ -1045,11 +1039,7 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
             )
             assert freqs_cos.dtype == torch.float32
             assert freqs_cos.device == hidden_states.device
-            freqs_cis = (
-                (freqs_cos.float(), freqs_sin.float())
-                if freqs_cos is not None
-                else None
-            )
+            freqs_cis = _pack_wan_rotary_inputs(freqs_cos, freqs_sin)
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
@@ -1081,7 +1071,7 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
                 post_patch_width,
                 hidden_states.device,
             )
-            freqs_cis = (freqs_cos.float(), freqs_sin.float())
+            freqs_cis = _pack_wan_rotary_inputs(freqs_cos, freqs_sin)
 
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.dim() == 2:
