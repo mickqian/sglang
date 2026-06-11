@@ -129,7 +129,7 @@ class DecodingStage(PipelineStage):
         return (
             model_parallel_is_initialized()
             and get_decode_parallel_world_size() > 1
-            and self.vae.use_parallel_decode
+            and getattr(self.vae, "use_parallel_decode", False)
         )
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:

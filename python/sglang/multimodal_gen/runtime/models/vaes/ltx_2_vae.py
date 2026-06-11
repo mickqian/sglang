@@ -1,3 +1,4 @@
+import math
 from functools import lru_cache
 from typing import Optional, Tuple, Union
 
@@ -12,7 +13,16 @@ from diffusers.models.embeddings import PixArtAlphaCombinedTimestepSizeEmbedding
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 
 from sglang.multimodal_gen.configs.models.vaes.ltx_video import LTXVideoVAEConfig
+from sglang.multimodal_gen.runtime.distributed import (
+    get_decode_parallel_rank,
+    get_decode_parallel_world_size,
+)
 from sglang.multimodal_gen.runtime.models.vaes.common import ParallelTiledVAE
+from sglang.multimodal_gen.runtime.models.vaes.parallel.decode_parallel import (
+    gather_and_trim_height,
+    halo_exchange,
+    tensor_chunk,
+)
 
 
 @lru_cache(maxsize=128)
@@ -216,6 +226,110 @@ class LTX2VideoCausalConv3d(nn.Module):
 
         hidden_states = self.conv(hidden_states)
         return hidden_states
+
+
+class LTX2VideoDistCausalConv3d(LTX2VideoCausalConv3d):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[int, Tuple[int, int, int]] = 3,
+        stride: Union[int, Tuple[int, int, int]] = 1,
+        dilation: Union[int, Tuple[int, int, int]] = 1,
+        groups: int = 1,
+        spatial_padding_mode: str = "zeros",
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            dilation=dilation,
+            groups=groups,
+            spatial_padding_mode=spatial_padding_mode,
+        )
+        height_pad = self.kernel_size[1] // 2
+        width_pad = self.kernel_size[2] // 2
+        self.height_halo_size = height_pad
+        self.height_pad_top = height_pad
+        self.height_pad_bottom = height_pad
+        self.boundary_mode = spatial_padding_mode
+        self.conv.padding = (self.conv.padding[0], 0, width_pad)
+        self._halo_recv_top_buf: Optional[torch.Tensor] = None
+        self._halo_recv_bottom_buf: Optional[torch.Tensor] = None
+        self.rank = get_decode_parallel_rank()
+        self.world_size = get_decode_parallel_world_size()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        causal: bool = True,
+        conv_cache: Optional[dict] = None,
+        cache_key: Optional[str] = None,
+    ) -> torch.Tensor:
+        if self.height_halo_size == 0 or self.world_size <= 1:
+            return super().forward(hidden_states, causal, conv_cache, cache_key)
+
+        local_height = hidden_states.shape[-2]
+        hidden_states, self._halo_recv_top_buf, self._halo_recv_bottom_buf = (
+            halo_exchange(
+                hidden_states,
+                height_halo_size=self.height_halo_size,
+                recv_top_buf=self._halo_recv_top_buf,
+                recv_bottom_buf=self._halo_recv_bottom_buf,
+                boundary_mode=self.boundary_mode,
+            )
+        )
+        out = super().forward(hidden_states, causal, conv_cache, cache_key)
+
+        pad_top = self.height_pad_top
+        stride = self.conv.stride[-2]
+        global_start = self.rank * local_height
+        global_height = local_height * self.world_size
+        halo = self.height_halo_size
+        pad_bottom = self.height_pad_bottom
+        kernel = self.kernel_size[-2]
+        min_i = math.ceil(((-pad_top) - (global_start - halo)) / stride)
+        max_i = math.floor(
+            ((global_height - 1 + pad_bottom) - (kernel - 1) - (global_start - halo))
+            / stride
+        )
+        start = max(min_i, 0)
+        end = min(max_i + 1, out.shape[-2])
+        if start != 0 or end != out.shape[-2]:
+            out = out[..., start:end, :]
+        return out
+
+
+def _to_ltx2_video_dist_causal_conv3d(
+    module: LTX2VideoCausalConv3d,
+) -> LTX2VideoDistCausalConv3d:
+    dist_module = LTX2VideoDistCausalConv3d(
+        in_channels=module.in_channels,
+        out_channels=module.out_channels,
+        kernel_size=module.kernel_size,
+        stride=module.conv.stride,
+        dilation=module.conv.dilation,
+        groups=module.conv.groups,
+        spatial_padding_mode=module.conv.padding_mode,
+    )
+    dist_module.conv = module.conv
+    dist_module.conv.padding = (
+        dist_module.conv.padding[0],
+        0,
+        dist_module.conv.padding[2],
+    )
+    return dist_module
+
+
+def _replace_ltx2_video_causal_convs(module: nn.Module) -> None:
+    for name, child in list(module.named_children()):
+        if isinstance(child, LTX2VideoDistCausalConv3d):
+            continue
+        if isinstance(child, LTX2VideoCausalConv3d):
+            setattr(module, name, _to_ltx2_video_dist_causal_conv3d(child))
+        else:
+            _replace_ltx2_video_causal_convs(child)
 
 
 # Like LTXVideoResnetBlock3d, but uses new causal Conv3d, normal Conv3d for the conv_shortcut, and the spatial padding
@@ -1615,6 +1729,7 @@ class AutoencoderKLLTX2Video(ParallelTiledVAE):
         )
         decoder_causal = config.arch_config.decoder_causal
         decoder_spatial_padding_mode = config.arch_config.decoder_spatial_padding_mode
+        self.use_parallel_decode = config.use_parallel_decode
 
         self.encoder = LTX2VideoEncoder3d(
             in_channels,
@@ -1679,6 +1794,9 @@ class AutoencoderKLLTX2Video(ParallelTiledVAE):
                 spatial_padding_mode=decoder_spatial_padding_mode,
             )
 
+        self._parallel_decode_convs_replaced = False
+        self._ensure_parallel_decode_convs()
+
         latents_mean = torch.zeros((latent_channels,), requires_grad=False)
         latents_std = torch.ones((latent_channels,), requires_grad=False)
         self.register_buffer("latents_mean", latents_mean, persistent=True)
@@ -1713,6 +1831,19 @@ class AutoencoderKLLTX2Video(ParallelTiledVAE):
         self.tile_sample_stride_height = 448
         self.tile_sample_stride_width = 448
         self.tile_sample_stride_num_frames = 8
+
+    def _can_use_parallel_decode(self) -> bool:
+        return (
+            self.use_parallel_decode
+            and torch.distributed.is_initialized()
+            and get_decode_parallel_world_size() > 1
+        )
+
+    def _ensure_parallel_decode_convs(self) -> None:
+        if self._parallel_decode_convs_replaced or not self._can_use_parallel_decode():
+            return
+        _replace_ltx2_video_causal_convs(self.decoder)
+        self._parallel_decode_convs_replaced = True
 
     def enable_tiling(
         self,
@@ -1829,7 +1960,19 @@ class AutoencoderKLLTX2Video(ParallelTiledVAE):
         ):
             return self.tiled_decode(z, temb, causal=causal, return_dict=return_dict)
 
-        dec = self.decoder(z, temb, causal=causal)
+        if self._can_use_parallel_decode():
+            self._ensure_parallel_decode_convs()
+            expected_height = z.shape[-2] * self.spatial_compression_ratio
+            z = tensor_chunk(
+                z,
+                dim=-2,
+                world_size=get_decode_parallel_world_size(),
+                rank=get_decode_parallel_rank(),
+            )
+            dec = self.decoder(z, temb, causal=causal)
+            dec = gather_and_trim_height(dec, expected_height)
+        else:
+            dec = self.decoder(z, temb, causal=causal)
 
         if not return_dict:
             return (dec,)
