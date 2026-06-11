@@ -63,6 +63,7 @@ if not _is_cpu:
 
 # Copied and adapted from sglang
 @CustomOp.register("rms_norm")
+@CustomOp.kernel_compile_autotune("norm")
 class RMSNorm(CustomOp):
     """Root mean square normalization.
 
@@ -333,6 +334,7 @@ class RMSNormNoWeight(CustomOp):
 
 # Copied and adapted from sglang
 @CustomOp.register("layer_norm")
+@CustomOp.kernel_compile_autotune("norm")
 class LayerNorm(CustomOp):
     def __init__(
         self,
@@ -743,10 +745,12 @@ class _ScaleResidualNormScaleShift(CustomOp):
         return modulated, residual_output
 
 
+@CustomOp.kernel_compile_autotune("scale_shift")
 class ScaleResidualLayerNormScaleShift(_ScaleResidualNormScaleShift):
     norm_type = "layer"
 
 
+@CustomOp.kernel_compile_autotune("scale_shift")
 class ScaleResidualRMSNormScaleShift(_ScaleResidualNormScaleShift):
     norm_type = "rms"
 
@@ -866,11 +870,90 @@ class _NormScaleShift(CustomOp):
         return (normalized * (1 + scale) + shift).to(x.dtype)
 
 
+@CustomOp.kernel_compile_autotune("scale_shift")
 class LayerNormScaleShift(_NormScaleShift):
     norm_type = "layer"
 
 
+@CustomOp.kernel_compile_autotune("scale_shift")
 class RMSNormScaleShift(_NormScaleShift):
+    norm_type = "rms"
+
+
+################################################################################
+# NormTanhMulAdd
+# y = norm(x) * tanh(scale) + shift (where norm is layernorm or rmsnorm)
+# See details in norm_tanh_mul_add_norm_scale.py
+################################################################################
+class _NormTanhMulAdd(CustomOp):
+    norm_type: str
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        affine: bool = False,
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+        self.eps = eps
+        if self.norm_type == "rms":
+            self.norm = RMSNorm(hidden_size, eps=eps, dtype=dtype)
+        elif self.norm_type == "layer":
+            self.norm = FP32LayerNorm(
+                hidden_size, elementwise_affine=affine, eps=eps, dtype=dtype
+            )
+        else:
+            raise NotImplementedError(f"Norm type {self.norm_type} not implemented")
+
+    def forward_cuda(
+        self, x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor
+    ) -> torch.Tensor:
+        if x.shape[-1] % 256 != 0 and x.shape[-1] <= 8192:
+            import warnings
+
+            warnings.warn(
+                "FusedNormScaleShift cuda not available, using native fallback",
+                stacklevel=2,
+            )
+            return self.forward_native(x, scale, shift)
+
+        from sglang.jit_kernel.diffusion.cutedsl.norm_tanh_mul_add_norm_scale import (
+            fused_norm_tanh_mul_add,
+        )
+
+        x, scale, shift = x.contiguous(), scale.contiguous(), shift.contiguous()
+        weight = _ensure_contiguous(getattr(self.norm, "weight", None))
+        bias = _ensure_contiguous(getattr(self.norm, "bias", None))
+        return fused_norm_tanh_mul_add(
+            x,
+            weight,
+            bias,
+            scale,
+            shift,
+            self.norm_type,
+            self.eps,
+        )
+
+    def forward_hip(self, *args, **kwargs):
+        # Fallback to native because ROCm does not support CuTeDSL.
+        return self.forward_native(*args, **kwargs)
+
+    @torch.compile(disable=current_platform.is_npu())
+    def forward_native(
+        self, x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor
+    ) -> torch.Tensor:
+        y = self.norm(x) * torch.tanh(scale) + shift
+        return y.to(x.dtype)
+
+
+@CustomOp.kernel_compile_autotune("scale_shift")
+class LayerNormTanhMulAdd(_NormTanhMulAdd):
+    norm_type = "layer"
+
+
+@CustomOp.kernel_compile_autotune("scale_shift")
+class RMSNormTanhMulAdd(_NormTanhMulAdd):
     norm_type = "rms"
 
 
