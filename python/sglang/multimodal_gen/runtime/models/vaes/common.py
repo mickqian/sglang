@@ -15,6 +15,7 @@ from torch import nn
 
 from sglang.multimodal_gen.configs.models import VAEConfig
 from sglang.multimodal_gen.runtime.distributed import (
+    get_decode_parallel_group_coordinator,
     get_decode_parallel_rank,
     get_decode_parallel_world_size,
 )
@@ -84,6 +85,14 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
     def _decode(self, *args, **kwargs) -> torch.Tensor:
         pass
 
+    def _decode_to_tensor(self, *args, **kwargs) -> torch.Tensor:
+        output = self._decode(*args, **kwargs)
+        if isinstance(output, tuple):
+            output = output[0]
+        if hasattr(output, "sample"):
+            output = output.sample
+        return output
+
     def encode(self, x: torch.Tensor) -> DiagonalGaussianDistribution:
         batch_size, num_channels, num_frames, height, width = x.shape
         latent_num_frames = (num_frames - 1) // self.temporal_compression_ratio + 1
@@ -118,6 +127,7 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
         if (
             self.use_tiling
             and self.use_parallel_tiling
+            and dist.is_initialized()
             and get_decode_parallel_world_size() > 1
         ):
             return self.parallel_tiled_decode(z)[:, :, :num_sample_frames]
@@ -280,7 +290,7 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
                 h_start : h_start + tile_latent_min_height,
                 w_start : w_start + tile_latent_min_width,
             ]
-            decoded_tile = self._decode(tile)
+            decoded_tile = self._decode_to_tensor(tile)
             if t_start > 0:
                 decoded_tile = decoded_tile[:, :, 1:, :, :]
             local_results.append(decoded_tile.reshape(-1))
@@ -299,7 +309,8 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
             torch.zeros(1, device=results.device, dtype=torch.int64)
             for _ in range(world_size)
         ]
-        dist.all_gather(all_sizes, local_size)
+        decode_group = get_decode_parallel_group_coordinator().device_group
+        dist.all_gather(all_sizes, local_size, group=decode_group)
         max_size = max(size.item() for size in all_sizes)
 
         padded_results = torch.zeros(
@@ -313,8 +324,12 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
             .repeat(world_size, *[1] * len(padded_results.shape))
             .contiguous()
         )
-        dist.all_gather_into_tensor(gathered_results, padded_results)
-        dist.all_gather_object(gathered_dim_metadata, local_dim_metadata)
+        dist.all_gather_into_tensor(
+            gathered_results, padded_results, group=decode_group
+        )
+        dist.all_gather_object(
+            gathered_dim_metadata, local_dim_metadata, group=decode_group
+        )
         gathered_dim_metadata = cast(list[list[torch.Size]], gathered_dim_metadata)
 
         data: list = [
@@ -408,7 +423,7 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
         ext_w1 = min(latent_w, w1 + halo_w)
 
         local_patch = z[:, :, :, ext_h0:ext_h1, ext_w0:ext_w1]
-        decoded_patch = self._decode(local_patch)
+        decoded_patch = self._decode_to_tensor(local_patch)
 
         crop_top = (h0 - ext_h0) * scale
         crop_bottom = crop_top + (h1 - h0) * scale
@@ -430,7 +445,8 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
         gathered_positions = [
             torch.empty_like(local_position) for _ in range(world_size)
         ]
-        dist.all_gather(gathered_positions, local_position)
+        decode_group = get_decode_parallel_group_coordinator().device_group
+        dist.all_gather(gathered_positions, local_position, group=decode_group)
 
         local_size = torch.tensor(
             [local_result.size(0)], device=z.device, dtype=torch.int64
@@ -438,13 +454,15 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
         gathered_dim_metadata = [
             torch.empty_like(local_dim_metadata) for _ in range(world_size)
         ]
-        dist.all_gather(gathered_dim_metadata, local_dim_metadata)
+        dist.all_gather(
+            gathered_dim_metadata, local_dim_metadata, group=decode_group
+        )
 
         all_sizes = [
             torch.zeros(1, device=z.device, dtype=torch.int64)
             for _ in range(world_size)
         ]
-        dist.all_gather(all_sizes, local_size)
+        dist.all_gather(all_sizes, local_size, group=decode_group)
         max_size = max(size.item() for size in all_sizes)
 
         padded_results = torch.zeros(max_size, device=z.device, dtype=z.dtype)
@@ -454,7 +472,9 @@ class ParallelTiledVAE(ABC, nn.Module, LayerwiseOffloadableModuleMixin):
             device=padded_results.device,
             dtype=padded_results.dtype,
         )
-        dist.all_gather_into_tensor(gathered_results, padded_results)
+        dist.all_gather_into_tensor(
+            gathered_results, padded_results, group=decode_group
+        )
 
         dec = z.new_empty(
             (

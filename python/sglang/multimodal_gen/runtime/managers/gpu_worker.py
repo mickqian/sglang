@@ -167,7 +167,7 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
             ).to_tcp(),
             dist_timeout=self.server_args.dist_timeout,
             use_cfg_ranks_for_decode_parallel=(
-                self.server_args.performance_mode == "speed"
+                self.server_args.enable_cfg_parallel
             ),
         )
 

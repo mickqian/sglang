@@ -3,6 +3,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.models.activations import get_activation
@@ -963,7 +964,11 @@ class AutoencoderKLQwenImage(ParallelTiledVAE):
         return posterior
 
     def _decode_with_parallel_dispatch(self, z: torch.Tensor) -> DecoderOutput:
-        if self.use_parallel_decode and get_decode_parallel_world_size() > 1:
+        if (
+            self.use_parallel_decode
+            and dist.is_initialized()
+            and get_decode_parallel_world_size() > 1
+        ):
             num_frame = z.shape[2]
             num_sample_frames = (num_frame - 1) * self.temporal_compression_ratio + 1
             tile_latent_min_height = (
@@ -983,9 +988,9 @@ class AutoencoderKLQwenImage(ParallelTiledVAE):
                     mode = "patch"
 
             if mode == "patch":
-                decoded = super().parallel_patch_decode(z)[:, :, :num_sample_frames]
+                decoded = self.parallel_patch_decode(z)[:, :, :num_sample_frames]
             else:
-                decoded = super().parallel_tiled_decode(z)[:, :, :num_sample_frames]
+                decoded = self.parallel_tiled_decode(z)[:, :, :num_sample_frames]
             return DecoderOutput(sample=decoded)
 
         return DecoderOutput(sample=self._decode(z))
