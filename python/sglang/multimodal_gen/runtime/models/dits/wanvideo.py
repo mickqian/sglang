@@ -534,7 +534,6 @@ class WanTransformerBlock(nn.Module):
         self.mlp_residual = MulAdd()
 
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
-        self.register_buffer("null_shift_scale", torch.zeros(1), persistent=False)
 
     def forward(
         self,
@@ -599,16 +598,11 @@ class WanTransformerBlock(nn.Module):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift_scale = self.null_shift_scale
-        if (
-            null_shift_scale.device != hidden_states.device
-            or null_shift_scale.dtype != hidden_states.dtype
-        ):
-            null_shift_scale = null_shift_scale.to(
-                device=hidden_states.device, dtype=hidden_states.dtype
-            )
+        null_shift = null_scale = torch.zeros(
+            (1,), device=hidden_states.device, dtype=hidden_states.dtype
+        )
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift_scale, null_shift_scale
+            hidden_states, attn_output, gate_msa, null_shift, null_scale
         )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype
@@ -772,7 +766,6 @@ class WanTransformerBlock_VSA(nn.Module):
         self.mlp_residual = MulAdd()
 
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
-        self.register_buffer("null_shift_scale", torch.zeros(1), persistent=False)
 
     def forward(
         self,
@@ -818,16 +811,9 @@ class WanTransformerBlock_VSA(nn.Module):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift_scale = self.null_shift_scale
-        if (
-            null_shift_scale.device != hidden_states.device
-            or null_shift_scale.dtype != hidden_states.dtype
-        ):
-            null_shift_scale = null_shift_scale.to(
-                device=hidden_states.device, dtype=hidden_states.dtype
-            )
+        null_shift = null_scale = torch.zeros((1,), device=hidden_states.device)
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift_scale, null_shift_scale
+            hidden_states, attn_output, gate_msa, null_shift, null_scale
         )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype
