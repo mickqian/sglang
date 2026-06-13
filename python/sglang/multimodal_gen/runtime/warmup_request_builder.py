@@ -172,8 +172,6 @@ def _resolve_warmup_prompt(
     server_based_warmup: bool,
     use_model_sampling_defaults: bool,
 ) -> str:
-    if server_based_warmup and use_model_sampling_defaults:
-        return DEFAULT_REPRESENTATIVE_PROMPT
     return DEFAULT_PLACEHOLDER_PROMPT
 
 
