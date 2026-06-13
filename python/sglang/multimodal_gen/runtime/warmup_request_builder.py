@@ -105,6 +105,14 @@ def _resolve_representative_warmup_resolution(
 
     width = sampling_defaults.width
     height = sampling_defaults.height
+    if (
+        server_args.pipeline_config.task_type.is_image_gen()
+        and getattr(server_args, "backend", None) != "diffusers"
+        and width is not None
+        and height is not None
+    ):
+        return width, height
+
     if width is not None and height is not None:
         return _fit_resolution_to_area(width, height, target_area)
 
