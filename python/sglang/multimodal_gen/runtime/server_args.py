@@ -378,7 +378,6 @@ class ServerArgs(DisaggServerArgsMixin):
             auto_tuner.maybe_adjust_auto_fsdp_with_offload_enabled()
             auto_tuner.maybe_replace_cpu_offloaded_components_with_layerwise()
         self._adjust_path()
-        self._adjust_pipeline_class_alias()
         self._adjust_quant_config()
         self._adjust_warmup()
         self._adjust_network_ports()
@@ -390,16 +389,6 @@ class ServerArgs(DisaggServerArgsMixin):
         self._adjust_autocast()
         auto_tuner.finalize_auto_flags()
         self.adjust_pipeline_config()
-
-    def _adjust_pipeline_class_alias(self):
-        if self.pipeline_class_name is None:
-            return
-        alias = self.pipeline_class_name.strip()
-        alias_map = {
-            "pi05": "Pi05Pipeline",
-            "pi0.5": "Pi05Pipeline",
-        }
-        self.pipeline_class_name = alias_map.get(alias.lower(), alias)
 
     def _adjust_disagg_parallelism_aliases(self):
         if self.decoder_tp is None:
@@ -1164,8 +1153,8 @@ class ServerArgs(DisaggServerArgsMixin):
             type=str,
             default=ServerArgs.pipeline_class_name,
             help=(
-                "Override pipeline class selection from model_index.json. "
-                "Must match a registered pipeline_name."
+                "Advanced override for pipeline class selection from the model registry "
+                "or model_index.json. Must match a registered pipeline_name."
             ),
         )
         # attention
