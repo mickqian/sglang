@@ -76,9 +76,6 @@ def _resolve_default_warmup_resolution(
     cold-start when the real request is larger (e.g. 1024x1024 paid ~0.1s of
     first-shape kernel autotuning, measured on H100).
     """
-    if server_args.pipeline_config.task_type.data_type() == DataType.ACTION:
-        return DEFAULT_LIGHTWEIGHT_IMAGE_RESOLUTION
-
     width = sampling_defaults.width
     height = sampling_defaults.height
     is_image_gen = server_args.pipeline_config.task_type.is_image_gen()
@@ -287,6 +284,8 @@ def should_include_warmup_image(
     server_args: ServerArgs, server_based_warmup: bool
 ) -> bool:
     task_type = server_args.pipeline_config.task_type
+    if task_type.data_type() == DataType.ACTION:
+        return False
     if not task_type.accepts_image_input():
         return False
     if task_type.requires_image_input():
@@ -294,6 +293,10 @@ def should_include_warmup_image(
     if server_based_warmup:
         return task_type in (ModelTaskType.TI2I, ModelTaskType.TI2V)
     return True
+
+
+def should_run_visual_warmup(server_args: ServerArgs) -> bool:
+    return server_args.pipeline_config.task_type.data_type() != DataType.ACTION
 
 
 def build_warmup_reqs(
@@ -305,10 +308,9 @@ def build_warmup_reqs(
     server_based_warmup: bool = False,
 ) -> list[Req]:
     task_type = server_args.pipeline_config.task_type
-    sampling_defaults = get_model_sampling_defaults(server_args)
-    if task_type.data_type() == DataType.ACTION:
-        logger.info("Skipping synthetic visual warmup for ACTION pipeline")
+    if not should_run_visual_warmup(server_args):
         return []
+    sampling_defaults = get_model_sampling_defaults(server_args)
 
     if warmup_resolutions is None:
         width, height = _resolve_default_warmup_resolution(
