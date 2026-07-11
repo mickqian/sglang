@@ -421,6 +421,24 @@ class TestBenchmarkDatasetsAPI(unittest.TestCase):
         self.assertTrue(all(isinstance(row, DatasetRow) for row in rows))
         self.assertTrue(all(row.image_data for row in rows))
 
+    def test_image_sampler_openai_chat_backends(self):
+        for backend in ("sglang-oai-chat", "vllm-chat", "lmdeploy-chat"):
+            rows = sample_image_requests(
+                num_requests=1,
+                image_count=1,
+                input_len=8,
+                output_len=4,
+                range_ratio=0.0,
+                processor=self.processor,
+                image_content="blank",
+                image_format="png",
+                image_resolution="8x8",
+                backend=backend,
+                random_image_count=False,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0].image_data)
+
     def test_gen_mm_prompt_excludes_special_tokens(self):
         tokenizer = create_lightweight_tokenizer()
         multimodal_special_tokens = [
