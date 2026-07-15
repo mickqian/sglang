@@ -1245,13 +1245,7 @@ class VisionAttention(nn.Module):
             # [s, b, head, head_size] --> [b, s, head, head_size]
             q, k, v = [rearrange(x, "s b ... -> b s ...") for x in (q, k, v)]
 
-        # FlashAttention accepts the strided Q/K/V views produced by
-        # QKVParallelLinear (the same layout used by vLLM's ViT path).  Do
-        # not materialize three full copies before every vision attention
-        # layer on CUDA; the other backends retain the contiguous contract.
-        if not isinstance(
-            self.qkv_backend, (VisionFlash3Attention, VisionFlash4Attention)
-        ) and not (_is_cpu and _is_cpu_amx_available):
+        if not (_is_cpu and _is_cpu_amx_available):
             q = q.contiguous()
             k = k.contiguous()
             v = v.contiguous()
