@@ -612,10 +612,14 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             return False
         if forward_batch.replace_embeds is not None:
             return False
-        # The captured graph embeds from input_ids only; multimodal batches
-        # merge mm embeddings in the outer wrapper, which capture bypasses.
-        if forward_batch.mm_inputs is not None and any(
-            x is not None for x in forward_batch.mm_inputs
+        # Breakable captures the inner language-model graph and bypasses the
+        # outer multimodal embedding wrapper. TcPiecewise, on the other hand,
+        # deliberately runs that wrapper eagerly around its compiled LM
+        # segments, so rejecting mm_inputs here would disable VLM PCG replay.
+        if (
+            self.prefill_backend_name == Backend.BREAKABLE
+            and forward_batch.mm_inputs is not None
+            and any(x is not None for x in forward_batch.mm_inputs)
         ):
             return False
         # tc_piecewise captures with ForwardMode.EXTEND and spec_info=None.
