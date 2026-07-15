@@ -43,7 +43,7 @@ from PIL import Image
 from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
 from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import flatten_nested_list
+from sglang.srt.utils import flatten_nested_list, print_info_once
 
 
 def ensure_numpy(x):
@@ -716,6 +716,13 @@ def run_dp_sharded_mrope_vision_model(
         envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()
         and pynccl_comm is not None
         and not pynccl_comm.disabled
+    )
+    print_info_once(
+        "VLM DP encoder feature gather: "
+        f"{'variable-size NCCL' if use_allgatherv else 'padded all-gather'} "
+        f"(requested={envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()}, "
+        f"pynccl_available={pynccl_comm is not None and not pynccl_comm.disabled}, "
+        f"world_size={tp_size})"
     )
     if use_allgatherv:
         gather_sizes = [
