@@ -41,6 +41,7 @@ import torch
 from PIL import Image
 
 from sglang.srt.distributed.communication_op import tensor_model_parallel_all_gather
+from sglang.srt.environ import envs
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import flatten_nested_list
 
@@ -705,44 +706,69 @@ def run_dp_sharded_mrope_vision_model(
                 dtype=input_dtype,
             )
 
-    # Pad the output based on max_len_per_rank
-    # for tensor_model_parallel_all_gather to work
+    # Pad the output based on max_len_per_rank for the regular all-gather path.
+    # The variable-size path below sends only the real local rows, which is
+    # important for DP encoder batches where most ranks own no images.
     current_len = image_embeds_local.shape[0]
-    if current_len < max_len_per_rank:
-        padding_size = max_len_per_rank - current_len
-        if packed_2d_rope:
-            padding = torch.empty(
-                (
-                    padding_size,
-                    image_embeds_local.shape[1],
-                    image_embeds_local.shape[2],
-                ),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
-        else:
-            padding = torch.empty(
-                (padding_size, image_embeds_local.shape[1]),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
-        image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
-    else:
-        image_embeds_local_padded = image_embeds_local
-
-    # Do all_gather to collect embeddings from all ranks
-    gathered_embeds = get_parallel().attn_tp_group.all_gather(
-        image_embeds_local_padded, dim=0
+    use_allgatherv = (
+        envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()
+        and getattr(get_parallel().attn_tp_group, "pynccl_comm", None) is not None
+        and not get_parallel().attn_tp_group.pynccl_comm.disabled
     )
-
-    # Remove padding and reconstruct per-rank embeddings
-    rank_embeddings = list[torch.Tensor]()
-    for rank in range(tp_size):
-        start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (
+    if use_allgatherv:
+        gather_sizes = [
             grouped_pixel_values_len[rank] // embed_dim_reduction_factor
+            for rank in range(tp_size)
+        ]
+        # PyNccl's variable-size gather returns a single tensor laid out in
+        # rank order, matching the offsets used below for reconstruction.
+        gathered_embeds = get_parallel().attn_tp_group.all_gatherv(
+            image_embeds_local, sizes=gather_sizes
+        )[0]
+    else:
+        if current_len < max_len_per_rank:
+            padding_size = max_len_per_rank - current_len
+            if packed_2d_rope:
+                padding = torch.empty(
+                    (
+                        padding_size,
+                        image_embeds_local.shape[1],
+                        image_embeds_local.shape[2],
+                    ),
+                    dtype=image_embeds_local.dtype,
+                    device=image_embeds_local.device,
+                )
+            else:
+                padding = torch.empty(
+                    (padding_size, image_embeds_local.shape[1]),
+                    dtype=image_embeds_local.dtype,
+                    device=image_embeds_local.device,
+                )
+            image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
+        else:
+            image_embeds_local_padded = image_embeds_local
+
+        # Do all_gather to collect embeddings from all ranks.
+        gathered_embeds = get_parallel().attn_tp_group.all_gather(
+            image_embeds_local_padded, dim=0
         )
-        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
+
+    # Remove padding (regular path) and reconstruct per-rank embeddings.
+    if use_allgatherv:
+        rank_embeddings = []
+        offset = 0
+        for rank in range(tp_size):
+            rank_len = grouped_pixel_values_len[rank] // embed_dim_reduction_factor
+            rank_embeddings.append(gathered_embeds[offset : offset + rank_len])
+            offset += rank_len
+    else:
+        rank_embeddings = list[torch.Tensor]()
+        for rank in range(tp_size):
+            start_idx = rank * max_len_per_rank
+            end_idx = start_idx + (
+                grouped_pixel_values_len[rank] // embed_dim_reduction_factor
+            )
+            rank_embeddings.append(gathered_embeds[start_idx:end_idx])
 
     patches_per_output_image = [
         (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
