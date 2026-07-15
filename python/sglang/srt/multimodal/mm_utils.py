@@ -578,7 +578,7 @@ def run_dp_sharded_mrope_vision_model(
             pixel_values = load_local_pixel_values(list(range(len(grid_thw_list))))
         grid_thw = torch.tensor(
             grid_thw_list,
-            # MoonViT's 2D RoPE implementation combines the grid metadata
+            # Kimi-VL's 2D RoPE implementation combines the grid metadata
             # with CUDA activations. Keep the metadata colocated in that
             # path; other encoders retain their existing CPU contract.
             device=pixel_values.device if rope_type == "rope_2d" else None,
