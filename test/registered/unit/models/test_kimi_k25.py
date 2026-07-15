@@ -240,6 +240,7 @@ def test_kimi_lazy_ipc_feature_acknowledges_all_tp_consumers():
 
 def test_dp_helper_uses_variable_size_gather_when_pynccl_is_available():
     class _PyNccl:
+        available = True
         disabled = False
 
     class _GatherGroup:

@@ -712,16 +712,15 @@ def run_dp_sharded_mrope_vision_model(
     current_len = image_embeds_local.shape[0]
     attn_tp_group = get_parallel().attn_tp_group
     pynccl_comm = getattr(attn_tp_group, "pynccl_comm", None)
+    pynccl_available = pynccl_comm is not None and pynccl_comm.available
     use_allgatherv = (
-        envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()
-        and pynccl_comm is not None
-        and not pynccl_comm.disabled
+        envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get() and pynccl_available
     )
     print_info_once(
         "VLM DP encoder feature gather: "
         f"{'variable-size NCCL' if use_allgatherv else 'padded all-gather'} "
         f"(requested={envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()}, "
-        f"pynccl_available={pynccl_comm is not None and not pynccl_comm.disabled}, "
+        f"pynccl_available={pynccl_available}, "
         f"world_size={tp_size})"
     )
     if use_allgatherv:
