@@ -1272,6 +1272,29 @@ class TestCudaGraphDisaggregationRoles(CustomTestCase):
 
 
 class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
+    KIMI_PREFILL_BUCKETS = [
+        512,
+        1024,
+        1536,
+        2048,
+        2304,
+        2560,
+        2816,
+        3072,
+        3328,
+        3584,
+        3840,
+        4096,
+        4608,
+        5120,
+        5632,
+        6144,
+        6656,
+        7168,
+        7680,
+        8192,
+    ]
+
     def _handled_args(
         self,
         *,
@@ -1307,23 +1330,24 @@ class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
         args = self._handled_args(large_bucket_opt_in=True)
 
         self.assertEqual(args.cuda_graph_config.prefill.max_bs, 8192)
-        self.assertEqual(
-            args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096, 8192]
-        )
+        self.assertEqual(args.cuda_graph_config.prefill.bs, self.KIMI_PREFILL_BUCKETS)
 
     def test_other_mla_models_keep_the_2048_auto_prefill_bucket(self):
         args = self._handled_args(large_bucket_opt_in=False)
 
         self.assertEqual(args.cuda_graph_config.prefill.max_bs, 2048)
         self.assertNotEqual(
-            args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096, 8192]
+            args.cuda_graph_config.prefill.bs, self.KIMI_PREFILL_BUCKETS
         )
 
     def test_kimi_auto_prefill_buckets_respect_smaller_chunk_size(self):
         args = self._handled_args(large_bucket_opt_in=True, chunked_prefill_size=4096)
 
         self.assertEqual(args.cuda_graph_config.prefill.max_bs, 4096)
-        self.assertEqual(args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096])
+        self.assertEqual(
+            args.cuda_graph_config.prefill.bs,
+            [bucket for bucket in self.KIMI_PREFILL_BUCKETS if bucket <= 4096],
+        )
 
     def test_explicit_prefill_buckets_override_kimi_auto_policy(self):
         args = self._handled_args(

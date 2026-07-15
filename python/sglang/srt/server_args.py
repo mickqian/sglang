@@ -3921,15 +3921,22 @@ class ServerArgs:
                 "is_multimodal_mla_large_prefill_cuda_graph_supported",
                 False,
             ):
-                # Keep the automatic Kimi-K2.7 configuration aligned with
-                # its serving validation. The general auto generator adds
-                # many fine-grained captures, whereas these five buckets
-                # cover single-request through full-chunk image-prefill batches
-                # bounded startup cost. An explicit --cuda-graph-bs-prefill
-                # always takes precedence.
+                # Kimi image-prefill batches commonly land between 2K and 4K
+                # tokens. Power-of-two buckets pad those batches by up to 2x,
+                # which can make graph replay slower than eager execution.
+                # Use 256-token spacing in that hot range and 512-token
+                # spacing elsewhere. PcG shares its graph memory pool, so the
+                # extra buckets have a small capture-memory/startup cost while
+                # substantially reducing replay padding. An explicit
+                # --cuda-graph-bs-prefill always takes precedence.
+                kimi_prefill_buckets = (
+                    list(range(512, 2048 + 1, 512))
+                    + list(range(2304, 4096 + 1, 256))
+                    + list(range(4608, 8192 + 1, 512))
+                )
                 prefill_cuda_graph_config.bs = [
                     bs
-                    for bs in [512, 1024, 2048, 4096, 8192]
+                    for bs in kimi_prefill_buckets
                     if bs <= prefill_cuda_graph_config.max_bs
                 ]
             else:
