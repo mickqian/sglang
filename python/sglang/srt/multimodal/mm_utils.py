@@ -531,6 +531,10 @@ def run_dp_sharded_mrope_vision_model(
     load_local_pixel_values: Optional[Callable[[list[int]], torch.Tensor]] = None,
     pixel_values_device: Optional[torch.device] = None,
     pixel_values_dtype: Optional[torch.dtype] = None,
+    local_feature_postprocessor: Optional[
+        Callable[[torch.Tensor], torch.Tensor]
+    ] = None,
+    local_feature_token_multiplier: int = 1,
 ):
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -594,14 +598,21 @@ def run_dp_sharded_mrope_vision_model(
             # already concatenates these tensors before returning, so keep the
             # TP=1 DP-encoder path on the same projector-facing contract.
             if isinstance(image_embeds, list):
-                return torch.cat(image_embeds, dim=0)
+                image_embeds = torch.cat(image_embeds, dim=0)
+            if local_feature_postprocessor is not None:
+                image_embeds = local_feature_postprocessor(image_embeds)
             return image_embeds
         if rope_type == "rope_2d_packed":
             image_embeds = vision_model(pixel_values, grid_thw)
             if isinstance(image_embeds, list):
-                return torch.cat(image_embeds, dim=0)
+                image_embeds = torch.cat(image_embeds, dim=0)
+            if local_feature_postprocessor is not None:
+                image_embeds = local_feature_postprocessor(image_embeds)
             return image_embeds
-        return vision_model(pixel_values, grid_thw=grid_thw)
+        image_embeds = vision_model(pixel_values, grid_thw=grid_thw)
+        if local_feature_postprocessor is not None:
+            image_embeds = local_feature_postprocessor(image_embeds)
+        return image_embeds
 
     # GPU_0 tp_rank_local = 0
     # GPU_1 tp_rank_local = 1
@@ -704,6 +715,30 @@ def run_dp_sharded_mrope_vision_model(
                 (0, out_dim),
                 device=input_device,
                 dtype=input_dtype,
+            )
+
+    if local_feature_postprocessor is not None:
+        if local_feature_token_multiplier < 1:
+            raise ValueError("local_feature_token_multiplier must be positive")
+        input_rows = image_embeds_local.shape[0]
+        image_embeds_local = local_feature_postprocessor(image_embeds_local)
+        expected_rows = input_rows * local_feature_token_multiplier
+        if image_embeds_local.shape[0] != expected_rows:
+            raise ValueError(
+                "local_feature_postprocessor changed the leading dimension "
+                f"from {input_rows} to {image_embeds_local.shape[0]}, "
+                f"expected {expected_rows}"
+            )
+        if packed_2d_rope:
+            if embed_dim_reduction_factor % local_feature_token_multiplier != 0:
+                raise ValueError(
+                    "local_feature_token_multiplier must divide the vision "
+                    "embedding reduction factor"
+                )
+            embed_dim_reduction_factor //= local_feature_token_multiplier
+        elif local_feature_token_multiplier != 1:
+            raise ValueError(
+                "local_feature_token_multiplier must be 1 for non-packed vision outputs"
             )
 
     # Pad the output based on max_len_per_rank for the regular all-gather path.

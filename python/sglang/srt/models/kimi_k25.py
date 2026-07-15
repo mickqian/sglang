@@ -754,9 +754,13 @@ class KimiK25ForConditionalGeneration(nn.Module):
                 load_local_pixel_values=materialize_item_features,
                 pixel_values_device=device,
                 pixel_values_dtype=target_dtype,
+                local_feature_postprocessor=self.mm_projector,
+                local_feature_token_multiplier=(
+                    self.vision_tower.merge_kernel_size[0]
+                    * self.vision_tower.merge_kernel_size[1]
+                ),
             )
-            image_features = self.mm_projector(image_embeds)
-            return image_features
+            return image_embeds
 
         pixel_values = materialize_item_features(list(range(len(items))))
         image_embeds = self.vision_tower(pixel_values, grid_thws.to(device))

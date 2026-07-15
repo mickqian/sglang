@@ -276,5 +276,44 @@ def test_dp_helper_uses_variable_size_gather_when_pynccl_is_available():
     assert output.shape == (1, 4, 2)
 
 
+def test_dp_helper_can_project_packed_features_before_gather():
+    class _PyNccl:
+        available = True
+        disabled = True
+
+    class _GatherGroup:
+        pynccl_comm = _PyNccl()
+
+        def all_gatherv(self, tensor, sizes):
+            assert sizes == [4, 0]
+            return [tensor]
+
+    class _FlattenProjector:
+        def __call__(self, tensor):
+            return tensor.reshape(-1, tensor.shape[-1])
+
+    tower = _MoonViT3dTower()
+    parallel = SimpleNamespace(
+        attn_tp_size=2,
+        attn_tp_rank=0,
+        attn_tp_group=_GatherGroup(),
+    )
+
+    with (
+        patch("sglang.srt.multimodal.mm_utils.get_parallel", return_value=parallel),
+        envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.override(True),
+    ):
+        output = run_dp_sharded_mrope_vision_model(
+            tower,
+            torch.randn(4, 2),
+            [[1, 2, 2]],
+            rope_type="rope_2d_packed",
+            local_feature_postprocessor=_FlattenProjector(),
+            local_feature_token_multiplier=4,
+        )
+
+    assert output.shape == (4, 2)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
