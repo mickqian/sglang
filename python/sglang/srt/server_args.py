@@ -3885,11 +3885,12 @@ class ServerArgs:
                 "is_multimodal_mla_large_prefill_cuda_graph_supported",
                 False,
             ):
-                # Kimi-K2.7 image serving has a measured high-concurrency gap
-                # at 2048: use 4096 when the model-specific capability marker
-                # confirms this larger TC capture is validated. Do not widen
-                # this to every MLA model without an equivalent measurement.
-                prefill_cuda_graph_config.max_bs = min(self.chunked_prefill_size, 4096)
+                # Kimi-K2.7 image serving commonly fills the default 8192-token
+                # chunk under concurrent multimodal requests. Cover that chunk
+                # when the model-specific capability marker confirms the larger
+                # TC capture is validated. Do not widen this to every MLA model
+                # without an equivalent measurement.
+                prefill_cuda_graph_config.max_bs = min(self.chunked_prefill_size, 8192)
             else:
                 prefill_cuda_graph_config.max_bs = 2048
 
@@ -3922,11 +3923,11 @@ class ServerArgs:
             ):
                 # Keep the automatic Kimi-K2.7 configuration aligned with
                 # its serving validation. The general auto generator adds
-                # many fine-grained captures, whereas these four buckets
-                # cover the high-concurrency image-prefill aggregates with
+                # many fine-grained captures, whereas these five buckets
+                # cover single-request through full-chunk image-prefill batches
                 # bounded startup cost. An explicit --cuda-graph-bs-prefill
                 # always takes precedence.
-                prefill_cuda_graph_config.bs = [512, 1024, 2048, 4096]
+                prefill_cuda_graph_config.bs = [512, 1024, 2048, 4096, 8192]
             else:
                 prefill_cuda_graph_config.bs = (
                     self._generate_prefill_cuda_graph_batch_sizes(

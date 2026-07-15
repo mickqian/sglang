@@ -1867,7 +1867,7 @@ def is_multimodal_piecewise_cuda_graph_supported(model_architectures: List[str])
 def is_multimodal_mla_large_prefill_cuda_graph_supported(
     model_architectures: List[str],
 ):
-    """Whether an MLA VLM may use the 4096-token auto PCG bucket."""
+    """Whether an MLA VLM may cover a full 8192-token chunk with PCG."""
     return any(
         arch in multimodal_mla_large_prefill_cuda_graph_supported_model_archs
         for arch in model_architectures

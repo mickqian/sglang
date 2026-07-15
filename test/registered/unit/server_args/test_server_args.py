@@ -1293,17 +1293,21 @@ class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
             args._handle_gpu_memory_settings(gpu_mem=None)
         return args
 
-    def test_kimi_mla_vlm_uses_4096_auto_prefill_bucket(self):
+    def test_kimi_mla_vlm_covers_full_chunk_with_auto_prefill_bucket(self):
         args = self._handled_args(large_bucket_opt_in=True)
 
-        self.assertEqual(args.cuda_graph_config.prefill.max_bs, 4096)
-        self.assertEqual(args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096])
+        self.assertEqual(args.cuda_graph_config.prefill.max_bs, 8192)
+        self.assertEqual(
+            args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096, 8192]
+        )
 
     def test_other_mla_models_keep_the_2048_auto_prefill_bucket(self):
         args = self._handled_args(large_bucket_opt_in=False)
 
         self.assertEqual(args.cuda_graph_config.prefill.max_bs, 2048)
-        self.assertNotEqual(args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096])
+        self.assertNotEqual(
+            args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096, 8192]
+        )
 
     def test_explicit_prefill_buckets_override_kimi_auto_policy(self):
         args = self._handled_args(
@@ -1311,7 +1315,7 @@ class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
         )
 
         self.assertEqual(args.cuda_graph_config.prefill.bs, [256, 768])
-        self.assertEqual(args.cuda_graph_config.prefill.max_bs, 4096)
+        self.assertEqual(args.cuda_graph_config.prefill.max_bs, 8192)
 
 
 class TestBreakableCudaGraphMultimodalAllowlist(CustomTestCase):
