@@ -285,12 +285,12 @@ def test_dp_helper_can_project_packed_features_before_gather():
         pynccl_comm = _PyNccl()
 
         def all_gatherv(self, tensor, sizes):
-            assert sizes == [4, 0]
+            assert sizes == [1, 0]
             return [tensor]
 
-    class _FlattenProjector:
+    class _Projector:
         def __call__(self, tensor):
-            return tensor.reshape(-1, tensor.shape[-1])
+            return tensor.mean(dim=1)
 
     tower = _MoonViT3dTower()
     parallel = SimpleNamespace(
@@ -308,11 +308,10 @@ def test_dp_helper_can_project_packed_features_before_gather():
             torch.randn(4, 2),
             [[1, 2, 2]],
             rope_type="rope_2d_packed",
-            local_feature_postprocessor=_FlattenProjector(),
-            local_feature_token_multiplier=4,
+            local_feature_postprocessor=_Projector(),
         )
 
-    assert output.shape == (4, 2)
+    assert output.shape == (1, 2)
 
 
 if __name__ == "__main__":

@@ -755,10 +755,6 @@ class KimiK25ForConditionalGeneration(nn.Module):
                 pixel_values_device=device,
                 pixel_values_dtype=target_dtype,
                 local_feature_postprocessor=self.mm_projector,
-                local_feature_token_multiplier=(
-                    self.vision_tower.merge_kernel_size[0]
-                    * self.vision_tower.merge_kernel_size[1]
-                ),
             )
             return image_embeds
 

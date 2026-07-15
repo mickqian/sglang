@@ -534,7 +534,6 @@ def run_dp_sharded_mrope_vision_model(
     local_feature_postprocessor: Optional[
         Callable[[torch.Tensor], torch.Tensor]
     ] = None,
-    local_feature_token_multiplier: int = 1,
 ):
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -718,27 +717,13 @@ def run_dp_sharded_mrope_vision_model(
             )
 
     if local_feature_postprocessor is not None:
-        if local_feature_token_multiplier < 1:
-            raise ValueError("local_feature_token_multiplier must be positive")
         input_rows = image_embeds_local.shape[0]
         image_embeds_local = local_feature_postprocessor(image_embeds_local)
-        expected_rows = input_rows * local_feature_token_multiplier
-        if image_embeds_local.shape[0] != expected_rows:
+        if image_embeds_local.shape[0] != input_rows:
             raise ValueError(
                 "local_feature_postprocessor changed the leading dimension "
                 f"from {input_rows} to {image_embeds_local.shape[0]}, "
-                f"expected {expected_rows}"
-            )
-        if packed_2d_rope:
-            if embed_dim_reduction_factor % local_feature_token_multiplier != 0:
-                raise ValueError(
-                    "local_feature_token_multiplier must divide the vision "
-                    "embedding reduction factor"
-                )
-            embed_dim_reduction_factor //= local_feature_token_multiplier
-        elif local_feature_token_multiplier != 1:
-            raise ValueError(
-                "local_feature_token_multiplier must be 1 for non-packed vision outputs"
+                f"expected {input_rows}"
             )
 
     # Pad the output based on max_len_per_rank for the regular all-gather path.
