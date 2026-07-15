@@ -1272,8 +1272,18 @@ class TestCudaGraphDisaggregationRoles(CustomTestCase):
 
 
 class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
-    def _handled_args(self, *, large_bucket_opt_in, explicit_prefill_bs=None):
-        args = ServerArgs(model_path="dummy", cuda_graph_bs_prefill=explicit_prefill_bs)
+    def _handled_args(
+        self,
+        *,
+        large_bucket_opt_in,
+        explicit_prefill_bs=None,
+        chunked_prefill_size=8192,
+    ):
+        args = ServerArgs(
+            model_path="dummy",
+            chunked_prefill_size=chunked_prefill_size,
+            cuda_graph_bs_prefill=explicit_prefill_bs,
+        )
         args.model_config = SimpleNamespace(
             hf_config=SimpleNamespace(
                 architectures=["KimiK25ForConditionalGeneration"]
@@ -1308,6 +1318,12 @@ class TestMultimodalMlaPrefillCudaGraphDefault(CustomTestCase):
         self.assertNotEqual(
             args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096, 8192]
         )
+
+    def test_kimi_auto_prefill_buckets_respect_smaller_chunk_size(self):
+        args = self._handled_args(large_bucket_opt_in=True, chunked_prefill_size=4096)
+
+        self.assertEqual(args.cuda_graph_config.prefill.max_bs, 4096)
+        self.assertEqual(args.cuda_graph_config.prefill.bs, [512, 1024, 2048, 4096])
 
     def test_explicit_prefill_buckets_override_kimi_auto_policy(self):
         args = self._handled_args(

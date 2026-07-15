@@ -3927,7 +3927,11 @@ class ServerArgs:
                 # cover single-request through full-chunk image-prefill batches
                 # bounded startup cost. An explicit --cuda-graph-bs-prefill
                 # always takes precedence.
-                prefill_cuda_graph_config.bs = [512, 1024, 2048, 4096, 8192]
+                prefill_cuda_graph_config.bs = [
+                    bs
+                    for bs in [512, 1024, 2048, 4096, 8192]
+                    if bs <= prefill_cuda_graph_config.max_bs
+                ]
             else:
                 prefill_cuda_graph_config.bs = (
                     self._generate_prefill_cuda_graph_batch_sizes(
