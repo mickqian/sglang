@@ -83,10 +83,13 @@ def tpool_patch_merger(
         reshaped_seq = seq.view(
             t, new_height, kernel_height, new_width, kernel_width, d_model
         )
-        reshaped_seq = (
-            reshaped_seq.permute(0, 1, 3, 2, 4, 5).contiguous().mean(dim=0)
-        )  # temporal pooling
-        padded_seq = reshaped_seq.view(
+        # Pool the temporal dimension before changing the memory layout.  The
+        # previous permute().contiguous().mean() materialized the full video
+        # tensor before reducing it, which is particularly costly for Kimi's
+        # high-resolution inputs.  Mean over the leading (time) dimension is
+        # layout-preserving and leaves only the compact pooled tensor to move.
+        pooled_seq = reshaped_seq.mean(dim=0)  # temporal pooling
+        padded_seq = pooled_seq.permute(0, 2, 1, 3, 4).reshape(
             new_height * new_width, kernel_height * kernel_width, -1
         )
         outputs.append(padded_seq)

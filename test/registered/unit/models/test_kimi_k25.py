@@ -14,7 +14,10 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalInputs,
     MultimodalProcessorOutput,
 )
-from sglang.srt.models.kimi_k25 import KimiK25ForConditionalGeneration
+from sglang.srt.models.kimi_k25 import (
+    KimiK25ForConditionalGeneration,
+    tpool_patch_merger,
+)
 from sglang.srt.multimodal.mm_utils import run_dp_sharded_mrope_vision_model
 from sglang.srt.multimodal.processors.kimi_k25 import (
     _resize_images_by_source_shape,
@@ -90,6 +93,20 @@ def test_kimi_gpu_preprocess_batches_only_source_compatible_images():
     assert len(actual) == len(expected)
     for result, reference in zip(actual, expected):
         torch.testing.assert_close(result, reference)
+
+
+def test_kimi_tpool_patch_merger_pools_before_permute():
+    # Keep the reference in the checkpoint's logical patch order while
+    # exercising both temporal pooling and the 2x2 spatial merge.
+    x = torch.arange(2 * 4 * 6 * 3, dtype=torch.float32).reshape(2 * 4 * 6, 3)
+    grid_thws = torch.tensor([[2, 4, 6]])
+
+    actual = tpool_patch_merger(x, grid_thws, merge_kernel_size=(2, 2))[0]
+    seq = x.reshape(2, 4, 6, 3)
+    expected = seq.reshape(2, 2, 2, 3, 2, 3).mean(dim=0)
+    expected = expected.permute(0, 2, 1, 3, 4).reshape(-1, 4, 3)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_dp_helper_supports_moonvit3d_packed_embeddings_on_tp1():
