@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -235,6 +236,43 @@ def test_kimi_lazy_ipc_feature_acknowledges_all_tp_consumers():
     item.reconstruct(0, ipc_consumer_count=8)
 
     proxy.reconstruct_on_target_device.assert_called_once_with(0, consumer_count=8)
+
+
+def test_dp_helper_uses_variable_size_gather_when_pynccl_is_available():
+    class _PyNccl:
+        disabled = False
+
+    class _GatherGroup:
+        pynccl_comm = _PyNccl()
+
+        def all_gatherv(self, tensor, sizes):
+            # Simulate rank 0 owning one image and rank 1 owning no images.
+            assert sizes == [1, 0]
+            return [tensor]
+
+        def all_gather(self, tensor, dim):
+            raise AssertionError("variable-size path should not pad and all-gather")
+
+    tower = _MoonViT3dTower()
+    pixel_values = torch.randn(4, 2)
+    parallel = SimpleNamespace(
+        attn_tp_size=2,
+        attn_tp_rank=0,
+        attn_tp_group=_GatherGroup(),
+    )
+
+    with (
+        patch("sglang.srt.multimodal.mm_utils.get_parallel", return_value=parallel),
+        envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.override(True),
+    ):
+        output = run_dp_sharded_mrope_vision_model(
+            tower,
+            pixel_values,
+            [[1, 2, 2]],
+            rope_type="rope_2d_packed",
+        )
+
+    assert output.shape == (1, 4, 2)
 
 
 if __name__ == "__main__":

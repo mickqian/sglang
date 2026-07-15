@@ -779,7 +779,7 @@ class Envs:
     # Use variable-size NCCL broadcasts for data-parallel VLM encoder outputs.
     # This avoids padding every rank to the largest image batch, but requires
     # PyNccl and is kept opt-in until it has been validated across backends.
-    SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV = EnvBool(False)
+    SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV = EnvBool(True)
     SGLANG_MM_SKIP_COMPUTE_HASH = EnvBool(False)
     # For pre-tokenized (list[int]) multimodal prompts,
     # preserve the user's original tokens to avoid retokenization drift.

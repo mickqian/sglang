@@ -710,10 +710,12 @@ def run_dp_sharded_mrope_vision_model(
     # The variable-size path below sends only the real local rows, which is
     # important for DP encoder batches where most ranks own no images.
     current_len = image_embeds_local.shape[0]
+    attn_tp_group = get_parallel().attn_tp_group
+    pynccl_comm = getattr(attn_tp_group, "pynccl_comm", None)
     use_allgatherv = (
         envs.SGLANG_VLM_DP_ENCODER_USE_ALLGATHERV.get()
-        and getattr(get_parallel().attn_tp_group, "pynccl_comm", None) is not None
-        and not get_parallel().attn_tp_group.pynccl_comm.disabled
+        and pynccl_comm is not None
+        and not pynccl_comm.disabled
     )
     if use_allgatherv:
         gather_sizes = [
@@ -722,7 +724,7 @@ def run_dp_sharded_mrope_vision_model(
         ]
         # PyNccl's variable-size gather returns a single tensor laid out in
         # rank order, matching the offsets used below for reconstruction.
-        gathered_embeds = get_parallel().attn_tp_group.all_gatherv(
+        gathered_embeds = attn_tp_group.all_gatherv(
             image_embeds_local, sizes=gather_sizes
         )[0]
     else:
@@ -749,9 +751,7 @@ def run_dp_sharded_mrope_vision_model(
             image_embeds_local_padded = image_embeds_local
 
         # Do all_gather to collect embeddings from all ranks.
-        gathered_embeds = get_parallel().attn_tp_group.all_gather(
-            image_embeds_local_padded, dim=0
-        )
+        gathered_embeds = attn_tp_group.all_gather(image_embeds_local_padded, dim=0)
 
     # Remove padding (regular path) and reconstruct per-rank embeddings.
     if use_allgatherv:
