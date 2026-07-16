@@ -851,9 +851,10 @@ class ServerArgs:
     ] = False
     mixed_chunk_decode_interleave_steps: A[
         int,
-        "Run this many decode-only steps after a mixed-chunk prefill before "
+        "Run up to this many decode-only steps after a mixed-chunk prefill before "
         "scheduling another non-chunked prefill. This can reduce decode stalls "
-        "under concurrent prefill-heavy workloads. Requires "
+        "under concurrent prefill-heavy workloads. The scheduler may shorten "
+        "the window when the waiting queue is deep. Requires "
         "--enable-mixed-chunk; 0 disables the interleave.",
     ] = 0
 
