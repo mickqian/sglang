@@ -6,6 +6,7 @@ from sglang.kernels.ops.attention.fla.chunk import chunk_gated_delta_rule
 from sglang.kernels.ops.attention.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
+from sglang.kernels.ops.attention.fla.index import prepare_chunk_indices
 from sglang.srt.utils import get_device, is_hip
 from sglang.test.ci.ci_register import (
     register_amd_ci,
@@ -27,6 +28,16 @@ class TestChunkGatedDeltaRule(unittest.TestCase):
 
     ATOL = 2e-2
     RTOL = 1e-2
+
+    def test_prepare_chunk_indices_from_cpu_seq_lens(self):
+        device = get_device()
+        seq_lens_cpu = [65, 128, 1]
+        cu_seqlens = torch.tensor([0, 65, 193, 194], dtype=torch.long, device=device)
+
+        expected = prepare_chunk_indices(cu_seqlens, 64)
+        actual = prepare_chunk_indices(cu_seqlens, 64, seq_lens_cpu=seq_lens_cpu)
+
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
     def _run_reference(self, pool_init, cache_indices, q, k, v, g, beta):
         """Per-batch token-by-token reference using fused_recurrent_gated_delta_rule.

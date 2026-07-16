@@ -195,6 +195,7 @@ class TritonGDNKernel(LinearAttnKernelBase):
             cu_seqlens=query_start_loc,
             head_first=False,
             use_qk_l2norm_in_kernel=True,
+            seq_lens_cpu=kwargs.get("seq_lens_cpu"),
             **recurrent_state_indices_args,
         )
 
