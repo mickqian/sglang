@@ -2629,19 +2629,25 @@ class Scheduler(
 
         if last_batch.forward_mode.is_extend():
             # At low/moderate load, a longer decode window protects TPOT from
-            # repeated multimodal prefills. When the waiting queue is already
-            # deep, cap the window so prefills keep draining and TTFT/throughput
-            # do not regress under a burst. The configured value remains the
-            # maximum; values <= 2 preserve their exact behavior.
+            # repeated multimodal prefills.
             self.mixed_chunk_decode_steps_remaining = min(
                 self.mixed_chunk_decode_interleave_steps,
-                2 if len(self.waiting_queue) >= 4 else 4,
+                4,
             )
         elif (
             last_batch.forward_mode.is_decode()
             and self.mixed_chunk_decode_steps_remaining > 0
         ):
             self.mixed_chunk_decode_steps_remaining -= 1
+
+        # Once a prefill arrives, bound its additional wait to one decode pass.
+        # Keep the longer window only while no request is waiting, so decode can
+        # recover after a mixed prefill without creating head-of-line latency.
+        if self.waiting_queue:
+            self.mixed_chunk_decode_steps_remaining = min(
+                self.mixed_chunk_decode_steps_remaining,
+                1,
+            )
 
     def _should_interleave_mixed_chunk_decode(
         self, running_batch: ScheduleBatch
