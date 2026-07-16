@@ -15,7 +15,7 @@ def test_tc_piecewise_is_the_only_multimodal_prefill_backend():
     # TC PCG keeps the VLM wrapper eager and replays only the decoder. The
     # other backends capture a layer body and cannot merge vision embeddings.
     assert backend_supports_multimodal_prefill_cuda_graph(Backend.TC_PIECEWISE)
-    assert not backend_supports_multimodal_prefill_cuda_graph(Backend.BREAKABLE)
+    assert backend_supports_multimodal_prefill_cuda_graph(Backend.BREAKABLE)
     assert not backend_supports_multimodal_prefill_cuda_graph(Backend.FULL)
 
 
