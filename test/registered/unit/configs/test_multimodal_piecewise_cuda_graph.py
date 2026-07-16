@@ -35,6 +35,7 @@ class TestMultimodalPiecewiseCudaGraph(CustomTestCase):
         runner._uses_mla_mha_companion = backend == Backend.BREAKABLE
         runner.capture_hidden_mode = CaptureHiddenMode.NULL
         runner.max_num_tokens = 16
+        runner.capture_num_tokens = [4, 16]
         return runner
 
     def _make_multimodal_forward_batch(self):
@@ -104,6 +105,20 @@ class TestMultimodalPiecewiseCudaGraph(CustomTestCase):
         runner = self._make_prefill_runner(Backend.BREAKABLE)
 
         self.assertTrue(runner.can_run_graph(self._make_multimodal_forward_batch()))
+
+    def test_prefill_graph_rejects_more_than_two_x_token_padding(self):
+        runner = self._make_prefill_runner(Backend.BREAKABLE)
+        forward_batch = self._make_multimodal_forward_batch()
+        forward_batch.input_ids.append(5)
+
+        self.assertFalse(runner.can_run_graph(forward_batch))
+
+    def test_prefill_graph_accepts_two_x_token_padding(self):
+        runner = self._make_prefill_runner(Backend.BREAKABLE)
+        forward_batch = self._make_multimodal_forward_batch()
+        forward_batch.input_ids.extend([5, 6, 7, 8])
+
+        self.assertTrue(runner.can_run_graph(forward_batch))
 
     def test_breakable_prefill_rejects_nonzero_prefix(self):
         runner = self._make_prefill_runner(Backend.BREAKABLE)
