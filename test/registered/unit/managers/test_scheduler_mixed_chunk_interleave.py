@@ -33,6 +33,7 @@ class TestMixedChunkDecodeInterleave(CustomTestCase):
         self.scheduler.mixed_chunk_decode_steps_remaining = 0
         self.scheduler.is_mixed_chunk = True
         self.scheduler.chunked_req = None
+        self.scheduler.waiting_queue = []
 
     def test_runs_configured_decode_steps_after_extend(self):
         self.scheduler._update_mixed_chunk_decode_interleave_budget(_batch(extend=True))
@@ -57,6 +58,30 @@ class TestMixedChunkDecodeInterleave(CustomTestCase):
         self.assertFalse(
             self.scheduler._should_interleave_mixed_chunk_decode(_running_batch())
         )
+
+    def test_deep_waiting_queue_caps_decode_window(self):
+        self.scheduler.mixed_chunk_decode_interleave_steps = 4
+        self.scheduler.waiting_queue = [MagicMock() for _ in range(4)]
+
+        self.scheduler._update_mixed_chunk_decode_interleave_budget(_batch(extend=True))
+
+        self.assertEqual(self.scheduler.mixed_chunk_decode_steps_remaining, 2)
+
+    def test_shallow_waiting_queue_uses_configured_window(self):
+        self.scheduler.mixed_chunk_decode_interleave_steps = 4
+        self.scheduler.waiting_queue = [MagicMock() for _ in range(3)]
+
+        self.scheduler._update_mixed_chunk_decode_interleave_budget(_batch(extend=True))
+
+        self.assertEqual(self.scheduler.mixed_chunk_decode_steps_remaining, 4)
+
+    def test_deep_queue_does_not_increase_small_configured_window(self):
+        self.scheduler.mixed_chunk_decode_interleave_steps = 1
+        self.scheduler.waiting_queue = [MagicMock() for _ in range(8)]
+
+        self.scheduler._update_mixed_chunk_decode_interleave_budget(_batch(extend=True))
+
+        self.assertEqual(self.scheduler.mixed_chunk_decode_steps_remaining, 1)
 
     def test_active_chunked_request_continues_prefill(self):
         self.scheduler.mixed_chunk_decode_steps_remaining = 2
