@@ -88,6 +88,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     EvictParams,
     MatchPrefixParams,
     zero_match_result,
+    zero_short_match_result,
 )
 from sglang.srt.mem_cache.common import (
     evict_from_tree_cache,
@@ -1181,6 +1182,7 @@ class Req(ReqDllmMixin):
         self,
         tree_cache: Optional[BasePrefixCache] = None,
         cow_mamba: Optional[bool] = None,
+        min_prefix_cache_len: int = 0,
     ):
         if self.is_dllm():
             self._init_fill_ids_for_dllm()
@@ -1251,6 +1253,10 @@ class Req(ReqDllmMixin):
             )
             if envs.SGLANG_RADIX_FORCE_MISS.get():
                 match_result = zero_match_result(tree_cache, match_result)
+            elif min_prefix_cache_len > 0:
+                match_result = zero_short_match_result(
+                    tree_cache, match_result, min_prefix_cache_len
+                )
             (
                 self.prefix_indices,
                 self.last_node,

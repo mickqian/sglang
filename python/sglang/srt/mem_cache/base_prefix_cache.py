@@ -205,7 +205,18 @@ def zero_match_result(tree_cache, match_result: MatchResult) -> MatchResult:
         host_hit_length=0,
         swa_host_hit_length=0,
         mamba_host_hit_length=0,
+        cache_protected_len=0,
     )
+
+
+def zero_short_match_result(
+    tree_cache, match_result: MatchResult, min_prefix_len: int
+) -> MatchResult:
+    """Discard a cache hit that is too short to justify a specialized path."""
+    matched_len = len(match_result.device_indices) + match_result.host_hit_length
+    if 0 < matched_len < min_prefix_len:
+        return zero_match_result(tree_cache, match_result)
+    return match_result
 
 
 class BasePrefixCache(ABC, PrefixCacheTrait):

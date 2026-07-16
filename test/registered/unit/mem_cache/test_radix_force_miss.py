@@ -22,6 +22,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
     zero_match_result,
+    zero_short_match_result,
 )
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 
@@ -58,6 +59,7 @@ class TestZeroMatchResult(unittest.TestCase):
         self.assertIs(zeroed.last_host_node, tree.root_node)
         self.assertIs(zeroed.best_match_node, tree.root_node)
         self.assertEqual(zeroed.host_hit_length, 0)
+        self.assertEqual(zeroed.cache_protected_len, 0)
         # dtype/device preserved (slice-not-allocate).
         self.assertEqual(zeroed.device_indices.dtype, match.device_indices.dtype)
         self.assertEqual(zeroed.device_indices.device, match.device_indices.device)
@@ -75,6 +77,30 @@ class TestZeroMatchResult(unittest.TestCase):
             host_hit_length=0,
         )
         self.assertIs(zero_match_result(_StubChunkCache(), original), original)
+
+    def test_zero_short_match_preserves_large_hit(self):
+        tree = RadixCache.create_simulated()
+        tree.insert(InsertParams(key=RadixKey(token_ids=array("q", range(16)))))
+        match = tree.match_prefix(
+            MatchPrefixParams(key=RadixKey(token_ids=array("q", range(12))))
+        )
+
+        self.assertEqual(
+            len(zero_short_match_result(tree, match, min_prefix_len=8).device_indices),
+            12,
+        )
+
+    def test_zero_short_match_discards_small_hit(self):
+        tree = RadixCache.create_simulated()
+        tree.insert(InsertParams(key=RadixKey(token_ids=array("q", range(16)))))
+        match = tree.match_prefix(
+            MatchPrefixParams(key=RadixKey(token_ids=array("q", range(4))))
+        )
+
+        zeroed = zero_short_match_result(tree, match, min_prefix_len=8)
+
+        self.assertEqual(len(zeroed.device_indices), 0)
+        self.assertIs(zeroed.last_device_node, tree.root_node)
 
 
 class TestMatchPrefixForReqForceMiss(unittest.TestCase):

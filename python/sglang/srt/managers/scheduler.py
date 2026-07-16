@@ -289,6 +289,8 @@ else:
 
 logger = logging.getLogger(__name__)
 
+_KIMI_BREAKABLE_GRAPH_MIN_PREFIX_CACHE_LEN = 64
+
 # Test retract decode for debugging purposes
 TEST_RETRACT = envs.SGLANG_TEST_RETRACT.get()
 TEST_RETRACT_INTERVAL = envs.SGLANG_TEST_RETRACT_INTERVAL.get()
@@ -1005,6 +1007,20 @@ class Scheduler(
             self.server_args.mixed_chunk_decode_interleave_steps
         )
         self.mixed_chunk_decode_steps_remaining = 0
+        self.prefill_graph_min_prefix_cache_len = 0
+        if (
+            self.server_args.cuda_graph_config.prefill.backend == "breakable"
+            and "KimiK25ForConditionalGeneration"
+            in (self.model_config.hf_config.architectures or [])
+        ):
+            self.prefill_graph_min_prefix_cache_len = (
+                _KIMI_BREAKABLE_GRAPH_MIN_PREFIX_CACHE_LEN
+            )
+            logger.info(
+                "Ignoring radix-cache hits shorter than %d tokens so Kimi "
+                "prefills remain eligible for breakable CUDA graph replay.",
+                self.prefill_graph_min_prefix_cache_len,
+            )
 
         # Init the dynamic chunking predictor for PP
         self.enable_dynamic_chunking = (
@@ -2303,7 +2319,11 @@ class Scheduler(
 
     def _prefetch_kvcache(self, req: Req):
         if self.enable_hicache_storage:
-            req.init_next_round_input(self.tree_cache, cow_mamba=False)
+            req.init_next_round_input(
+                self.tree_cache,
+                cow_mamba=False,
+                min_prefix_cache_len=self.prefill_graph_min_prefix_cache_len,
+            )
             last_host_node = req.last_host_node
             if last_host_node.backuped or last_host_node is self.tree_cache.root_node:
                 last_hash = last_host_node.get_last_hash_value()
@@ -2958,7 +2978,10 @@ class Scheduler(
                 if loaded_tokens > 0:
                     req.storage_hit_length = loaded_tokens
 
-            req.init_next_round_input(self.tree_cache)
+            req.init_next_round_input(
+                self.tree_cache,
+                min_prefix_cache_len=self.prefill_graph_min_prefix_cache_len,
+            )
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),
