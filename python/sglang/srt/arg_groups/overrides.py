@@ -890,7 +890,14 @@ def _nemotron_h_overrides(server_args: Any, hf_config: Any) -> dict:
     "Qwen3_5ForConditionalGeneration",
 )
 def _qwen3_5_hybrid_overrides(server_args: Any, hf_config: Any) -> dict:
-    if not is_sm100_supported() or server_args.attention_backend is not None:
+    if not is_sm100_supported() or any(
+        getattr(server_args, field, None) is not None
+        for field in (
+            "attention_backend",
+            "prefill_attention_backend",
+            "decode_attention_backend",
+        )
+    ):
         return {}
     sm100_default_attn_backend = "triton"
     # trtllm_mha requires speculative_eagle_topk == 1 and page_size > 1.
@@ -905,11 +912,21 @@ def _qwen3_5_hybrid_overrides(server_args: Any, hf_config: Any) -> dict:
     # The mamba radix-cache pass runs before this dispatch: read the
     # declared strategy through the view (the legacy branch observed the
     # already-written field here).
-    if default_attn_backend == "trtllm_mha" and not (
+    use_trtllm_mha = default_attn_backend == "trtllm_mha" and not (
         not mamba_extra_buffer_of(resolved_view(server_args))
         and not server_args.disable_radix_cache
         and server_args.speculative_algorithm is None
-    ):
+    )
+    if use_trtllm_mha:
+        if server_args.speculative_algorithm is None:
+            # TRT-LLM MHA improves Qwen3.5 prefill on SM100, while Triton is
+            # faster for decode at head_dim=256. Keep the mode-specific choice
+            # coupled to page_size=64, which is valid with extra_buffer.
+            return {
+                "attention_backend": "triton",
+                "prefill_attention_backend": "trtllm_mha",
+                "page_size": 64,
+            }
         sm100_default_attn_backend = "trtllm_mha"
     return {
         "attention_backend": sm100_default_attn_backend,

@@ -1439,6 +1439,8 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         def _args(default_backend, **kw):
             defaults = dict(
                 attention_backend=None,
+                prefill_attention_backend=None,
+                decode_attention_backend=None,
                 _get_default_attn_backend=lambda **_: default_backend,
                 use_mla_backend=lambda: False,
                 get_model_config=lambda: None,
@@ -1469,9 +1471,21 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 ),
                 {},
             )
+            self.assertEqual(
+                _qwen3_5_hybrid_overrides(
+                    _args("trtllm_mha", prefill_attention_backend="fa4"), None
+                ),
+                {},
+            )
+            self.assertEqual(
+                _qwen3_5_hybrid_overrides(
+                    _args("trtllm_mha", decode_attention_backend="fa4"), None
+                ),
+                {},
+            )
             # the mamba pass ran before this dispatch and stashed the
-            # extra-buffer strategy: the callable must see it through the
-            # view (SM100 hybrid keeps trtllm_mha + page 64)
+            # extra-buffer strategy: the callable must see it through the view
+            # (SM100 uses TRT-LLM MHA for prefill with page 64).
             self.assertEqual(
                 _qwen3_5_hybrid_overrides(
                     _args(
@@ -1485,7 +1499,11 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     ),
                     None,
                 ),
-                {"attention_backend": "trtllm_mha", "page_size": 64},
+                {
+                    "attention_backend": "triton",
+                    "prefill_attention_backend": "trtllm_mha",
+                    "page_size": 64,
+                },
             )
         with patch.object(overrides_module, "is_sm100_supported", return_value=False):
             self.assertEqual(_qwen3_5_hybrid_overrides(_args("fa3"), None), {})
