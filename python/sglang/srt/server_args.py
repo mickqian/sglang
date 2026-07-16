@@ -853,8 +853,8 @@ class ServerArgs:
         int,
         "Run up to this many decode-only steps after a mixed-chunk prefill before "
         "scheduling another non-chunked prefill. This can reduce decode stalls "
-        "under concurrent prefill-heavy workloads. The scheduler may shorten "
-        "the window when the waiting queue is deep. Requires "
+        "under concurrent prefill-heavy workloads. The scheduler shortens the "
+        "remaining window when a prefill is waiting. Requires "
         "--enable-mixed-chunk; 0 disables the interleave.",
     ] = 0
 
