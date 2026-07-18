@@ -772,11 +772,12 @@ def _get_chunked_prefill_embedding(
 
         extend_prefix_len = prefix_length[i]
         extend_seq_len = extend_length[i] if i < len(extend_length) else 0
-        if extend_seq_len <= 0:
-            continue
 
         # Skip if all items already prefilled
         if all(offset_end < prefix_length[i] for _, offset_end in items_offset):
+            continue
+
+        if extend_seq_len <= 0:
             continue
 
         # Use per-image path when all items have exactly one offset (already
