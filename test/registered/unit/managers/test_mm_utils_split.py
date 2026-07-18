@@ -18,12 +18,16 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from sglang.srt.managers.mm_utils import (
+from sglang.srt.environ import envs
+from sglang.srt.managers.mm_schedule import (
     PerImageRequestInfo,
     _assemble_per_image_chunk,
     _batch_encode_per_image_misses,
-    _get_chunked_prefill_embedding,
+    get_chunked_prefill_embedding,
+)
+from sglang.srt.managers.mm_utils import (
     _mm_features_consumed_by_forward,
+    get_embedding_chunk,
     get_new_expanded_mm_items,
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
@@ -80,13 +84,9 @@ class TestGetNewExpandedMMItems(CustomTestCase):
                 [torch.full((6, 2), float(item.hash)) for item in items], dim=0
             )
 
-        with patch("sglang.srt.managers.mm_utils.embedding_cache", cache), patch(
-            "sglang.srt.managers.mm_utils._can_skip_pre_embed_feature_move",
-            return_value=True,
-        ):
-            hash_to_embedding = _batch_encode_per_image_misses(
-                encode, requests, torch.device("cpu")
-            )
+        hash_to_embedding = _batch_encode_per_image_misses(
+            encode, requests, torch.device("cpu"), cache
+        )
 
         self.assertEqual(len(calls), 1)
         self.assertEqual([item.hash for item in calls[0]], [11, 22])
@@ -94,6 +94,32 @@ class TestGetNewExpandedMMItems(CustomTestCase):
         second_chunk = _assemble_per_image_chunk(requests[1], hash_to_embedding)
         self.assertTrue(torch.equal(first_chunk, torch.full((6, 2), 11.0)))
         self.assertTrue(torch.equal(second_chunk, torch.full((6, 2), 22.0)))
+
+    def test_cross_request_image_misses_respect_vit_token_budget(self):
+        first = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        second = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        first.hash = 11
+        second.hash = 22
+        requests = [
+            PerImageRequestInfo(0, [first], [(0, 5)], 0, 6),
+            PerImageRequestInfo(1, [second], [(0, 5)], 0, 6),
+        ]
+        cache = SimpleNamespace(get_single=lambda _hash: None, set=lambda *_args: None)
+        calls = []
+
+        def encode(items):
+            calls.append(items)
+            return torch.cat(
+                [torch.full((6, 2), float(item.hash)) for item in items], dim=0
+            )
+
+        with envs.SGLANG_VIT_ENCODE_MAX_TOKENS.override(6):
+            _batch_encode_per_image_misses(encode, requests, torch.device("cpu"), cache)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            [[item.hash for item in batch] for batch in calls], [[11], [22]]
+        )
 
     def test_mm_features_consumed_by_forward_tracks_chunk_boundaries(self):
         item = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
@@ -105,10 +131,11 @@ class TestGetNewExpandedMMItems(CustomTestCase):
 
     def test_prefix_covered_item_acknowledges_deferred_ipc_feature(self):
         item = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        cache = SimpleNamespace()
         with patch(
-            "sglang.srt.managers.mm_utils._acknowledge_deferred_cuda_ipc_cache_hits"
+            "sglang.srt.managers.mm_schedule._acknowledge_deferred_cuda_ipc_cache_hits"
         ) as acknowledge:
-            embedding, input_ids = _get_chunked_prefill_embedding(
+            embedding, input_ids = get_chunked_prefill_embedding(
                 lambda _: torch.empty(0, 4),
                 [item],
                 [0, 1],
@@ -116,6 +143,8 @@ class TestGetNewExpandedMMItems(CustomTestCase):
                 [0],
                 [[(0, 5)]],
                 torch.tensor([1, 2]),
+                embedding_cache=cache,
+                get_embedding_chunk=get_embedding_chunk,
             )
 
         self.assertIsNone(embedding)

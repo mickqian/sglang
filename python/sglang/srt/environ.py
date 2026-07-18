@@ -777,6 +777,10 @@ class Envs:
     SGLANG_MM_BUFFER_SIZE_MB = EnvInt(0)
     SGLANG_MM_PRECOMPUTE_HASH = EnvBool(False)
     SGLANG_VIT_ENABLE_CUDA_GRAPH = EnvBool(False)
+    # Bound cross-request ViT batches by the total number of image tokens.
+    # An image larger than the bound is still encoded alone.  Set to 0 only
+    # when an unbounded batch is known to fit the model's memory budget.
+    SGLANG_VIT_ENCODE_MAX_TOKENS = EnvInt(32768)
     # Use the fully-vectorized ViT position-embedding interpolation (no per-image
     # Python loop / CPU<->GPU sync). Bit-exact with the legacy implementation;
     # set False to fall back to the per-image loop.
