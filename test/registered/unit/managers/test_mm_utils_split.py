@@ -12,11 +12,20 @@ mis-split a degenerate flat grid. No server / GPU / weight loading involved.
 """
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from sglang.srt.managers.mm_utils import get_new_expanded_mm_items
+from sglang.srt.managers.mm_utils import (
+    PerImageRequestInfo,
+    _assemble_per_image_chunk,
+    _batch_encode_per_image_misses,
+    _get_chunked_prefill_embedding,
+    _mm_features_consumed_by_forward,
+    get_new_expanded_mm_items,
+)
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -41,6 +50,78 @@ def _bundled_item(grid_key=None, grid=None, feature_len=10, num_images=2):
 
 
 class TestGetNewExpandedMMItems(CustomTestCase):
+    def test_cross_request_image_misses_share_one_encoder_call(self):
+        first = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        second = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        first.hash = 11
+        second.hash = 22
+        requests = [
+            PerImageRequestInfo(
+                req_idx=0,
+                items=[first],
+                items_offset=[(0, 5)],
+                extend_prefix_len=0,
+                extend_seq_len=6,
+            ),
+            PerImageRequestInfo(
+                req_idx=1,
+                items=[second],
+                items_offset=[(0, 5)],
+                extend_prefix_len=0,
+                extend_seq_len=6,
+            ),
+        ]
+        cache = SimpleNamespace(get_single=lambda _hash: None, set=lambda *_args: None)
+        calls = []
+
+        def encode(items):
+            calls.append(items)
+            return torch.cat(
+                [torch.full((6, 2), float(item.hash)) for item in items], dim=0
+            )
+
+        with patch("sglang.srt.managers.mm_utils.embedding_cache", cache), patch(
+            "sglang.srt.managers.mm_utils._can_skip_pre_embed_feature_move",
+            return_value=True,
+        ):
+            hash_to_embedding = _batch_encode_per_image_misses(
+                encode, requests, torch.device("cpu")
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([item.hash for item in calls[0]], [11, 22])
+        first_chunk = _assemble_per_image_chunk(requests[0], hash_to_embedding)
+        second_chunk = _assemble_per_image_chunk(requests[1], hash_to_embedding)
+        self.assertTrue(torch.equal(first_chunk, torch.full((6, 2), 11.0)))
+        self.assertTrue(torch.equal(second_chunk, torch.full((6, 2), 22.0)))
+
+    def test_mm_features_consumed_by_forward_tracks_chunk_boundaries(self):
+        item = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        mm_inputs = SimpleNamespace(mm_items=[item])
+
+        self.assertTrue(_mm_features_consumed_by_forward([mm_inputs], [0], [6]))
+        self.assertTrue(_mm_features_consumed_by_forward([mm_inputs], [6], [0]))
+        self.assertFalse(_mm_features_consumed_by_forward([mm_inputs], [0], [3]))
+
+    def test_prefix_covered_item_acknowledges_deferred_ipc_feature(self):
+        item = _bundled_item(grid_key="image_grid_hws", grid=[[1, 1]], num_images=1)
+        with patch(
+            "sglang.srt.managers.mm_utils._acknowledge_deferred_cuda_ipc_cache_hits"
+        ) as acknowledge:
+            embedding, input_ids = _get_chunked_prefill_embedding(
+                lambda _: torch.empty(0, 4),
+                [item],
+                [0, 1],
+                [10],
+                [0],
+                [[(0, 5)]],
+                torch.tensor([1, 2]),
+            )
+
+        self.assertIsNone(embedding)
+        self.assertEqual(input_ids.tolist(), [1, 2])
+        acknowledge.assert_called_once_with([item])
+
     def test_image_grid_hws_splits_per_image(self):
         # grid rows [[2,3],[4,1]] -> prod = [6, 4] patches -> feature_len 10.
         item = _bundled_item(
