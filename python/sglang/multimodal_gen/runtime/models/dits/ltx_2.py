@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -58,6 +59,14 @@ ADALN_NUM_BASE_PARAMS = 6
 ADALN_NUM_CROSS_ATTN_PARAMS = 3
 _LTX2_RESIDUAL_GATE_CUDA_DISABLED = False
 _LTX2_QKNORM_SPLIT_ROPE_CUDA_DISABLED = False
+
+
+def _ltx2_use_naive_sp_kv_gather() -> bool:
+    """Enable the all-gather K/V SP baseline for parallelism experiments only."""
+    return (
+        os.environ.get("SGLANG_LTX2_SP_ATTN_MODE") == "kv_gather"
+        and get_sp_world_size() > 1
+    )
 
 
 def _ltx2_residual_gate_add(
@@ -1225,7 +1234,9 @@ class LTX2TransformerBlock(nn.Module):
             pe=video_rotary_emb,
             perturbation_mask=video_self_attn_perturbation_mask,
             all_perturbed=skip_video_self_attn,
-            gather_context_kv_for_sp=audio_replicated_for_sp,
+            gather_context_kv_for_sp=(
+                audio_replicated_for_sp or _ltx2_use_naive_sp_kv_gather()
+            ),
             context_replicated_prefix_len=video_memory_prefix_len,
         )
         hidden_states = _ltx2_residual_gate_add(
@@ -1248,6 +1259,7 @@ class LTX2TransformerBlock(nn.Module):
             pe=audio_rotary_emb,
             perturbation_mask=audio_self_attn_perturbation_mask,
             all_perturbed=skip_audio_self_attn,
+            gather_context_kv_for_sp=_ltx2_use_naive_sp_kv_gather(),
             skip_sequence_parallel_override=audio_replicated_for_sp,
         )
         audio_hidden_states = _ltx2_residual_gate_add(
@@ -1404,6 +1416,7 @@ class LTX2TransformerBlock(nn.Module):
                 pe=ca_video_rotary_emb,
                 k_pe=ca_audio_rotary_emb,
                 mask=a2v_cross_attention_mask,
+                gather_context_kv_for_sp=_ltx2_use_naive_sp_kv_gather(),
                 skip_sequence_parallel_override=audio_replicated_for_sp,
             )
             if a2v_cross_attn_perturbation_mask is not None:
@@ -1429,7 +1442,9 @@ class LTX2TransformerBlock(nn.Module):
                 pe=ca_audio_rotary_emb,
                 k_pe=ca_video_rotary_emb,
                 mask=v2a_cross_attention_mask,
-                gather_context_kv_for_sp=audio_replicated_for_sp,
+                gather_context_kv_for_sp=(
+                    audio_replicated_for_sp or _ltx2_use_naive_sp_kv_gather()
+                ),
                 context_replicated_prefix_len=video_memory_prefix_len,
             )
             if v2a_cross_attn_perturbation_mask is not None:
