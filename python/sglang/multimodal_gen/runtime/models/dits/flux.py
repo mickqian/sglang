@@ -310,10 +310,14 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
         pre_only: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        rope_dim: Optional[int] = None,
     ):
         super().__init__()
 
         self.head_dim = dim_head
+        # cos/sin cache width as a Python int; keeps the fused qk-norm-rope gate
+        # foldable under torch.compile (see apply_qk_norm_rope)
+        self.rope_dim = rope_dim
         self.inner_dim = out_dim if out_dim is not None else dim_head * num_heads
         self.query_dim = query_dim
         self.use_bias = bias
@@ -501,6 +505,7 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
                 cos_sin_cache=cos_sin_cache,
                 is_neox=False,
                 allow_inplace=True,
+                rope_dim=self.rope_dim,
             )
             query, key = apply_qk_norm_with_optional_rope(
                 q=query,
@@ -512,6 +517,7 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
                 is_neox=False,
                 position_offset=text_seq_len,
                 allow_inplace=True,
+                rope_dim=self.rope_dim,
             )
 
             # join_seqs relocates any SP text tail-pad behind the image (see
@@ -530,6 +536,7 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
                 cos_sin_cache=cos_sin_cache,
                 is_neox=False,
                 allow_inplace=True,
+                rope_dim=self.rope_dim,
             )
 
         x = self.attn(
@@ -568,6 +575,7 @@ class FluxSingleTransformerBlock(nn.Module):
         dim: int,
         num_attention_heads: int,
         attention_head_dim: int,
+        rope_dim: Optional[int] = None,
         mlp_ratio: float = 4.0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -603,6 +611,7 @@ class FluxSingleTransformerBlock(nn.Module):
             self.attn = FluxAttention(
                 query_dim=dim,
                 dim_head=attention_head_dim,
+                rope_dim=rope_dim,
                 num_heads=num_attention_heads,
                 out_dim=dim,
                 bias=True,
@@ -645,6 +654,7 @@ class FluxSingleTransformerBlock(nn.Module):
             self.attn = FluxAttention(
                 query_dim=dim,
                 dim_head=attention_head_dim,
+                rope_dim=rope_dim,
                 num_heads=num_attention_heads,
                 out_dim=dim,
                 bias=True,
@@ -754,6 +764,7 @@ class FluxTransformerBlock(nn.Module):
         dim: int,
         num_attention_heads: int,
         attention_head_dim: int,
+        rope_dim: Optional[int] = None,
         qk_norm: str = "rms_norm",
         eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
@@ -768,6 +779,7 @@ class FluxTransformerBlock(nn.Module):
             query_dim=dim,
             added_kv_proj_dim=dim,
             dim_head=attention_head_dim,
+            rope_dim=rope_dim,
             num_heads=num_attention_heads,
             out_dim=dim,
             context_pre_only=False,
@@ -1020,6 +1032,7 @@ class FluxTransformer2DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
                     dim=self.inner_dim,
                     num_attention_heads=self.config.num_attention_heads,
                     attention_head_dim=self.config.attention_head_dim,
+                    rope_dim=2 * self.rotary_emb.rope.embed_width,
                     quant_config=quant_config,
                     prefix=f"transformer_blocks.{i}",
                 )
@@ -1033,6 +1046,7 @@ class FluxTransformer2DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
                     dim=self.inner_dim,
                     num_attention_heads=self.config.num_attention_heads,
                     attention_head_dim=self.config.attention_head_dim,
+                    rope_dim=2 * self.rotary_emb.rope.embed_width,
                     quant_config=quant_config,
                     prefix=f"single_transformer_blocks.{i}",
                 )

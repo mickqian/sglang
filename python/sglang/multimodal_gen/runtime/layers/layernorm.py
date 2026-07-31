@@ -865,6 +865,7 @@ def apply_qk_norm_with_optional_rope(
     positions: Optional[torch.Tensor] = None,
     position_offset: int = 0,
     allow_inplace: bool = True,
+    rope_dim: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply QK RMSNorm and optionally RoPE when a cos/sin cache is provided."""
 
@@ -889,6 +890,7 @@ def apply_qk_norm_with_optional_rope(
         positions=positions,
         position_offset=position_offset,
         allow_inplace=allow_inplace,
+        rope_dim=rope_dim,
     )
 
 
@@ -904,8 +906,18 @@ def apply_qk_norm_rope(
     positions: Optional[torch.Tensor] = None,
     position_offset: int = 0,
     allow_inplace: bool = True,
+    rope_dim: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply QK RMSNorm followed by RoPE, fusing both on supported CUDA shapes."""
+    """Apply QK RMSNorm followed by RoPE, fusing both on supported CUDA shapes.
+
+    `rope_dim` is the cos/sin cache width as a Python int, known at construction
+    from the rope config. Pass it to keep the fused kernel under torch.compile:
+    the capability gate is `assume_constant_result`, which cannot fold the SymInt
+    that `cos_sin_cache.size(-1)` becomes inside a compiled region -- measured
+    under both `dynamic=True` and the default, and the symbolic case cannot be
+    detected from traced code (`isinstance(d, int)` is True for a SymInt) nor
+    caught, since the error comes from the compile layer.
+    """
 
     from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
         apply_flashinfer_rope_qk_inplace,
@@ -931,7 +943,17 @@ def apply_qk_norm_rope(
     batch_size, seq_len, _, _ = q.shape
     q_eps = q_norm.variance_epsilon
     k_eps = k_norm.variance_epsilon
-    rope_dim = cos_sin_cache.size(-1)
+    rope_dim_is_static = rope_dim is not None
+    if rope_dim is None:
+        rope_dim = cos_sin_cache.size(-1)
+    elif not torch.compiler.is_compiling():
+        # the static width is only trustworthy if it matches the tensor; eager
+        # covers every model, so a wrong constant cannot reach a compiled run
+        actual = cos_sin_cache.size(-1)
+        if rope_dim != actual:
+            raise ValueError(
+                f"rope_dim={rope_dim} does not match cos_sin_cache width {actual}"
+            )
     if rope_dim % 2 != 0 or rope_dim > head_dim:
         raise ValueError(
             f"cos_sin_cache width must be even and <= head_dim, got {rope_dim} vs {head_dim}"
@@ -961,7 +983,9 @@ def apply_qk_norm_rope(
     if (
         fused_enabled
         and _is_cuda
-        and not torch.compiler.is_compiling()
+        # under compile the gate needs both dims as real ints; head_dim already
+        # comes from module state, so this hinges on the caller's rope_dim
+        and (rope_dim_is_static or not torch.compiler.is_compiling())
         and allow_inplace
         and (q_eps == k_eps)
         and q.dtype in (torch.float16, torch.bfloat16)

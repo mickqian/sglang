@@ -338,6 +338,15 @@ class NDRotaryEmbedding(torch.nn.Module):
             gen_idx = _config_to_gen_idx[config_key]
             self.dim_idx_to_gen_idx.append(gen_idx)
 
+        # width of each of cos/sin, resolved here so callers have it as a Python
+        # int: reading it off the produced tensor is a SymInt under torch.compile,
+        # which the fused qk-norm-rope gate cannot fold (see apply_qk_norm_rope)
+        self.embed_width = (
+            sum(self.rope_dim_list)
+            if use_real and repeat_interleave_real
+            else sum(self.rope_dim_list) // 2
+        )
+
     def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Calculates n-d rotary embeddings for given absolute positions.
@@ -375,11 +384,7 @@ class NDRotaryEmbedding(torch.nn.Module):
 
         # Pre-allocate the final tensors for efficiency.
         num_tokens = pos.shape[0]
-        first_generator = self.rope_generators[0]
-        if first_generator.use_real and first_generator.repeat_interleave_real:
-            head_dim = sum(self.rope_dim_list)
-        else:
-            head_dim = sum(self.rope_dim_list) // 2
+        head_dim = self.embed_width
 
         cos = torch.empty((num_tokens, head_dim), device=device, dtype=self.dtype)
         sin = torch.empty((num_tokens, head_dim), device=device, dtype=self.dtype)
