@@ -2155,9 +2155,9 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         Sparse backends (STA/VSA/SVG2/VMoBA/block-sparse/rain-fusion) rebuild
         their attention metadata every step — a replay would reuse step 0's
         block layout — and Cache-DiT decides per step whether to skip blocks,
-        which cannot be baked into one graph. A sharded run puts NCCL
-        collectives inside the captured region, which hang on replay. All three
-        keep eager."""
+        which cannot be baked into one graph. Both keep eager. A sharded run is
+        allowed only once its in-forward collectives come from a transport a
+        graph can replay."""
         if self.server_args.dit_cuda_graph != "full" or self._bcg_is_warmup():
             return False
         if self._cache_dit_enabled:
@@ -2169,21 +2169,44 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
                 "per-step metadata"
             )
             return False
-        if get_sp_world_size() > 1 or get_tp_world_size() > 1:
-            # A NCCL collective recorded into the graph deadlocks on replay:
-            # ProcessGroupNCCL bakes its per-op sequence number into the
-            # capture, so replayed kernels no longer match the peer's. (This is
-            # why BCG splits its segments at attention instead.) Whole-forward
-            # capture therefore needs every in-forward collective to come from a
-            # capture-safe transport; until one is wired up, sharded runs stay
-            # eager. Measured on 2xH100 Ulysses: both ranks hang in
-            # graph.replay() with the NCCL all-to-all captured.
+        if get_tp_world_size() > 1:
+            # TP puts an all-reduce inside every block. Unlike the sequence
+            # all-to-all there is no capture-safe route wired for it here yet:
+            # srt's custom all-reduce covers the tensor-parallel group, not this
+            # forward's own collectives.
             self._fcg_log_skip(
-                f"sp={get_sp_world_size()} tp={get_tp_world_size()}: NCCL "
-                "collectives inside the forward are not replay-safe"
+                f"tp={get_tp_world_size()}: the per-block all-reduce is not "
+                "replay-safe"
+            )
+            return False
+        if get_sp_world_size() > 1 and not self._fcg_prepare_sp_transport():
+            # A ProcessGroupNCCL collective recorded into the graph deadlocks on
+            # replay: its host-side per-op bookkeeping advances once at capture,
+            # so the ranks stop agreeing on which collective is in flight.
+            # Measured on 2xH100 Ulysses: both ranks hang in graph.replay().
+            self._fcg_log_skip(
+                f"sp={get_sp_world_size()}: no capture-safe transport for the "
+                "sequence all-to-all"
             )
             return False
         return True
+
+    def _fcg_prepare_sp_transport(self) -> bool:
+        """Make the sequence all-to-all replay-safe, or report that it is not.
+
+        The IPC transport is already both capture-safe and faster, so at two
+        ranks with peer access it needs nothing; otherwise pynccl is built and
+        warmed here, outside any capture. One decision point, so the two
+        transports cannot both be live.
+        """
+        from sglang.multimodal_gen.runtime.distributed.device_communicators.ipc_a2a import (
+            IPC_A2A,
+        )
+        from sglang.multimodal_gen.runtime.layers.usp import prepare_capture_safe_a2a
+
+        if IPC_A2A.inited and not IPC_A2A.failed:
+            return True
+        return prepare_capture_safe_a2a()
 
     def _fcg_log_skip(self, reason: str) -> None:
         if not self._fcg_skip_logged:

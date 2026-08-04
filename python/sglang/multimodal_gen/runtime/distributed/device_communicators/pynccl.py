@@ -241,7 +241,12 @@ class PyNcclCommunicator:
         self.nccl.ncclGroupEnd()
 
     def all_to_all_single(
-        self, output: torch.Tensor, input_: torch.Tensor, stream=None
+        self,
+        output: torch.Tensor,
+        input_: torch.Tensor,
+        output_split_sizes: list[int] | None = None,
+        input_split_sizes: list[int] | None = None,
+        stream=None,
     ) -> None:
         """Equal-split all-to-all, the dist.all_to_all_single equivalent.
 
@@ -257,37 +262,49 @@ class PyNcclCommunicator:
                 "disabled; wrap it in change_state(enable=True)"
             )
         assert output.dtype == input_.dtype, (output.dtype, input_.dtype)
-        assert output.numel() == input_.numel(), (output.numel(), input_.numel())
         assert input_.is_contiguous() and output.is_contiguous()
-        assert input_.numel() % self.world_size == 0, (
-            f"all_to_all_single needs an equal split, got {input_.numel()} "
-            f"elements over {self.world_size} ranks"
-        )
+        if input_split_sizes is None and output_split_sizes is None:
+            assert output.numel() == input_.numel(), (
+                output.numel(),
+                input_.numel(),
+            )
+            assert input_.numel() % self.world_size == 0, (
+                f"all_to_all_single without split sizes needs an equal split, "
+                f"got {input_.numel()} elements over {self.world_size} ranks"
+            )
         if stream is None:
             stream = current_stream()
         chunk = input_.numel() // self.world_size
+        send_counts = input_split_sizes or [chunk] * self.world_size
+        recv_counts = output_split_sizes or [chunk] * self.world_size
+        assert len(send_counts) == len(recv_counts) == self.world_size
+        assert sum(send_counts) == input_.numel(), (sum(send_counts), input_.numel())
+        assert sum(recv_counts) == output.numel(), (sum(recv_counts), output.numel())
         send = input_.view(-1)
         recv = output.view(-1)
         dtype = ncclDataTypeEnum.from_torch(input_.dtype)
         itemsize = input_.element_size()
+        send_off = recv_off = 0
         self.nccl.ncclGroupStart()
         for peer in range(self.world_size):
             self.nccl.ncclSend(
-                buffer_type(send.data_ptr() + peer * chunk * itemsize),
-                chunk,
+                buffer_type(send.data_ptr() + send_off * itemsize),
+                send_counts[peer],
                 dtype,
                 peer,
                 self.comm,
                 cudaStream_t(stream.cuda_stream),
             )
             self.nccl.ncclRecv(
-                buffer_type(recv.data_ptr() + peer * chunk * itemsize),
-                chunk,
+                buffer_type(recv.data_ptr() + recv_off * itemsize),
+                recv_counts[peer],
                 dtype,
                 peer,
                 self.comm,
                 cudaStream_t(stream.cuda_stream),
             )
+            send_off += send_counts[peer]
+            recv_off += recv_counts[peer]
         self.nccl.ncclGroupEnd()
 
     @contextmanager

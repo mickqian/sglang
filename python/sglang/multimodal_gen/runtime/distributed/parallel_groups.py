@@ -16,6 +16,9 @@ class Singleton:
 class ProcessGroupSingleton(Singleton):
     def __init__(self):
         self.ULYSSES_PG = None
+        # gloo mirror of ULYSSES_PG; a capture-safe pynccl all-to-all needs a
+        # non-NCCL group to broadcast its unique id over
+        self.ULYSSES_CPU_PG = None
         self.RING_PG = None
 
 
@@ -48,6 +51,7 @@ def set_seq_parallel_pg_by_sp_groups(
     ), f"Each SP group must have size {sp_degree}, got sizes {[len(g) for g in sp_groups]}"
 
     ulyssess_pg = None
+    ulysses_cpu_pg = None
     ring_pg = None
 
     num_ulysses_pgs = sp_ring_degree
@@ -63,8 +67,10 @@ def set_seq_parallel_pg_by_sp_groups(
                 idx = list(range(i * sp_ulysses_degree, (i + 1) * sp_ulysses_degree))
                 ulysses_ranks = _map_indices_to_ranks(sp_ranks, idx)
                 group = torch.distributed.new_group(ulysses_ranks)
+                cpu_group = torch.distributed.new_group(ulysses_ranks, backend="gloo")
                 if rank in ulysses_ranks:
                     ulyssess_pg = group
+                    ulysses_cpu_pg = cpu_group
 
             for i in range(num_ring_pgs):
                 idx = list(range(i, sp_degree, num_ring_pgs))
@@ -84,8 +90,11 @@ def set_seq_parallel_pg_by_sp_groups(
                 idx = list(range(i, sp_degree, num_ulysses_pgs))
                 ulysses_ranks = _map_indices_to_ranks(sp_ranks, idx)
                 group = torch.distributed.new_group(ulysses_ranks)
+                cpu_group = torch.distributed.new_group(ulysses_ranks, backend="gloo")
                 if rank in ulysses_ranks:
                     ulyssess_pg = group
+                    ulysses_cpu_pg = cpu_group
 
     PROCESS_GROUP.ULYSSES_PG = ulyssess_pg
+    PROCESS_GROUP.ULYSSES_CPU_PG = ulysses_cpu_pg
     PROCESS_GROUP.RING_PG = ring_pg

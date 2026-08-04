@@ -39,15 +39,72 @@ def _maybe_wait(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+_ULYSSES_PYNCCL = None
+
+
+def _capture_safe_a2a():
+    """The prepared pynccl communicator for the ulysses group, or None.
+
+    A CUDA graph cannot hold a ProcessGroupNCCL collective: its host-side per-op
+    bookkeeping advances once at capture, so replays leave the ranks disagreeing
+    about which collective is in flight and they hang. Raw nccl through pynccl
+    carries no such state. This only reads what prepare_capture_safe_a2a() built
+    -- creating a communicator broadcasts a unique id, which capture forbids.
+
+    An all-to-all is a permutation, never a reduction, so which transport
+    carries it cannot change the result.
+    """
+    return _ULYSSES_PYNCCL or None
+
+
+def prepare_capture_safe_a2a() -> bool:
+    """Build and warm the transport a captured all-to-all needs. Outside capture.
+
+    Called only by the full-forward graph path, so a run that never captures
+    pays for no extra communicator.
+    """
+    global _ULYSSES_PYNCCL
+    if _ULYSSES_PYNCCL is not None:
+        return bool(_ULYSSES_PYNCCL)
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("prepare_capture_safe_a2a must run outside capture")
+
+    from sglang.multimodal_gen.runtime.distributed.device_communicators.pynccl import (
+        PyNcclCommunicator,
+    )
+    from sglang.multimodal_gen.runtime.distributed.parallel_groups import PROCESS_GROUP
+
+    cpu_group = PROCESS_GROUP.ULYSSES_CPU_PG
+    if cpu_group is None:
+        _ULYSSES_PYNCCL = False
+        return False
+    comm = PyNcclCommunicator(group=cpu_group, device=torch.cuda.current_device())
+    if not comm.available:
+        _ULYSSES_PYNCCL = False
+        return False
+    # NCCL brings up its send/recv channels on first use, which has to happen
+    # here rather than inside the recording
+    probe = torch.zeros(comm.world_size, dtype=torch.bfloat16, device="cuda")
+    comm.all_to_all_single(torch.empty_like(probe), probe)
+    torch.cuda.current_stream().synchronize()
+    _ULYSSES_PYNCCL = comm
+    return True
+
+
 def _usp_all_to_all_single(x: torch.Tensor) -> torch.Tensor:
     ulysses_pg = get_sp_group().ulysses_group
     assert ulysses_pg is not None, "Ulysses process group is not initialized."
     x_shape = x.shape
     x = x.flatten().contiguous()
     output = torch.empty_like(x)
-    # USP calls this collective many times per denoising step and waits
-    # immediately, so avoid the extra wrapper overhead of functional collectives.
-    torch.distributed.all_to_all_single(output, x, group=ulysses_pg)
+    comm = _capture_safe_a2a() if torch.cuda.is_current_stream_capturing() else None
+    if comm is not None:
+        comm.all_to_all_single(output, x)
+    else:
+        # USP calls this collective many times per denoising step and waits
+        # immediately, so avoid the extra wrapper overhead of functional
+        # collectives.
+        torch.distributed.all_to_all_single(output, x, group=ulysses_pg)
     return output.reshape(x_shape)
 
 
@@ -60,6 +117,12 @@ def _usp_all_to_all_single_varlen(
     assert ulysses_pg is not None, "Ulysses process group is not initialized."
     x = x.flatten().contiguous()
     output = torch.empty(sum(output_split_sizes), dtype=x.dtype, device=x.device)
+    comm = _capture_safe_a2a() if torch.cuda.is_current_stream_capturing() else None
+    if comm is not None:
+        comm.all_to_all_single(
+            output, x, list(output_split_sizes), list(input_split_sizes)
+        )
+        return output
     dist.all_to_all_single(
         output,
         x,
