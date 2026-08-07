@@ -369,6 +369,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.causal = causal
         self.softmax_scale = softmax_scale
+        self.window_size = tuple(extra_impl_args.get("window_size", (-1, -1)))
         self.attention_metadata = FlashAttentionMetadata()
 
     def forward(
@@ -406,6 +407,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.softmax_scale,
                 causal=self.causal,
+                window_size=self.window_size,
                 return_softmax_lse=return_softmax_lse,
                 ver=fa_ver,
             )
@@ -423,6 +425,7 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=max_seqlen_k,
                     softmax_scale=self.softmax_scale,
                     causal=self.causal,
+                    window_size=list(self.window_size),
                     return_softmax_lse=True,
                     ver=fa_ver,
                 )
@@ -437,6 +440,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.softmax_scale,
                 causal=self.causal,
+                window_size=list(self.window_size),
                 return_softmax_lse=False,
                 ver=fa_ver,
             )
@@ -465,6 +469,7 @@ class FlashAttentionImpl(AttentionImpl):
             max_seqlen_k=max_seqlen,
             softmax_scale=self.softmax_scale,
             causal=self.causal,
+            window_size=self.window_size,
             ver=fa_ver,
         )
         return output[0] if isinstance(output, tuple) else output

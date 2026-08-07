@@ -27,6 +27,7 @@ from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loa
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     LayerwiseOffloadableModuleMixin,
 )
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.common import add_prefix
 
 logger = logging.getLogger(__name__)
@@ -223,16 +224,18 @@ class Gemma3Attention(nn.Module):
             is_neox_style=True,
         )
 
-        # Local Attention not support attention mask, we use global attention instead.
-        # self.attn = LocalAttention(
-        #     self.num_heads,
-        #     self.head_dim,
-        #     self.num_kv_heads,
-        #     softmax_scale=self.scaling,
-        #     causal=True,
-        #     supported_attention_backends=config._supported_attention_backends,
-        #     window_size=self.window_size,
-        # )
+        self.attn = LocalAttention(
+            self.num_heads,
+            self.head_dim,
+            self.num_kv_heads,
+            softmax_scale=self.scaling,
+            causal=True,
+            supported_attention_backends={
+                AttentionBackendEnum.FA,
+                AttentionBackendEnum.TORCH_SDPA,
+            },
+            window_size=self.window_size,
+        )
 
         # Gemma3 adds normalization for q and k
         self.q_norm = Gemma3RMSNorm(
@@ -284,7 +287,30 @@ class Gemma3Attention(nn.Module):
         q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
-        # TODO(FlamingoPg): Support LocalAttention
+        if self.attn.backend == AttentionBackendEnum.FA:
+            valid_tokens = attention_mask.to(device=q.device, dtype=torch.bool)
+            packed_q = q[valid_tokens]
+            packed_k = k[valid_tokens]
+            packed_v = v[valid_tokens]
+            sequence_lengths = valid_tokens.sum(dim=1, dtype=torch.int32)
+            cu_seqlens = torch.nn.functional.pad(
+                sequence_lengths.cumsum(dim=0, dtype=torch.int32), (1, 0)
+            )
+            packed_output = self.attn.forward_varlen(
+                packed_q,
+                packed_k,
+                packed_v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=seq_len,
+            )
+            attn_output = torch.zeros_like(q)
+            attn_output[valid_tokens] = packed_output
+            attn_output = attn_output.reshape(
+                batch_size, seq_len, self.num_heads * self.head_dim
+            )
+            output, _ = self.o_proj(attn_output)
+            return output
+
         query = q.transpose(1, 2)
         key = k.transpose(1, 2)
         value = v.transpose(1, 2)

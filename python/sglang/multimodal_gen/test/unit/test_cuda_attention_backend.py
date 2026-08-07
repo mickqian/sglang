@@ -3,6 +3,9 @@ from unittest.mock import patch
 
 import torch
 
+from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
+    FlashAttentionImpl,
+)
 from sglang.multimodal_gen.runtime.platforms.cuda import CudaPlatformBase
 from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
 
@@ -107,6 +110,34 @@ class TestCudaAttentionBackendSelection(unittest.TestCase):
     def test_invalid_backend_raises(self):
         with self.assertRaisesRegex(ValueError, "Invalid attention backend"):
             self.resolve(AttentionBackendEnum.AITER_SAGE)
+
+
+class TestFlashAttentionImpl(unittest.TestCase):
+    @patch(
+        "sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn.flash_attn_varlen_func"
+    )
+    def test_varlen_forwards_window_size(self, flash_attn_varlen_func):
+        query = torch.zeros(3, 2, 64, dtype=torch.float16)
+        flash_attn_varlen_func.return_value = query
+        impl = FlashAttentionImpl(
+            num_heads=2,
+            head_size=64,
+            causal=True,
+            softmax_scale=0.125,
+            window_size=(31, 0),
+        )
+
+        impl.forward_varlen(
+            query,
+            query,
+            query,
+            cu_seqlens=torch.tensor([0, 3], dtype=torch.int32),
+            max_seqlen=3,
+        )
+
+        self.assertEqual(
+            flash_attn_varlen_func.call_args.kwargs["window_size"], (31, 0)
+        )
 
 
 if __name__ == "__main__":

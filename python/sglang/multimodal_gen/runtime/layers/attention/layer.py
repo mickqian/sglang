@@ -640,6 +640,25 @@ class LocalAttention(nn.Module):
         output = self.attn_impl.forward(q, k, v, attn_metadata=ctx_attn_metadata)
         return output
 
+    def forward_varlen(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        cu_seqlens_host: tuple[int, ...] | None = None,
+    ) -> torch.Tensor:
+        return self.attn_impl.forward_varlen(
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            cu_seqlens_host=cu_seqlens_host,
+        )
+
 
 class USPAttention(nn.Module):
     """

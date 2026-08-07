@@ -969,6 +969,17 @@ class TestOffloadDefaults(unittest.TestCase):
                 self.assertEqual(args.ulysses_degree, num_gpus)
                 self.assertEqual(args.ring_degree, 1)
 
+    def test_ltx_explicit_fa_text_encoder_backend_is_preserved(self):
+        args = self._from_dict_with_pipeline_config(
+            LTX2PipelineConfig(),
+            kwargs={
+                "model_path": "Lightricks/LTX-2.3",
+                "component_attention_backends": {"text_encoder": "fa"},
+            },
+        )
+
+        self.assertEqual(args.component_attention_backends["text_encoder"], "fa")
+
     def test_manual_mode_preserves_unset_performance_args(self):
         args = self._from_dict_with_pipeline_config(
             QwenImagePipelineConfig(),
