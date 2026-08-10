@@ -7,7 +7,7 @@ cross-attends from noisy visual tokens to that cache at every denoising step.
 """
 
 import math
-from collections.abc import Iterable, Iterator
+from collections.abc import Hashable, Iterable, Iterator
 from typing import Any
 
 import torch
@@ -1064,6 +1064,7 @@ class Cosmos3OmniTransformer(CachableDiT, LayerwiseOffloadableModuleMixin):
         # prompts, avoiding recomputation on every denoising step
         self.cached_kv: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         self.cached_gen_rope_inputs: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self.cache_signatures: dict[str, Hashable] = {}
 
         self.__post_init__()
 
@@ -1194,12 +1195,22 @@ class Cosmos3OmniTransformer(CachableDiT, LayerwiseOffloadableModuleMixin):
             # Reset all caches
             self.cached_kv = {}
             self.cached_gen_rope_inputs = {}
+            self.cache_signatures = {}
         else:
             # Reset specific cache
             if cache_key in self.cached_kv:
                 del self.cached_kv[cache_key]
             if cache_key in self.cached_gen_rope_inputs:
                 del self.cached_gen_rope_inputs[cache_key]
+            self.cache_signatures.pop(cache_key, None)
+
+    def retain_cache_entries(self, signatures: dict[str, Hashable]) -> None:
+        """Retain branch slots only when their exact request signature matches."""
+        cached_keys = set(self.cached_kv) | set(self.cached_gen_rope_inputs)
+        for cache_key in cached_keys:
+            if self.cache_signatures.get(cache_key) != signatures.get(cache_key):
+                self.reset_cache(cache_key)
+        self.cache_signatures = signatures
 
     def _ensure_cache_dicts(self):
         """Ensure cache dictionaries exist (for backwards compatibility)."""
@@ -1238,9 +1249,7 @@ class Cosmos3OmniTransformer(CachableDiT, LayerwiseOffloadableModuleMixin):
             text_ids: [B, S_text] tokenized text input
             text_mask: [B, S_text] attention mask for text (1=real, 0=pad)
             fps: video frame rate for temporal mRoPE scaling
-            cache_key: Key for the UND K/V cache. Use different keys for
-                conditional ("cond") and unconditional ("uncond") branches
-                in CFG to avoid recomputing the cache every step.
+            cache_key: Branch slot for the UND K/V and GEN RoPE entry.
             noisy_frame_mask: Optional [B, 1, T, 1, 1] mask where 1 marks
                 noisy frames (timestep embedding applied) and 0 marks
                 conditioned frames (clean context, embedding skipped).

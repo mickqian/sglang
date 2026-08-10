@@ -232,10 +232,10 @@ class Cosmos3TokenizationStage(PipelineStage):
         device: torch.device,
         use_system_prompt: bool = False,
         system_prompt: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int, tuple[int, ...]]:
         """Tokenize a prompt using Qwen2 chat template.
 
-        Returns (input_ids, attention_mask, seq_len) as [1, S] tensors.
+        Returns tensors, real sequence length, and the CPU token cache key.
         """
         conversations = []
         if use_system_prompt:
@@ -277,6 +277,7 @@ class Cosmos3TokenizationStage(PipelineStage):
             token_ids.append(vision_start_id)
 
         seq_len = len(token_ids)
+        token_key = tuple(token_ids)
 
         # Pad to max_sequence_length
         pad_len = max_sequence_length - seq_len
@@ -286,7 +287,7 @@ class Cosmos3TokenizationStage(PipelineStage):
 
         input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
         attention_mask = torch.tensor([attention_mask], dtype=torch.long, device=device)
-        return input_ids, attention_mask, seq_len
+        return input_ids, attention_mask, seq_len, token_key
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Tokenize prompt and negative prompt."""
@@ -336,15 +337,17 @@ class Cosmos3TokenizationStage(PipelineStage):
             self.log_info(f"Prompt with duration: '{prompt}'")
 
         # Tokenize prompts
-        cond_ids, cond_mask, cond_seq_len = self._tokenize_prompt(
+        cond_ids, cond_mask, cond_seq_len, cond_token_key = self._tokenize_prompt(
             prompt, max_sequence_length, device, use_system_prompt, system_prompt
         )
-        uncond_ids, uncond_mask, uncond_seq_len = self._tokenize_prompt(
-            negative_prompt,
-            max_sequence_length,
-            device,
-            use_system_prompt,
-            system_prompt,
+        uncond_ids, uncond_mask, uncond_seq_len, uncond_token_key = (
+            self._tokenize_prompt(
+                negative_prompt,
+                max_sequence_length,
+                device,
+                use_system_prompt,
+                system_prompt,
+            )
         )
         # official Cosmos3 consumes packed text; keep a shared length for CFG batching
         shared_seq_len = max(cond_seq_len, uncond_seq_len)
@@ -360,6 +363,8 @@ class Cosmos3TokenizationStage(PipelineStage):
         batch.extra["uncond_text_mask"] = uncond_mask
         batch.extra["cond_text_seq_len"] = cond_seq_len
         batch.extra["uncond_text_seq_len"] = uncond_seq_len
+        batch.extra["cond_text_cache_key"] = cond_token_key
+        batch.extra["uncond_text_cache_key"] = uncond_token_key
         batch.extra["fps"] = fps
 
         # Mark as processed (even though we don't use standard embeddings)
@@ -847,8 +852,7 @@ class Cosmos3DenoisingStage(PipelineStage):
             text_mask: Attention mask for text
             video_shape: (T, H, W) in latent space
             fps: Video frame rate
-            cache_key: Key for the UND K/V cache. Use "cond" for conditional
-                and "uncond" for unconditional to enable cache reuse across steps.
+            cache_key: Branch slot for the UND K/V and GEN RoPE cache.
             noisy_frame_mask: Optional [B, 1, T, 1, 1] I2V / V2V conditioning mask.
         """
         if current_timestep is None:
@@ -871,6 +875,31 @@ class Cosmos3DenoisingStage(PipelineStage):
                 action_fps=action_fps,
                 action_start_frame_offset=action_start_frame_offset,
             )
+
+    @staticmethod
+    def _build_und_cache_signature(
+        text_key: Any,
+        latents: torch.Tensor,
+        fps: float,
+        sound_latents: torch.Tensor | None,
+        action_latents: torch.Tensor | None,
+        action_fps: float | None,
+        action_start_frame_offset: int,
+        sp_rank: int,
+        sp_size: int,
+    ) -> tuple[Any, ...]:
+        return (
+            text_key,
+            tuple(latents.shape),
+            latents.dtype,
+            float(fps),
+            tuple(sound_latents.shape) if sound_latents is not None else None,
+            tuple(action_latents.shape) if action_latents is not None else None,
+            float(action_fps) if action_fps is not None else None,
+            action_start_frame_offset,
+            sp_rank,
+            sp_size,
+        )
 
     def _manage_device_placement(self, server_args: ServerArgs):
         """Move transformer to GPU if CPU offload is enabled."""
@@ -955,6 +984,46 @@ class Cosmos3DenoisingStage(PipelineStage):
         sp_rank = get_sp_parallel_rank() if sp_size > 1 else 0
         ulysses_enabled = sp_size > 1
 
+        cache_signature_args = (
+            latents,
+            fps,
+            sound_latents,
+            action_latents,
+            action_fps,
+            action_start_frame_offset,
+            sp_rank,
+            sp_size,
+        )
+        cond_cache_signature = self._build_und_cache_signature(
+            batch.extra["cond_text_cache_key"], *cache_signature_args
+        )
+        uncond_cache_signature = self._build_und_cache_signature(
+            batch.extra["uncond_text_cache_key"], *cache_signature_args
+        )
+        cfg_batched_cache_signature = self._build_und_cache_signature(
+            (
+                batch.extra["uncond_text_cache_key"],
+                batch.extra["cond_text_cache_key"],
+            ),
+            *cache_signature_args,
+        )
+
+        if enable_cfg_parallel:
+            if cfg_rank == 0:
+                cache_signatures = {"cond": cond_cache_signature}
+            else:
+                cache_signatures = {"uncond": uncond_cache_signature}
+        elif not do_cfg:
+            cache_signatures = {"cond": cond_cache_signature}
+        elif guidance_interval is None:
+            cache_signatures = {"cfg_batched": cfg_batched_cache_signature}
+        else:
+            cache_signatures = {
+                "cond": cond_cache_signature,
+                "cfg_batched": cfg_batched_cache_signature,
+            }
+        self.transformer.retain_cache_entries(cache_signatures)
+
         if not self._logged_parallel_config:
             self._logged_parallel_config = True
             if enable_cfg_parallel and ulysses_enabled:
@@ -968,9 +1037,6 @@ class Cosmos3DenoisingStage(PipelineStage):
                 )
             elif ulysses_enabled:
                 self.log_info(f"Ulysses enabled: sp_size={sp_size}, sp_rank={sp_rank}")
-
-        # Drop any cached UND K/V from a previous request — its text differs.
-        self.transformer.reset_cache()
 
         self.log_info(
             f"Starting denoising with {len(timesteps)} steps, CFG={do_cfg}, "
