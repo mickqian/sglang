@@ -216,6 +216,52 @@ def test_qknorm_rope_preserves_split_bf16_rounding() -> None:
     assert torch.equal(k_ref, k_fused)
 
 
+def test_qknorm_rope_accepts_strided_packed_gqa() -> None:
+    from sglang.kernels.ops.diffusion.qknorm_rope import (
+        fused_inplace_qknorm_rope,
+    )
+
+    num_tokens, num_q_heads, num_kv_heads, head_dim = 257, 32, 8, 128
+    num_heads = num_q_heads + 2 * num_kv_heads
+    qkv = torch.randn(num_tokens, num_heads, head_dim, device=DEVICE, dtype=DTYPE)
+    q_weight = torch.randn(head_dim, device=DEVICE, dtype=DTYPE)
+    k_weight = torch.randn(head_dim, device=DEVICE, dtype=DTYPE)
+    positions = torch.arange(num_tokens, device=DEVICE, dtype=torch.int64)
+    cos_sin_cache = create_cos_sin_cache(head_dim, num_tokens)
+
+    q_ref = qkv[:, :num_q_heads].contiguous()
+    k_ref = qkv[:, num_q_heads : num_q_heads + num_kv_heads].contiguous()
+    qkv_fused = qkv.clone()
+    q_fused = qkv_fused[:, :num_q_heads]
+    k_fused = qkv_fused[:, num_q_heads : num_q_heads + num_kv_heads]
+    v_before = qkv_fused[:, num_q_heads + num_kv_heads :].clone()
+
+    fused_inplace_qknorm_rope(
+        q_ref,
+        k_ref,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        is_neox=True,
+        rope_dim=head_dim,
+    )
+    fused_inplace_qknorm_rope(
+        q_fused,
+        k_fused,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        is_neox=True,
+        rope_dim=head_dim,
+    )
+
+    assert torch.equal(q_ref, q_fused)
+    assert torch.equal(k_ref, k_fused)
+    assert torch.equal(v_before, qkv_fused[:, num_q_heads + num_kv_heads :])
+
+
 def test_qknorm_rope_accepts_empty_token_dimension() -> None:
     from sglang.kernels.ops.diffusion.qknorm_rope import fused_inplace_qknorm_rope
 
