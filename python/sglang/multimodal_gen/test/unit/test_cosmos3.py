@@ -33,15 +33,18 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.scheduler_loader imp
 )
 from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.models.dits.cosmos3video import (
+    Cosmos3OmniTransformer,
     DomainAwareLinear,
     compute_mrope_position_ids_action,
     compute_mrope_position_ids_sound,
     compute_mrope_position_ids_vision,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.cosmos3 import (
+    Cosmos3DenoisingStage,
     Cosmos3ImagePreprocessStage,
     Cosmos3LatentPreparationStage,
     Cosmos3TimestepPreparationStage,
+    Cosmos3TokenizationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.cosmos3_action import (
     EMBODIMENT_TO_DOMAIN_ID,
@@ -564,6 +567,73 @@ class TestCosmos3DomainAwareLinear(unittest.TestCase):
         layer = DomainAwareLinear(input_size=4, output_size=8, num_domains=4)
         out = layer(torch.randn(1, 2, 4), torch.tensor(3))
         self.assertEqual(tuple(out.shape), (1, 2, 8))
+
+
+class TestCosmos3UndCache(unittest.TestCase):
+    def test_token_cache_key_excludes_padding(self):
+        tokenizer = types.SimpleNamespace(
+            eos_token_id=2,
+            pad_token_id=0,
+            apply_chat_template=lambda *args, **kwargs: [10, 11],
+            convert_tokens_to_ids=lambda token: 3,
+        )
+        stage = Cosmos3TokenizationStage(tokenizer)
+
+        input_ids, attention_mask, seq_len, token_key = stage._tokenize_prompt(
+            "test", 8, torch.device("cpu")
+        )
+
+        self.assertEqual(token_key, (10, 11, 2, 3))
+        self.assertEqual(seq_len, 4)
+        self.assertEqual(tuple(input_ids.shape), (1, 8))
+        self.assertEqual(attention_mask.tolist(), [[1, 1, 1, 1, 0, 0, 0, 0]])
+
+    def test_cache_signature_covers_text_geometry_and_parallel_layout(self):
+        latents = torch.empty(1, 16, 5, 30, 52)
+        action = torch.empty(1, 16, 64)
+        args = (
+            (10, 11, 2, 3),
+            latents,
+            5.0,
+            None,
+            action,
+            5.0,
+            1,
+            0,
+            1,
+        )
+        signature = Cosmos3DenoisingStage._build_und_cache_signature(*args)
+
+        self.assertEqual(
+            signature,
+            Cosmos3DenoisingStage._build_und_cache_signature(*args),
+        )
+        self.assertNotEqual(
+            signature,
+            Cosmos3DenoisingStage._build_und_cache_signature((10, 12, 2, 3), *args[1:]),
+        )
+        self.assertNotEqual(
+            signature,
+            Cosmos3DenoisingStage._build_und_cache_signature(*args[:-2], 1, 2),
+        )
+
+    def test_retain_cache_entries_evicts_stale_signatures(self):
+        transformer = types.SimpleNamespace(
+            cached_kv={"old": [1], "hit": [2]},
+            cached_gen_rope_inputs={"old": (3, 4), "hit": (5, 6)},
+            cache_signatures={"old": "old-signature", "hit": "same-signature"},
+        )
+        transformer.reset_cache = lambda cache_key: Cosmos3OmniTransformer.reset_cache(
+            transformer, cache_key
+        )
+
+        Cosmos3OmniTransformer.retain_cache_entries(
+            transformer, {"hit": "same-signature"}
+        )
+
+        self.assertEqual(transformer.cached_kv, {"hit": [2]})
+        self.assertEqual(transformer.cached_gen_rope_inputs, {"hit": (5, 6)})
+        self.assertEqual(transformer.cache_signatures, {"hit": "same-signature"})
 
 
 class TestCosmos3ConditionIndexes(unittest.TestCase):
