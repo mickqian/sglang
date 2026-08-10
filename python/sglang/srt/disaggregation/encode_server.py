@@ -936,8 +936,8 @@ class MMEncoder:
                 raise ValueError("Encoder preprocess output contains wrong modality")
             return selected
 
-        split_kimi_k3_images = (
-            self.model_type == "kimi_k3" and modality == Modality.IMAGE
+        split_kimi_images = (
+            self.model_type in ("kimi_k25", "kimi_k3") and modality == Modality.IMAGE
         )
 
         # Audio features are per-item (list of mels for mimo_v2, or batched
@@ -958,10 +958,10 @@ class MMEncoder:
                 offsets.append(curr)
             for index in indices:
                 sub_feature_list.append(mm_feature[offsets[index] : offsets[index + 1]])
-            if not split_kimi_k3_images:
+            if not split_kimi_images:
                 sub_feature = torch.cat(sub_feature_list, dim=0)
 
-        if split_kimi_k3_images:
+        if split_kimi_images:
             mm_items = [
                 MultimodalDataItem.from_dict(
                     {
@@ -990,7 +990,7 @@ class MMEncoder:
                 continue
             value = _convert(value)
             if key in _mm_grid_attrs.get(modality, []):
-                if split_kimi_k3_images:
+                if split_kimi_images:
                     for mm_item, index in zip(mm_items, indices):
                         mm_item.set(key, value[index : index + 1])
                 else:
