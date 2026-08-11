@@ -9,6 +9,7 @@ import gc
 import inspect
 import math
 import time
+import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
@@ -291,6 +292,10 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         for transformer in filter(None, [self.transformer, self.transformer_2]):
             self._maybe_offload_during_compile(transformer)
             self._maybe_torch_compile(transformer)
+
+        self.scheduler = scheduler
+        self.vae = vae
+        self.pipeline = weakref.ref(pipeline) if pipeline else None
 
         selected_attention_backend = self._infer_transformer_attention_backend()
         # precision-constraint: attention backend metadata allocation currently assumes fp16;
