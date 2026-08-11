@@ -12,13 +12,13 @@ import torch
 import torch.nn as nn
 
 from sglang.kernel_api_logging import debug_kernel_api
+from sglang.multimodal_gen.runtime.managers.forward_context import (
+    get_forward_context_or_none,
+)
 from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     custom_op_kernel_compile_policy,
     kernel_compile_autotune_config,
     kernel_compile_kwargs,
-)
-from sglang.multimodal_gen.runtime.managers.forward_context import (
-    get_forward_context_or_none,
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger

@@ -21,10 +21,6 @@ from sglang.kernels.ops.diffusion.triton.varlen_pack_pad import (
 from sglang.multimodal_gen.runtime.breakable_cuda_graph.replay_token import (
     get_current_replay_token,
 )
-from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
-    attention_allows_cudnn_sdp,
-    attention_autotune_config,
-)
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
     sequence_model_parallel_all_to_all_4D,
@@ -64,6 +60,10 @@ from sglang.multimodal_gen.runtime.layers.usp import (
 from sglang.multimodal_gen.runtime.managers.forward_context import (
     ForwardContext,
     get_forward_context,
+)
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
+    attention_allows_cudnn_sdp,
+    attention_autotune_config,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger

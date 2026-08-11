@@ -65,9 +65,7 @@ def _configured_kernel_compile_selectors(configured_ops: str | None) -> set[str]
         return set(DEFAULT_KERNEL_COMPILE_OPS)
 
     return {
-        selector.strip()
-        for selector in configured_ops.split(",")
-        if selector.strip()
+        selector.strip() for selector in configured_ops.split(",") if selector.strip()
     }
 
 
@@ -88,9 +86,7 @@ def _is_kernel_compile_op_allowed(op_name: str | None, op_cls: type | str) -> bo
         op_selectors.add(op_name)
     op_selectors.update(getattr(op_cls, "kernel_compile_names", ()))
     op_groups = set(getattr(op_cls, "kernel_compile_groups", ()))
-    return bool(
-        op_selectors & configured_selectors or op_groups & configured_selectors
-    )
+    return bool(op_selectors & configured_selectors or op_groups & configured_selectors)
 
 
 @contextmanager

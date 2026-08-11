@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.optimization.kernel_policy import (
     KERNEL_COMPILE_WARMUP_ENV,
 )
 
+
 def configure_acceleration_policy(config: Mapping[str, Any]) -> None:
     kernel_policy = None
     for candidate in (

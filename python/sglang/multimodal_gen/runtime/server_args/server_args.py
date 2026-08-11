@@ -27,9 +27,6 @@ from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
 )
 from sglang.multimodal_gen.configs.quantization.nunchaku import NunchakuSVDQuantArgs
 from sglang.multimodal_gen.configs.quantization.qvg_kv import QVGKVQuantArgs
-from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
-    configure_acceleration_policy,
-)
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
@@ -41,6 +38,9 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload_co
     cpu_offload_flags_for_layerwise_components,
     layerwise_component_matches_any_selection,
     normalize_layerwise_offload_components,
+)
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
+    configure_acceleration_policy,
 )
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
