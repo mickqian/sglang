@@ -50,6 +50,7 @@ from sglang.multimodal_gen.registry import (
     _get_config_info,
     get_non_diffusers_pipeline_name,
     is_known_non_diffusers_multimodal_model,
+)
 from sglang.multimodal_gen.runtime.entrypoints.cli.routing import (
     has_registered_pipeline_class,
 )
@@ -61,6 +62,9 @@ from sglang.multimodal_gen.runtime.layers.activation import (
 from sglang.multimodal_gen.runtime.layers.elementwise import MulAdd
 from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
 from sglang.multimodal_gen.runtime.layers.rotary_embedding.base import RotaryEmbedding
+from sglang.multimodal_gen.runtime.models.dits.qwen_image import (
+    QwenImageTransformer2DModel,
+)
 from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     KERNEL_COMPILE_ITERS_ENV,
     KERNEL_COMPILE_LIVE_MISS_ENV,
@@ -73,9 +77,6 @@ from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     custom_op_kernel_compile_policy,
     kernel_compile_autotune_config,
     torch_compile_autotune_config,
-)
-from sglang.multimodal_gen.runtime.models.dits.qwen_image import (
-    QwenImageTransformer2DModel,
 )
 from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
     MiniMaxH3Pipeline,

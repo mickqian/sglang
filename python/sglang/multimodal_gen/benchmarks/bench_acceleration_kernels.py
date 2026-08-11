@@ -11,10 +11,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
-    KERNEL_COMPILE_OPS_ENV,
-    KERNEL_COMPILE_POLICY_ENV,
-)
 from sglang.multimodal_gen.runtime.layers.activation import (
     GeluAndMul,
     NewGELU,
@@ -32,13 +28,13 @@ from sglang.multimodal_gen.runtime.layers.attention.layer import (
 from sglang.multimodal_gen.runtime.layers.attention.selector import (
     global_force_attn_backend_context_manager,
 )
+from sglang.multimodal_gen.runtime.layers.custom_op import (
+    _CUSTOM_OP_KERNEL_AUTOTUNE_CACHE,
+)
 from sglang.multimodal_gen.runtime.layers.elementwise import MulAdd
 from sglang.multimodal_gen.runtime.layers.fused_scale_shift_gate import (
     FusedLayerNormScaleShiftGateSelect01,
     FusedResidualLayerNormScaleShiftGateSelect01,
-)
-from sglang.multimodal_gen.runtime.layers.custom_op import (
-    _CUSTOM_OP_KERNEL_AUTOTUNE_CACHE,
 )
 from sglang.multimodal_gen.runtime.layers.layernorm import (
     LayerNorm,
@@ -50,6 +46,10 @@ from sglang.multimodal_gen.runtime.layers.layernorm import (
 )
 from sglang.multimodal_gen.runtime.layers.rotary_embedding.base import RotaryEmbedding
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
+    KERNEL_COMPILE_OPS_ENV,
+    KERNEL_COMPILE_POLICY_ENV,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
@@ -194,7 +194,9 @@ def bench_norm_scale_shift(args: argparse.Namespace) -> None:
 
 def bench_scale_residual_norm_scale_shift(args: argparse.Namespace) -> None:
     dtype = _dtype(args.dtype)
-    residual = torch.randn(args.batch, args.seq, args.hidden, device="cuda", dtype=dtype)
+    residual = torch.randn(
+        args.batch, args.seq, args.hidden, device="cuda", dtype=dtype
+    )
     x = torch.randn_like(residual)
     gate = torch.randn(args.batch, 1, args.hidden, device="cuda", dtype=dtype)
     shift = torch.randn(args.batch, 1, args.hidden, device="cuda", dtype=dtype)

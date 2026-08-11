@@ -9,7 +9,6 @@ import gc
 import inspect
 import math
 import time
-import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
@@ -43,9 +42,6 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import (
     FluxPipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.zimage import ZImagePipelineConfig
-from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
-    torch_compile_autotune_config,
-)
 from sglang.multimodal_gen.runtime.breakable_cuda_graph import (
     prompt_padding as bcg_utils,
 )
@@ -83,9 +79,6 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_classifier_free_guidance_world_size,
     world_group_is_initialized,
 )
-from sglang.multimodal_gen.runtime.optimization.compile_autotune import (
-    install_torch_compile_autotune,
-)
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.attention.STA_configuration import (
     configure_sta,
@@ -101,6 +94,12 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.component_resident_s
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     LayerwiseOffloadableModuleMixin,
     is_layerwise_offloaded_module,
+)
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
+    torch_compile_autotune_config,
+)
+from sglang.multimodal_gen.runtime.optimization.compile_autotune import (
+    install_torch_compile_autotune,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (

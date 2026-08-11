@@ -17,12 +17,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from sglang.multimodal_gen.runtime.managers.forward_context import (
+    get_forward_context_or_none,
+)
 from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
     TorchCompileAutotuneConfig,
     suppress_kernel_compile_autotune,
-)
-from sglang.multimodal_gen.runtime.managers.forward_context import (
-    get_forward_context_or_none,
 )
 from sglang.multimodal_gen.runtime.optimization.tensor_keys import (
     value_key,
@@ -224,8 +224,7 @@ class _TorchCompileAutotuner:
     def _shape_summary(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
         values = [value_summary(arg) for arg in args]
         values.extend(
-            f"{key}={value_summary(value)}"
-            for key, value in sorted(kwargs.items())
+            f"{key}={value_summary(value)}" for key, value in sorted(kwargs.items())
         )
         values = [value for value in values if value]
         return ", ".join(values[:8])

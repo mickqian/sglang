@@ -7,13 +7,13 @@ from contextlib import nullcontext
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
-    attention_allows_cudnn_sdp,
-)
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (  # FlashAttentionMetadata,
     AttentionBackend,
     AttentionImpl,
     AttentionMetadata,
+)
+from sglang.multimodal_gen.runtime.optimization.acceleration_policy import (
+    attention_allows_cudnn_sdp,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
