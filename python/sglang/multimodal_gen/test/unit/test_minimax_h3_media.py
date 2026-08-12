@@ -83,6 +83,8 @@ def test_video_transform_runs_once_and_qwen_samples_shared_rgb(monkeypatch):
     assert command[-5:-1] == ["-f", "rawvideo", "-pix_fmt", "rgb24"]
     assert command[-1].startswith("pipe:")
     assert "libx264" not in command
+    if command[-1] != "pipe:1":
+        assert frames.flags.writeable
     assert all(np.shares_memory(frame, frames) for frame in sampled["frames"])
     assert [int(frame[0, 0, 0]) for frame in sampled["frames"]] == [
         int(expected[index, 0, 0, 0]) for index in (0, 12, 24)

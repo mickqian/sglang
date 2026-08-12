@@ -436,7 +436,7 @@ def minimax_h3_decode_reference_video_frames(
                 payload = mmap.mmap(
                     output_fd,
                     payload_size,
-                    access=mmap.ACCESS_READ,
+                    access=mmap.ACCESS_WRITE,
                 )
         finally:
             os.close(output_fd)
