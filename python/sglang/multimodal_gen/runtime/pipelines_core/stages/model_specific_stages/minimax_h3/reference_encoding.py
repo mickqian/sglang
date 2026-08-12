@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import functools
 import math
+import mmap
+import os
+import subprocess
 from typing import Any
 
 import torch
@@ -210,8 +213,6 @@ def _load_waveform(
     temporary lossless file plus a second decode.
     """
 
-    import subprocess
-
     import numpy as np
 
     if max_duration_seconds is not None:
@@ -365,12 +366,10 @@ def minimax_h3_decode_reference_video_frames(
     """Decode, transform, and truncate a reference video in one ffmpeg pass.
 
     ffmpeg applies display rotation, CFR sampling, direct Lanczos scaling, and
-    square-pixel normalization before writing bounded RGB24 frames to stdout.
+    square-pixel normalization before writing a bounded RGB24 stream.
     The returned array is shared by Qwen and the visual VAE, so conditioning
     never passes through a lossy x264 intermediate or a second video decode.
     """
-    import subprocess
-
     import numpy as np
 
     if target_frame_count <= 0:
@@ -407,23 +406,59 @@ def minimax_h3_decode_reference_video_frames(
         "rawvideo",
         "-pix_fmt",
         "rgb24",
-        "pipe:1",
     ]
-    decoded = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-    )
-    payload = decoded.stdout
-    if not isinstance(payload, bytes):
-        raise TypeError("ffmpeg RGB24 output must be bytes")
     frame_bytes = target_width * target_height * 3
-    if len(payload) % frame_bytes:
+
+    # Linux workers can let ffmpeg write the exact RGB24 stream into an
+    # anonymous file descriptor. Mapping that output avoids communicate()'s
+    # chunk list and final bytes join for a several-hundred-MiB reference.
+    output_fd = -1
+    if hasattr(os, "memfd_create"):
+        try:
+            output_fd = os.memfd_create(
+                "sglang-h3-reference-video",
+                flags=getattr(os, "MFD_CLOEXEC", 0),
+            )
+        except OSError:
+            output_fd = -1
+
+    if output_fd >= 0:
+        try:
+            subprocess.run(
+                [*command, f"pipe:{output_fd}"],
+                check=True,
+                pass_fds=(output_fd,),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            payload_size = os.lseek(output_fd, 0, os.SEEK_CUR)
+            if payload_size > 0 and not payload_size % frame_bytes:
+                payload = mmap.mmap(
+                    output_fd,
+                    payload_size,
+                    access=mmap.ACCESS_READ,
+                )
+        finally:
+            os.close(output_fd)
+    else:
+        decoded = subprocess.run(
+            [*command, "pipe:1"],
+            check=True,
+            capture_output=True,
+        )
+        payload = decoded.stdout
+        if not isinstance(payload, bytes):
+            raise TypeError("ffmpeg RGB24 output must be bytes")
+        payload_size = len(payload)
+
+    if payload_size <= 0:
+        raise ValueError(f"reference video has no frames: {video_path}")
+    if payload_size % frame_bytes:
         raise ValueError(
             "ffmpeg returned a partial reference-video frame: "
-            f"{len(payload)} bytes for {target_width}x{target_height} RGB24"
+            f"{payload_size} bytes for {target_width}x{target_height} RGB24"
         )
-    frame_count = len(payload) // frame_bytes
+    frame_count = payload_size // frame_bytes
     if frame_count <= 0:
         raise ValueError(f"reference video has no frames: {video_path}")
     return np.frombuffer(payload, dtype=np.uint8).reshape(

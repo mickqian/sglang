@@ -2,6 +2,7 @@
 """Numerical boundaries for the one-pass Ref2VA media path."""
 
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -51,9 +52,14 @@ def test_video_transform_runs_once_and_qwen_samples_shared_rgb(monkeypatch):
     expected = np.arange(25 * 4 * 6 * 3, dtype=np.uint8).reshape(25, 4, 6, 3)
     commands = []
 
-    def run(command, **_kwargs):
+    def run(command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(stdout=expected.tobytes())
+        if command[-1] == "pipe:1":
+            return SimpleNamespace(stdout=expected.tobytes())
+        output_fd = int(command[-1].removeprefix("pipe:"))
+        assert kwargs["pass_fds"] == (output_fd,)
+        os.write(output_fd, expected.tobytes())
+        return SimpleNamespace(stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", run)
     frames = reference_encoding.minimax_h3_decode_reference_video_frames(
@@ -74,7 +80,8 @@ def test_video_transform_runs_once_and_qwen_samples_shared_rgb(monkeypatch):
     assert command[command.index("-frames:v") + 1] == "25"
     assert command[command.index("-ss") + 1] == "2.25"
     assert command.index("-ss") < command.index("-i")
-    assert command[-5:] == ["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+    assert command[-5:-1] == ["-f", "rawvideo", "-pix_fmt", "rgb24"]
+    assert command[-1].startswith("pipe:")
     assert "libx264" not in command
     assert all(np.shares_memory(frame, frames) for frame in sampled["frames"])
     assert [int(frame[0, 0, 0]) for frame in sampled["frames"]] == [
