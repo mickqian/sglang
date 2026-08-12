@@ -60,6 +60,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                     minimax_h3_cleanup_temp_dirs,
                 )
 
+                batch.extra.pop(MINIMAX_H3_PREPARED_REFERENCE_VIDEO_EXTRA_KEY, None)
                 minimax_h3_cleanup_temp_dirs(batch)
                 raise
             return batch
@@ -368,7 +369,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             minimax_h3_sample_reference_video_frames,
         )
 
-        prepared_videos, sampled_videos = None, None
+        prepared_videos = None
         if any(
             material.material_chain
             in ("video.reference_preserve", "video_audio.reference_preserve")
@@ -385,18 +386,8 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                     )
                 ),
             )
-            sampled_videos = []
-            for item in prepared_videos["videos"]:
-                sampled = minimax_h3_sample_reference_video_frames(item["frames"])
-                sampled_videos.append(
-                    {
-                        **sampled,
-                        "condition_index": int(item["condition_index"]),
-                        "input_has_audio": bool(item["input_has_audio"]),
-                    }
-                )
         video_has_audio: dict[int, bool] = {}
-        for video_index, item in enumerate(sampled_videos or []):
+        for video_index, item in enumerate((prepared_videos or {}).get("videos") or []):
             if item.get("condition_index") is None:
                 continue
             if "input_has_audio" not in item:
@@ -481,14 +472,15 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         video_block_token_counts = None
         video_block_timestamps = None
         if has_video:
+            prepared = prepared_videos or minimax_h3_prepared_reference_videos(
+                batch, plan
+            )
             videos = []
-            if not sampled_videos:
-                raise RuntimeError("ref2va video sampling produced no inputs")
-            for sampled in sampled_videos:
-                frames = sampled["frames"]
-                if not isinstance(frames, torch.Tensor):
-                    frames = torch.from_numpy(frames)
-                videos.append(frames.permute(0, 3, 1, 2))
+            sampled_videos = []
+            for item in prepared["videos"]:
+                sampled = minimax_h3_sample_reference_video_frames(item["frames"])
+                videos.append(torch.from_numpy(sampled["frames"]).permute(0, 3, 1, 2))
+                sampled_videos.append(sampled)
             proc = processor
             vout = proc.video_processor(
                 videos=videos,

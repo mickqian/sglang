@@ -450,14 +450,7 @@ def _decode_reference_video_local(command: list[str]) -> tuple[Any, int]:
     payload_size = 0
     if output_fd >= 0:
         try:
-            subprocess.run(
-                [*command, f"pipe:{output_fd}"],
-                check=True,
-                pass_fds=(output_fd,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            payload_size = os.lseek(output_fd, 0, os.SEEK_CUR)
+            payload_size = _write_reference_video_to_fd(command, output_fd)
             if payload_size > 0:
                 payload = mmap.mmap(
                     output_fd,
@@ -479,19 +472,35 @@ def _decode_reference_video_local(command: list[str]) -> tuple[Any, int]:
     return payload, payload_size
 
 
+def _write_reference_video_to_fd(command: list[str], output_fd: int) -> int:
+    subprocess.run(
+        [*command, f"pipe:{output_fd}"],
+        check=True,
+        pass_fds=(output_fd,),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    return os.lseek(output_fd, 0, os.SEEK_CUR)
+
+
+def _all_gather_world_objects(group: Any, value: Any) -> list[Any]:
+    values = [None] * group.world_size
+    torch.distributed.all_gather_object(
+        values,
+        value,
+        group=group.cpu_group,
+    )
+    return values
+
+
 @functools.lru_cache(maxsize=1)
 def _reference_video_host_leader() -> int:
     group = get_world_group()
-    hostnames: list[str | None] = [None] * group.world_size
-    torch.distributed.all_gather_object(
-        hostnames,
-        socket.gethostname(),
-        group=group.cpu_group,
-    )
+    hostnames = _all_gather_world_objects(group, socket.gethostname())
     return hostnames.index(hostnames[group.rank_in_group])
 
 
-def _decode_reference_video_shared(command: list[str]) -> tuple[mmap.mmap, int]:
+def _decode_reference_video_shared(command: list[str]) -> tuple[Any, int]:
     """Decode once per host and map the same RGB pages on its worker ranks."""
     group = get_world_group()
     if (
@@ -510,48 +519,62 @@ def _decode_reference_video_shared(command: list[str]) -> tuple[mmap.mmap, int]:
     leader_state = None
     if is_leader:
         try:
-            leader_fd = os.memfd_create(
-                "sglang-h3-reference-video-shared",
-                flags=os.MFD_CLOEXEC,
-            )
-            subprocess.run(
-                [*command, f"pipe:{leader_fd}"],
-                check=True,
-                pass_fds=(leader_fd,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            payload_size = os.lseek(leader_fd, 0, os.SEEK_CUR)
-            leader_state = (
-                f"/proc/{os.getpid()}/fd/{leader_fd}",
-                payload_size,
-                None,
-            )
+            try:
+                leader_fd = os.memfd_create(
+                    "sglang-h3-reference-video-shared",
+                    flags=os.MFD_CLOEXEC,
+                )
+            except OSError:
+                # Anonymous file descriptors can be disabled by a container's
+                # seccomp policy. Tell every host to use the unchanged local
+                # decode path instead of failing a valid request.
+                leader_state = (None, 0, None)
+            else:
+                payload_size = _write_reference_video_to_fd(command, leader_fd)
+                leader_state = (
+                    f"/proc/{os.getpid()}/fd/{leader_fd}",
+                    payload_size,
+                    None,
+                )
         except Exception as exc:
             owner_exception = exc
             leader_state = (None, 0, f"{type(exc).__name__}: {exc}")
 
-    states: list[tuple[str | None, int, str | None] | None] = [None] * group.world_size
-    torch.distributed.all_gather_object(
-        states,
-        leader_state,
-        group=group.cpu_group,
+    states = _all_gather_world_objects(group, leader_state)
+    host_states = [state for state in states if state is not None]
+    owner_error = next(
+        (state[2] for state in host_states if state[2] is not None),
+        None,
     )
-    state = states[leader]
-    if state is None:
-        raise RuntimeError("MiniMax H3 shared video decode returned no descriptor")
-    local_path, payload_size, owner_error = state
+    # Every rank makes the same decision here. In particular, a decode failure
+    # on one host must not leave the other hosts entering the mapping collective.
     if owner_error is not None:
         if leader_fd >= 0:
             os.close(leader_fd)
-        if owner_exception is not None:
+        if owner_exception is not None and owner_error.endswith(str(owner_exception)):
             raise owner_exception
         raise RuntimeError(f"MiniMax H3 shared video decode failed: {owner_error}")
+    if any(state[0] is None for state in host_states):
+        if leader_fd >= 0:
+            os.close(leader_fd)
+        return _decode_reference_video_local(command)
+    if any(state[1] <= 0 for state in host_states):
+        if leader_fd >= 0:
+            os.close(leader_fd)
+        return b"", 0
+
+    state = states[leader]
+    if state is None:
+        raise RuntimeError("MiniMax H3 shared video decode returned no descriptor")
+    local_path, payload_size, _ = state
+    if payload_size <= 0:
+        if leader_fd >= 0:
+            os.close(leader_fd)
+        return b"", 0
     if local_path is None:
         raise RuntimeError("MiniMax H3 shared video decode returned no path")
 
     mapping = None
-    map_exception = None
     map_error = None
     try:
         map_fd = os.open(local_path, os.O_RDWR)
@@ -560,24 +583,19 @@ def _decode_reference_video_shared(command: list[str]) -> tuple[mmap.mmap, int]:
         finally:
             os.close(map_fd)
     except Exception as exc:
-        map_exception = exc
         map_error = f"{type(exc).__name__}: {exc}"
 
-    map_errors: list[str | None] = [None] * group.world_size
-    torch.distributed.all_gather_object(
-        map_errors,
-        map_error,
-        group=group.cpu_group,
-    )
+    map_errors = _all_gather_world_objects(group, map_error)
     failed = next((error for error in map_errors if error is not None), None)
     if is_leader:
         os.close(leader_fd)
     if failed is not None:
         if mapping is not None:
             mapping.close()
-        if map_exception is not None:
-            raise map_exception
-        raise RuntimeError(f"MiniMax H3 shared video mapping failed: {failed}")
+        # /proc fd traversal can be denied by hidepid or a container policy.
+        # All ranks fall back together so the optimization never makes a
+        # previously valid request fail or changes its RGB bytes.
+        return _decode_reference_video_local(command)
 
     if mapping is None:
         raise RuntimeError("MiniMax H3 shared video mapping returned no payload")
