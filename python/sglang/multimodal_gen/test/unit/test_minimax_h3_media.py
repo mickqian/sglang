@@ -92,6 +92,45 @@ def test_video_transform_runs_once_and_qwen_samples_shared_rgb(monkeypatch):
     assert sampled["block_timestamps"] == [0.25, 1.0]
 
 
+def test_video_transform_can_share_one_host_decode(monkeypatch):
+    expected = np.arange(25 * 4 * 6 * 3, dtype=np.uint8).reshape(25, 4, 6, 3)
+    commands = []
+
+    class FakeGroup:
+        world_size = 2
+        rank_in_group = 0
+        cpu_group = object()
+
+        def barrier(self):
+            return None
+
+    def all_gather_object(outputs, value, **_kwargs):
+        outputs[:] = [value, value]
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        output_fd = int(command[-1].removeprefix("pipe:"))
+        os.write(output_fd, expected.tobytes())
+        return SimpleNamespace(stderr=b"")
+
+    monkeypatch.setattr(reference_encoding, "get_world_group", FakeGroup)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    frames = reference_encoding.minimax_h3_decode_reference_video_frames(
+        "/input/ref.mp4",
+        target_width=6,
+        target_height=4,
+        target_frame_count=25,
+        share_across_replicas=True,
+    )
+
+    assert np.array_equal(frames, expected)
+    assert frames.flags.writeable
+    assert len(commands) == 1
+    assert commands[0][-1].startswith("pipe:")
+
+
 def test_audio_decode_is_bounded_float_pcm_without_temp_files(monkeypatch):
     pcm = torch.arange(8, dtype=torch.float32).numpy().tobytes()
     commands = []

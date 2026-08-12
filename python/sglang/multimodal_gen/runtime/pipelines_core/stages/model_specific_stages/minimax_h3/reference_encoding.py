@@ -21,7 +21,9 @@ import functools
 import math
 import mmap
 import os
+import socket
 import subprocess
+import sys
 from typing import Any
 
 import torch
@@ -32,6 +34,7 @@ from sglang.multimodal_gen.configs.models.vaes.minimax_h3_audio import (
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEArchConfig,
 )
+from sglang.multimodal_gen.runtime.distributed.parallel_state import get_world_group
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
     MINIMAX_H3_SUPPORTED_FPS,
 )
@@ -362,6 +365,7 @@ def minimax_h3_decode_reference_video_frames(
     target_frame_count: int,
     fps: float = MINIMAX_H3_SUPPORTED_FPS,
     start_time_seconds: float = 0.0,
+    share_across_replicas: bool = False,
 ) -> Any:
     """Decode, transform, and truncate a reference video in one ffmpeg pass.
 
@@ -408,20 +412,42 @@ def minimax_h3_decode_reference_video_frames(
         "rgb24",
     ]
     frame_bytes = target_width * target_height * 3
+    if share_across_replicas:
+        payload, payload_size = _decode_reference_video_shared(command)
+    else:
+        payload, payload_size = _decode_reference_video_local(command)
+
+    if payload_size <= 0:
+        raise ValueError(f"reference video has no frames: {video_path}")
+    if payload_size % frame_bytes:
+        raise ValueError(
+            "ffmpeg returned a partial reference-video frame: "
+            f"{payload_size} bytes for {target_width}x{target_height} RGB24"
+        )
+    frame_count = payload_size // frame_bytes
+    return np.frombuffer(payload, dtype=np.uint8).reshape(
+        frame_count, target_height, target_width, 3
+    )
+
+
+def _decode_reference_video_local(command: list[str]) -> tuple[Any, int]:
+    """Write one worker's RGB stream without a large stdout aggregation."""
 
     # Linux workers can let ffmpeg write the exact RGB24 stream into an
     # anonymous file descriptor. Mapping that output avoids communicate()'s
     # chunk list and final bytes join for a several-hundred-MiB reference.
     output_fd = -1
-    if hasattr(os, "memfd_create"):
+    if sys.platform.startswith("linux"):
         try:
             output_fd = os.memfd_create(
                 "sglang-h3-reference-video",
-                flags=getattr(os, "MFD_CLOEXEC", 0),
+                flags=os.MFD_CLOEXEC,
             )
         except OSError:
             output_fd = -1
 
+    payload: Any = b""
+    payload_size = 0
     if output_fd >= 0:
         try:
             subprocess.run(
@@ -432,7 +458,7 @@ def minimax_h3_decode_reference_video_frames(
                 stderr=subprocess.PIPE,
             )
             payload_size = os.lseek(output_fd, 0, os.SEEK_CUR)
-            if payload_size > 0 and not payload_size % frame_bytes:
+            if payload_size > 0:
                 payload = mmap.mmap(
                     output_fd,
                     payload_size,
@@ -450,20 +476,112 @@ def minimax_h3_decode_reference_video_frames(
         if not isinstance(payload, bytes):
             raise TypeError("ffmpeg RGB24 output must be bytes")
         payload_size = len(payload)
+    return payload, payload_size
 
-    if payload_size <= 0:
-        raise ValueError(f"reference video has no frames: {video_path}")
-    if payload_size % frame_bytes:
-        raise ValueError(
-            "ffmpeg returned a partial reference-video frame: "
-            f"{payload_size} bytes for {target_width}x{target_height} RGB24"
-        )
-    frame_count = payload_size // frame_bytes
-    if frame_count <= 0:
-        raise ValueError(f"reference video has no frames: {video_path}")
-    return np.frombuffer(payload, dtype=np.uint8).reshape(
-        frame_count, target_height, target_width, 3
+
+@functools.lru_cache(maxsize=1)
+def _reference_video_host_leader() -> int:
+    group = get_world_group()
+    hostnames: list[str | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(
+        hostnames,
+        socket.gethostname(),
+        group=group.cpu_group,
     )
+    return hostnames.index(hostnames[group.rank_in_group])
+
+
+def _decode_reference_video_shared(command: list[str]) -> tuple[mmap.mmap, int]:
+    """Decode once per host and map the same RGB pages on its worker ranks."""
+    group = get_world_group()
+    if (
+        group.world_size <= 1
+        or not sys.platform.startswith("linux")
+        or not os.path.isdir("/proc/self/fd")
+    ):
+        return _decode_reference_video_local(command)
+
+    leader = _reference_video_host_leader()
+    is_leader = group.rank_in_group == leader
+
+    leader_fd = -1
+    payload_size = 0
+    owner_exception = None
+    leader_state = None
+    if is_leader:
+        try:
+            leader_fd = os.memfd_create(
+                "sglang-h3-reference-video-shared",
+                flags=os.MFD_CLOEXEC,
+            )
+            subprocess.run(
+                [*command, f"pipe:{leader_fd}"],
+                check=True,
+                pass_fds=(leader_fd,),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            payload_size = os.lseek(leader_fd, 0, os.SEEK_CUR)
+            leader_state = (
+                f"/proc/{os.getpid()}/fd/{leader_fd}",
+                payload_size,
+                None,
+            )
+        except Exception as exc:
+            owner_exception = exc
+            leader_state = (None, 0, f"{type(exc).__name__}: {exc}")
+
+    states: list[tuple[str | None, int, str | None] | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(
+        states,
+        leader_state,
+        group=group.cpu_group,
+    )
+    state = states[leader]
+    if state is None:
+        raise RuntimeError("MiniMax H3 shared video decode returned no descriptor")
+    local_path, payload_size, owner_error = state
+    if owner_error is not None:
+        if leader_fd >= 0:
+            os.close(leader_fd)
+        if owner_exception is not None:
+            raise owner_exception
+        raise RuntimeError(f"MiniMax H3 shared video decode failed: {owner_error}")
+    if local_path is None:
+        raise RuntimeError("MiniMax H3 shared video decode returned no path")
+
+    mapping = None
+    map_exception = None
+    map_error = None
+    try:
+        map_fd = os.open(local_path, os.O_RDWR)
+        try:
+            mapping = mmap.mmap(map_fd, payload_size, access=mmap.ACCESS_COPY)
+        finally:
+            os.close(map_fd)
+    except Exception as exc:
+        map_exception = exc
+        map_error = f"{type(exc).__name__}: {exc}"
+
+    map_errors: list[str | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(
+        map_errors,
+        map_error,
+        group=group.cpu_group,
+    )
+    failed = next((error for error in map_errors if error is not None), None)
+    if is_leader:
+        os.close(leader_fd)
+    if failed is not None:
+        if mapping is not None:
+            mapping.close()
+        if map_exception is not None:
+            raise map_exception
+        raise RuntimeError(f"MiniMax H3 shared video mapping failed: {failed}")
+
+    if mapping is None:
+        raise RuntimeError("MiniMax H3 shared video mapping returned no payload")
+    return mapping, payload_size
 
 
 MINIMAX_H3_REFERENCE_VIDEO_ENCODE_SEED = 42
@@ -604,7 +722,12 @@ def _reference_video_target_frame_count(
     )
 
 
-def minimax_h3_prepared_reference_videos(batch: Any, plan: Any) -> dict[str, Any]:
+def minimax_h3_prepared_reference_videos(
+    batch: Any,
+    plan: Any,
+    *,
+    share_across_replicas: bool = False,
+) -> dict[str, Any]:
     """Decode the bounded reference-video RGB frames once per request.
 
     BOTH the visual-condition tokenizer and Qwen consume the same transformed
@@ -664,6 +787,7 @@ def minimax_h3_prepared_reference_videos(batch: Any, plan: Any) -> dict[str, Any
             target_frame_count=target_frames,
             fps=float(plan.shape["fps"]),
             start_time_seconds=float(material.start_time_seconds),
+            share_across_replicas=share_across_replicas,
         )
         prepared_videos.append(
             {

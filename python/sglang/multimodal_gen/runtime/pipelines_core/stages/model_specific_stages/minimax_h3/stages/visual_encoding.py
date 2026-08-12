@@ -13,6 +13,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.condition_encoding impo
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
     MINIMAX_H3_KEYFRAME_COND_ROWS_EXTRA_KEY,
+    MINIMAX_H3_PREPARED_REFERENCE_VIDEO_EXTRA_KEY,
     MINIMAX_H3_REFERENCE_IMAGE_ROWS_EXTRA_KEY,
     MINIMAX_H3_REFERENCE_VIDEO_ROWS_EXTRA_KEY,
 )
@@ -117,6 +118,7 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
                     )
                 for key in output_keys:
                     minimax_h3_replica_broadcast_extra(batch, key)
+            batch.extra.pop(MINIMAX_H3_PREPARED_REFERENCE_VIDEO_EXTRA_KEY, None)
             return batch
         if (
             batch.sampling_params is not None
@@ -283,7 +285,11 @@ class MiniMaxH3VisualEncodingStage(ConditionEncodingStage):
 
         if MINIMAX_H3_REFERENCE_VIDEO_ROWS_EXTRA_KEY in batch.extra:
             return
-        prepared = minimax_h3_prepared_reference_videos(batch, plan)
+        prepared = minimax_h3_prepared_reference_videos(
+            batch,
+            plan,
+            share_across_replicas=bool(self.video_vae.parallel_tiling),
+        )
         videos = prepared.get("videos")
         if not isinstance(videos, list) or not videos:
             raise ValueError(
