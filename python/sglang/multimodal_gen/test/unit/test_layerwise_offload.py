@@ -447,25 +447,21 @@ def test_layerwise_configuration_default_group_selects_non_dit_defaults(monkeypa
         "text_encoder",
         "text_encoder_2",
         "image_encoder",
-        "vae",
-        "condition_image_encoder",
     ]
     assert configured == [
         "text_encoder",
         "text_encoder_2",
         "image_encoder",
-        "vae",
-        "condition_image_encoder",
     ]
     assert is_layerwise_offloaded_module(text_encoder)
     assert is_layerwise_offloaded_module(text_encoder_2)
     assert not is_layerwise_offloaded_module(transformer)
     assert is_layerwise_offloaded_module(image_encoder)
-    assert is_layerwise_offloaded_module(vae)
+    assert not is_layerwise_offloaded_module(vae)
     assert not is_layerwise_offloaded_module(audio_vae)
     assert not is_layerwise_offloaded_module(vocoder)
     assert not is_layerwise_offloaded_module(spatial_upsampler)
-    assert is_layerwise_offloaded_module(condition_image_encoder)
+    assert not is_layerwise_offloaded_module(condition_image_encoder)
 
     for component_name, module in (
         ("audio_vae", audio_vae),

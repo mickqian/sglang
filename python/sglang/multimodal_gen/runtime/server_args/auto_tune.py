@@ -31,12 +31,11 @@ PERFORMANCE_MODES = ("manual", "auto", "speed", "memory")
 DEFAULT_LAYERWISE_COMPONENT_ARG_NAMES = (
     (LAYERWISE_OFFLOAD_TEXT_ENCODER_GROUP, "text_encoder_cpu_offload"),
     (LAYERWISE_OFFLOAD_IMAGE_ENCODER_GROUP, "image_encoder_cpu_offload"),
-    (LAYERWISE_OFFLOAD_VAE_GROUP, "vae_cpu_offload"),
 )
 
-# task-type defaults for keep_resident_min_available_gb when a model does not pin
-# one: image vae is tiny so any datacenter gpu keeps it resident, video vae is
-# larger so it only stays resident on very-high-memory gpus
+# Task-type defaults for model-specific high-memory residency hints. VAE
+# residency no longer depends on these thresholds: implicit placement always
+# keeps VAEs resident, while explicit VAE offload remains supported.
 IMAGE_GEN_KEEP_RESIDENT_MIN_AVAILABLE_GB = 45.0
 DEFAULT_KEEP_RESIDENT_MIN_AVAILABLE_GB = 120.0
 

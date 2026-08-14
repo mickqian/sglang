@@ -225,7 +225,7 @@ sglang generate \
   --prompt "A quiet city street after rain"
 ```
 
-The values must match keys in the selected pipeline's `pipeline.modules`, such as `transformer`, `text_encoder`, `image_encoder`, `vae`, `condition_image_encoder`, `spatial_upsampler`, or `vocoder`. Use `all` to select every layerwise-offloadable component. Prefer the smallest component set that solves the memory issue because layerwise offload can increase latency.
+The values must match keys in the selected pipeline's `pipeline.modules`, such as `transformer`, `text_encoder`, `image_encoder`, `vae`, `condition_image_encoder`, `spatial_upsampler`, or `vocoder`. The `default` group selects text and image encoders; VAEs stay resident unless selected explicitly. Use `all` to select every layerwise-offloadable component. Prefer the smallest component set that solves the memory issue because layerwise offload can increase latency.
 
 ## Serve
 

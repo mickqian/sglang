@@ -1901,7 +1901,7 @@ class ServerArgs(DisaggServerArgsMixin):
             default=ServerArgs.layerwise_offload_components,
             help="Select pipeline components for layerwise offload. "
             "Use dit to select the DiT layerwise group, default for the default group "
-            "(currently text_encoder, image_encoder, and vae), "
+            "(currently text_encoder and image_encoder), "
             "or all to select every layerwise-offloadable component. "
             "This option does not imply --dit-layerwise-offload. Example: "
             "--layerwise-offload-components text_encoder image_encoder vae.",

@@ -700,7 +700,7 @@ TWO_GPU_CASES = [
                 "--performance-mode",
                 "memory",
                 "--layerwise-offload-components",
-                "dit,text_encoder,vae",
+                "dit,text_encoder",
                 "--dit-offload-prefetch-size",
                 "1",
                 "--dit-layerwise-resident-layers",
