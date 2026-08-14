@@ -371,14 +371,22 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     ):
         if stack_tiling and tile_indices:
             sample_batch_size = tiles[0].shape[0]
-            tile_batch = torch.cat([tiles[idx] for idx in tile_indices], dim=0)
-            output_batch = forward_fn(tile_batch)
-            output_tiles = output_batch.unflatten(
-                0, (len(tile_indices), sample_batch_size)
-            ).unbind(dim=0)
-            if cls_agg is not None:
-                cls_agg.collect_stacked(len(tile_indices), sample_batch_size)
-            return list(output_tiles)
+            microbatch_size = int(
+                os.environ.get("MINIMAX_H3_VAE_TILE_MICROBATCH", len(tile_indices))
+            )
+            tasks = []
+            for start in range(0, len(tile_indices), microbatch_size):
+                indices = tile_indices[start : start + microbatch_size]
+                tile_batch = torch.cat([tiles[idx] for idx in indices], dim=0)
+                output_batch = forward_fn(tile_batch)
+                tasks.extend(
+                    output_batch.unflatten(0, (len(indices), sample_batch_size)).unbind(
+                        dim=0
+                    )
+                )
+                if cls_agg is not None:
+                    cls_agg.collect_stacked(len(indices), sample_batch_size)
+            return tasks
 
         tasks = []
         for idx in tile_indices:
