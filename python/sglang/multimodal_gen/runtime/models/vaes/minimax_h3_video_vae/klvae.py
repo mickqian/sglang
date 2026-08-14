@@ -174,6 +174,13 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             "decoder_tile_overlap_min", self.tile_overlap_min
         )
         self._blend_weight_cache = {}
+        self._decoder_cuda_graph_enabled = os.environ.get(
+            "MINIMAX_H3_VAE_DECODER_CUDA_GRAPH", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._decoder_cuda_graphs = {}
+        self._decoder_cuda_graph_disabled_keys = set()
+        self._decoder_cuda_graph_stream = None
+        self._decoder_cuda_graph_pool = None
         self.latent_patch_size = kwargs.get("latent_patch_size", 1)
         self.crop_mode = kwargs.get("crop_mode", "top_left")
         self.pixel_norm_type = kwargs.get("pixel_norm_type", "imagenet")
@@ -1277,8 +1284,80 @@ class AutoencoderKLLegacy(AutoencoderKL):
     def decode(self, z):
         z2 = self.post_quant_conv(z)
         if self.use_vit_decoder:
-            return self.decoder(z2)
+            return self._decode_vit(z2)
         return self.decoder(z2, z)
+
+    def _decode_vit(self, z):
+        if (
+            not self._decoder_cuda_graph_enabled
+            or self.training
+            or not z.is_cuda
+            or z.dtype != torch.float16
+            or torch.compiler.is_compiling()
+        ):
+            return self.decoder(z)
+
+        key = (tuple(z.shape), tuple(z.stride()), z.dtype, z.device)
+        if key in self._decoder_cuda_graph_disabled_keys:
+            return self.decoder(z)
+
+        captured = self._decoder_cuda_graphs.get(key)
+        try:
+            if captured is None:
+                static_input = torch.empty_strided(
+                    z.shape,
+                    z.stride(),
+                    dtype=z.dtype,
+                    device=z.device,
+                )
+                static_input.copy_(z)
+                if self._decoder_cuda_graph_stream is None:
+                    self._decoder_cuda_graph_stream = torch.cuda.Stream(device=z.device)
+                if self._decoder_cuda_graph_pool is None:
+                    self._decoder_cuda_graph_pool = torch.cuda.graph_pool_handle()
+
+                torch.cuda.synchronize(z.device)
+                with (
+                    torch.cuda.stream(self._decoder_cuda_graph_stream),
+                    torch.inference_mode(),
+                ):
+                    self.decoder(static_input)
+                self._decoder_cuda_graph_stream.synchronize()
+
+                graph = torch.cuda.CUDAGraph()
+                with (
+                    torch.cuda.graph(
+                        graph,
+                        pool=self._decoder_cuda_graph_pool,
+                        stream=self._decoder_cuda_graph_stream,
+                    ),
+                    torch.inference_mode(),
+                ):
+                    static_output = self.decoder(static_input)
+                self._decoder_cuda_graph_stream.synchronize()
+                captured = (graph, static_input, static_output)
+                self._decoder_cuda_graphs[key] = captured
+                logger.info(
+                    "Captured MiniMax H3 VAE decoder CUDA graph for shape=%s stride=%s",
+                    tuple(z.shape),
+                    tuple(z.stride()),
+                )
+            else:
+                graph, static_input, _ = captured
+                static_input.copy_(z)
+                graph.replay()
+
+            return captured[2].clone()
+        except Exception:
+            self._decoder_cuda_graphs.pop(key, None)
+            self._decoder_cuda_graph_disabled_keys.add(key)
+            logger.warning(
+                "MiniMax H3 VAE decoder CUDA graph disabled for shape=%s stride=%s",
+                tuple(z.shape),
+                tuple(z.stride()),
+                exc_info=True,
+            )
+            return self.decoder(z)
 
     def encode_base(self, input, process_image=False):
         if self.use_3d_conv and input.ndim == 4:
