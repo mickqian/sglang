@@ -4,6 +4,7 @@ import asyncio
 import base64
 import functools
 import io
+import pickle
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -900,6 +901,8 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
             hot = asyncio.run(
                 processor.process_mm_data_async([image_data], [3, 42, 4], request)
             )
+        cold_items = pickle.loads(pickle.dumps(cold.mm_items))
+        hot_items = pickle.loads(pickle.dumps(hot.mm_items))
 
         with (
             patch("sglang.srt.models.kimi_k3.configured_tp_size", return_value=1),
@@ -911,8 +914,8 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
                 ),
             ),
         ):
-            cold_features = model.get_image_feature(cold.mm_items)
-            hot_features = model.get_image_feature(hot.mm_items)
+            cold_features = model.get_image_feature(cold_items)
+            hot_features = model.get_image_feature(hot_items)
     finally:
         processor.shutdown()
 
@@ -920,8 +923,7 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
     assert cold.mm_items[0].hash == hot.mm_items[0].hash
     assert cold.mm_items[0].offsets == hot.mm_items[0].offsets == [(3, 3)]
     assert (
-        cold.mm_items[0].model_specific_data[DEFERRED_PREPROCESSING_KEY].backend
-        == "gpu"
+        cold_items[0].model_specific_data[DEFERRED_PREPROCESSING_KEY].backend == "gpu"
     )
     torch.testing.assert_close(cold_features, hot_features)
 
