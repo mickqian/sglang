@@ -894,11 +894,14 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
                 processor.process_mm_data_async([image], [3, 42, 4], request)
             )
 
-        with patch(
-            "sglang.srt.multimodal.processors.kimi_k25._gpu_preprocess_images",
-            return_value=(
-                torch.ones((4, 3), dtype=torch.float32),
-                torch.tensor([[1, 2, 2]], dtype=torch.int64),
+        with (
+            patch("sglang.srt.models.kimi_k3.configured_tp_size", return_value=1),
+            patch(
+                "sglang.srt.multimodal.processors.kimi_k25._gpu_preprocess_images",
+                return_value=(
+                    torch.ones((4, 3), dtype=torch.float32),
+                    torch.tensor([[1, 2, 2]], dtype=torch.int64),
+                ),
             ),
         ):
             cold_features = model.get_image_feature(cold.mm_items)
