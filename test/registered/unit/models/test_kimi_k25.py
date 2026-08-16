@@ -838,6 +838,7 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
     server_args = ServerArgs(
         model_path="dummy",
         mm_feature_transport="cpu",
+        mm_process_config={},
         mm_io_worker_num=1,
         mm_processor_worker_num=0,
         tokenizer_worker_num=1,
