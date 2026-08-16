@@ -67,6 +67,7 @@ from sglang.srt.multimodal.transport.cuda_ipc import (
     CudaIpcTensorTransportProxy,
 )
 from sglang.srt.runtime_context import get_context, get_parallel
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import ImageData
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -834,21 +835,13 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
             "architectures": ["KimiK3ForConditionalGeneration"],
         },
     )
-    server_args = SimpleNamespace(
+    server_args = ServerArgs(
+        model_path="dummy",
         mm_feature_transport="cpu",
-        image_processor_backend="auto",
-        disable_fast_image_processor=False,
-        skip_tokenizer_init=False,
-        mm_process_config={},
         mm_io_worker_num=1,
         mm_processor_worker_num=0,
         tokenizer_worker_num=1,
         mm_preprocess_cache_size_mb=1,
-        trust_mm_content_hashes=False,
-        revision=None,
-        tokenizer_revision=None,
-        allowed_media_domains=[],
-        media_url_max_file_size_mb=64,
     )
     processor = KimiK3ImageProcessor(
         hf_config=hf_config,

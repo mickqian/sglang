@@ -393,7 +393,7 @@ def build_processor_fingerprint(
         "model_type": hf_payload.get("model_type"),
         "architectures": hf_payload.get("architectures"),
         "model_revision": server_args.revision,
-        "tokenizer_revision": server_args.tokenizer_revision,
+        "processor_revision": server_args.revision,
         "disable_fast_image_processor": server_args.disable_fast_image_processor,
         "mm_process_config": server_args.mm_process_config or {},
         "processor": processor_payload,
