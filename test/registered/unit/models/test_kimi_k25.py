@@ -605,6 +605,15 @@ class _HFProcessor:
         )
 
 
+class _AnySizeTokenizer:
+    def encode(self, text, allowed_special=None):
+        if text.startswith("<|media_begin|>image "):
+            return [10, 11]
+        if text == "<|media_end|>":
+            return [14]
+        return []
+
+
 def _k3_preprocess_config(
     *, patch_size=14, in_patch_limit=16384
 ) -> KimiK3PreprocessConfig:
@@ -810,6 +819,101 @@ def test_kimi_k3_cached_deferred_artifact_has_model_contract():
     config = artifact.deferred
     assert config.backend == "gpu"
     assert config.resize_config["new_width"] == 2
+
+
+def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
+    hf_processor = _HFProcessor()
+    hf_processor.tokenizer = _AnySizeTokenizer()
+    hf_config = SimpleNamespace(
+        media_placeholder_token_id=42,
+        to_dict=lambda: {
+            "model_type": "kimi_k3",
+            "architectures": ["KimiK3ForConditionalGeneration"],
+        },
+    )
+    server_args = SimpleNamespace(
+        mm_feature_transport="cpu",
+        image_processor_backend="auto",
+        disable_fast_image_processor=False,
+        skip_tokenizer_init=False,
+        mm_process_config={},
+        mm_io_worker_num=1,
+        mm_processor_worker_num=0,
+        tokenizer_worker_num=1,
+        mm_preprocess_cache_size_mb=1,
+        trust_mm_content_hashes=False,
+        revision=None,
+        tokenizer_revision=None,
+        allowed_media_domains=[],
+        media_url_max_file_size_mb=64,
+    )
+    processor = KimiK3ImageProcessor(
+        hf_config=hf_config,
+        server_args=server_args,
+        _processor=hf_processor,
+        transport_mode=None,
+        skip_mm_pool=True,
+    )
+    image = Image.new("RGB", (28, 28), color=(1, 2, 3))
+    request = SimpleNamespace(video_data=None, mm_content_hashes=None)
+
+    class _Tower(nn.Module):
+        device = torch.device("cpu")
+        patch_size = 14
+
+        def __init__(self):
+            super().__init__()
+            self.patch_embed = SimpleNamespace(
+                proj=SimpleNamespace(weight=torch.empty(1, dtype=torch.float32))
+            )
+
+        def forward(self, pixel_values, _grid_thws):
+            return pixel_values
+
+    model = KimiK3ForConditionalGeneration.__new__(KimiK3ForConditionalGeneration)
+    nn.Module.__init__(model)
+    model.use_data_parallel = False
+    model.vision_tower = _Tower()
+    model.mm_projector = _Projector()
+
+    try:
+        with (
+            patch(
+                "sglang.srt.multimodal.processors.kimi_k3.is_cuda", return_value=True
+            ),
+            patch.object(
+                processor,
+                "prepare_artifact_batch",
+                wraps=processor.prepare_artifact_batch,
+            ) as prepare_artifacts,
+        ):
+            cold = asyncio.run(
+                processor.process_mm_data_async([image], [1, 42, 2], request)
+            )
+            hot = asyncio.run(
+                processor.process_mm_data_async([image], [3, 42, 4], request)
+            )
+
+        with patch(
+            "sglang.srt.multimodal.processors.kimi_k25._gpu_preprocess_images",
+            return_value=(
+                torch.ones((4, 3), dtype=torch.float32),
+                torch.tensor([[1, 2, 2]], dtype=torch.int64),
+            ),
+        ):
+            cold_features = model.get_image_feature(cold.mm_items)
+            hot_features = model.get_image_feature(hot.mm_items)
+    finally:
+        processor.shutdown()
+
+    assert prepare_artifacts.call_count == 1
+    assert cold.mm_items[0].hash == hot.mm_items[0].hash
+    assert cold.mm_items[0].offsets == hot.mm_items[0].offsets == [(3, 3)]
+    assert (
+        cold.mm_items[0].model_specific_data[DEFERRED_PREPROCESSING_KEY].backend
+        == "gpu"
+    )
+    torch.testing.assert_close(cold_features, hot_features)
 
 
 def test_kimi_k3_model_accepts_mixed_cached_eager_and_deferred_artifacts():
