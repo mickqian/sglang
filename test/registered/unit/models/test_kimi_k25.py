@@ -1,7 +1,9 @@
 """CPU coverage for Kimi-K2.5/K2.7 encoder-DP wiring."""
 
 import asyncio
+import base64
 import functools
+import io
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -852,9 +854,14 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
         server_args=server_args,
         _processor=hf_processor,
         transport_mode=None,
-        skip_mm_pool=True,
     )
     image = Image.new("RGB", (28, 28), color=(1, 2, 3))
+    encoded_image = io.BytesIO()
+    image.save(encoded_image, format="PNG")
+    image_data = ImageData(
+        url="data:image/png;base64,"
+        + base64.b64encode(encoded_image.getvalue()).decode()
+    )
     request = SimpleNamespace(video_data=None, mm_content_hashes=None)
 
     class _Tower(nn.Module):
@@ -888,10 +895,10 @@ def test_kimi_k3_normal_cache_path_connects_real_producer_to_model_consumer():
             ) as prepare_artifacts,
         ):
             cold = asyncio.run(
-                processor.process_mm_data_async([image], [1, 42, 2], request)
+                processor.process_mm_data_async([image_data], [1, 42, 2], request)
             )
             hot = asyncio.run(
-                processor.process_mm_data_async([image], [3, 42, 4], request)
+                processor.process_mm_data_async([image_data], [3, 42, 4], request)
             )
 
         with (
