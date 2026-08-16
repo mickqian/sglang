@@ -1358,7 +1358,7 @@ def test_kimi_k3_eager_preprocessing_preserves_float_tensor_support():
     assert output.shape == (3, 4, 4)
 
 
-@pytest.mark.parametrize("transport", ["cuda_ipc", "fabric"])
+@pytest.mark.parametrize("transport", ["cuda_ipc", "cuda_vmm"])
 def test_kimi_k3_keeps_gpu_transport_preprocessing_eager(transport):
     processor = object.__new__(KimiK3ImageProcessor)
     processor.mm_feature_transport = transport
