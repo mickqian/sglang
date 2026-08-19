@@ -692,10 +692,10 @@ BF16. With full layerwise offload, VAE decode and offload buffers can still
 dominate peak GPU memory, but each streamed DiT layer also transfers fewer
 bytes.
 
-Packed linears reuse the SRT GGUF implementation. Standard and K-quants run
-through its MMVQ/MMQ kernels without first materializing a dense weight. Types
-without an MMQ kernel use SRT's existing dequantize-and-matmul fallback for
-larger activation batches. GGUF remains a capacity-oriented option; latency
+Packed linears reuse SRT's GGUF type definitions, CUDA dequantization, and
+low-token MMVQ dispatch. Normal diffusion token matrices use dequantization
+followed by the native GEMM because the LLM-oriented MMQ path is slower at
+diffusion sequence lengths. GGUF remains a capacity-oriented option; latency
 depends on the quantization type, activation shape, and placement policy.
 
 Layers the checkpoint stores unquantized (F32/F16/BF16) take the ordinary linear

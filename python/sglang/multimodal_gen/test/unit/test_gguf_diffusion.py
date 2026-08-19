@@ -312,7 +312,7 @@ class TestGGUFQuantMethodSelection(unittest.TestCase):
             ReplicatedLinear(512, 4, bias=False, quant_config=config, prefix="w")
 
     @patch("sglang.multimodal_gen.runtime.layers.quantization.gguf.fused_mul_mat_gguf")
-    def test_apply_dispatches_srt_fused_kernel(self, fused_mul_mat):
+    def test_apply_dispatches_srt_mmvq_for_small_token_count(self, fused_mul_mat):
         config = self._config(**{"w.weight": self._meta(_Q4_K, 4, 512, (4, 288))})
         layer = ReplicatedLinear(512, 4, bias=True, quant_config=config, prefix="w")
         layer.bias.data.copy_(torch.arange(4, dtype=torch.float32))
@@ -329,6 +329,24 @@ class TestGGUFQuantMethodSelection(unittest.TestCase):
         self.assertEqual(tuple(args[0].shape), (6, 512))
         self.assertIs(args[1], layer.qweight)
         self.assertEqual(args[2], _Q4_K)
+
+    @patch(
+        "sglang.multimodal_gen.runtime.layers.quantization.gguf.dequantize_gguf_weight"
+    )
+    @patch("sglang.multimodal_gen.runtime.layers.quantization.gguf.fused_mul_mat_gguf")
+    def test_apply_uses_dense_gemm_for_dit_token_count(
+        self, fused_mul_mat, dequantize
+    ):
+        config = self._config(**{"w.weight": self._meta(_Q4_K, 4, 512, (4, 288))})
+        layer = ReplicatedLinear(512, 4, bias=False, quant_config=config, prefix="w")
+        dequantize.return_value = torch.ones(4, 512)
+
+        output, _ = layer(torch.ones(2, 4, 512))
+
+        fused_mul_mat.assert_not_called()
+        dequantize.assert_called_once_with(layer.qweight, _Q4_K, torch.float32)
+        self.assertEqual(tuple(output.shape), (2, 4, 4))
+        torch.testing.assert_close(output, torch.full_like(output, 512.0))
 
 
 class TestGGUFTensorParallelLoading(unittest.TestCase):

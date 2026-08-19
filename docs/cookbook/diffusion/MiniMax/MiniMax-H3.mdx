@@ -235,10 +235,13 @@ sglang serve \
   --port 30010
 ```
 
-Standard and K-quant linears reuse SRT's fused GGUF kernels. TP is supported
-when each row-parallel input shard remains GGML-block aligned; incompatible
-degrees fail during model construction. FSDP, LoRA merging, and the separate
-MiniMax-H3 AdaLN cache flags are not compatible with packed GGUF weights.
+The linear adapter reuses SRT's GGUF type definitions, CUDA dequantization, and
+low-token MMVQ dispatch. Normal DiT token matrices use dequantization followed
+by the native GEMM because SRT's LLM-oriented MMQ path is slower at diffusion
+sequence lengths. TP is supported when each row-parallel input shard remains
+GGML-block aligned; incompatible degrees fail during model construction. FSDP,
+LoRA merging, and the separate MiniMax-H3 AdaLN cache flags are not compatible
+with packed GGUF weights.
 
 The first launch downloads the model through the selected Hub. If the Hugging
 Face repository requires authentication, export a Hugging Face token in the
