@@ -24,8 +24,6 @@ from sglang.srt.layers.quantization.gguf import (
     DEQUANT_TYPES,
     UNQUANTIZED_TYPES,
     dequantize_gguf_weight,
-    fused_mul_mat_gguf,
-    should_use_gguf_mmvq,
 )
 
 
@@ -80,7 +78,7 @@ class GGUFConfig(QuantizationConfig):
 
 
 class GGUFLinearMethod(LinearMethodBase):
-    """Register TP-local packed weights and dispatch shared GGUF kernels."""
+    """Register TP-local packed weights and reuse SRT dequantization."""
 
     def __init__(self, metadata: GGUFTensorMeta, prefix: str) -> None:
         self.metadata = metadata
@@ -128,19 +126,8 @@ class GGUFLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        input_shape = x.shape
-        flat_x = x.reshape(-1, input_shape[-1]).contiguous()
-        if should_use_gguf_mmvq(flat_x, layer.qweight, self.weight_type):
-            output = fused_mul_mat_gguf(flat_x, layer.qweight, self.weight_type)
-        else:
-            weight = dequantize_gguf_weight(
-                layer.qweight, self.weight_type, flat_x.dtype
-            )
-            output = nn.functional.linear(flat_x, weight)
-        output = output.reshape(*input_shape[:-1], output.shape[-1])
-        if bias is not None:
-            output.add_(bias)
-        return output
+        weight = dequantize_gguf_weight(layer.qweight, self.weight_type, x.dtype)
+        return nn.functional.linear(x, weight, bias)
 
 
 __all__ = ["GGUFConfig", "GGUFLinearMethod"]

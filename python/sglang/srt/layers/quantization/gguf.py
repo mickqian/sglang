@@ -169,19 +169,6 @@ MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 
-def should_use_gguf_mmvq(
-    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
-) -> bool:
-    """Return whether the packed matrix is in the low-token MMVQ regime."""
-    if qweight_type not in MMVQ_QUANT_TYPES:
-        return False
-    if qweight_type in IMATRIX_QUANT_TYPES:
-        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
-    else:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
-    return x.shape[0] <= mmvq_safe
-
-
 def dequantize_gguf_weight(
     qweight: torch.Tensor, qweight_type: int, dtype: torch.dtype
 ) -> torch.Tensor:
@@ -194,6 +181,10 @@ def dequantize_gguf_weight(
 def fused_mul_mat_gguf(
     x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
+    if qweight_type in IMATRIX_QUANT_TYPES:
+        mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
+    else:
+        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
@@ -202,7 +193,7 @@ def fused_mul_mat_gguf(
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
     # enable MMVQ in contiguous batching with batch_size=1
-    if should_use_gguf_mmvq(x, qweight, qweight_type):
+    if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
     elif qweight_type in MMQ_QUANT_TYPES:
