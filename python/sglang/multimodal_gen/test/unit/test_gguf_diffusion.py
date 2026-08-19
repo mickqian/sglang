@@ -334,9 +334,7 @@ class TestGGUFQuantMethodSelection(unittest.TestCase):
         "sglang.multimodal_gen.runtime.layers.quantization.gguf.dequantize_gguf_weight"
     )
     @patch("sglang.multimodal_gen.runtime.layers.quantization.gguf.fused_mul_mat_gguf")
-    def test_apply_uses_dense_gemm_for_dit_token_count(
-        self, fused_mul_mat, dequantize
-    ):
+    def test_apply_uses_dense_gemm_for_dit_token_count(self, fused_mul_mat, dequantize):
         config = self._config(**{"w.weight": self._meta(_Q4_K, 4, 512, (4, 288))})
         layer = ReplicatedLinear(512, 4, bias=False, quant_config=config, prefix="w")
         dequantize.return_value = torch.ones(4, 512)
