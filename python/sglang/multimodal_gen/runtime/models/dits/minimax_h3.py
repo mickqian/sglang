@@ -785,17 +785,12 @@ class MiniMaxH3AdalnProj(nn.Module):
         self.expand_ratio = expand_ratio
         self.modality_num = modality_num
         self.hidden_size = arch.hidden_size
-        # Curve checkpoints store both the sampled curve and their reduced
-        # AdaLN projections in FP32. Preserve that precision island to match
-        # the published pruned implementation; these outputs intentionally do
-        # not enter the BF16-only fused modulation kernels.
-        params_dtype = _FP32_DTYPE if arch.adaln_curve_grid is not None else _BF16_DTYPE
         self.linear = ColumnParallelLinear(
             arch.time_embed_dim,
             out_features,
             bias=True,
             gather_output=False,
-            params_dtype=params_dtype,
+            params_dtype=_BF16_DTYPE,
             quant_config=quant_config,
             prefix=f"{prefix}.linear",
         )
@@ -1636,9 +1631,9 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 )
         if self.adaln_t_table is not None:
             for name, param in self.named_parameters():
-                if ".adaln_proj.linear." in name and param.dtype != _FP32_DTYPE:
+                if ".adaln_proj.linear." in name and param.dtype != _BF16_DTYPE:
                     raise ValueError(
-                        f"{name} must stay fp32 with curve AdaLN, got {param.dtype}."
+                        f"{name} must be bf16 with curve AdaLN, got {param.dtype}."
                     )
         # assign=True loading may re-register this persistent buffer as a parameter
         rope_inv_freq = self.rope.inv_freq
@@ -2066,7 +2061,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         )
         # request-step AdaLN input shared by all blocks
         adaln_input = (
-            t_emb
+            t_emb.to(_BF16_DTYPE)
             if self.adaln_t_table is not None
             else nn.functional.silu(t_emb).to(_BF16_DTYPE)
         )
