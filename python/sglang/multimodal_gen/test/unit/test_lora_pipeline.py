@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -10,7 +11,10 @@ from sglang.multimodal_gen.runtime.layers.lora.linear import BaseLayerWithLoRA
 from sglang.multimodal_gen.runtime.pipelines_core.lora_format_adapter import (
     normalize_lora_state_dict,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
+from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import (
+    LoRAPipeline,
+    _normalize_peft_scaling,
+)
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_lora
 
 _RANK_PATCH = "sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline.dist.get_rank"
@@ -183,3 +187,38 @@ def test_multiple_peft_adapter_slots_fail_closed():
 
     with pytest.raises(ValueError, match="multiple PEFT adapter slots"):
         normalize_lora_state_dict(state_dict)
+
+
+def test_normalize_peft_rslora_scaling_preserves_effective_delta():
+    lora_a = torch.randn(4, 8)
+    lora_b = torch.randn(16, 4)
+    normalized = _normalize_peft_scaling(
+        {
+            "transformer.block.proj.lora_A.weight": lora_a,
+            "transformer.block.proj.lora_B.weight": lora_b,
+        },
+        {"use_rslora": True, "lora_alpha": 8},
+    )
+
+    ordinary_delta = (
+        (8 / 4) * normalized["transformer.block.proj.lora_B.weight"] @ lora_a
+    )
+    expected_delta = (8 / math.sqrt(4)) * lora_b @ lora_a
+    torch.testing.assert_close(ordinary_delta, expected_delta)
+
+
+@pytest.mark.parametrize(
+    ("state_dict", "adapter_config", "message"),
+    [
+        (
+            {"transformer.block.lora_magnitude_vector.weight": torch.ones(8)},
+            {},
+            "DoRA adapters",
+        ),
+        ({}, {"use_dora": True}, "DoRA adapters"),
+        ({}, {"alpha_pattern": {"block": 8}}, "alpha_pattern"),
+    ],
+)
+def test_unsupported_peft_scaling_fails_closed(state_dict, adapter_config, message):
+    with pytest.raises(ValueError, match=message):
+        _normalize_peft_scaling(state_dict, adapter_config)

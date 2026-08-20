@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 import json
+import math
 import os
 from collections import defaultdict
 from collections.abc import Hashable
@@ -42,6 +43,60 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 logger = init_logger(__name__)
+
+
+def _load_peft_adapter_config(lora_local_path: str) -> dict[str, Any]:
+    adapter_config_path = os.path.join(
+        os.path.dirname(lora_local_path), "adapter_config.json"
+    )
+    if not os.path.isfile(adapter_config_path):
+        return {}
+    with open(adapter_config_path, encoding="utf-8") as file:
+        config = json.load(file)
+    if not isinstance(config, dict):
+        raise ValueError("PEFT adapter_config.json must contain a JSON object")
+    return config
+
+
+def _normalize_peft_scaling(
+    state_dict: dict[str, torch.Tensor], adapter_config: dict[str, Any]
+) -> dict[str, torch.Tensor]:
+    """Fold PEFT scaling variants into the ordinary alpha/rank LoRA formula."""
+    if adapter_config.get("use_dora", False) or any(
+        "lora_magnitude_vector" in name or "dora_scale" in name for name in state_dict
+    ):
+        raise ValueError(
+            "DoRA adapters are not supported by the native diffusion LoRA layers"
+        )
+    if adapter_config.get("alpha_pattern"):
+        raise ValueError(
+            "PEFT alpha_pattern is not supported; export explicit per-layer "
+            "'.alpha' tensors or use one global lora_alpha"
+        )
+    use_rslora = adapter_config.get("use_rslora", False)
+    if not isinstance(use_rslora, bool):
+        raise ValueError("PEFT use_rslora must be boolean")
+    if not use_rslora:
+        return state_dict
+
+    normalized = dict(state_dict)
+    scaled_count = 0
+    suffix = ".lora_B.weight"
+    for name, weight in state_dict.items():
+        if not name.endswith(suffix):
+            continue
+        lora_a_name = f"{name[: -len(suffix)]}.lora_A.weight"
+        lora_a = state_dict.get(lora_a_name)
+        if lora_a is None or lora_a.ndim < 2:
+            raise ValueError(f"RSLoRA weight {name!r} has no matching rank-bearing A")
+        rank = int(lora_a.shape[-2])
+        if rank <= 0:
+            raise ValueError(f"RSLoRA weight {name!r} has invalid rank {rank}")
+        normalized[name] = weight * math.sqrt(rank)
+        scaled_count += 1
+    if scaled_count == 0:
+        raise ValueError("PEFT use_rslora is true, but no LoRA A/B pairs were found")
+    return normalized
 
 
 def _swap_peft_swiglu_fc1_lora_b(
@@ -831,15 +886,11 @@ class LoRAPipeline(ComposedPipelineBase):
             tensor_metadata = dict(weights.metadata() or {})
         raw_state_dict = load_file(lora_local_path)
         lora_state_dict = normalize_lora_state_dict(raw_state_dict, logger=logger)
+        adapter_config = _load_peft_adapter_config(lora_local_path)
+        lora_state_dict = _normalize_peft_scaling(lora_state_dict, adapter_config)
         adapter_lora_alpha = lora_alpha
-        adapter_config_path = os.path.join(
-            os.path.dirname(lora_local_path), "adapter_config.json"
-        )
-        if adapter_lora_alpha is None and os.path.isfile(adapter_config_path):
-            with open(adapter_config_path, encoding="utf-8") as f:
-                adapter_config = json.load(f)
-            if adapter_config.get("lora_alpha") is not None:
-                adapter_lora_alpha = int(adapter_config["lora_alpha"])
+        if adapter_lora_alpha is None and adapter_config.get("lora_alpha") is not None:
+            adapter_lora_alpha = int(adapter_config["lora_alpha"])
         if adapter_lora_alpha is None:
             adapter_lora_alpha = infer_lora_alpha_from_tensor_metadata(tensor_metadata)
 
