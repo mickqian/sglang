@@ -28,6 +28,7 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
     ComponentCheckpointUnsupportedError,
     ComponentLoader,
     NativeComponentLoaderRequired,
+    _admit_native_library_quantization,
 )
 from sglang.multimodal_gen.runtime.loader.utils import (
     set_default_torch_dtype,
@@ -85,6 +86,7 @@ def _select_encoder_quantization_capability(
     model_cls: type[nn.Module],
     quant_method: str | None,
     component_name: str,
+    component_config: dict,
 ) -> CheckpointQuantizationCapability:
     capabilities = model_cls.checkpoint_quantization_capabilities
     matches = [cap for cap in capabilities if quant_method in cap.methods]
@@ -96,17 +98,10 @@ def _select_encoder_quantization_capability(
             f"{component_name!r} quantization method {quant_method!r}"
         )
 
-    if not capabilities:
-        raise ComponentCheckpointUnsupportedError(
-            f"{model_cls.__name__} does not support quantized checkpoints for "
-            f"{component_name!r}: no checkpoint quantization capability is declared"
-        )
-    supported_methods = sorted(
-        method for capability in capabilities for method in capability.methods
-    )
-    raise ComponentCheckpointUnsupportedError(
-        f"{model_cls.__name__} does not support {component_name!r} checkpoints "
-        f"quantized with {quant_method!r}; supported methods: {supported_methods}"
+    _admit_native_library_quantization(component_config, "transformers", component_name)
+    raise NativeComponentLoaderRequired(
+        f"{model_cls.__name__} does not implement {quant_method!r} checkpoint "
+        f"loading natively; delegating {component_name!r} to Transformers"
     )
 
 
@@ -157,7 +152,7 @@ def _configure_encoder_quantization(
 
     quant_method = quant_spec.declared_method
     capability = _select_encoder_quantization_capability(
-        model_cls, quant_method, component_name
+        model_cls, quant_method, component_name, component_config
     )
     if capability.backend == "transformers":
         raise NativeComponentLoaderRequired(
@@ -218,9 +213,12 @@ def _resolve_and_configure_encoder_quantization(
     except Exception as resolution_error:
         if quant_spec is None:
             raise
-        raise ComponentCheckpointUnsupportedError(
-            f"A quantized {component_name!r} checkpoint requires an in-tree "
-            f"native encoder; unsupported architectures: {architectures}"
+        _admit_native_library_quantization(
+            component_config, "transformers", component_name
+        )
+        raise NativeComponentLoaderRequired(
+            f"No in-tree native encoder matches {architectures}; delegating "
+            f"quantized {component_name!r} to Transformers"
         ) from resolution_error
 
     _configure_encoder_quantization(
@@ -327,11 +325,12 @@ class TextEncoderLoader(ComponentLoader):
         component_config = get_diffusers_component_config(
             component_path=component_model_path
         )
-        quant_spec = resolve_checkpoint_quant_spec(component_config)
-        if quant_spec is not None and quant_spec.declared_method == "bitsandbytes":
+        if _admit_native_library_quantization(
+            component_config, "transformers", resolved_component_name
+        ):
             server_args.require_component_resident(
                 resolved_component_name,
-                feature_name="Transformers bitsandbytes text encoder",
+                feature_name="Transformers quantized encoder",
             )
         return transformers_model_class.from_pretrained(
             component_model_path,

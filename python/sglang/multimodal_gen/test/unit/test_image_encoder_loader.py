@@ -3,9 +3,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from sglang.multimodal_gen.configs.models.encoders.clip import CLIPVisionConfig
-from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
-    ComponentCheckpointUnsupportedError,
-)
 from sglang.multimodal_gen.runtime.loader.component_loaders.image_encoder_loader import (
     ImageEncoderLoader,
 )
@@ -85,13 +82,15 @@ class TestImageEncoderQuantizationAdmission(unittest.TestCase):
             "image_encoder",
         )
 
-    def test_unknown_quantized_architecture_does_not_fall_back(self):
+    def test_unknown_quantized_architecture_uses_transformers_fallback(self):
         config = self._component_config("UnknownVisionModel", quantized=True)
-        with self._config_patch(config), self.assertRaises(
-            ComponentCheckpointUnsupportedError
+        with self._config_patch(config), mock.patch(
+            "sglang.multimodal_gen.runtime.loader.component_loaders."
+            "text_encoder_loader._admit_native_library_quantization",
+            return_value=True,
         ):
             self._load()
-        self.load_native.assert_not_called()
+        self.load_native.assert_called_once()
 
     def test_admitted_quantized_native_failure_does_not_fall_back(self):
         config = self._component_config("CLIPVisionModelWithProjection", quantized=True)

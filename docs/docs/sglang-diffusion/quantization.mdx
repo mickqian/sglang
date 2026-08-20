@@ -63,7 +63,7 @@ no separate quantization flag is required.
 | No SGLang-specific loader | Delegates admission and restoration to the installed Transformers or Diffusers AutoQuantizer. |
 | Specialized loader without a quantization implementation | Bypasses the ordinary SGLang weight path and delegates to the upstream AutoQuantizer. If the upstream architecture or format is unsupported, loading fails explicitly. |
 | Native DiT | Uses the formats and platform constraints listed in the tables below. |
-| Native text/image encoder | Uses an explicit architecture capability: H3 Qwen3-VL FP8, T5/UMT5/CLIP text BnB4, and CLIP vision BnB4 or serialized SRT FP8 are currently admitted. |
+| Native text/image encoder | Uses an explicit optimized capability when available: H3 Qwen3-VL FP8, T5/UMT5/CLIP text BnB4, and CLIP vision BnB4 or serialized SRT FP8 are currently admitted. Otherwise, non-native-only pipelines delegate formats accepted by Transformers. |
 | VAE | A non-native VAE may use a top-level Diffusers `quantization_config`; native-only VAEs reject formats they do not implement. |
 
 This reuses the upstream format ecosystem where possible, but it is not a
@@ -435,8 +435,11 @@ use the same contract through `--component-paths.text_encoder`,
 Native `CLIPVisionModel` image encoders also accept serialized FP8 through the
 shared SRT FP8 linear backend. The component must remain resident; its
 activation precision remains controlled independently by
-`--image-encoder-precision`. Other native encoder architectures remain
-fail-closed until their loader and output contract are admitted explicitly.
+`--image-encoder-precision`. Other encoder architectures delegate serialized
+formats accepted by Transformers when the pipeline permits native-library
+fallback. A pipeline that requires an SGLang-native encoder, such as H3's
+layer-50 Qwen3-VL extractor, still fails closed unless that exact native
+architecture/format pair is admitted.
 
 ## Validated ModelOpt Checkpoints
 

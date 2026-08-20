@@ -9,7 +9,6 @@ from torch import nn
 from sglang.multimodal_gen.runtime.layers.linear import LinearBase
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
-    ComponentCheckpointUnsupportedError,
     NativeComponentLoaderRequired,
 )
 from sglang.multimodal_gen.runtime.loader.component_loaders.text_encoder_loader import (
@@ -137,7 +136,7 @@ class TestTextEncoderClassResolution(unittest.TestCase):
         self.assertIs(encoder, loaded_encoder)
         server_args.require_component_resident.assert_called_once_with(
             "text_encoder",
-            feature_name="Transformers bitsandbytes text encoder",
+            feature_name="Transformers quantized encoder",
         )
         transformers_model_class.from_pretrained.assert_called_once_with(
             "/model/text_encoder",
@@ -214,10 +213,14 @@ class TestTextEncoderQuantization(unittest.TestCase):
         )
         self.assertIs(model_config.quant_config, self.serialized)
 
-    def test_encoder_class_must_opt_in(self):
+    def test_unowned_encoder_quantization_delegates_to_transformers(self):
         model_config = SimpleNamespace(quant_config=None)
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError, "does not support"
+        with mock.patch(
+            "sglang.multimodal_gen.runtime.loader.component_loaders."
+            "text_encoder_loader._admit_native_library_quantization",
+            return_value=True,
+        ), self.assertRaisesRegex(
+            NativeComponentLoaderRequired, "delegating.*Transformers"
         ):
             _configure_encoder_quantization(
                 model_config,
@@ -245,10 +248,13 @@ class TestTextEncoderQuantization(unittest.TestCase):
                     "text_encoder",
                 )
 
-    def test_t5_rejects_unlisted_quantization_method(self):
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError,
-            "supported methods.*bitsandbytes",
+    def test_t5_delegates_unlisted_upstream_quantization_method(self):
+        with mock.patch(
+            "sglang.multimodal_gen.runtime.loader.component_loaders."
+            "text_encoder_loader._admit_native_library_quantization",
+            return_value=True,
+        ), self.assertRaisesRegex(
+            NativeComponentLoaderRequired, "delegating.*Transformers"
         ):
             _configure_encoder_quantization(
                 SimpleNamespace(quant_config=None),

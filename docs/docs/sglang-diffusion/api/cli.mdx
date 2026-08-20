@@ -145,8 +145,10 @@ never silently changes prompt embeddings or VAE outputs:
   `--component-paths.transformer`.
 - Serialized quantization metadata is auto-detected. Generic components reuse
   the installed Transformers/Diffusers AutoQuantizer; native SGLang components
-  require an explicit architecture/format capability. Unsupported combinations
-  fail before ordinary weight loading instead of silently changing precision.
+  use an optimized architecture/format capability when available and otherwise
+  delegate to the upstream loader when the pipeline permits it. Native-only or
+  unsupported combinations fail before ordinary weight loading instead of
+  silently changing precision.
 
 ### Artifact preflight
 
