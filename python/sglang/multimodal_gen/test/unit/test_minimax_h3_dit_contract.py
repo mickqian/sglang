@@ -78,6 +78,16 @@ def test_native_weight_names_and_grouped_qkv_reorder():
         None,
         None,
     )
+    assert mapping("lora_unet_blocks_10_attn_qkv_proj.lora_A") == (
+        "blocks.10.attn.qkv_proj.lora_A",
+        None,
+        None,
+    )
+    assert mapping("lora_unet_blocks_10_mlp_fc1.alpha") == (
+        "blocks.10.mlp.fc1.alpha",
+        None,
+        None,
+    )
     assert mapping("transformer.blocks.0.attn.qkv_proj.weight") == (
         "transformer.blocks.0.attn.qkv_proj.weight",
         None,

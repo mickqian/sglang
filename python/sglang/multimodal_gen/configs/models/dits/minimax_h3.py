@@ -13,6 +13,12 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     # H3 fuses Q/K/V, so split projections are stacked for the fused LoRA layer
     param_names_mapping: dict = field(
         default_factory=lambda: {
+            # Kohya/Comfy native-fused H3 adapters use underscore-delimited
+            # module names and keep per-layer alpha tensors beside A/B.
+            r"^lora_unet_blocks_(\d+)_attn_out_proj\.(lora_[AB]|alpha)$": r"blocks.\1.attn.out_proj.\2",
+            r"^lora_unet_blocks_(\d+)_attn_qkv_proj\.(lora_[AB]|alpha)$": r"blocks.\1.attn.qkv_proj.\2",
+            r"^lora_unet_blocks_(\d+)_mlp_fc1\.(lora_[AB]|alpha)$": r"blocks.\1.mlp.fc1.\2",
+            r"^lora_unet_blocks_(\d+)_mlp_fc2\.(lora_[AB]|alpha)$": r"blocks.\1.mlp.fc2.\2",
             r"^(.*\.lora_[AB])\.[^.]+$": r"\1",
             r"^base_model\.model\.(.*\.lora_[AB])$": r"\1",
             r"^transformer\.(.*\.lora_[AB])$": r"\1",
