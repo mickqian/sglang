@@ -142,6 +142,32 @@ never silently changes prompt embeddings. For a native text encoder:
 
 ### Artifact preflight
 
+Artifact publishers can package stable defaults in a non-executable
+`sglang_artifacts.json` and users can apply it with `--artifact-manifest`:
+
+```json
+{
+  "schema_version": 1,
+  "base_model": "owner/base-model",
+  "entries": [
+    {
+      "id": "turbo",
+      "path": "adapter.safetensors",
+      "role": "lora",
+      "default": true,
+      "adapter": {"scale": 0.25}
+    }
+  ],
+  "request_defaults": {"num_inference_steps": 6}
+}
+```
+
+Paths are relative to the manifest. Supported default roles are `component`,
+`component_weights`, and `lora`; arbitrary backend names, key mappings, and
+executable code are not accepted. Explicit CLI or request values always win.
+Manifest request defaults must name fields on the selected model's concrete
+`SamplingParams` class.
+
 Use the normal `generate` or `serve` command to inspect every configured model,
 component override, weights-only override, and startup LoRA before allocating a
 GPU:

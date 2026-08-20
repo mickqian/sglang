@@ -31,6 +31,9 @@ from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
 )
+from sglang.multimodal_gen.runtime.loader.artifact_manifest import (
+    load_artifact_manifest_defaults,
+)
 from sglang.multimodal_gen.runtime.loader.utils import BYTES_PER_GB
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
     COMPONENT_OFFLOAD,
@@ -236,6 +239,10 @@ class ServerArgs(DisaggServerArgsMixin):
     # HuggingFace specific parameters
     trust_remote_code: bool = False
     revision: str | None = None
+    artifact_manifest: str | None = None
+    artifact_request_defaults: dict[str, object] = field(
+        default_factory=dict, repr=False
+    )
     artifact_preflight: str | None = None
     artifact_report_format: str = "text"
 
@@ -1670,6 +1677,16 @@ class ServerArgs(DisaggServerArgsMixin):
             help="The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
         )
         parser.add_argument(
+            "--artifact-manifest",
+            type=str,
+            default=ServerArgs.artifact_manifest,
+            help=(
+                "Optional local path or Hugging Face source for a strict "
+                "sglang_artifacts.json manifest. Explicit CLI arguments override "
+                "manifest defaults."
+            ),
+        )
+        parser.add_argument(
             "--artifact-preflight",
             choices=("metadata", "full"),
             default=ServerArgs.artifact_preflight,
@@ -2844,6 +2861,34 @@ class ServerArgs(DisaggServerArgsMixin):
             existing.update(dynamic_attention_backends)
             provided_args["component_attention_backends"] = existing
             explicit_arg_names.add("component_attention_backends")
+
+        artifact_manifest = provided_args.get("artifact_manifest")
+        if artifact_manifest is not None:
+            manifest = load_artifact_manifest_defaults(
+                artifact_manifest,
+                revision=provided_args.get("revision"),
+            )
+            scalar_defaults = {
+                "model_path": manifest.model_path,
+                "model_variant": manifest.model_variant,
+                "lora_path": manifest.lora_path,
+                "lora_alpha": manifest.lora_alpha,
+                "lora_scale": manifest.lora_scale,
+            }
+            for name, value in scalar_defaults.items():
+                if value is not None:
+                    provided_args.setdefault(name, value)
+            manifest_component_paths = dict(manifest.component_paths)
+            manifest_component_paths.update(provided_args.get("component_paths") or {})
+            if manifest_component_paths:
+                provided_args["component_paths"] = manifest_component_paths
+            manifest_weights_paths = dict(manifest.component_weights_paths)
+            manifest_weights_paths.update(
+                provided_args.get("component_weights_paths") or {}
+            )
+            if manifest_weights_paths:
+                provided_args["component_weights_paths"] = manifest_weights_paths
+            provided_args["artifact_request_defaults"] = manifest.request_defaults
 
         provided_args["_explicit_arg_names"] = explicit_arg_names
         return cls.from_dict(provided_args)

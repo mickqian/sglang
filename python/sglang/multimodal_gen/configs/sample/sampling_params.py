@@ -882,6 +882,25 @@ class SamplingParams:
         user_kwargs = dict(kwargs)
         diffusers_kwargs = user_kwargs.pop("diffusers_kwargs", None)
 
+        manifest_defaults = server_args.artifact_request_defaults
+        if manifest_defaults:
+            valid_fields = {field.name for field in dataclasses.fields(sampling_params)}
+            invalid_fields = sorted(
+                field_name
+                for field_name in manifest_defaults
+                if field_name not in valid_fields or field_name.startswith("_")
+            )
+            if invalid_fields:
+                raise ValueError(
+                    "Artifact manifest request_defaults contains unsupported "
+                    f"SamplingParams fields: {invalid_fields}"
+                )
+            manifest_sampling_params = type(sampling_params)(**manifest_defaults)
+            sampling_params._merge_with_user_params(
+                manifest_sampling_params,
+                explicit_fields=set(manifest_defaults),
+            )
+
         user_sampling_params = type(sampling_params)(*args, **user_kwargs)
         # TODO: refactor
         sampling_params._merge_with_user_params(
