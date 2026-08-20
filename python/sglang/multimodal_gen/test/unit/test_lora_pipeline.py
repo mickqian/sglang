@@ -142,20 +142,12 @@ def test_lora_alpha_override_updates_cached_adapter_scale():
     assert layer.lora_alpha == 8
 
 
-def test_pinned_lora_weight_limits_snapshot_download(tmp_path):
+def test_pinned_lora_weight_selects_one_file_from_multi_adapter_source(tmp_path):
     weight_name = "adapter-v4.safetensors"
     weight_path = tmp_path / weight_name
     weight_path.touch()
 
-    download_target = (
-        "sglang.multimodal_gen.runtime.utils.hf_diffusers_utils.maybe_download_model"
-    )
-    with patch(download_target, return_value=str(tmp_path)) as download:
-        actual = maybe_download_lora("org/multi-adapter", weight_name=weight_name)
+    (tmp_path / "another-adapter.safetensors").touch()
+    actual = maybe_download_lora(str(tmp_path), weight_name=weight_name)
 
     assert actual == str(weight_path)
-    assert download.call_args.kwargs["allow_patterns"] == [
-        "*.json",
-        weight_name,
-        f"**/{weight_name}",
-    ]

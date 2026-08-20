@@ -30,6 +30,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model,
+    prepare_diffusers_component_path_for_loading,
     verify_model_config_and_directory,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -224,7 +225,7 @@ class Ideogram4Nvfp4Pipeline(Ideogram4Pipeline):
     ) -> str:
         override_path = server_args.component_paths.get(module_name)
         if override_path is not None:
-            return maybe_download_model(override_path)
+            return prepare_diffusers_component_path_for_loading(override_path)
 
         component_model_path = os.path.join(
             self._get_model_resolution(server_args).base_model_path,
@@ -310,7 +311,7 @@ class Ideogram4DistilledPipeline(Ideogram4Pipeline):
     ) -> str:
         override_path = server_args.component_paths.get(module_name)
         if override_path is not None:
-            return maybe_download_model(override_path)
+            return prepare_diffusers_component_path_for_loading(override_path)
         if module_name == "transformer":
             return self._resolve_distilled_transformer_path()
         return os.path.join(

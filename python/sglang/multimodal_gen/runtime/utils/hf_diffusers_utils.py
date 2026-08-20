@@ -25,7 +25,7 @@ import os
 import shutil
 import time
 from functools import reduce
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union, cast
 
 from diffusers.loaders.lora_base import (
@@ -41,6 +41,14 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import RequestException
 from transformers import AutoConfig, PretrainedConfig
 
+from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
+    ArtifactRequest,
+    materialize_artifact,
+    materialize_artifact_file,
+    parse_artifact_source,
+    resolve_artifact_inventory,
+    select_artifact_weight_files,
+)
 from sglang.multimodal_gen.runtime.loader.utils import _clean_hf_config_inplace
 from sglang.multimodal_gen.runtime.loader.weight_utils import get_lock
 from sglang.multimodal_gen.runtime.platforms import current_platform
@@ -475,31 +483,18 @@ def load_dict(file_path):
         ) from e
 
 
-def _split_hf_subfolder(path: str) -> tuple[str, str | None]:
-    """Split 'namespace/repo/subfolder' into (repo_id, subfolder), or return (path, None)."""
-    if os.path.isabs(path):
-        return path, None
-    parts = path.split("/")
-    if len(parts) > 2:
-        return "/".join(parts[:2]), "/".join(parts[2:])
-    return path, None
-
-
 def prepare_diffusers_component_path_for_loading(component_path: str) -> str:
     """Download component repos if needed and patch legacy flat ModelOpt configs."""
     if os.path.exists(component_path):
         local_component_path = component_path
+    elif envs.SGLANG_USE_MODELSCOPE.get():
+        # Preserve the existing ModelScope downloader. The generic artifact
+        # resolver currently targets Hugging Face's repo/subfolder/file URL
+        # conventions and must not silently reroute this provider.
+        local_component_path = maybe_download_model(component_path)
     else:
-        repo_id, subfolder = _split_hf_subfolder(component_path)
-        if subfolder is not None:
-            # component_path is 'namespace/repo/subfolder' — download only that subfolder
-            local_repo = maybe_download_model(
-                repo_id,
-                allow_patterns=[f"{subfolder}/**", f"{subfolder}/*"],
-            )
-            local_component_path = os.path.join(local_repo, subfolder)
-        else:
-            local_component_path = maybe_download_model(component_path)
+        source = parse_artifact_source(component_path)
+        local_component_path = materialize_artifact(resolve_artifact_inventory(source))
     config_path = os.path.join(local_component_path, "config.json")
     if not os.path.exists(config_path):
         return local_component_path
@@ -616,42 +611,59 @@ def maybe_download_lora(
     Returns:
         Local path to the model
     """
-    # Repositories often publish several adapter revisions side by side.  If a
-    # filename is pinned, do not download every weight before selecting it.
-    # Keep JSON metadata so PEFT's lora_alpha remains available.
-    allow_patterns = (
-        ["*.json", weight_name, f"**/{weight_name}"]
-        if weight_name is not None
-        else ["*.json", "*.safetensors", "*.bin"]
-    )
-
-    local_path = maybe_download_model(
-        model_name_or_path,
-        local_dir,
-        download,
-        is_lora=True,
-        allow_patterns=allow_patterns,
-    )
-    # return directly if local_path is a file
-    if os.path.isfile(local_path):
-        return local_path
-
-    if weight_name is not None:
-        target = os.path.join(local_path, weight_name)
-        if not os.path.isfile(target):
-            raise FileNotFoundError(
-                f"Specified lora_weight_name '{weight_name}' not found in {local_path}"
-            )
-        return target
-
-    guessed = _best_guess_weight_name(local_path, file_extension=".safetensors")
-    # AMD workaround: PR 15813 changed from model_name_or_path to local_path,
-    # which can return None. Fall back to original behavior on ROCm.
-    if guessed is None and current_platform.is_rocm():
-        guessed = _best_guess_weight_name(
-            model_name_or_path, file_extension=".safetensors"
+    if local_dir is not None or not download or envs.SGLANG_USE_MODELSCOPE.get():
+        allow_patterns = (
+            ["*.json", weight_name, f"**/{weight_name}"]
+            if weight_name is not None
+            else ["*.json", "*.safetensors", "*.bin"]
         )
-    return os.path.join(local_path, guessed)
+        local_path = maybe_download_model(
+            model_name_or_path,
+            local_dir,
+            download,
+            is_lora=True,
+            allow_patterns=allow_patterns,
+        )
+        if os.path.isfile(local_path):
+            return local_path
+        if weight_name is not None:
+            target = os.path.join(local_path, weight_name)
+            if not os.path.isfile(target):
+                raise FileNotFoundError(
+                    f"Specified lora_weight_name '{weight_name}' not found in "
+                    f"{local_path}"
+                )
+            return target
+        guessed = _best_guess_weight_name(local_path, file_extension=".safetensors")
+        if guessed is None and current_platform.is_rocm():
+            guessed = _best_guess_weight_name(
+                model_name_or_path, file_extension=".safetensors"
+            )
+        return os.path.join(local_path, guessed)
+
+    source = parse_artifact_source(model_name_or_path)
+    inventory = resolve_artifact_inventory(source)
+    request = ArtifactRequest(
+        name="lora",
+        role="lora",
+        source=model_name_or_path,
+        weight_name=weight_name,
+    )
+    selected_files = select_artifact_weight_files(request, inventory)
+    if len(selected_files) != 1 or not selected_files[0].endswith(".safetensors"):
+        raise ValueError(
+            "SGLang diffusion LoRA loading requires exactly one safetensors file; "
+            f"selected {list(selected_files)}"
+        )
+    selected_path = materialize_artifact_file(inventory, selected_files[0])
+    for item in inventory.files:
+        if PurePosixPath(item.path).name in (
+            "adapter_config.json",
+            "config.json",
+            "sglang_artifacts.json",
+        ):
+            materialize_artifact_file(inventory, item.path)
+    return selected_path
 
 
 def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:

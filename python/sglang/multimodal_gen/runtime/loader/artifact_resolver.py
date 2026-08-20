@@ -294,9 +294,7 @@ def _local_inventory_file_path(
     return os.path.join(source.local_path, inventory_path)
 
 
-def _materialize_inventory_file(
-    inventory: ArtifactInventory, inventory_path: str
-) -> str:
+def materialize_artifact_file(inventory: ArtifactInventory, inventory_path: str) -> str:
     source = inventory.source
     if source.kind == "local":
         return _local_inventory_file_path(inventory, inventory_path)
@@ -309,7 +307,7 @@ def _materialize_inventory_file(
 
 
 def _read_inventory_json(inventory: ArtifactInventory, inventory_path: str) -> dict:
-    local_path = _materialize_inventory_file(inventory, inventory_path)
+    local_path = materialize_artifact_file(inventory, inventory_path)
     with open(local_path, encoding="utf-8") as file:
         value = json.load(file)
     if not isinstance(value, dict):
@@ -527,6 +525,6 @@ def materialize_resolved_artifact(artifact: ResolvedArtifact) -> tuple[str, ...]
     if artifact.request.role in ("pipeline", "component"):
         return (materialize_artifact(artifact.inventory),)
     return tuple(
-        _materialize_inventory_file(artifact.inventory, selected_file)
+        materialize_artifact_file(artifact.inventory, selected_file)
         for selected_file in artifact.selected_files
     )

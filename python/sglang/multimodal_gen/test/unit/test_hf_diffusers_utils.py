@@ -10,6 +10,7 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     _is_revisionless_snapshot_root,
     _verify_diffusers_model_complete,
     maybe_download_model,
+    prepare_diffusers_component_path_for_loading,
 )
 from sglang.srt.environ import envs
 
@@ -29,6 +30,32 @@ def _write_model_index(root):
             }
         )
     )
+
+
+def test_component_override_uses_shared_artifact_resolution(monkeypatch, tmp_path):
+    component_path = tmp_path / "component"
+    component_path.mkdir()
+    source = object()
+    inventory = object()
+    monkeypatch.setattr(
+        hf_diffusers_utils, "parse_artifact_source", lambda value: source
+    )
+    monkeypatch.setattr(
+        hf_diffusers_utils,
+        "resolve_artifact_inventory",
+        lambda value: inventory,
+    )
+    monkeypatch.setattr(
+        hf_diffusers_utils,
+        "materialize_artifact",
+        lambda value: str(component_path),
+    )
+
+    resolved = prepare_diffusers_component_path_for_loading(
+        "https://huggingface.co/owner/repo/tree/main/text_encoder"
+    )
+
+    assert resolved == str(component_path)
 
 
 def test_diffusers_cache_validation_rejects_declared_component_without_weights(
