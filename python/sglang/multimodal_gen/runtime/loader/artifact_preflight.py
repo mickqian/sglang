@@ -108,7 +108,11 @@ def _format_text_report(mode: str, artifacts: tuple[ResolvedArtifact, ...]) -> s
                 f"({artifact.request_default_sources})"
             )
         if artifact.lora_alpha is not None:
-            lines.append(f"  LoRA alpha: {artifact.lora_alpha} (safetensors metadata)")
+            lines.append(
+                f"  LoRA alpha: {artifact.lora_alpha} ({artifact.lora_alpha_source})"
+            )
+        if artifact.lora_adapter_type is not None:
+            lines.append(f"  adapter type: {artifact.lora_adapter_type}")
     return "\n".join(lines)
 
 

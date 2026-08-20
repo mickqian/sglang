@@ -23,6 +23,9 @@ ArtifactSourceKind = Literal["local", "huggingface"]
 ArtifactRole = Literal["pipeline", "component", "component_weights", "lora"]
 
 _WEIGHT_SUFFIXES = (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt")
+_DECLARATIVE_SIDECARS = frozenset(
+    ("adapter_config.json", "config.json", "sglang_artifacts.json")
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,8 @@ class ResolvedArtifact:
     request_defaults: dict[str, int | float] = field(default_factory=dict)
     request_default_sources: dict[str, str] = field(default_factory=dict)
     lora_alpha: int | None = None
+    lora_alpha_source: str | None = None
+    lora_adapter_type: str | None = None
 
 
 _REQUEST_METADATA_KEYS = {
@@ -319,12 +324,20 @@ def _filter_inventory_files(
     files: tuple[ArtifactFile, ...], source: ArtifactSource
 ) -> tuple[ArtifactFile, ...]:
     if source.filename is not None:
-        selected = tuple(item for item in files if item.path == source.filename)
-        if not selected:
+        exact = tuple(item for item in files if item.path == source.filename)
+        if not exact:
             raise FileNotFoundError(
                 f"Artifact file {source.filename!r} was not found in {source.repo_id}"
             )
-        return selected
+        parent = PurePosixPath(source.filename).parent
+        sidecars = tuple(
+            item
+            for item in files
+            if item.path != source.filename
+            and PurePosixPath(item.path).parent == parent
+            and PurePosixPath(item.path).name in _DECLARATIVE_SIDECARS
+        )
+        return exact + sidecars
     if source.subfolder is None:
         return files
     prefix = source.subfolder.rstrip("/") + "/"
@@ -426,10 +439,13 @@ def _local_inventory_file_path(
 
 def materialize_artifact_file(inventory: ArtifactInventory, inventory_path: str) -> str:
     source = inventory.source
+    expected_sha256 = source.expected_sha256
+    if source.filename is not None and inventory_path != source.filename:
+        expected_sha256 = None
     if source.kind == "local":
         return _verify_artifact_checksum(
             _local_inventory_file_path(inventory, inventory_path),
-            source.expected_sha256,
+            expected_sha256,
         )
     assert source.repo_id is not None
     local_path = hf_hub_download(
@@ -437,7 +453,7 @@ def materialize_artifact_file(inventory: ArtifactInventory, inventory_path: str)
         filename=inventory_path,
         revision=inventory.resolved_revision or source.revision,
     )
-    return _verify_artifact_checksum(local_path, source.expected_sha256)
+    return _verify_artifact_checksum(local_path, expected_sha256)
 
 
 def _read_inventory_json(inventory: ArtifactInventory, inventory_path: str) -> dict:
@@ -480,7 +496,11 @@ def select_artifact_weight_files(
         if item.path.lower().endswith(_WEIGHT_SUFFIXES)
     )
     if inventory.source.filename is not None:
-        return tuple(item.path for item in inventory.files)
+        return tuple(
+            item.path
+            for item in inventory.files
+            if item.path == inventory.source.filename
+        )
     if request.weight_name is not None:
         return _select_named_file(candidates, request.weight_name)
     if request.role in ("pipeline", "component"):
@@ -651,6 +671,39 @@ def _resolve_quantization_metadata(
     return method, sources
 
 
+def _resolve_lora_adapter_config(
+    inventory: ArtifactInventory, selected_files: tuple[str, ...]
+) -> tuple[int | None, str | None]:
+    if len(selected_files) != 1:
+        return None, None
+    selected_parent = PurePosixPath(selected_files[0]).parent
+    config_path = next(
+        (
+            item.path
+            for item in inventory.files
+            if PurePosixPath(item.path).parent == selected_parent
+            and PurePosixPath(item.path).name == "adapter_config.json"
+        ),
+        None,
+    )
+    if config_path is None:
+        return None, None
+    config = _read_inventory_json(inventory, config_path)
+    use_rslora = config.get("use_rslora", False)
+    use_dora = config.get("use_dora", False)
+    if not isinstance(use_rslora, bool) or not isinstance(use_dora, bool):
+        raise ValueError("PEFT use_rslora and use_dora must be boolean")
+    adapter_type = "dora" if use_dora else "rslora" if use_rslora else "lora"
+    alpha = config.get("lora_alpha")
+    if alpha is None:
+        return None, adapter_type
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
+        raise ValueError("PEFT lora_alpha must be a positive integer")
+    if not float(alpha).is_integer() or alpha <= 0:
+        raise ValueError("PEFT lora_alpha must be a positive integer")
+    return int(alpha), adapter_type
+
+
 def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
     """Resolve one artifact request using the same metadata path as preflight."""
     source = parse_artifact_source(request.source, revision=request.revision)
@@ -692,6 +745,21 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
             lora_alphas.add(lora_alpha)
     if len(lora_alphas) > 1:
         raise ValueError(f"Conflicting LoRA alpha across artifact files: {lora_alphas}")
+    tensor_lora_alpha = next(iter(lora_alphas), None)
+    config_lora_alpha = None
+    lora_adapter_type = None
+    if request.role == "lora":
+        config_lora_alpha, lora_adapter_type = _resolve_lora_adapter_config(
+            inventory, selected_files
+        )
+    lora_alpha = (
+        config_lora_alpha if config_lora_alpha is not None else tensor_lora_alpha
+    )
+    lora_alpha_source = (
+        "adapter_config.json"
+        if config_lora_alpha is not None
+        else "safetensors metadata" if tensor_lora_alpha is not None else None
+    )
     quantization_method, quantization_source = _resolve_quantization_metadata(
         inventory, summaries
     )
@@ -712,7 +780,9 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
         tensor_summary=_merge_tensor_summaries(summaries),
         request_defaults=request_defaults,
         request_default_sources=request_default_sources,
-        lora_alpha=next(iter(lora_alphas), None),
+        lora_alpha=lora_alpha,
+        lora_alpha_source=lora_alpha_source,
+        lora_adapter_type=lora_adapter_type,
     )
 
 

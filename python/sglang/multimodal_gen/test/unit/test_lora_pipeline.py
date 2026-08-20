@@ -14,6 +14,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.lora_format_adapter import (
 from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import (
     LoRAPipeline,
     _normalize_peft_scaling,
+    _peft_lora_alpha,
 )
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_lora
 
@@ -222,3 +223,9 @@ def test_normalize_peft_rslora_scaling_preserves_effective_delta():
 def test_unsupported_peft_scaling_fails_closed(state_dict, adapter_config, message):
     with pytest.raises(ValueError, match=message):
         _normalize_peft_scaling(state_dict, adapter_config)
+
+
+@pytest.mark.parametrize("alpha", [True, 0, -1, 8.5, "8"])
+def test_invalid_peft_lora_alpha_fails_closed(alpha):
+    with pytest.raises(ValueError, match="positive integer"):
+        _peft_lora_alpha({"lora_alpha": alpha})

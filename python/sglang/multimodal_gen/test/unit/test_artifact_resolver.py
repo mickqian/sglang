@@ -15,6 +15,7 @@ from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
     parse_artifact_source,
     resolve_artifact,
     resolve_artifact_inventory,
+    select_artifact_weight_files,
 )
 
 
@@ -111,6 +112,38 @@ def test_resolve_remote_inventory_pins_revision_and_filters_subfolder():
     )
 
 
+def test_exact_remote_file_retains_only_sibling_declarative_sidecars():
+    source = parse_artifact_source("owner/repo/adapters/style.safetensors")
+    model_info = SimpleNamespace(
+        sha="immutable-sha",
+        siblings=[
+            SimpleNamespace(
+                rfilename="adapters/style.safetensors", size=42, blob_id="a"
+            ),
+            SimpleNamespace(
+                rfilename="adapters/adapter_config.json", size=12, blob_id="b"
+            ),
+            SimpleNamespace(rfilename="README.md", size=10, blob_id="c"),
+            SimpleNamespace(rfilename="config.json", size=10, blob_id="d"),
+        ],
+    )
+
+    with patch(
+        "sglang.multimodal_gen.runtime.loader.artifact_resolver.HfApi.model_info",
+        return_value=model_info,
+    ):
+        inventory = resolve_artifact_inventory(source)
+
+    assert [item.path for item in inventory.files] == [
+        "adapters/style.safetensors",
+        "adapters/adapter_config.json",
+    ]
+    request = ArtifactRequest(name="lora", role="lora", source=source.original)
+    assert select_artifact_weight_files(request, inventory) == (
+        "adapters/style.safetensors",
+    )
+
+
 def test_materialized_inventory_shape_is_serializable():
     source = parse_artifact_source("owner/repo")
     inventory = ArtifactInventory(
@@ -141,6 +174,9 @@ def test_lora_artifact_reports_tensor_and_quant_metadata(tmp_path):
     (tmp_path / "config.json").write_text(
         '{"quantization_config": {"quant_method": "bitsandbytes"}}'
     )
+    (tmp_path / "adapter_config.json").write_text(
+        '{"lora_alpha": 16, "use_rslora": true}'
+    )
     save_file(
         {
             "blocks.0.to_q.lora_A.weight": torch.zeros(4, 8),
@@ -166,7 +202,9 @@ def test_lora_artifact_reports_tensor_and_quant_metadata(tmp_path):
     assert artifact.tensor_summary.lora_ranks == (4,)
     assert artifact.tensor_summary.metadata["sampler_steps"] == "4"
     assert artifact.request_defaults == {"num_inference_steps": 4}
-    assert artifact.lora_alpha == 8
+    assert artifact.lora_alpha == 16
+    assert artifact.lora_alpha_source == "adapter_config.json"
+    assert artifact.lora_adapter_type == "rslora"
 
 
 def test_single_file_reports_serialized_quantization_metadata(tmp_path):

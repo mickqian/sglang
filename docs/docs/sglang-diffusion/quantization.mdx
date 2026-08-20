@@ -69,8 +69,8 @@ no separate quantization flag is required.
 This reuses the upstream format ecosystem where possible, but it is not a
 blanket promise that every format runs on every architecture, topology, or
 device. Unsupported combinations fail closed rather than silently loading a
-different precision. Use `--artifact-preflight metadata` to inspect routing
-and metadata before allocating a GPU.
+different precision. Use `--artifact-preflight metadata` to inspect artifact
+selection and serialized metadata before allocating a GPU.
 
 MiniMax-H3 auto-detects the per-layer metadata in Comfy's
 `pruned_fp8_scaled` safetensors. Pass one selected FL2VA or Ref2VA file by local

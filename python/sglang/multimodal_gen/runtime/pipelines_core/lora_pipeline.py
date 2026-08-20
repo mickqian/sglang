@@ -58,6 +58,20 @@ def _load_peft_adapter_config(lora_local_path: str) -> dict[str, Any]:
     return config
 
 
+def _peft_lora_alpha(adapter_config: dict[str, Any]) -> int | None:
+    alpha = adapter_config.get("lora_alpha")
+    if alpha is None:
+        return None
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not float(alpha).is_integer()
+        or alpha <= 0
+    ):
+        raise ValueError("PEFT lora_alpha must be a positive integer")
+    return int(alpha)
+
+
 def _normalize_peft_scaling(
     state_dict: dict[str, torch.Tensor], adapter_config: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
@@ -889,8 +903,8 @@ class LoRAPipeline(ComposedPipelineBase):
         adapter_config = _load_peft_adapter_config(lora_local_path)
         lora_state_dict = _normalize_peft_scaling(lora_state_dict, adapter_config)
         adapter_lora_alpha = lora_alpha
-        if adapter_lora_alpha is None and adapter_config.get("lora_alpha") is not None:
-            adapter_lora_alpha = int(adapter_config["lora_alpha"])
+        if adapter_lora_alpha is None:
+            adapter_lora_alpha = _peft_lora_alpha(adapter_config)
         if adapter_lora_alpha is None:
             adapter_lora_alpha = infer_lora_alpha_from_tensor_metadata(tensor_metadata)
 
