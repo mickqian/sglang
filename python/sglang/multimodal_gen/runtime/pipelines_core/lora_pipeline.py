@@ -77,6 +77,30 @@ def _normalize_peft_scaling(
     state_dict: dict[str, torch.Tensor], adapter_config: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
     """Fold PEFT scaling variants into the ordinary alpha/rank LoRA formula."""
+    unsupported_options = {
+        name: adapter_config[name]
+        for name in (
+            "alora_invocation_tokens",
+            "layer_replication",
+            "modules_to_save",
+            "target_parameters",
+            "trainable_token_indices",
+            "use_bdlora",
+            "use_qalora",
+        )
+        if adapter_config.get(name)
+    }
+    if adapter_config.get("bias") not in (None, "none"):
+        unsupported_options["bias"] = adapter_config["bias"]
+    if adapter_config.get("fan_in_fan_out", False):
+        unsupported_options["fan_in_fan_out"] = True
+    if adapter_config.get("lora_bias", False):
+        unsupported_options["lora_bias"] = True
+    if unsupported_options:
+        raise ValueError(
+            "PEFT adapter requires unsupported auxiliary/runtime features: "
+            f"{sorted(unsupported_options)}"
+        )
     if adapter_config.get("use_dora", False) or any(
         "lora_magnitude_vector" in name or "dora_scale" in name for name in state_dict
     ):
@@ -108,7 +132,11 @@ def _normalize_peft_scaling(
         if matched_pattern is None:
             continue
         alpha = _peft_lora_alpha({"lora_alpha": alpha_pattern[matched_pattern]})
-        assert alpha is not None
+        if alpha is None:
+            raise ValueError(
+                f"PEFT alpha_pattern value for {matched_pattern!r} must be "
+                "a positive integer"
+            )
         alpha_key = f"{base}.alpha"
         existing_alpha = normalized.get(alpha_key)
         if existing_alpha is not None and int(existing_alpha.item()) != alpha:

@@ -225,6 +225,20 @@ def test_unsupported_peft_scaling_fails_closed(state_dict, adapter_config, messa
         _normalize_peft_scaling(state_dict, adapter_config)
 
 
+@pytest.mark.parametrize(
+    "adapter_config",
+    [
+        {"modules_to_save": ["head"]},
+        {"target_parameters": ["experts.weight"]},
+        {"bias": "lora_only"},
+        {"fan_in_fan_out": True},
+    ],
+)
+def test_peft_auxiliary_runtime_features_fail_closed(adapter_config):
+    with pytest.raises(ValueError, match="auxiliary/runtime features"):
+        _normalize_peft_scaling({}, adapter_config)
+
+
 @pytest.mark.parametrize("alpha", [True, 0, -1, 8.5, "8"])
 def test_invalid_peft_lora_alpha_fails_closed(alpha):
     with pytest.raises(ValueError, match="positive integer"):
@@ -246,3 +260,13 @@ def test_peft_alpha_pattern_becomes_per_layer_alpha_tensor():
 
     assert normalized["transformer.blocks.0.proj.alpha"].item() == 8
     assert normalized["transformer.blocks.1.proj.alpha"].item() == 16
+
+
+def test_peft_alpha_pattern_rejects_missing_alpha_value():
+    state_dict = {
+        "transformer.blocks.0.proj.lora_A.weight": torch.ones(4, 8),
+        "transformer.blocks.0.proj.lora_B.weight": torch.ones(8, 4),
+    }
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _normalize_peft_scaling(state_dict, {"alpha_pattern": {"blocks.0.proj": None}})
