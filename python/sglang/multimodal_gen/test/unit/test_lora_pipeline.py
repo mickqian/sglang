@@ -217,7 +217,7 @@ def test_normalize_peft_rslora_scaling_preserves_effective_delta():
             "DoRA adapters",
         ),
         ({}, {"use_dora": True}, "DoRA adapters"),
-        ({}, {"alpha_pattern": {"block": 8}}, "alpha_pattern"),
+        ({}, {"alpha_pattern": []}, "alpha_pattern must be an object"),
     ],
 )
 def test_unsupported_peft_scaling_fails_closed(state_dict, adapter_config, message):
@@ -229,3 +229,20 @@ def test_unsupported_peft_scaling_fails_closed(state_dict, adapter_config, messa
 def test_invalid_peft_lora_alpha_fails_closed(alpha):
     with pytest.raises(ValueError, match="positive integer"):
         _peft_lora_alpha({"lora_alpha": alpha})
+
+
+def test_peft_alpha_pattern_becomes_per_layer_alpha_tensor():
+    state_dict = {
+        "transformer.blocks.0.proj.lora_A.weight": torch.ones(4, 8),
+        "transformer.blocks.0.proj.lora_B.weight": torch.ones(8, 4),
+        "transformer.blocks.1.proj.lora_A.weight": torch.ones(8, 8),
+        "transformer.blocks.1.proj.lora_B.weight": torch.ones(8, 8),
+    }
+
+    normalized = _normalize_peft_scaling(
+        state_dict,
+        {"alpha_pattern": {"blocks.0.proj": 8, "blocks.1.proj": 16}},
+    )
+
+    assert normalized["transformer.blocks.0.proj.alpha"].item() == 8
+    assert normalized["transformer.blocks.1.proj.alpha"].item() == 16

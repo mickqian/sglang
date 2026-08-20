@@ -4,6 +4,7 @@
 import json
 import math
 import os
+import re
 from collections import defaultdict
 from collections.abc import Hashable
 from contextlib import contextmanager, nullcontext
@@ -82,18 +83,43 @@ def _normalize_peft_scaling(
         raise ValueError(
             "DoRA adapters are not supported by the native diffusion LoRA layers"
         )
-    if adapter_config.get("alpha_pattern"):
-        raise ValueError(
-            "PEFT alpha_pattern is not supported; export explicit per-layer "
-            "'.alpha' tensors or use one global lora_alpha"
-        )
+    normalized = dict(state_dict)
+    alpha_pattern = adapter_config.get("alpha_pattern", {})
+    if not isinstance(alpha_pattern, dict):
+        raise ValueError("PEFT alpha_pattern must be an object")
+    for name in state_dict:
+        suffix = ".lora_A.weight"
+        if not name.endswith(suffix):
+            continue
+        base = name[: -len(suffix)]
+        matched_pattern = None
+        for pattern in alpha_pattern:
+            if not isinstance(pattern, str):
+                raise ValueError("PEFT alpha_pattern keys must be strings")
+            try:
+                matches = re.match(rf"(.*\.)?({pattern})$", base)
+            except re.error as error:
+                raise ValueError(
+                    f"Invalid PEFT alpha_pattern expression {pattern!r}: {error}"
+                ) from error
+            if matches:
+                matched_pattern = pattern
+                break
+        if matched_pattern is None:
+            continue
+        alpha = _peft_lora_alpha({"lora_alpha": alpha_pattern[matched_pattern]})
+        assert alpha is not None
+        alpha_key = f"{base}.alpha"
+        existing_alpha = normalized.get(alpha_key)
+        if existing_alpha is not None and int(existing_alpha.item()) != alpha:
+            raise ValueError(f"PEFT alpha_pattern conflicts with tensor {alpha_key!r}")
+        normalized[alpha_key] = torch.tensor(alpha)
     use_rslora = adapter_config.get("use_rslora", False)
     if not isinstance(use_rslora, bool):
         raise ValueError("PEFT use_rslora must be boolean")
     if not use_rslora:
-        return state_dict
+        return normalized
 
-    normalized = dict(state_dict)
     scaled_count = 0
     suffix = ".lora_B.weight"
     for name, weight in state_dict.items():
@@ -172,11 +198,35 @@ def _store_fused_lora_groups(
             or set(b_parts) != set(range(n))
         ):
             continue
-        a, b, fused_alpha = stack_or_compose_fused_lora(
-            [a_parts[i] for i in range(n)],
-            [b_parts[i] for i in range(n)],
-            adapter_alpha,
-        )
+        alpha_parts = to_merge_params.get(f"{base}.alpha", {})
+        if alpha_parts:
+            scaled_b_parts = []
+            for index in range(n):
+                rank = a_parts[index].shape[0]
+                alpha = (
+                    float(alpha_parts[index].item())
+                    if index in alpha_parts
+                    else float(adapter_alpha if adapter_alpha is not None else rank)
+                )
+                scale = alpha / rank
+                b_part = b_parts[index]
+                scaled_b_parts.append(
+                    b_part
+                    if scale == 1.0
+                    else (b_part.float() * scale).to(dtype=b_part.dtype)
+                )
+            a, b, fused_alpha = stack_or_compose_fused_lora(
+                [a_parts[i] for i in range(n)], scaled_b_parts, None
+            )
+            # Per-section scaling is already folded into B. Keep the fused
+            # layer's ordinary alpha/rank multiplier neutral.
+            fused_alpha = a.shape[-2]
+        else:
+            a, b, fused_alpha = stack_or_compose_fused_lora(
+                [a_parts[i] for i in range(n)],
+                [b_parts[i] for i in range(n)],
+                adapter_alpha,
+            )
         adapter[str(a_key)] = a.to(device)
         adapter[b_key] = b.to(device)
         if fused_alpha is not None:
