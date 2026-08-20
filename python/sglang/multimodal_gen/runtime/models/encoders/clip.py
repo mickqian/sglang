@@ -19,7 +19,11 @@ from sglang.multimodal_gen.configs.models.encoders import (
 )
 from sglang.multimodal_gen.runtime.layers.quantization import QuantizationConfig
 from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
-from sglang.multimodal_gen.runtime.models.encoders.base import ImageEncoder, TextEncoder
+from sglang.multimodal_gen.runtime.models.encoders.base import (
+    CheckpointQuantizationCapability,
+    ImageEncoder,
+    TextEncoder,
+)
 from sglang.multimodal_gen.runtime.models.encoders.vision import (
     resolve_visual_encoder_outputs,
 )
@@ -337,6 +341,10 @@ class CLIPVisionModel(ImageEncoder):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    checkpoint_quantization_capability = CheckpointQuantizationCapability(
+        backend="transformers",
+        methods=frozenset({"bitsandbytes"}),
+    )
 
     def __init__(self, config: CLIPVisionConfig) -> None:
         super().__init__(config)

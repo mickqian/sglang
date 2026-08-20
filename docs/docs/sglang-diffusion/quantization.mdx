@@ -404,6 +404,10 @@ sglang serve \
 
 The quantized encoder must stay resident. SGLang rejects component or layerwise
 offload for this path instead of silently dequantizing or changing its state.
+Serialized BitsAndBytes 4-bit `CLIPVisionModel` image encoders use the same
+contract through `--component-paths.image_encoder`; other image-encoder
+architectures remain fail-closed until their loader and output contract are
+admitted explicitly.
 
 ## Validated ModelOpt Checkpoints
 

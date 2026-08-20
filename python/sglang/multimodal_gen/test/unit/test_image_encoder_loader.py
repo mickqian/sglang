@@ -54,9 +54,28 @@ class TestImageEncoderQuantizationAdmission(unittest.TestCase):
         config = self._component_config("CLIPVisionModelWithProjection", quantized=True)
         with self._config_patch(config), self.assertRaisesRegex(
             ComponentCheckpointUnsupportedError,
-            "CLIPVisionModel.*image_encoder.*no checkpoint quantization capability",
+            "CLIPVisionModel.*image_encoder.*supported methods.*bitsandbytes",
         ):
             self.loader.load_customized("/model/image_encoder", self.server_args)
+
+    def test_bitsandbytes_clip_checkpoint_uses_transformers_loader(self):
+        config = self._component_config(
+            "CLIPVisionModelWithProjection", quantized=False
+        )
+        config["quantization_config"] = {
+            "load_in_4bit": True,
+            "quant_method": "bitsandbytes",
+        }
+
+        with self._config_patch(config):
+            self._load()
+
+        self.load_native.assert_called_once_with(
+            "/model/image_encoder",
+            self.server_args,
+            "transformers",
+            "image_encoder",
+        )
 
     def test_unknown_quantized_architecture_does_not_fall_back(self):
         config = self._component_config("UnknownVisionModel", quantized=True)
