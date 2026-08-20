@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,7 +19,9 @@ def _write_manifest(tmp_path, value):
 
 def test_manifest_resolves_default_component_and_lora_sources(tmp_path):
     (tmp_path / "text_encoder").mkdir()
-    (tmp_path / "adapter.safetensors").write_bytes(b"fixture")
+    adapter = tmp_path / "adapter.safetensors"
+    adapter.write_bytes(b"fixture")
+    checksum = hashlib.sha256(adapter.read_bytes()).hexdigest()
     manifest = _write_manifest(
         tmp_path,
         {
@@ -38,6 +41,7 @@ def test_manifest_resolves_default_component_and_lora_sources(tmp_path):
                     "path": "adapter.safetensors",
                     "role": "lora",
                     "default": True,
+                    "checksum": f"sha256:{checksum}",
                     "adapter": {"alpha": 16, "scale": 0.25},
                 },
             ],
@@ -49,7 +53,7 @@ def test_manifest_resolves_default_component_and_lora_sources(tmp_path):
 
     assert defaults.model_path == "owner/base"
     assert defaults.component_paths == {"text_encoder": str(tmp_path / "text_encoder")}
-    assert defaults.lora_path == str(tmp_path / "adapter.safetensors")
+    assert defaults.lora_path == f"{adapter}#sha256={checksum}"
     assert defaults.lora_alpha == 16
     assert defaults.lora_scale == 0.25
     assert defaults.request_defaults == {"num_inference_steps": 6}

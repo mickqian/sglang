@@ -1,3 +1,4 @@
+import hashlib
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
     ArtifactFile,
     ArtifactInventory,
     ArtifactRequest,
+    materialize_resolved_artifact,
     parse_artifact_source,
     resolve_artifact,
     resolve_artifact_inventory,
@@ -29,6 +31,10 @@ def test_parse_artifact_source_accepts_repo_subfolder_and_exact_url():
     assert exact_file.revision == "main"
     assert exact_file.filename == "weights/model.safetensors"
 
+    short_file = parse_artifact_source("owner/repo/weights/model.safetensors")
+    assert short_file.filename == "weights/model.safetensors"
+    assert short_file.subfolder is None
+
 
 def test_parse_artifact_source_rejects_conflicting_url_revision():
     with pytest.raises(ValueError, match="conflicts with --revision"):
@@ -36,6 +42,32 @@ def test_parse_artifact_source_rejects_conflicting_url_revision():
             "https://huggingface.co/owner/repo/tree/main/transformer",
             revision="v2",
         )
+
+
+def test_exact_file_checksum_is_verified_only_when_materialized(tmp_path):
+    weight_path = tmp_path / "adapter.safetensors"
+    save_file({"lora_A.weight": torch.zeros(2, 4)}, weight_path)
+    checksum = hashlib.sha256(weight_path.read_bytes()).hexdigest()
+    artifact = resolve_artifact(
+        ArtifactRequest(
+            name="lora",
+            role="lora",
+            source=f"{weight_path}#sha256={checksum}",
+        )
+    )
+
+    assert artifact.inventory.source.local_path == str(weight_path)
+    assert materialize_resolved_artifact(artifact) == (str(weight_path),)
+
+    bad_artifact = resolve_artifact(
+        ArtifactRequest(
+            name="lora",
+            role="lora",
+            source=f"{weight_path}#sha256={'0' * 64}",
+        )
+    )
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        materialize_resolved_artifact(bad_artifact)
 
 
 def test_resolve_local_inventory_does_not_load_tensor_payloads(tmp_path):

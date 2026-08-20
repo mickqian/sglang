@@ -65,6 +65,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp8Config,
     _prepare_nvfp4_weight_bytes,
 )
+from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
+    ArtifactFile,
+    ArtifactInventory,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders import transformer_loader
 from sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader import (
     _default_quantized_attention_backend,
@@ -186,11 +190,12 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         self.assertEqual(resolved, [f.name])
 
     @patch(
-        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.hf_hub_download",
+        "sglang.multimodal_gen.runtime.loader.transformer_load_utils."
+        "materialize_artifact_file",
         return_value="/cache/model.safetensors",
     )
     def test_resolve_transformer_safetensors_to_load_uses_hf_file_reference(
-        self, mock_download
+        self, mock_materialize
     ):
         filename = "diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors"
         references = (
@@ -207,6 +212,14 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 with patch(
                     "os.path.isfile",
                     side_effect=lambda path: path == "/cache/model.safetensors",
+                ), patch(
+                    "sglang.multimodal_gen.runtime.loader.transformer_load_utils."
+                    "resolve_artifact_inventory",
+                    side_effect=lambda source: ArtifactInventory(
+                        source=source,
+                        resolved_revision=revision,
+                        files=(ArtifactFile(path=filename),),
+                    ),
                 ):
                     self.assertEqual(
                         resolve_transformer_safetensors_to_load(
@@ -214,12 +227,11 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                         ),
                         ["/cache/model.safetensors"],
                     )
-                mock_download.assert_called_once_with(
-                    repo_id="Comfy-Org/MiniMax-H3",
-                    filename=filename,
-                    revision=revision,
-                )
-                mock_download.reset_mock()
+                inventory, selected = mock_materialize.call_args.args
+                self.assertEqual(inventory.source.repo_id, "Comfy-Org/MiniMax-H3")
+                self.assertEqual(inventory.source.revision, revision)
+                self.assertEqual(selected, filename)
+                mock_materialize.reset_mock()
 
     def test_inspect_minimax_h3_safetensors_detects_curve_and_comfy_format(self):
         marker = json.dumps({"format": "int8_tensorwise", "convrot": True}).encode()
@@ -343,13 +355,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint_quant_config=ComfyFp8Config({}),
             )
 
-    @patch(
-        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.maybe_download_model",
-        side_effect=lambda path, **kw: path,
-    )
-    def test_resolve_transformer_safetensors_to_load_prefers_mixed_export(
-        self, _mock_download
-    ):
+    def test_resolve_transformer_safetensors_to_load_prefers_mixed_export(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mixed = f"{tmpdir}/flux2-dev-nvfp4-mixed.safetensors"
             full = f"{tmpdir}/flux2-dev-nvfp4.safetensors"
@@ -364,32 +370,35 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         self.assertEqual(resolved, [mixed])
 
     @patch(
-        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.snapshot_download",
+        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.materialize_artifact"
     )
-    @patch(
-        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.maybe_download_model",
-    )
-    def test_resolve_transformer_safetensors_to_load_refreshes_empty_cached_repo(
-        self, mock_download_model, mock_snapshot_download
+    def test_resolve_transformer_safetensors_to_load_materializes_repo_once(
+        self, mock_materialize
     ):
         with tempfile.TemporaryDirectory() as cached_dir:
             repo_id = "black-forest-labs/FLUX.2-dev-NVFP4"
             mixed = os.path.join(cached_dir, "flux2-dev-nvfp4-mixed.safetensors")
-            mock_download_model.return_value = cached_dir
 
-            def _snapshot_download(**_kwargs):
+            def _materialize(_inventory):
                 open(mixed, "a").close()
                 return cached_dir
 
-            mock_snapshot_download.side_effect = _snapshot_download
+            mock_materialize.side_effect = _materialize
 
             server_args = self._make_server_args(transformer_weights_path=repo_id)
-            resolved = resolve_transformer_safetensors_to_load(
-                server_args, "/unused/component/path"
-            )
+            with patch(
+                "sglang.multimodal_gen.runtime.loader.transformer_load_utils."
+                "resolve_artifact_inventory",
+                side_effect=lambda source: ArtifactInventory(
+                    source=source, resolved_revision="sha", files=()
+                ),
+            ):
+                resolved = resolve_transformer_safetensors_to_load(
+                    server_args, "/unused/component/path"
+                )
 
         self.assertEqual(resolved, [mixed])
-        mock_snapshot_download.assert_called_once()
+        mock_materialize.assert_called_once()
 
     def test_filter_transformer_precision_variants_prefers_canonical_file(self):
         files = [

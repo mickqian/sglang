@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -27,8 +28,11 @@ _ROOT_KEYS = frozenset(
         "request_defaults",
     )
 )
-_ENTRY_KEYS = frozenset(("id", "path", "role", "component", "default", "adapter"))
+_ENTRY_KEYS = frozenset(
+    ("id", "path", "role", "component", "default", "checksum", "adapter")
+)
 _ADAPTER_KEYS = frozenset(("alpha", "scale"))
+_SHA256_PATTERN = re.compile(r"sha256:([0-9a-fA-F]{64})")
 
 
 @dataclass(frozen=True)
@@ -102,7 +106,10 @@ def _entry_inventory(
 
 
 def _relative_entry_source(
-    inventory: ArtifactInventory, manifest_path: str, relative_path: str
+    inventory: ArtifactInventory,
+    manifest_path: str,
+    relative_path: str,
+    checksum: str | None,
 ) -> str:
     pure_path = PurePosixPath(relative_path)
     if pure_path.is_absolute() or ".." in pure_path.parts or not relative_path:
@@ -117,20 +124,30 @@ def _relative_entry_source(
         local_target = os.path.join(source.local_path, relative_path)
         if not os.path.exists(local_target):
             raise FileNotFoundError(f"Manifest artifact does not exist: {local_target}")
-        return local_target
+        is_file = os.path.isfile(local_target)
+        resolved_source = local_target
+    else:
+        paths = {item.path for item in inventory.files}
+        is_file = target_path in paths
+        is_directory = any(path.startswith(f"{target_path}/") for path in paths)
+        if not is_file and not is_directory:
+            raise FileNotFoundError(f"Manifest artifact does not exist: {target_path}")
+        assert source.repo_id is not None
+        revision = inventory.resolved_revision or source.revision or "main"
+        action = "resolve" if is_file else "tree"
+        resolved_source = (
+            f"https://huggingface.co/{source.repo_id}/{action}/"
+            f"{quote(revision, safe='')}/{quote(target_path, safe='/')}"
+        )
 
-    paths = {item.path for item in inventory.files}
-    is_file = target_path in paths
-    is_directory = any(path.startswith(f"{target_path}/") for path in paths)
-    if not is_file and not is_directory:
-        raise FileNotFoundError(f"Manifest artifact does not exist: {target_path}")
-    assert source.repo_id is not None
-    revision = inventory.resolved_revision or source.revision or "main"
-    action = "resolve" if is_file else "tree"
-    return (
-        f"https://huggingface.co/{source.repo_id}/{action}/"
-        f"{quote(revision, safe='')}/{quote(target_path, safe='/')}"
-    )
+    if checksum is None:
+        return resolved_source
+    match = _SHA256_PATTERN.fullmatch(checksum)
+    if match is None:
+        raise ValueError("Artifact checksum must use sha256:<64 hex digits>")
+    if not is_file:
+        raise ValueError("Artifact checksums require an exact file entry")
+    return f"{resolved_source}#sha256={match.group(1).lower()}"
 
 
 def _read_manifest(
@@ -185,9 +202,13 @@ def load_artifact_manifest_defaults(
         is_default = entry.get("default", False)
         if not isinstance(is_default, bool):
             raise ValueError(f"Artifact entry {entry_id!r} default must be boolean")
-        if not is_default:
-            continue
-        resolved_source = _relative_entry_source(inventory, manifest_path, path)
+        checksum = entry.get("checksum")
+        if checksum is not None and (
+            not isinstance(checksum, str) or _SHA256_PATTERN.fullmatch(checksum) is None
+        ):
+            raise ValueError(
+                f"Artifact entry {entry_id!r} checksum must use sha256:<64 hex digits>"
+            )
         component = entry.get("component")
         if role in ("component", "component_weights"):
             if not isinstance(component, str) or not component:
@@ -196,6 +217,11 @@ def load_artifact_manifest_defaults(
                 raise ValueError(
                     f"Artifact entry {entry_id!r} adapter is only valid for LoRA"
                 )
+            resolved_source = _relative_entry_source(
+                inventory, manifest_path, path, checksum
+            )
+            if not is_default:
+                continue
             target = component_paths if role == "component" else component_weights_paths
             if component in target:
                 raise ValueError(
@@ -207,8 +233,6 @@ def load_artifact_manifest_defaults(
                 raise ValueError(
                     f"Artifact entry {entry_id!r} LoRA cannot name a component"
                 )
-            if lora_path is not None:
-                raise ValueError("Only one default LoRA is supported")
             adapter = entry.get("adapter", {})
             if not isinstance(adapter, dict):
                 raise ValueError(
@@ -223,6 +247,13 @@ def load_artifact_manifest_defaults(
                 not isinstance(scale, (int, float)) or scale <= 0
             ):
                 raise ValueError(f"Artifact entry {entry_id!r} scale must be positive")
+            resolved_source = _relative_entry_source(
+                inventory, manifest_path, path, checksum
+            )
+            if not is_default:
+                continue
+            if lora_path is not None:
+                raise ValueError("Only one default LoRA is supported")
             lora_path, lora_alpha = resolved_source, alpha
             lora_scale = float(scale) if scale is not None else None
 

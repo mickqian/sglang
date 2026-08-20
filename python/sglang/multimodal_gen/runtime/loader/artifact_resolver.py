@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ class ArtifactSource:
     revision: str | None = None
     subfolder: str | None = None
     filename: str | None = None
+    expected_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,7 +97,22 @@ def _merge_revision(url_revision: str | None, revision: str | None) -> str | Non
     return url_revision or revision
 
 
-def _parse_huggingface_url(source: str, revision: str | None) -> ArtifactSource:
+def _split_checksum(source: str) -> tuple[str, str | None]:
+    parsed = urlparse(source)
+    if not parsed.fragment:
+        return source, None
+    prefix = "sha256="
+    if not parsed.fragment.startswith(prefix):
+        raise ValueError(f"Unsupported artifact source fragment: {parsed.fragment!r}")
+    checksum = parsed.fragment.removeprefix(prefix).lower()
+    if len(checksum) != 64 or any(char not in "0123456789abcdef" for char in checksum):
+        raise ValueError("Artifact sha256 checksum must contain exactly 64 hex digits")
+    return source.rsplit("#", 1)[0], checksum
+
+
+def _parse_huggingface_url(
+    source: str, revision: str | None, expected_sha256: str | None
+) -> ArtifactSource:
     parsed = urlparse(source)
     if parsed.netloc.lower() not in ("huggingface.co", "www.huggingface.co"):
         raise ValueError(
@@ -118,6 +135,7 @@ def _parse_huggingface_url(source: str, revision: str | None) -> ArtifactSource:
             kind="huggingface",
             repo_id=repo_id,
             revision=revision,
+            expected_sha256=expected_sha256,
         )
     if action not in ("tree", "blob", "resolve") or len(raw_parts) < 4:
         raise ValueError(f"Unsupported Hugging Face artifact URL: {source!r}")
@@ -133,6 +151,7 @@ def _parse_huggingface_url(source: str, revision: str | None) -> ArtifactSource:
             repo_id=repo_id,
             revision=selected_revision,
             subfolder=subfolder,
+            expected_sha256=expected_sha256,
         )
     if not tail:
         raise ValueError(f"Hugging Face file URL has no filename: {source!r}")
@@ -142,6 +161,7 @@ def _parse_huggingface_url(source: str, revision: str | None) -> ArtifactSource:
         repo_id=repo_id,
         revision=selected_revision,
         filename=_validate_relative_hub_path(tail, "filename"),
+        expected_sha256=expected_sha256,
     )
 
 
@@ -151,24 +171,26 @@ def parse_artifact_source(
     revision: str | None = None,
 ) -> ArtifactSource:
     """Parse local paths, Hub repo IDs, subfolders, and exact Hub URLs."""
-    expanded = os.path.expanduser(source)
-    parsed = urlparse(source)
+    base_source, expected_sha256 = _split_checksum(source)
+    expanded = os.path.expanduser(base_source)
+    parsed = urlparse(base_source)
     if parsed.scheme in ("http", "https"):
-        return _parse_huggingface_url(source, revision)
+        return _parse_huggingface_url(base_source, revision, expected_sha256)
 
     looks_local = (
         os.path.exists(expanded)
         or os.path.isabs(expanded)
-        or source.startswith(("./", "../", "~"))
+        or base_source.startswith(("./", "../", "~"))
     )
     if looks_local:
         return ArtifactSource(
             original=source,
             kind="local",
             local_path=os.path.abspath(expanded),
+            expected_sha256=expected_sha256,
         )
 
-    parts = source.split("/")
+    parts = base_source.split("/")
     if len(parts) < 2 or not all(parts[:2]):
         raise ValueError(
             f"Artifact source {source!r} is neither a local path nor an "
@@ -176,7 +198,13 @@ def parse_artifact_source(
         )
     repo_id = "/".join(parts[:2])
     validate_repo_id(repo_id)
-    subfolder = "/".join(parts[2:]) or None
+    tail = "/".join(parts[2:]) or None
+    filename = (
+        _validate_relative_hub_path(tail, "filename")
+        if tail is not None and tail.lower().endswith(_WEIGHT_SUFFIXES)
+        else None
+    )
+    subfolder = tail if filename is None else None
     if subfolder is not None:
         subfolder = _validate_relative_hub_path(subfolder, "subfolder")
     return ArtifactSource(
@@ -185,7 +213,26 @@ def parse_artifact_source(
         repo_id=repo_id,
         revision=revision,
         subfolder=subfolder,
+        filename=filename,
+        expected_sha256=expected_sha256,
     )
+
+
+def _verify_artifact_checksum(path: str, expected_sha256: str | None) -> str:
+    if expected_sha256 is None:
+        return path
+    if not os.path.isfile(path):
+        raise ValueError("Artifact sha256 checksums require one exact file")
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected_sha256:
+        raise ValueError(
+            f"Artifact sha256 mismatch for {path}: expected {expected_sha256}, got {actual}"
+        )
+    return path
 
 
 def _filter_inventory_files(
@@ -261,16 +308,19 @@ def materialize_artifact(inventory: ArtifactInventory) -> str:
     source = inventory.source
     if source.kind == "local":
         assert source.local_path is not None
-        return source.local_path
+        return _verify_artifact_checksum(source.local_path, source.expected_sha256)
 
     assert source.repo_id is not None
     revision = inventory.resolved_revision or source.revision
     if source.filename is not None:
-        return hf_hub_download(
+        local_path = hf_hub_download(
             repo_id=source.repo_id,
             filename=source.filename,
             revision=revision,
         )
+        return _verify_artifact_checksum(local_path, source.expected_sha256)
+    if source.expected_sha256 is not None:
+        raise ValueError("Artifact sha256 checksums require one exact file")
     allow_patterns = None
     if source.subfolder is not None:
         allow_patterns = [f"{source.subfolder}/**", f"{source.subfolder}/*"]
@@ -297,13 +347,17 @@ def _local_inventory_file_path(
 def materialize_artifact_file(inventory: ArtifactInventory, inventory_path: str) -> str:
     source = inventory.source
     if source.kind == "local":
-        return _local_inventory_file_path(inventory, inventory_path)
+        return _verify_artifact_checksum(
+            _local_inventory_file_path(inventory, inventory_path),
+            source.expected_sha256,
+        )
     assert source.repo_id is not None
-    return hf_hub_download(
+    local_path = hf_hub_download(
         repo_id=source.repo_id,
         filename=inventory_path,
         revision=inventory.resolved_revision or source.revision,
     )
+    return _verify_artifact_checksum(local_path, source.expected_sha256)
 
 
 def _read_inventory_json(inventory: ArtifactInventory, inventory_path: str) -> dict:
@@ -488,6 +542,8 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
     source = parse_artifact_source(request.source, revision=request.revision)
     inventory = resolve_artifact_inventory(source)
     selected_files = select_artifact_weight_files(request, inventory)
+    if source.expected_sha256 is not None and len(selected_files) != 1:
+        raise ValueError("Artifact sha256 checksums require one exact weight file")
     summaries = []
     summary_files = () if request.role == "pipeline" else selected_files
     for selected_file in summary_files:

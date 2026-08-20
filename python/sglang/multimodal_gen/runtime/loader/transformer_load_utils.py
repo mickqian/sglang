@@ -22,6 +22,14 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config i
     NunchakuConfig,
     _patch_nunchaku_scales,
 )
+from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
+    ArtifactRequest,
+    materialize_artifact,
+    materialize_artifact_file,
+    parse_artifact_source,
+    resolve_artifact_inventory,
+    select_artifact_weight_files,
+)
 from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     names_gguf_checkpoint,
     read_gguf_tensor_meta,
@@ -37,9 +45,7 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency 
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
-    hf_hub_download,
     maybe_download_model,
-    snapshot_download,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.precision import resolve_precision
@@ -49,6 +55,7 @@ from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     get_quant_config,
     get_quant_config_from_safetensors_metadata,
 )
+from sglang.srt.environ import envs
 from sglang.srt.utils.hf_transformers import (
     check_gguf_file,
     resolve_hf_gguf_reference,
@@ -62,11 +69,6 @@ _PRECISION_VARIANT_SUFFIX_RE = re.compile(
     r"^(?P<stem>.+?)(?P<precision>\.(?:fp16|bf16|fp32))(?P<shard>-\d+-of-\d+)?(?P<ext>\.safetensors)$"
 )
 _MIXED_SAFETENSORS_RE = re.compile(r".*-mixed(?:-\d+-of-\d+)?\.safetensors$")
-_HF_SAFETENSORS_URL_RE = re.compile(
-    r"https?://huggingface\.co/(?P<repo>[^/]+/[^/]+)/"
-    r"(?:blob|resolve)/(?P<revision>[^/]+)/(?P<filename>.+\.safetensors)$",
-    re.IGNORECASE,
-)
 
 
 def _get_quant_config_name(config: Optional[QuantizationConfig]) -> Optional[str]:
@@ -549,20 +551,48 @@ def resolve_transformer_gguf_to_load(
         return None
     # A `~` can reach us unexpanded from a config file or a quoted argument.
     override = os.path.expanduser(override)
-    if not names_gguf_checkpoint(override):
+    unfragmented_override = override.rsplit("#", 1)[0]
+    if not names_gguf_checkpoint(unfragmented_override):
         return None
 
     # Before any download: a Hub reference would otherwise fetch gigabytes and
     # only then hit an unsupported-configuration error.
     _validate_gguf_runtime_support(server_args, component_name)
 
-    is_local_reference = os.path.isabs(override) or override.startswith(".")
-    resolved = (
-        override
-        if is_local_reference
-        else resolve_hf_gguf_reference(override, revision=server_args.revision)
-        or override
+    is_hub_quant_reference = (
+        ":" in unfragmented_override
+        and not unfragmented_override.startswith(("http://", "https://"))
     )
+    if is_hub_quant_reference:
+        resolved = (
+            resolve_hf_gguf_reference(
+                unfragmented_override, revision=server_args.revision
+            )
+            or unfragmented_override
+        )
+    else:
+        artifact_revision = (
+            None
+            if unfragmented_override.startswith(("http://", "https://"))
+            else server_args.revision
+        )
+        source = parse_artifact_source(override, revision=artifact_revision)
+        inventory = resolve_artifact_inventory(source)
+        selected = select_artifact_weight_files(
+            ArtifactRequest(
+                name="transformer_weights",
+                role="component_weights",
+                component=component_name or "transformer",
+                source=override,
+                revision=artifact_revision,
+            ),
+            inventory,
+        )
+        if len(selected) != 1 or not selected[0].endswith(".gguf"):
+            raise ValueError(
+                "GGUF transformer override must resolve to one exact .gguf file"
+            )
+        resolved = materialize_artifact_file(inventory, selected[0])
     if not check_gguf_file(resolved):
         raise ValueError(f"Resolved GGUF path is not a GGUF file: {resolved}")
     logger.info("using GGUF transformer weights from: %s", resolved)
@@ -577,54 +607,57 @@ def resolve_transformer_safetensors_to_load(
 
     if quantized_path:
         original_quantized_path = quantized_path
-        direct_url = _HF_SAFETENSORS_URL_RE.fullmatch(original_quantized_path)
-        if direct_url is not None:
-            quantized_path = hf_hub_download(
-                repo_id=direct_url.group("repo"),
-                filename=direct_url.group("filename"),
-                revision=direct_url.group("revision"),
+        use_modelscope = (
+            envs.SGLANG_USE_MODELSCOPE.get()
+            and not original_quantized_path.startswith(("http://", "https://"))
+            and "#sha256=" not in original_quantized_path
+        )
+        if not use_modelscope:
+            artifact_revision = (
+                None
+                if original_quantized_path.startswith(("http://", "https://"))
+                else server_args.revision
             )
-        else:
-            parts = original_quantized_path.strip("/").split("/")
-            is_hub_file = (
-                not os.path.exists(original_quantized_path)
-                and not os.path.isabs(original_quantized_path)
-                and not original_quantized_path.startswith((".", "~"))
-                and len(parts) > 2
-                and original_quantized_path.endswith(".safetensors")
+            source = parse_artifact_source(
+                original_quantized_path, revision=artifact_revision
             )
-            quantized_path = (
-                hf_hub_download(
-                    repo_id="/".join(parts[:2]),
-                    filename="/".join(parts[2:]),
-                    revision=server_args.revision,
+            inventory = resolve_artifact_inventory(source)
+            is_exact_file = source.filename is not None or (
+                source.kind == "local"
+                and source.local_path is not None
+                and os.path.isfile(source.local_path)
+            )
+            if is_exact_file:
+                request = ArtifactRequest(
+                    name="transformer_weights",
+                    role="component_weights",
+                    component="transformer",
+                    source=original_quantized_path,
+                    revision=artifact_revision,
                 )
-                if is_hub_file
-                else maybe_download_model(original_quantized_path)
+                selected_files = select_artifact_weight_files(request, inventory)
+                safetensors_list = [
+                    materialize_artifact_file(inventory, path)
+                    for path in selected_files
+                ]
+                quantized_path = safetensors_list[0]
+            else:
+                quantized_path = materialize_artifact(inventory)
+                safetensors_list = _list_safetensors_files(quantized_path)
+            if any(not path.endswith(".safetensors") for path in safetensors_list):
+                raise ValueError(
+                    "Transformer weights override must contain only safetensors "
+                    f"files: {safetensors_list}"
+                )
+        else:
+            quantized_path = maybe_download_model(original_quantized_path)
+            safetensors_list = (
+                [quantized_path]
+                if os.path.isfile(quantized_path)
+                and quantized_path.endswith(".safetensors")
+                else _list_safetensors_files(quantized_path)
             )
         logger.info("using quantized transformer weights from: %s", quantized_path)
-        if os.path.isfile(quantized_path) and quantized_path.endswith(".safetensors"):
-            safetensors_list = [quantized_path]
-        else:
-            safetensors_list = _list_safetensors_files(quantized_path)
-            if not safetensors_list and not os.path.exists(original_quantized_path):
-                logger.warning(
-                    "No safetensors files found in cached transformer weights path "
-                    "%s; refreshing snapshot for %s",
-                    quantized_path,
-                    original_quantized_path,
-                )
-                quantized_path = snapshot_download(
-                    repo_id=original_quantized_path,
-                    ignore_patterns=["*.onnx", "*.msgpack"],
-                    allow_patterns=[
-                        "*.json",
-                        "*.safetensors",
-                        "*.safetensors.index.json",
-                    ],
-                    max_workers=8,
-                )
-                safetensors_list = _list_safetensors_files(quantized_path)
     else:
         safetensors_list = _list_safetensors_files(component_model_path)
 
@@ -914,7 +947,18 @@ def _resolve_quant_config_from_transformer_override(
     ):
         return None
 
-    override_quantized_path = maybe_download_model(transformer_weights_path)
+    use_modelscope = (
+        envs.SGLANG_USE_MODELSCOPE.get()
+        and not transformer_weights_path.startswith(("http://", "https://"))
+        and "#sha256=" not in transformer_weights_path
+    )
+    if use_modelscope:
+        override_quantized_path = maybe_download_model(transformer_weights_path)
+    else:
+        source = parse_artifact_source(transformer_weights_path)
+        override_quantized_path = materialize_artifact(
+            resolve_artifact_inventory(source)
+        )
     if not os.path.isdir(override_quantized_path):
         return None
 

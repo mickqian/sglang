@@ -93,6 +93,10 @@ def _format_text_report(mode: str, artifacts: tuple[ResolvedArtifact, ...]) -> s
                 "  quantization: "
                 f"{artifact.quantization_method} ({artifact.quantization_source})"
             )
+        if artifact.inventory.source.expected_sha256 is not None:
+            lines.append(
+                f"  checksum: sha256:{artifact.inventory.source.expected_sha256}"
+            )
         if summary is not None:
             details = f"{summary.tensor_count} tensors; dtypes={list(summary.dtypes)}"
             if summary.lora_ranks:

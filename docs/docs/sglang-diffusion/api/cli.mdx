@@ -155,6 +155,7 @@ Artifact publishers can package stable defaults in a non-executable
       "path": "adapter.safetensors",
       "role": "lora",
       "default": true,
+      "checksum": "sha256:<64 hex digits>",
       "adapter": {"scale": 0.25}
     }
   ],
@@ -166,7 +167,8 @@ Paths are relative to the manifest. Supported default roles are `component`,
 `component_weights`, and `lora`; arbitrary backend names, key mappings, and
 executable code are not accepted. Explicit CLI or request values always win.
 Manifest request defaults must name fields on the selected model's concrete
-`SamplingParams` class.
+`SamplingParams` class. Optional SHA-256 checksums apply to exact files and are
+verified after download, before the artifact is loaded.
 
 Use the normal `generate` or `serve` command to inspect every configured model,
 component override, weights-only override, and startup LoRA before allocating a
