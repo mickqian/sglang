@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from enum import Enum
 from typing import Dict, Iterable, Mapping, Optional
 
@@ -8,6 +9,8 @@ import torch
 from diffusers.loaders import lora_conversion_utils as lcu
 
 logger = logging.getLogger("LoRAFormatAdapter")
+
+_PEFT_ADAPTER_SLOT = re.compile(r"(\.lora_[AB])\.[^.]+\.weight$")
 
 
 class LoRAFormat(str, Enum):
@@ -29,6 +32,22 @@ def _sample_keys(keys: Iterable[str], k: int = 20) -> list[str]:
             break
         out.append(key)
     return out
+
+
+def _normalize_peft_adapter_slots(
+    state_dict: Mapping[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """Remove PEFT's named adapter slot from linear LoRA tensor keys."""
+    normalized: Dict[str, torch.Tensor] = {}
+    for name, tensor in state_dict.items():
+        target = _PEFT_ADAPTER_SLOT.sub(r"\1.weight", name)
+        if target in normalized:
+            raise ValueError(
+                "LoRA checkpoint contains multiple PEFT adapter slots for "
+                f"the same tensor: {target!r}"
+            )
+        normalized[target] = tensor
+    return normalized
 
 
 def _has_substring_key(keys: Iterable[str], substr: str) -> bool:
@@ -543,6 +562,7 @@ def normalize_lora_state_dict(
     """Normalize any supported LoRA format into a single canonical layout."""
     log = logger or globals()["logger"]
 
+    state_dict = _normalize_peft_adapter_slots(state_dict)
     keys = list(state_dict.keys())
     log.info(
         "[LoRAFormatAdapter] normalize_lora_state_dict called, #keys=%d",

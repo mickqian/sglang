@@ -89,7 +89,12 @@ _REQUEST_METADATA_KEYS = {
     "guidance_scale": ("guidance_scale", "cfg_scale"),
     "flow_shift": ("flow_shift",),
 }
-_LORA_ALPHA_METADATA_KEYS = ("lora_alpha", "network_alpha", "ss_network_alpha")
+_LORA_ALPHA_METADATA_KEYS = (
+    "lora_alpha",
+    "network_alpha",
+    "ss_network_alpha",
+    "alpha",
+)
 
 
 def _metadata_number(value: str) -> int | float | None:

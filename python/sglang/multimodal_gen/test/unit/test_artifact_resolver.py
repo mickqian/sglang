@@ -147,7 +147,7 @@ def test_lora_artifact_reports_tensor_and_quant_metadata(tmp_path):
             "blocks.0.to_q.lora_B.weight": torch.zeros(8, 4),
         },
         tmp_path / "adapter.safetensors",
-        metadata={"sampler_steps": "4", "lora_alpha": "8"},
+        metadata={"sampler_steps": "4", "alpha": "8"},
     )
 
     artifact = resolve_artifact(

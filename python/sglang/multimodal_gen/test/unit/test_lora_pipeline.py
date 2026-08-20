@@ -3,9 +3,13 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from sglang.multimodal_gen.runtime.layers.lora.linear import BaseLayerWithLoRA
+from sglang.multimodal_gen.runtime.pipelines_core.lora_format_adapter import (
+    normalize_lora_state_dict,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.lora_pipeline import LoRAPipeline
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_lora
 
@@ -151,3 +155,27 @@ def test_pinned_lora_weight_selects_one_file_from_multi_adapter_source(tmp_path)
     actual = maybe_download_lora(str(tmp_path), weight_name=weight_name)
 
     assert actual == str(weight_path)
+
+
+def test_peft_named_adapter_slot_is_normalized():
+    state_dict = {
+        "transformer.blocks.0.proj.lora_A.default.weight": torch.ones(4, 8),
+        "transformer.blocks.0.proj.lora_B.default.weight": torch.ones(8, 4),
+    }
+
+    normalized = normalize_lora_state_dict(state_dict)
+
+    assert set(normalized) == {
+        "transformer.blocks.0.proj.lora_A.weight",
+        "transformer.blocks.0.proj.lora_B.weight",
+    }
+
+
+def test_multiple_peft_adapter_slots_fail_closed():
+    state_dict = {
+        "proj.lora_A.first.weight": torch.ones(4, 8),
+        "proj.lora_A.second.weight": torch.ones(4, 8),
+    }
+
+    with pytest.raises(ValueError, match="multiple PEFT adapter slots"):
+        normalize_lora_state_dict(state_dict)

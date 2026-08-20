@@ -186,7 +186,8 @@ downloading tensor payloads. `full` additionally downloads exactly the selected
 artifacts but still exits before model construction. Add
 `--artifact-report-format json` for a machine-readable CI or support report.
 Explicit numeric safetensors metadata for sampling steps, guidance scale, flow
-shift, and LoRA alpha is reported. A startup LoRA can provide those request
+shift, and LoRA alpha (`alpha`, `lora_alpha`, `network_alpha`, or
+`ss_network_alpha`) is reported. A startup LoRA can provide those request
 defaults, but manifest defaults take precedence and explicit request values
 always win; filename-only guesses never change runtime behavior.
 
