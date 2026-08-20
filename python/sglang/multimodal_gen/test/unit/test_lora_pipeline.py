@@ -159,8 +159,12 @@ def test_pinned_lora_weight_selects_one_file_from_multi_adapter_source(tmp_path)
 
 def test_peft_named_adapter_slot_is_normalized():
     state_dict = {
-        "transformer.blocks.0.proj.lora_A.default.weight": torch.ones(4, 8),
-        "transformer.blocks.0.proj.lora_B.default.weight": torch.ones(8, 4),
+        "base_model.model.transformer.blocks.0.proj.lora_A.default.weight": (
+            torch.ones(4, 8)
+        ),
+        "base_model.model.transformer.blocks.0.proj.lora_B.default.weight": (
+            torch.ones(8, 4)
+        ),
     }
 
     normalized = normalize_lora_state_dict(state_dict)

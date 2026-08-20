@@ -11,6 +11,10 @@ from diffusers.loaders import lora_conversion_utils as lcu
 logger = logging.getLogger("LoRAFormatAdapter")
 
 _PEFT_ADAPTER_SLOT = re.compile(r"(\.lora_[AB])\.[^.]+\.weight$")
+_PEFT_WRAPPER_PREFIXES = (
+    "peft_model.base_model.model.",
+    "base_model.model.",
+)
 
 
 class LoRAFormat(str, Enum):
@@ -37,9 +41,19 @@ def _sample_keys(keys: Iterable[str], k: int = 20) -> list[str]:
 def _normalize_peft_adapter_slots(
     state_dict: Mapping[str, torch.Tensor],
 ) -> Dict[str, torch.Tensor]:
-    """Remove PEFT's named adapter slot from linear LoRA tensor keys."""
+    """Remove PEFT's uniform model wrapper and named adapter slot."""
+    wrapper_prefix = next(
+        (
+            prefix
+            for prefix in _PEFT_WRAPPER_PREFIXES
+            if state_dict and all(name.startswith(prefix) for name in state_dict)
+        ),
+        "",
+    )
     normalized: Dict[str, torch.Tensor] = {}
     for name, tensor in state_dict.items():
+        if wrapper_prefix:
+            name = name.removeprefix(wrapper_prefix)
         target = _PEFT_ADAPTER_SLOT.sub(r"\1.weight", name)
         if target in normalized:
             raise ValueError(
