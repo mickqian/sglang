@@ -128,3 +128,31 @@ def test_component_load_order_prefers_inferred_safetensors_size(tmp_path):
 
     assert ordered_names == ["text_encoder", "transformer", "scheduler"]
     assert infer_component_weight_size_bytes(str(large_encoder_path)) == 64
+
+
+def test_component_load_order_uses_weights_only_override_size(tmp_path):
+    base_transformer_path = tmp_path / "transformer"
+    override_path = tmp_path / "override.safetensors"
+    encoder_path = tmp_path / "text_encoder"
+    base_transformer_path.mkdir()
+    encoder_path.mkdir()
+    _write_safetensors(base_transformer_path / "model.safetensors", 8)
+    _write_safetensors(override_path, 128)
+    _write_safetensors(encoder_path / "model.safetensors", 64)
+
+    specs = [
+        ComponentLoadSpec(
+            module_name="transformer",
+            load_module_name="transformer",
+            component_model_path=str(base_transformer_path),
+            component_weights_path=str(override_path),
+            transformers_or_diffusers="diffusers",
+            architecture=None,
+            index=0,
+        ),
+        _spec("text_encoder", 1, str(encoder_path)),
+    ]
+
+    ordered_names = [spec.module_name for spec in order_component_load_specs(specs)]
+
+    assert ordered_names == ["transformer", "text_encoder"]

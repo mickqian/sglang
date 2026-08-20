@@ -110,6 +110,22 @@ class ComponentLoader(ABC):
     ) -> dict[str, Any]:
         return {}
 
+    def server_args_for_component_load(
+        self,
+        server_args: ServerArgs,
+        _component_name: str,
+        component_key: str,
+    ) -> ServerArgs:
+        weights_path = server_args.component_weights_paths.get(component_key)
+        if weights_path is None:
+            return server_args
+        raise ComponentCheckpointUnsupportedError(
+            f"Weights-only override for component {component_key!r} is not "
+            f"supported by {self.__class__.__name__}. Use "
+            f"--component-paths.{component_key} with a complete component "
+            "checkpoint instead."
+        )
+
     def should_raise_customized_load_error(
         self, server_args: ServerArgs, component_name: str
     ) -> bool:
@@ -162,6 +178,7 @@ class ComponentLoader(ABC):
         server_args: ServerArgs,
         component_name: str,
         transformers_or_diffusers: str,
+        component_key: str | None = None,
     ) -> tuple[AutoModel, float]:
         """
         Template method that standardizes logging around the core load implementation.
@@ -171,6 +188,10 @@ class ComponentLoader(ABC):
         If all of the above methods failed, an error will be thrown
 
         """
+        component_key = component_key or component_name
+        server_args = self.server_args_for_component_load(
+            server_args, component_name, component_key
+        )
         gpu_mem_before_loading = current_platform.get_available_gpu_memory()
         logger.info(
             "Loading %s from %s. avail mem: %.2f GB",
@@ -521,6 +542,7 @@ class PipelineComponentLoader:
         transformers_or_diffusers: str,
         server_args: ServerArgs,
         component_architecture: str | None = None,
+        component_key: str | None = None,
     ):
         """
         Load a pipeline component.
@@ -544,6 +566,7 @@ class PipelineComponentLoader:
                 server_args,
                 component_name,
                 transformers_or_diffusers,
+                component_key=component_key,
             )
         except Exception as e:
             logger.error(

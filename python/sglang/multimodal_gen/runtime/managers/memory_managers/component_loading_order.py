@@ -29,6 +29,7 @@ class ComponentLoadSpec:
     transformers_or_diffusers: str
     architecture: str | None
     index: int
+    component_weights_path: str | None = None
 
 
 _WEIGHT_FILE_SUFFIXES = (".bin", ".pt", ".pth")
@@ -165,7 +166,12 @@ def order_component_load_specs(
         component_specs,
         key=lambda spec: (
             # 1. model size inferred from checkpoints
-            -(infer_component_weight_size_bytes(spec.component_model_path) or 0),
+            -(
+                infer_component_weight_size_bytes(
+                    spec.component_weights_path or spec.component_model_path
+                )
+                or 0
+            ),
             # 2. infer from component name
             component_load_risk_rank(spec.load_module_name),
             _component_variant_priority(spec.load_module_name),

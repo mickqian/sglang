@@ -522,6 +522,9 @@ class ComposedPipelineBase(ABC):
                     module_name=module_name,
                     load_module_name=load_module_name,
                     component_model_path=component_model_path,
+                    component_weights_path=server_args.component_weights_paths.get(
+                        module_name
+                    ),
                     transformers_or_diffusers=transformers_or_diffusers,
                     architecture=architecture,
                     index=index,
@@ -566,6 +569,7 @@ class ComposedPipelineBase(ABC):
                     transformers_or_diffusers=transformers_or_diffusers,
                     server_args=server_args,
                     component_architecture=architecture,
+                    component_key=module_name,
                 )
 
             self.memory_usages[load_module_name] = memory_usage

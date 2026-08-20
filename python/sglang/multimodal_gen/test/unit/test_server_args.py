@@ -163,6 +163,66 @@ class TestServerArgsPathExpansion(unittest.TestCase):
             args.component_paths["vae"], os.path.expanduser("~/fake/local/vae")
         )
 
+    def test_component_weights_paths_are_expanded_and_keep_base_config(self):
+        args = self._from_dict_without_model_resolution(
+            {
+                "model_path": "/data/my-model",
+                "component_weights_paths": {
+                    "text_encoder": "~/fake/local/text-encoder.safetensors"
+                },
+            }
+        )
+
+        self.assertEqual(
+            args.component_weights_paths["text_encoder"],
+            os.path.expanduser("~/fake/local/text-encoder.safetensors"),
+        )
+        self.assertNotIn("text_encoder", args.component_paths)
+
+    def test_transformer_weights_alias_uses_component_weights_map(self):
+        args = self._from_dict_without_model_resolution(
+            {
+                "model_path": "/data/my-model",
+                "transformer_weights_path": "/weights/transformer.safetensors",
+            }
+        )
+
+        self.assertEqual(
+            args.component_weights_paths,
+            {"transformer": "/weights/transformer.safetensors"},
+        )
+
+    def test_dynamic_component_weights_cli_forms(self):
+        paths, remaining = ServerArgs._extract_component_weights_paths(
+            [
+                "--component-weights.text-encoder=~/weights/text.safetensors",
+                "--vae-weights-path",
+                "/weights/vae.safetensors",
+                "--unrelated",
+            ]
+        )
+
+        self.assertEqual(
+            paths,
+            {
+                "text_encoder": os.path.expanduser("~/weights/text.safetensors"),
+                "vae": "/weights/vae.safetensors",
+            },
+        )
+        self.assertEqual(remaining, ["--unrelated"])
+
+    def test_conflicting_transformer_weights_aliases_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must resolve to the same value"):
+            self._from_dict_without_model_resolution(
+                {
+                    "model_path": "/data/my-model",
+                    "transformer_weights_path": "/weights/legacy.safetensors",
+                    "component_weights_paths": {
+                        "transformer": "/weights/canonical.safetensors"
+                    },
+                }
+            )
+
     def test_component_attention_backends_are_normalized(self):
         args = self._from_dict_without_model_resolution(
             {

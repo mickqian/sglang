@@ -308,11 +308,9 @@ class ServerArgs(DisaggServerArgsMixin):
     # Widest timestep plan the rebuild slab is sized for; see
     # MINIMAX_H3_ADALN_MAX_PLAN_WIDTH.
     minimax_h3_adaln_plan_width: int = 4
-    # Per-component transformer weight overrides (key = model_index.json component name).
-    # Pipelines use this when a checkpoint ships separate quantized weights for
-    # secondary DiT components; the generic loader consumes it without model-specific
-    # filename logic.
-    component_transformer_weights_paths: dict[str, str] = field(default_factory=dict)
+    # Per-component weights-only overrides (key = model_index.json component name).
+    # Unlike component_paths, these retain the base component configuration.
+    component_weights_paths: dict[str, str] = field(default_factory=dict)
 
     # Explicit quantization method override (e.g. "mxfp8", "fp8", "modelslim").
     # When set, the transformer loader uses it instead of auto-detection.
@@ -521,6 +519,24 @@ class ServerArgs(DisaggServerArgsMixin):
         expand_path_fields(self)
         self._adjust_save_paths()
 
+    def _adjust_component_weights_paths(self) -> None:
+        mapped_path = self.component_weights_paths.get("transformer")
+        if (
+            self.transformer_weights_path is not None
+            and mapped_path is not None
+            and self.transformer_weights_path != mapped_path
+        ):
+            raise ValueError(
+                "--transformer-weights-path and --component-weights.transformer "
+                "must resolve to the same value when both are provided"
+            )
+        if self.transformer_weights_path is not None:
+            self.component_weights_paths.setdefault(
+                "transformer", self.transformer_weights_path
+            )
+        elif mapped_path is not None:
+            self.transformer_weights_path = mapped_path
+
     def _adjust_parameters(self):
         """set defaults and normalize values."""
         self._normalize_component_residency()
@@ -536,6 +552,7 @@ class ServerArgs(DisaggServerArgsMixin):
             auto_tuner.maybe_adjust_auto_component_residency_after_offload()
             auto_tuner.maybe_replace_cpu_offloaded_components_with_layerwise()
         self._adjust_path()
+        self._adjust_component_weights_paths()
         if self.served_model_name is None:
             self.served_model_name = self.model_id or self.model_path
         self._adjust_quant_config()
@@ -700,6 +717,9 @@ class ServerArgs(DisaggServerArgsMixin):
         resolution = ncfg.resolve_runtime_config()
         if resolution.transformer_weights_path:
             self.transformer_weights_path = resolution.transformer_weights_path
+            self.component_weights_paths["transformer"] = (
+                resolution.transformer_weights_path
+            )
         self.nunchaku_config = resolution.nunchaku_config
 
     def adjust_pipeline_config(self):
@@ -2672,6 +2692,50 @@ class ServerArgs(DisaggServerArgsMixin):
         return component_paths, remaining
 
     @staticmethod
+    def _extract_component_weights_paths(
+        unknown_args: list[str],
+    ) -> tuple[dict[str, str], list[str]]:
+        """Extract dynamic weights-only component overrides.
+
+        Supported forms:
+        - ``--<component>-weights-path /path/to/weights``
+        - ``--component-weights.<component> /path/to/weights``
+        """
+        component_weights_paths: dict[str, str] = {}
+        remaining: list[str] = []
+        i = 0
+        while i < len(unknown_args):
+            arg = unknown_args[i]
+            key_part = arg.split("=", 1)[0] if "=" in arg else arg
+            component = None
+            if key_part.startswith("--component-weights."):
+                component = key_part[len("--component-weights.") :].replace("-", "_")
+            elif key_part.startswith("--component_weights."):
+                component = key_part[len("--component_weights.") :].replace("-", "_")
+            elif key_part.startswith("--") and key_part.endswith("-weights-path"):
+                component = key_part[2 : -len("-weights-path")].replace("-", "_")
+
+            if component is not None:
+                if "=" in arg:
+                    component_weights_paths[component] = arg.split("=", 1)[1]
+                elif i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith(
+                    "-"
+                ):
+                    i += 1
+                    component_weights_paths[component] = unknown_args[i]
+                else:
+                    remaining.append(arg)
+                    i += 1
+                    continue
+            else:
+                remaining.append(arg)
+            i += 1
+
+        for component, path in component_weights_paths.items():
+            component_weights_paths[component] = os.path.expanduser(path)
+        return component_weights_paths, remaining
+
+    @staticmethod
     def _extract_component_attention_backends(
         unknown_args: list[str],
     ) -> tuple[dict[str, str], list[str]]:
@@ -2718,8 +2782,12 @@ class ServerArgs(DisaggServerArgsMixin):
         if unknown_args is None:
             unknown_args = []
 
-        # extract dynamic --<component>-path from unknown args
-        dynamic_paths, remaining = cls._extract_component_paths(unknown_args)
+        # Parse weights aliases first because --<component>-weights-path also
+        # matches the more general --<component>-path suffix.
+        dynamic_weights_paths, remaining = cls._extract_component_weights_paths(
+            unknown_args
+        )
+        dynamic_paths, remaining = cls._extract_component_paths(remaining)
         dynamic_attention_backends, remaining = (
             cls._extract_component_attention_backends(remaining)
         )
@@ -2745,6 +2813,11 @@ class ServerArgs(DisaggServerArgsMixin):
             existing.update(dynamic_paths)
             provided_args["component_paths"] = existing
             explicit_arg_names.add("component_paths")
+        if dynamic_weights_paths:
+            existing = dict(provided_args.get("component_weights_paths") or {})
+            existing.update(dynamic_weights_paths)
+            provided_args["component_weights_paths"] = existing
+            explicit_arg_names.add("component_weights_paths")
         if dynamic_attention_backends:
             existing = cls._parse_component_attention_backend_map(
                 provided_args.get("component_attention_backends")
@@ -2769,6 +2842,9 @@ class ServerArgs(DisaggServerArgsMixin):
         component_paths = dict(kwargs.get("component_paths") or {})
         if component_paths:
             server_args_kwargs["component_paths"] = component_paths
+        component_weights_paths = dict(kwargs.get("component_weights_paths") or {})
+        if component_weights_paths:
+            server_args_kwargs["component_weights_paths"] = component_weights_paths
         server_args_kwargs["_explicit_arg_names"] = set(explicit_arg_names)
 
         for attr in attrs:

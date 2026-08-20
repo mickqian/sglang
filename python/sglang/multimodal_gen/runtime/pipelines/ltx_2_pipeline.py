@@ -685,6 +685,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             component_model_path=upsampler_path,
             transformers_or_diffusers="diffusers",
             server_args=server_args,
+            component_key="spatial_upsampler",
         )
         self.modules["spatial_upsampler"] = module
         self.memory_usages["spatial_upsampler"] = memory_usage
@@ -728,6 +729,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             component_model_path=transformer_path,
             transformers_or_diffusers="diffusers",
             server_args=server_args,
+            component_key="transformer_2",
         )
         self.modules["transformer_2"] = module
         self.memory_usages["transformer_2"] = memory_usage
