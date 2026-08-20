@@ -135,10 +135,18 @@ For quantized transformer checkpoints, prefer:
 - `--quantization-ignored-layers` layer name patterns to keep unquantized (e.g. `attention.to_`)
 
 Component checkpoint paths are selected separately, so changing DiT precision
-never silently changes prompt embeddings. For a native text encoder:
+never silently changes prompt embeddings or VAE outputs:
 
-- `--component-paths.text_encoder {MODEL}` replaces the text-encoder checkpoint; `--text-encoder-path {MODEL}` is its shorter alias
-- Quantization metadata is auto-detected from that checkpoint. Each native encoder must explicitly support the serialized format; this is not blanket quantization support for every component, and unsupported combinations fail before weight loading.
+- `--component-paths.<component> {MODEL}` replaces any `model_index.json`
+  component with a self-contained local directory or Hub component repo;
+  `--<component>-path` is its shorter alias.
+- Examples include `--component-paths.text_encoder`,
+  `--component-paths.image_encoder`, `--component-paths.vae`, and
+  `--component-paths.transformer`.
+- Serialized quantization metadata is auto-detected. Generic components reuse
+  the installed Transformers/Diffusers AutoQuantizer; native SGLang components
+  require an explicit architecture/format capability. Unsupported combinations
+  fail before ordinary weight loading instead of silently changing precision.
 
 ### Artifact preflight
 

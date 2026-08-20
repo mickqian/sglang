@@ -2,12 +2,12 @@
 title: "Quantization"
 tag: "approx"
 metatags:
-    description: "Configure transformer and native text-encoder checkpoint quantization, plus Quant-VideoGen causal KV-cache quantization in SGLang-Diffusion."
+    description: "Configure transformer, encoder, VAE, and other component checkpoint quantization, plus Quant-VideoGen causal KV-cache quantization in SGLang-Diffusion."
 ---
 
-SGLang-Diffusion supports quantized transformer checkpoints and selected
-quantized native text-encoder checkpoints. Transformer and text-encoder
-precision are resolved independently.
+SGLang-Diffusion resolves quantization independently for each weight-bearing
+pipeline component. A quantized DiT does not implicitly quantize the text or
+image encoder, VAE, or any other component.
 
 ## Quick Reference
 
@@ -20,10 +20,12 @@ Use these paths:
   (local or Hub)
 - `--quantization`: apply online quantization to unquantized models at load time (activations are quantized dynamically)
 - `--quantization-ignored-layers` layer name patterns to keep unquantized (e.g. `attention.to_`)
-- `--component-paths.text_encoder`: replace a native text encoder with a checkpoint whose `quantization_config` is auto-detected
 - `--component-paths.<component>`: replace any component declared in
-  `model_index.json` with a complete local or Hub component repo
-- `--text-encoder-path`: shorter alias for `--component-paths.text_encoder`
+  `model_index.json` with a complete local directory or Hub component repo;
+  `--<component>-path` is the shorter alias
+- `--component-weights.<component>`: replace weights while retaining the base
+  component config; only use this when that component loader documents its
+  accepted standalone weight format
 - `--kv-cache-quant`: compress completed causal KV-cache chunks for supported realtime models
 
 Recommended example for pre-quantized checkpoints:
@@ -49,13 +51,26 @@ directory directly as `--model-path`, but that is a compatibility path. If a
 repo contains multiple candidate checkpoints, pass
 `--transformer-weights-path` explicitly.
 
-Components without an SGLang-specific loader delegate serialized
-`quantization_config` admission and restoration to the installed Transformers
-or Diffusers AutoQuantizer. This covers the formats that the selected upstream
-library and component architecture actually support; it is not a blanket
-promise that every format runs on every device. SGLang-specific text/image
-encoders, DiTs, and VAEs retain explicit capability checks and fail closed
-rather than silently falling back to a different precision.
+### Component checkpoint contract
+
+`--component-paths.<component>` is the canonical day-0 interface. The selected
+directory or Hub repo must be a self-contained component root with its own
+`config.json` and weights. SGLang reads its serialized `quantization_config`;
+no separate quantization flag is required.
+
+| Component loader | Serialized checkpoint handling |
+| --- | --- |
+| No SGLang-specific loader | Delegates admission and restoration to the installed Transformers or Diffusers AutoQuantizer. |
+| Specialized loader without a quantization implementation | Bypasses the ordinary SGLang weight path and delegates to the upstream AutoQuantizer. If the upstream architecture or format is unsupported, loading fails explicitly. |
+| Native DiT | Uses the formats and platform constraints listed in the tables below. |
+| Native text/image encoder | Uses an explicit architecture capability: H3 Qwen3-VL FP8, T5/UMT5/CLIP text BnB4, and CLIP vision BnB4 or serialized SRT FP8 are currently admitted. |
+| VAE | A non-native VAE may use a top-level Diffusers `quantization_config`; native-only VAEs reject formats they do not implement. |
+
+This reuses the upstream format ecosystem where possible, but it is not a
+blanket promise that every format runs on every architecture, topology, or
+device. Unsupported combinations fail closed rather than silently loading a
+different precision. Use `--artifact-preflight metadata` to inspect routing
+and metadata before allocating a GPU.
 
 MiniMax-H3 auto-detects the per-layer metadata in Comfy's
 `pruned_fp8_scaled` safetensors. Pass one selected FL2VA or Ref2VA file by local
@@ -398,7 +413,7 @@ the native encoder explicitly supports. Text-encoder FP8 is approximate, is
 not enabled by default, and is rejected by MiniMax-H3's strict
 `quality="high"` deployment contract.
 
-## T5 and UMT5 Text Encoder BnB4
+## Encoder component quantization
 
 T5 and UMT5 text encoders can load serialized BitsAndBytes 4-bit checkpoints
 through Transformers. For example, replace FLUX's second text encoder with the
@@ -417,8 +432,11 @@ offload for this path instead of silently dequantizing or changing its state.
 Serialized BitsAndBytes 4-bit `CLIPTextModel` and `CLIPVisionModel` components
 use the same contract through `--component-paths.text_encoder`,
 `--component-paths.text_encoder_2`, or `--component-paths.image_encoder`.
-Other encoder architectures remain fail-closed until their loader and output
-contract are admitted explicitly.
+Native `CLIPVisionModel` image encoders also accept serialized FP8 through the
+shared SRT FP8 linear backend. The component must remain resident; its
+activation precision remains controlled independently by
+`--image-encoder-precision`. Other native encoder architectures remain
+fail-closed until their loader and output contract are admitted explicitly.
 
 ## Validated ModelOpt Checkpoints
 
