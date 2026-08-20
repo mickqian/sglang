@@ -321,12 +321,15 @@ class TextEncoderLoader(ComponentLoader):
             )
         except Exception:
             return AutoModel
-        if getattr(config, "is_encoder_decoder", False):
-            for arch in getattr(config, "architectures", None) or []:
-                encoder_arch = _TRANSFORMERS_ENCODER_ONLY_ARCHITECTURES.get(arch, arch)
-                transformers_model_class = getattr(transformers, encoder_arch, None)
-                if isinstance(transformers_model_class, type):
-                    return transformers_model_class
+        for arch in config.architectures or []:
+            model_arch = (
+                _TRANSFORMERS_ENCODER_ONLY_ARCHITECTURES.get(arch, arch)
+                if config.is_encoder_decoder
+                else arch
+            )
+            transformers_model_class = transformers.__dict__.get(model_arch)
+            if isinstance(transformers_model_class, type):
+                return transformers_model_class
         return AutoModel
 
     def _prepare_weights(

@@ -149,6 +149,10 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIPTextModel(TextEncoder):
+    checkpoint_quantization_capability = CheckpointQuantizationCapability(
+        backend="transformers",
+        methods=frozenset({"bitsandbytes"}),
+    )
 
     def __init__(
         self,

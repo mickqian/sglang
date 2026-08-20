@@ -79,9 +79,10 @@ class TestTextEncoderClassResolution(unittest.TestCase):
             transformers.MT5EncoderModel,
         )
 
-    def test_non_encoder_decoder_keeps_automodel(self):
-        # e.g. CLIP/Mistral/Qwen text encoders are not encoder-decoder.
-        self.assertIs(self._resolve(False, ["CLIPTextModel"]), transformers.AutoModel)
+    def test_non_encoder_decoder_uses_declared_class(self):
+        self.assertIs(
+            self._resolve(False, ["CLIPTextModel"]), transformers.CLIPTextModel
+        )
 
     def test_unknown_architecture_falls_back_to_automodel(self):
         self.assertIs(self._resolve(True, ["NotARealClass"]), transformers.AutoModel)
@@ -254,6 +255,24 @@ class TestTextEncoderQuantization(unittest.TestCase):
                 "/model/text_encoder",
                 "text_encoder",
             )
+
+    def test_clip_bitsandbytes_delegates_to_transformers(self):
+        bitsandbytes = mock.Mock()
+        bitsandbytes.get_name.return_value = "bitsandbytes"
+        self.get_quant_config.return_value = bitsandbytes
+        component_config = {"quantization_config": {"quant_method": "bitsandbytes"}}
+
+        for architecture in ("CLIPTextModel", "CLIPTextModelWithProjection"):
+            with self.subTest(architecture=architecture), self.assertRaisesRegex(
+                NativeComponentLoaderRequired,
+                "delegates 'bitsandbytes' checkpoint loading to Transformers",
+            ):
+                _resolve_and_configure_encoder_quantization(
+                    SimpleNamespace(architectures=[architecture], quant_config=None),
+                    component_config,
+                    "/model/text_encoder",
+                    "text_encoder",
+                )
 
     def test_srt_backend_is_not_admitted_without_an_adapter(self):
         model_config = SimpleNamespace(quant_config=None)
