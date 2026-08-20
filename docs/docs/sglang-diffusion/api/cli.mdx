@@ -178,6 +178,24 @@ Manifest request defaults must name fields on the selected model's concrete
 `SamplingParams` class. Optional SHA-256 checksums apply to exact files and are
 verified after download, before the artifact is loaded.
 
+Entries without `"default": true` remain available as named release variants.
+Select one with `--artifact-entry <id>`; repeat the option for independent
+components. An explicitly selected entry replaces the manifest default for the
+same component or LoRA slot, while direct `--component-paths.*`,
+`--component-weights.*`, and `--lora-path` arguments still take precedence:
+
+```bash Command
+sglang serve \
+  --artifact-manifest owner/release-package \
+  --artifact-entry distilled \
+  --artifact-entry fp8-encoder
+```
+
+An entry may include its own `request_defaults` for variant-specific steps,
+guidance, or flow shift. Selected-entry defaults override default-entry values,
+which override root manifest defaults; conflicting active entries at the same
+priority are rejected.
+
 Use the normal `generate` or `serve` command to inspect every configured model,
 component override, weights-only override, and startup LoRA before allocating a
 GPU:

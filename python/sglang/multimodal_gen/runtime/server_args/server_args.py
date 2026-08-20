@@ -240,6 +240,7 @@ class ServerArgs(DisaggServerArgsMixin):
     trust_remote_code: bool = False
     revision: str | None = None
     artifact_manifest: str | None = None
+    artifact_entries: list[str] = field(default_factory=list)
     artifact_request_defaults: dict[str, object] = field(
         default_factory=dict, repr=False
     )
@@ -1687,6 +1688,17 @@ class ServerArgs(DisaggServerArgsMixin):
             ),
         )
         parser.add_argument(
+            "--artifact-entry",
+            dest="artifact_entries",
+            action="append",
+            default=None,
+            help=(
+                "Select a named non-default entry from --artifact-manifest. "
+                "Repeat for independent component entries; a selected entry "
+                "replaces the default entry for the same target."
+            ),
+        )
+        parser.add_argument(
             "--artifact-preflight",
             choices=("metadata", "full"),
             default=ServerArgs.artifact_preflight,
@@ -2867,6 +2879,7 @@ class ServerArgs(DisaggServerArgsMixin):
             manifest = load_artifact_manifest_defaults(
                 artifact_manifest,
                 revision=provided_args.get("revision"),
+                selected_entries=provided_args.get("artifact_entries"),
             )
             scalar_defaults = {
                 "model_path": manifest.model_path,
@@ -2889,6 +2902,8 @@ class ServerArgs(DisaggServerArgsMixin):
             if manifest_weights_paths:
                 provided_args["component_weights_paths"] = manifest_weights_paths
             provided_args["artifact_request_defaults"] = manifest.request_defaults
+        elif provided_args.get("artifact_entries"):
+            raise ValueError("--artifact-entry requires --artifact-manifest")
 
         provided_args["_explicit_arg_names"] = explicit_arg_names
         return cls.from_dict(provided_args)

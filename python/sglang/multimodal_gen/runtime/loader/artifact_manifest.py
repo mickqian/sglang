@@ -29,7 +29,16 @@ _ROOT_KEYS = frozenset(
     )
 )
 _ENTRY_KEYS = frozenset(
-    ("id", "path", "role", "component", "default", "checksum", "adapter")
+    (
+        "id",
+        "path",
+        "role",
+        "component",
+        "default",
+        "checksum",
+        "adapter",
+        "request_defaults",
+    )
 )
 _ADAPTER_KEYS = frozenset(("alpha", "scale"))
 _SHA256_PATTERN = re.compile(r"sha256:([0-9a-fA-F]{64})")
@@ -164,7 +173,10 @@ def _read_manifest(
 
 
 def load_artifact_manifest_defaults(
-    source: str, *, revision: str | None = None
+    source: str,
+    *,
+    revision: str | None = None,
+    selected_entries: list[str] | tuple[str, ...] | None = None,
 ) -> ArtifactManifestDefaults:
     """Load versioned, non-executable artifact defaults from a local or Hub manifest."""
     value, inventory, manifest_path = _read_manifest(source, revision)
@@ -173,11 +185,13 @@ def load_artifact_manifest_defaults(
         raise ValueError("Artifact manifest schema_version must be 1")
 
     entries = value.get("entries", [])
-    request_defaults = value.get("request_defaults", {})
-    if not isinstance(entries, list) or not isinstance(request_defaults, dict):
+    root_request_defaults = value.get("request_defaults", {})
+    if not isinstance(entries, list) or not isinstance(root_request_defaults, dict):
         raise ValueError(
             "Artifact manifest entries must be a list and request_defaults an object"
         )
+    request_defaults = dict(root_request_defaults)
+    request_default_priorities = {name: -1 for name in request_defaults}
 
     component_paths: dict[str, str] = {}
     component_weights_paths: dict[str, str] = {}
@@ -185,6 +199,10 @@ def load_artifact_manifest_defaults(
     lora_alpha = None
     lora_scale = None
     entry_ids: set[str] = set()
+    selected_ids = set(selected_entries or ())
+    matched_selected_ids: set[str] = set()
+    component_priorities: dict[tuple[str, str], int] = {}
+    lora_priority = -1
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise ValueError(f"Artifact manifest entry {index} must be an object")
@@ -202,6 +220,30 @@ def load_artifact_manifest_defaults(
         is_default = entry.get("default", False)
         if not isinstance(is_default, bool):
             raise ValueError(f"Artifact entry {entry_id!r} default must be boolean")
+        is_selected = entry_id in selected_ids
+        if is_selected:
+            matched_selected_ids.add(entry_id)
+        is_active = is_default or is_selected
+        priority = 1 if is_selected else 0
+        entry_request_defaults = entry.get("request_defaults", {})
+        if not isinstance(entry_request_defaults, dict):
+            raise ValueError(
+                f"Artifact entry {entry_id!r} request_defaults must be an object"
+            )
+        if is_active:
+            for name, request_value in entry_request_defaults.items():
+                existing_priority = request_default_priorities.get(name)
+                if (
+                    existing_priority == priority
+                    and request_defaults[name] != request_value
+                ):
+                    raise ValueError(
+                        f"Active artifact entries disagree on request default "
+                        f"{name!r}"
+                    )
+                if existing_priority is None or priority > existing_priority:
+                    request_defaults[name] = request_value
+                    request_default_priorities[name] = priority
         checksum = entry.get("checksum")
         if checksum is not None and (
             not isinstance(checksum, str) or _SHA256_PATTERN.fullmatch(checksum) is None
@@ -220,14 +262,18 @@ def load_artifact_manifest_defaults(
             resolved_source = _relative_entry_source(
                 inventory, manifest_path, path, checksum
             )
-            if not is_default:
+            if not is_active:
                 continue
             target = component_paths if role == "component" else component_weights_paths
-            if component in target:
+            target_key = (role, component)
+            existing_priority = component_priorities.get(target_key)
+            if existing_priority == priority:
                 raise ValueError(
-                    f"Multiple default artifacts target component {component!r}"
+                    f"Multiple active {role} artifacts target component {component!r}"
                 )
-            target[component] = resolved_source
+            if existing_priority is None or priority > existing_priority:
+                target[component] = resolved_source
+                component_priorities[target_key] = priority
         else:
             if component is not None:
                 raise ValueError(
@@ -250,12 +296,18 @@ def load_artifact_manifest_defaults(
             resolved_source = _relative_entry_source(
                 inventory, manifest_path, path, checksum
             )
-            if not is_default:
+            if not is_active:
                 continue
-            if lora_path is not None:
-                raise ValueError("Only one default LoRA is supported")
-            lora_path, lora_alpha = resolved_source, alpha
-            lora_scale = float(scale) if scale is not None else None
+            if lora_path is not None and priority == lora_priority:
+                raise ValueError("Only one active LoRA manifest entry is supported")
+            if priority > lora_priority:
+                lora_path, lora_alpha = resolved_source, alpha
+                lora_scale = float(scale) if scale is not None else None
+                lora_priority = priority
+
+    missing_entries = sorted(selected_ids - matched_selected_ids)
+    if missing_entries:
+        raise ValueError(f"Unknown artifact manifest entries: {missing_entries}")
 
     base_model = value.get("base_model")
     model_variant = value.get("model_variant")

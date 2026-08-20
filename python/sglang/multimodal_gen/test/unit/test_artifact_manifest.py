@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.loader.artifact_manifest import (
     load_artifact_manifest_defaults,
@@ -59,6 +61,50 @@ def test_manifest_resolves_default_component_and_lora_sources(tmp_path):
     assert defaults.request_defaults == {"num_inference_steps": 6}
 
 
+def test_selected_manifest_entry_replaces_same_target_default(tmp_path):
+    for name in ("default.safetensors", "style.safetensors"):
+        (tmp_path / name).write_bytes(b"fixture")
+    manifest = _write_manifest(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "default",
+                    "path": "default.safetensors",
+                    "role": "lora",
+                    "default": True,
+                    "request_defaults": {"num_inference_steps": 8},
+                },
+                {
+                    "id": "style",
+                    "path": "style.safetensors",
+                    "role": "lora",
+                    "request_defaults": {"num_inference_steps": 4},
+                },
+            ],
+            "request_defaults": {"num_inference_steps": 28, "guidance_scale": 1.0},
+        },
+    )
+
+    defaults = load_artifact_manifest_defaults(
+        str(manifest), selected_entries=["style"]
+    )
+
+    assert defaults.lora_path == str(tmp_path / "style.safetensors")
+    assert defaults.request_defaults == {
+        "num_inference_steps": 4,
+        "guidance_scale": 1.0,
+    }
+
+
+def test_unknown_manifest_entry_fails_closed(tmp_path):
+    manifest = _write_manifest(tmp_path, {"schema_version": 1, "entries": []})
+
+    with pytest.raises(ValueError, match="Unknown artifact manifest entries"):
+        load_artifact_manifest_defaults(str(manifest), selected_entries=["missing"])
+
+
 def test_cli_values_override_manifest_defaults():
     manifest_defaults = SimpleNamespace(
         model_path="owner/base",
@@ -72,15 +118,23 @@ def test_cli_values_override_manifest_defaults():
     )
     args = argparse.Namespace(
         artifact_manifest="owner/package",
+        artifact_entries=["turbo"],
         model_path="owner/explicit-base",
         lora_scale=0.5,
-        _sglang_explicit_arg_names={"artifact_manifest", "model_path", "lora_scale"},
+        _sglang_explicit_arg_names={
+            "artifact_manifest",
+            "artifact_entries",
+            "model_path",
+            "lora_scale",
+        },
     )
     with patch(
         "sglang.multimodal_gen.runtime.server_args.server_args."
         "load_artifact_manifest_defaults",
         return_value=manifest_defaults,
-    ), patch.object(ServerArgs, "from_dict", side_effect=lambda value: value):
+    ) as load_manifest, patch.object(
+        ServerArgs, "from_dict", side_effect=lambda value: value
+    ):
         values = ServerArgs.from_cli_args(
             args,
             ["--component-paths.text_encoder", "owner/explicit-encoder"],
@@ -90,6 +144,19 @@ def test_cli_values_override_manifest_defaults():
     assert values["lora_scale"] == 0.5
     assert values["component_paths"] == {"text_encoder": "owner/explicit-encoder"}
     assert values["component_weights_paths"] == {"transformer": "owner/default-dit"}
+    load_manifest.assert_called_once_with(
+        "owner/package", revision=None, selected_entries=["turbo"]
+    )
+
+
+def test_cli_manifest_entry_requires_manifest():
+    args = argparse.Namespace(
+        artifact_entries=["turbo"],
+        _sglang_explicit_arg_names={"artifact_entries"},
+    )
+
+    with pytest.raises(ValueError, match="requires --artifact-manifest"):
+        ServerArgs.from_cli_args(args)
 
 
 def test_manifest_request_defaults_are_lower_priority_than_user_values():
