@@ -11,8 +11,10 @@ from typing import Any, Type
 
 import torch
 from diffusers import AutoModel
+from diffusers.quantizers.auto import DiffusersAutoQuantizer
 from torch import nn
 from transformers import AutoImageProcessor, AutoProcessor, AutoTokenizer
+from transformers.quantizers.auto import AutoHfQuantizer
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.attention.selector import (
@@ -34,11 +36,15 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency_
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
+    get_diffusers_component_config,
     get_hf_config,
     prepare_diffusers_component_path_for_loading,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
+from sglang.srt.model_loader.checkpoint_quantization import (
+    resolve_checkpoint_quant_spec,
+)
 
 logger = init_logger(__name__)
 
@@ -49,6 +55,41 @@ class ComponentCheckpointUnsupportedError(ValueError):
 
 class NativeComponentLoaderRequired(RuntimeError):
     """The customized loader must defer to the native library loader."""
+
+
+def _admit_native_library_quantization(
+    config: dict[str, Any], library: str, component_name: str
+) -> bool:
+    """Validate serialized quantization with the library that will restore it."""
+    try:
+        quant_spec = resolve_checkpoint_quant_spec(config)
+    except (TypeError, ValueError) as error:
+        raise ComponentCheckpointUnsupportedError(
+            f"Cannot parse checkpoint quantization for {component_name!r}: {error}"
+        ) from error
+    if quant_spec is None:
+        return False
+    if quant_spec.source != "quantization_config":
+        raise ComponentCheckpointUnsupportedError(
+            f"Native {library} loading for {component_name!r} cannot restore "
+            f"quantization metadata from {quant_spec.source!r}"
+        )
+
+    quantization_config = config["quantization_config"]
+    try:
+        if library == "transformers":
+            AutoHfQuantizer.from_config(quantization_config)
+        elif library == "diffusers":
+            DiffusersAutoQuantizer.from_config(quantization_config)
+        else:
+            raise ValueError(f"Unsupported native component library: {library}")
+    except (KeyError, TypeError, ValueError) as error:
+        method = quant_spec.declared_method or "unspecified"
+        raise ComponentCheckpointUnsupportedError(
+            f"Native {library} does not support {component_name!r} checkpoint "
+            f"quant_method={method!r}: {error}"
+        ) from error
+    return True
 
 
 def _load_auto_tokenizer_with_roberta_processing_compat(*args, **kwargs):
@@ -312,6 +353,15 @@ class ComponentLoader(ABC):
                 trust_remote_code=server_args.trust_remote_code,
                 revision=server_args.revision,
             )
+            config_dict = config.to_dict()
+            is_quantized = _admit_native_library_quantization(
+                config_dict, "transformers", component_name or "component"
+            )
+            if is_quantized:
+                server_args.require_component_resident(
+                    component_name or "component",
+                    feature_name="Native Transformers quantized component",
+                )
             return AutoModel.from_pretrained(
                 component_model_path,
                 config=config,
@@ -325,6 +375,15 @@ class ComponentLoader(ABC):
             component_model_path = prepare_diffusers_component_path_for_loading(
                 component_model_path
             )
+            component_config = get_diffusers_component_config(component_model_path)
+            is_quantized = _admit_native_library_quantization(
+                component_config, "diffusers", component_name or "component"
+            )
+            if is_quantized:
+                server_args.require_component_resident(
+                    component_name or "component",
+                    feature_name="Native Diffusers quantized component",
+                )
             return AutoModel.from_pretrained(
                 component_model_path,
                 revision=server_args.revision,
