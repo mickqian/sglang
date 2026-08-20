@@ -17,7 +17,6 @@ from sglang.multimodal_gen.configs.models.encoders import (
     CLIPTextConfig,
     CLIPVisionConfig,
 )
-from sglang.multimodal_gen.runtime.layers.quantization import QuantizationConfig
 from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
 from sglang.multimodal_gen.runtime.models.encoders.base import (
     CheckpointQuantizationCapability,
@@ -27,6 +26,7 @@ from sglang.multimodal_gen.runtime.models.encoders.base import (
 from sglang.multimodal_gen.runtime.models.encoders.vision import (
     resolve_visual_encoder_outputs,
 )
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.models.clip import (
     CLIPEncoder,
     CLIPTextEmbeddings,
@@ -149,9 +149,11 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIPTextModel(TextEncoder):
-    checkpoint_quantization_capability = CheckpointQuantizationCapability(
-        backend="transformers",
-        methods=frozenset({"bitsandbytes"}),
+    checkpoint_quantization_capabilities = (
+        CheckpointQuantizationCapability(
+            backend="transformers",
+            methods=frozenset({"bitsandbytes"}),
+        ),
     )
 
     def __init__(
@@ -345,9 +347,15 @@ class CLIPVisionModel(ImageEncoder):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    checkpoint_quantization_capability = CheckpointQuantizationCapability(
-        backend="transformers",
-        methods=frozenset({"bitsandbytes"}),
+    checkpoint_quantization_capabilities = (
+        CheckpointQuantizationCapability(
+            backend="transformers",
+            methods=frozenset({"bitsandbytes"}),
+        ),
+        CheckpointQuantizationCapability(
+            backend="srt",
+            methods=frozenset({"fp8"}),
+        ),
     )
 
     def __init__(self, config: CLIPVisionConfig) -> None:

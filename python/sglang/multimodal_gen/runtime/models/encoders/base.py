@@ -167,7 +167,9 @@ class EncoderTensorParallelMixin:
     """Keep an encoder on the TP group that was used to build its shards."""
 
     _encoder_tp_group: GroupCoordinator | None = None
-    checkpoint_quantization_capability: CheckpointQuantizationCapability | None = None
+    checkpoint_quantization_capabilities: tuple[
+        CheckpointQuantizationCapability, ...
+    ] = ()
     # Some encoders own checkpoint quantization end to end because their weight
     # states or sharding contract cannot use the generic loader lifecycle.
     manages_checkpoint_quantization = False

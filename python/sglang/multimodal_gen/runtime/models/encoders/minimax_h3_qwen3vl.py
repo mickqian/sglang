@@ -49,9 +49,11 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
     layer_names = [*TextEncoder.layer_names, "model.visual.blocks"]
 
     supports_dp_encode = True
-    checkpoint_quantization_capability = CheckpointQuantizationCapability(
-        backend="diffusion",
-        methods=frozenset({"fp8"}),
+    checkpoint_quantization_capabilities = (
+        CheckpointQuantizationCapability(
+            backend="diffusion",
+            methods=frozenset({"fp8"}),
+        ),
     )
 
     @staticmethod

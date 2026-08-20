@@ -3,7 +3,6 @@ import glob
 import os
 import re
 from collections.abc import Callable, Generator, Iterable
-from itertools import chain
 from typing import cast
 
 import torch
@@ -41,6 +40,7 @@ from sglang.multimodal_gen.runtime.loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from sglang.multimodal_gen.runtime.models.encoders.base import (
+    CheckpointQuantizationCapability,
     EncoderTensorParallelMixin,
     TextEncoder,
     finalize_encoder_folding,
@@ -58,7 +58,13 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.multimodal_gen.runtime.utils.quantization_utils import get_quant_config
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
+from sglang.quantization.post_load import stage_module_for_post_load
 from sglang.srt.environ import envs
+from sglang.srt.layers.linear import LinearBase as SRTLinearBase
+from sglang.srt.layers.quantization.fp8 import Fp8Config as SRTFp8Config
+from sglang.srt.layers.quantization.unquant import (
+    UnquantizedLinearMethod as SRTUnquantizedLinearMethod,
+)
 from sglang.srt.model_loader.checkpoint_quantization import (
     resolve_checkpoint_quant_spec,
 )
@@ -75,6 +81,51 @@ _TRANSFORMERS_ENCODER_ONLY_ARCHITECTURES = {
 }
 
 
+def _select_encoder_quantization_capability(
+    model_cls: type[nn.Module],
+    quant_method: str | None,
+    component_name: str,
+) -> CheckpointQuantizationCapability:
+    capabilities = model_cls.checkpoint_quantization_capabilities
+    matches = [cap for cap in capabilities if quant_method in cap.methods]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ComponentCheckpointUnsupportedError(
+            f"{model_cls.__name__} declares multiple backends for "
+            f"{component_name!r} quantization method {quant_method!r}"
+        )
+
+    if not capabilities:
+        raise ComponentCheckpointUnsupportedError(
+            f"{model_cls.__name__} does not support quantized checkpoints for "
+            f"{component_name!r}: no checkpoint quantization capability is declared"
+        )
+    supported_methods = sorted(
+        method for capability in capabilities for method in capability.methods
+    )
+    raise ComponentCheckpointUnsupportedError(
+        f"{model_cls.__name__} does not support {component_name!r} checkpoints "
+        f"quantized with {quant_method!r}; supported methods: {supported_methods}"
+    )
+
+
+def _srt_encoder_quant_config(
+    model_cls: type[nn.Module], quant_config: dict
+) -> SRTFp8Config:
+    """Construct the serialized SRT format explicitly admitted by an encoder."""
+    quant_method = quant_config.get("quant_method")
+    if quant_method != "fp8":
+        raise ComponentCheckpointUnsupportedError(
+            "The native encoder SRT adapter supports only serialized 'fp8', "
+            f"got {quant_method!r}"
+        )
+
+    config = dict(quant_config)
+    config["packed_modules_mapping"] = model_cls.packed_modules_mapping
+    return SRTFp8Config.from_config(config)
+
+
 def _configure_encoder_quantization(
     model_config: EncoderConfig,
     model_cls: type[nn.Module],
@@ -89,15 +140,12 @@ def _configure_encoder_quantization(
         return
 
     try:
-        quant_config = get_quant_config(
-            component_config,
-            component_model_path,
-        )
-    except (KeyError, TypeError, ValueError) as error:
+        quant_spec = resolve_checkpoint_quant_spec(component_config)
+    except (TypeError, ValueError) as error:
         raise ComponentCheckpointUnsupportedError(
             f"Cannot configure checkpoint quantization for {component_name!r}: {error}"
         ) from error
-    if quant_config is None:
+    if quant_spec is None:
         model_config.quant_config = None
         return
     if not issubclass(model_cls, EncoderTensorParallelMixin):
@@ -107,29 +155,42 @@ def _configure_encoder_quantization(
             f"got {model_cls.__name__}"
         )
 
-    capability = model_cls.checkpoint_quantization_capability
-    if capability is None:
-        raise ComponentCheckpointUnsupportedError(
-            f"{model_cls.__name__} does not support quantized checkpoints for "
-            f"{component_name!r}: no checkpoint quantization capability is declared"
-        )
-    quant_method = quant_config.get_name()
-    if quant_method not in capability.methods:
-        raise ComponentCheckpointUnsupportedError(
-            f"{model_cls.__name__} does not support {component_name!r} checkpoints "
-            f"quantized with {quant_method!r}; supported methods for the "
-            f"{capability.backend!r} backend: {sorted(capability.methods)}"
-        )
+    quant_method = quant_spec.declared_method
+    capability = _select_encoder_quantization_capability(
+        model_cls, quant_method, component_name
+    )
     if capability.backend == "transformers":
         raise NativeComponentLoaderRequired(
             f"{model_cls.__name__} delegates {quant_method!r} checkpoint loading "
             "to Transformers"
         )
-    if capability.backend != "diffusion":
+
+    try:
+        if capability.backend == "diffusion":
+            quant_config = get_quant_config(component_config, component_model_path)
+        elif capability.backend == "srt":
+            if quant_spec.source != "quantization_config":
+                raise ComponentCheckpointUnsupportedError(
+                    f"The SRT encoder adapter cannot restore {component_name!r} "
+                    f"quantization metadata from {quant_spec.source!r}"
+                )
+            quant_config = _srt_encoder_quant_config(model_cls, quant_spec.config)
+        else:
+            raise ComponentCheckpointUnsupportedError(
+                f"Unsupported native encoder quantization backend "
+                f"{capability.backend!r} for {component_name!r}"
+            )
+    except ComponentCheckpointUnsupportedError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
         raise ComponentCheckpointUnsupportedError(
-            f"{model_cls.__name__} declares the {capability.backend!r} checkpoint "
-            f"quantization backend for {component_name!r}, but the native encoder "
-            "loader currently supports only the 'diffusion' backend"
+            f"Cannot construct {capability.backend!r} quantization for "
+            f"{component_name!r}: {error}"
+        ) from error
+    if quant_config is None:
+        raise ComponentCheckpointUnsupportedError(
+            f"No {capability.backend!r} quantization config was constructed for "
+            f"the quantized {component_name!r} checkpoint"
         )
     model_config.quant_config = quant_config
 
@@ -155,14 +216,7 @@ def _resolve_and_configure_encoder_quantization(
     try:
         model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
     except Exception as resolution_error:
-        try:
-            quant_config = get_quant_config(component_config, component_model_path)
-        except Exception as quantization_error:
-            raise ComponentCheckpointUnsupportedError(
-                f"Cannot parse checkpoint quantization for {component_name!r}: "
-                f"{quantization_error}"
-            ) from quantization_error
-        if quant_config is None:
+        if quant_spec is None:
             raise
         raise ComponentCheckpointUnsupportedError(
             f"A quantized {component_name!r} checkpoint requires an in-tree "
@@ -179,28 +233,6 @@ def _resolve_and_configure_encoder_quantization(
     return model_cls
 
 
-def _module_tensor_device(module: nn.Module) -> torch.device | None:
-    """Return the device of a module's own tensors.
-
-    Quantized linear layers are expected to keep their parameters and buffers
-    together.  Failing explicitly is safer than staging only part of a layer.
-    """
-
-    devices = {
-        tensor.device
-        for tensor in chain(
-            module.parameters(recurse=False),
-            module.buffers(recurse=False),
-        )
-    }
-    if len(devices) > 1:
-        raise ValueError(
-            f"Cannot stage {type(module).__name__} with tensors on multiple "
-            f"devices: {sorted(map(str, devices))}"
-        )
-    return next(iter(devices), None)
-
-
 def _process_quantized_encoder_weights(
     model: nn.Module,
     process_device: torch.device,
@@ -208,24 +240,16 @@ def _process_quantized_encoder_weights(
 ) -> int:
     processed_layers = 0
     for module in model.modules():
-        if not isinstance(module, LinearBase):
+        if not isinstance(module, (LinearBase, SRTLinearBase)):
             continue
         quant_method = module.quant_method
-        if quant_method is None or isinstance(quant_method, UnquantizedLinearMethod):
+        if quant_method is None or isinstance(
+            quant_method, (UnquantizedLinearMethod, SRTUnquantizedLinearMethod)
+        ):
             continue
-
-        origin_device = _module_tensor_device(module)
-        should_stage = origin_device is not None and origin_device != process_device
-        if should_stage:
-            module.to(process_device)
-        try:
+        with stage_module_for_post_load(module, process_device):
             quant_method.process_weights_after_loading(module)
-            processed_layers += 1
-        finally:
-            # Post-load methods may replace parameters or register buffers. Move
-            # the complete layer back so component residency remains authoritative.
-            if should_stage:
-                module.to(origin_device)
+        processed_layers += 1
     if processed_layers == 0:
         raise ValueError(
             f"The {component_name!r} checkpoint declares quantization, but the "
@@ -239,6 +263,22 @@ class TextEncoderLoader(ComponentLoader):
 
     component_names = ["text_encoder"]
     expected_library = "transformers"
+
+    def should_raise_customized_load_error(
+        self, server_args: ServerArgs, component_name: str
+    ) -> bool:
+        """Never fall back after a native quantized encoder was admitted."""
+        if super().should_raise_customized_load_error(server_args, component_name):
+            return True
+        if component_name == "image_encoder":
+            config = server_args.pipeline_config.image_encoder_config
+        elif component_name.startswith("text_encoder"):
+            config = server_args.pipeline_config.text_encoder_configs[
+                self._extract_encoder_index(component_name)
+            ]
+        else:
+            return False
+        return config.quant_config is not None
 
     @dataclasses.dataclass
     class Source:

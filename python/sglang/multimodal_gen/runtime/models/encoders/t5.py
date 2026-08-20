@@ -574,9 +574,11 @@ class T5EncoderModel(TextEncoder):
     # dp measured here: 1.9x on the encode stage at batch 2/4/8
     # (2xH100, T5-XXL width), max_abs_diff=0 vs replicated
     supports_dp_encode = True
-    checkpoint_quantization_capability = CheckpointQuantizationCapability(
-        backend="transformers",
-        methods=frozenset({"bitsandbytes"}),
+    checkpoint_quantization_capabilities = (
+        CheckpointQuantizationCapability(
+            backend="transformers",
+            methods=frozenset({"bitsandbytes"}),
+        ),
     )
 
     def __init__(self, config: T5Config, prefix: str = ""):
@@ -672,9 +674,11 @@ class UMT5EncoderModel(TextEncoder):
     # dp measured here: 1.9x on the encode stage at batch 2/4/8
     # (2xH100, T5-XXL width), max_abs_diff=0 vs replicated
     supports_dp_encode = True
-    checkpoint_quantization_capability = CheckpointQuantizationCapability(
-        backend="transformers",
-        methods=frozenset({"bitsandbytes"}),
+    checkpoint_quantization_capabilities = (
+        CheckpointQuantizationCapability(
+            backend="transformers",
+            methods=frozenset({"bitsandbytes"}),
+        ),
     )
 
     def __init__(self, config: T5Config, prefix: str = ""):

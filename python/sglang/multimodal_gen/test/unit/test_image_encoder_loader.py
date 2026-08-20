@@ -9,6 +9,7 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader imp
 from sglang.multimodal_gen.runtime.loader.component_loaders.image_encoder_loader import (
     ImageEncoderLoader,
 )
+from sglang.srt.layers.quantization.fp8 import Fp8Config as SRTFp8Config
 
 
 class TestImageEncoderQuantizationAdmission(unittest.TestCase):
@@ -19,6 +20,11 @@ class TestImageEncoderQuantizationAdmission(unittest.TestCase):
         )
         self.load_native = load_native_patcher.start()
         self.addCleanup(load_native_patcher.stop)
+        load_model_patcher = mock.patch.object(
+            self.loader, "load_model", return_value=object()
+        )
+        self.load_model = load_model_patcher.start()
+        self.addCleanup(load_model_patcher.stop)
         self.server_args = SimpleNamespace(
             pipeline_config=SimpleNamespace(
                 image_encoder_config=CLIPVisionConfig(),
@@ -50,13 +56,15 @@ class TestImageEncoderQuantizationAdmission(unittest.TestCase):
             "/model/image_encoder", self.server_args, "image_encoder", "transformers"
         )
 
-    def test_quantized_clip_checkpoint_is_not_silently_enabled(self):
+    def test_serialized_fp8_clip_checkpoint_uses_srt_adapter(self):
         config = self._component_config("CLIPVisionModelWithProjection", quantized=True)
-        with self._config_patch(config), self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError,
-            "CLIPVisionModel.*image_encoder.*supported methods.*bitsandbytes",
-        ):
+        with self._config_patch(config):
             self.loader.load_customized("/model/image_encoder", self.server_args)
+
+        self.assertIsInstance(
+            self.server_args.pipeline_config.image_encoder_config.quant_config,
+            SRTFp8Config,
+        )
 
     def test_bitsandbytes_clip_checkpoint_uses_transformers_loader(self):
         config = self._component_config(
@@ -81,6 +89,15 @@ class TestImageEncoderQuantizationAdmission(unittest.TestCase):
         config = self._component_config("UnknownVisionModel", quantized=True)
         with self._config_patch(config), self.assertRaises(
             ComponentCheckpointUnsupportedError
+        ):
+            self._load()
+        self.load_native.assert_not_called()
+
+    def test_admitted_quantized_native_failure_does_not_fall_back(self):
+        config = self._component_config("CLIPVisionModelWithProjection", quantized=True)
+        self.load_model.side_effect = RuntimeError("synthetic post-load failure")
+        with self._config_patch(config), self.assertRaisesRegex(
+            RuntimeError, "native fallback is disabled"
         ):
             self._load()
         self.load_native.assert_not_called()

@@ -26,6 +26,8 @@ from sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLEncoder,
 )
 from sglang.multimodal_gen.runtime.models.encoders.t5 import T5EncoderModel
+from sglang.srt.layers.linear import LinearBase as SRTLinearBase
+from sglang.srt.layers.quantization.fp8 import Fp8Config as SRTFp8Config
 
 
 class TestTextEncoderClassResolution(unittest.TestCase):
@@ -206,7 +208,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
         _configure_encoder_quantization(
             model_config,
             MiniMaxH3Qwen3VLEncoder,
-            {},
+            {"quantization_config": {"quant_method": "fp8"}},
             "/model/text_encoder",
             "text_encoder",
         )
@@ -220,7 +222,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
             _configure_encoder_quantization(
                 model_config,
                 TextEncoder,
-                {},
+                {"quantization_config": {"quant_method": "fp8"}},
                 "/model/text_encoder",
                 "text_encoder",
             )
@@ -251,7 +253,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
             _configure_encoder_quantization(
                 SimpleNamespace(quant_config=None),
                 T5EncoderModel,
-                {},
+                {"quantization_config": {"quant_method": "fp8"}},
                 "/model/text_encoder",
                 "text_encoder",
             )
@@ -274,7 +276,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
                     "text_encoder",
                 )
 
-    def test_srt_backend_is_not_admitted_without_an_adapter(self):
+    def test_srt_backend_uses_serialized_fp8_adapter(self):
         model_config = SimpleNamespace(quant_config=None)
         capability = CheckpointQuantizationCapability(
             backend="srt",
@@ -282,19 +284,26 @@ class TestTextEncoderQuantization(unittest.TestCase):
         )
         with mock.patch.object(
             MiniMaxH3Qwen3VLEncoder,
-            "checkpoint_quantization_capability",
-            capability,
-        ), self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError,
-            "'srt'.*only the 'diffusion' backend",
+            "checkpoint_quantization_capabilities",
+            (capability,),
+        ), mock.patch.object(
+            MiniMaxH3Qwen3VLEncoder,
+            "packed_modules_mapping",
+            {},
         ):
             _configure_encoder_quantization(
                 model_config,
                 MiniMaxH3Qwen3VLEncoder,
-                {},
+                {
+                    "quantization_config": {
+                        "quant_method": "fp8",
+                        "activation_scheme": "dynamic",
+                    }
+                },
                 "/model/text_encoder",
                 "text_encoder",
             )
+        self.assertIsInstance(model_config.quant_config, SRTFp8Config)
 
     def test_model_managed_quantization_bypasses_generic_lifecycle(self):
         model_config = SimpleNamespace(quant_config=None)
@@ -340,6 +349,13 @@ class _QuantizedEncoder(nn.Module):
         self.unquantized = nn.Linear(2, 2, bias=False)
 
 
+class _SRTQuantizedLinear(SRTLinearBase):
+    def __init__(self, quant_method):
+        nn.Module.__init__(self)
+        self.weight = nn.Parameter(torch.empty(2, 2), requires_grad=False)
+        self.quant_method = quant_method
+
+
 class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
     def test_processes_quantized_layers_without_moving_the_model(self):
         quant_method = _RecordingQuantMethod()
@@ -354,6 +370,20 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         self.assertEqual(processed, 1)
         self.assertEqual(quant_method.devices, [torch.device("cpu")])
         self.assertEqual(model.unquantized.weight.device, torch.device("cpu"))
+
+    def test_processes_reused_srt_linear_layers(self):
+        quant_method = _RecordingQuantMethod()
+        model = nn.Module()
+        model.quantized = _SRTQuantizedLinear(quant_method)
+
+        processed = _process_quantized_encoder_weights(
+            model,
+            torch.device("cpu"),
+            "image_encoder",
+        )
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(quant_method.devices, [torch.device("cpu")])
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_stages_only_the_quantized_layer_and_restores_it(self):
