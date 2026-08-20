@@ -124,13 +124,16 @@ def _relative_entry_source(
     if pure_path.is_absolute() or ".." in pure_path.parts or not relative_path:
         raise ValueError(f"Artifact manifest paths must be relative: {relative_path!r}")
     manifest_dir = PurePosixPath(manifest_path).parent
-    target = pure_path if str(manifest_dir) == "." else manifest_dir / pure_path
+    if str(pure_path) == ".":
+        target = manifest_dir
+    else:
+        target = pure_path if str(manifest_dir) == "." else manifest_dir / pure_path
     target_path = str(target)
 
     source = inventory.source
     if source.kind == "local":
         assert source.local_path is not None
-        local_target = os.path.join(source.local_path, relative_path)
+        local_target = os.path.normpath(os.path.join(source.local_path, relative_path))
         if not os.path.exists(local_target):
             raise FileNotFoundError(f"Manifest artifact does not exist: {local_target}")
         is_file = os.path.isfile(local_target)
@@ -138,7 +141,11 @@ def _relative_entry_source(
     else:
         paths = {item.path for item in inventory.files}
         is_file = target_path in paths
-        is_directory = any(path.startswith(f"{target_path}/") for path in paths)
+        is_directory = (
+            bool(paths)
+            if target_path == "."
+            else any(path.startswith(f"{target_path}/") for path in paths)
+        )
         if not is_file and not is_directory:
             raise FileNotFoundError(f"Manifest artifact does not exist: {target_path}")
         assert source.repo_id is not None
@@ -146,8 +153,10 @@ def _relative_entry_source(
         action = "resolve" if is_file else "tree"
         resolved_source = (
             f"https://huggingface.co/{source.repo_id}/{action}/"
-            f"{quote(revision, safe='')}/{quote(target_path, safe='/')}"
+            f"{quote(revision, safe='')}"
         )
+        if target_path != ".":
+            resolved_source += f"/{quote(target_path, safe='/')}"
 
     if checksum is None:
         return resolved_source

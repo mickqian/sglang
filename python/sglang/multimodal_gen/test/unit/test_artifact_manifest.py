@@ -61,6 +61,29 @@ def test_manifest_resolves_default_component_and_lora_sources(tmp_path):
     assert defaults.request_defaults == {"num_inference_steps": 6}
 
 
+def test_manifest_component_can_select_its_own_repo_root(tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    manifest = _write_manifest(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "encoder",
+                    "path": ".",
+                    "role": "component",
+                    "component": "text_encoder",
+                    "default": True,
+                }
+            ],
+        },
+    )
+
+    defaults = load_artifact_manifest_defaults(str(manifest))
+
+    assert defaults.component_paths == {"text_encoder": str(tmp_path)}
+
+
 def test_selected_manifest_entry_replaces_same_target_default(tmp_path):
     for name in ("default.safetensors", "style.safetensors"):
         (tmp_path / name).write_bytes(b"fixture")
