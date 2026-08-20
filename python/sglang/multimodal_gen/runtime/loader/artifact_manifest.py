@@ -179,6 +179,16 @@ def load_artifact_manifest_defaults(
     selected_entries: list[str] | tuple[str, ...] | None = None,
 ) -> ArtifactManifestDefaults:
     """Load versioned, non-executable artifact defaults from a local or Hub manifest."""
+    if selected_entries is not None and (
+        not isinstance(selected_entries, (list, tuple))
+        or any(
+            not isinstance(entry_id, str) or not entry_id
+            for entry_id in selected_entries
+        )
+    ):
+        raise ValueError(
+            "Artifact manifest selected_entries must be a list of non-empty strings"
+        )
     value, inventory, manifest_path = _read_manifest(source, revision)
     _reject_unknown_keys(value, _ROOT_KEYS, "artifact manifest")
     if value.get("schema_version") != 1:

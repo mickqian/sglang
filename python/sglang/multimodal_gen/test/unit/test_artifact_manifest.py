@@ -105,6 +105,16 @@ def test_unknown_manifest_entry_fails_closed(tmp_path):
         load_artifact_manifest_defaults(str(manifest), selected_entries=["missing"])
 
 
+@pytest.mark.parametrize("selected_entries", ["turbo", [""], [1]])
+def test_manifest_selected_entries_require_string_list(tmp_path, selected_entries):
+    manifest = _write_manifest(tmp_path, {"schema_version": 1, "entries": []})
+
+    with pytest.raises(ValueError, match="list of non-empty strings"):
+        load_artifact_manifest_defaults(
+            str(manifest), selected_entries=selected_entries
+        )
+
+
 def test_cli_values_override_manifest_defaults():
     manifest_defaults = SimpleNamespace(
         model_path="owner/base",
