@@ -236,6 +236,8 @@ class ServerArgs(DisaggServerArgsMixin):
     # HuggingFace specific parameters
     trust_remote_code: bool = False
     revision: str | None = None
+    artifact_preflight: str | None = None
+    artifact_report_format: str = "text"
 
     # Parallelism
     num_gpus: int = 1
@@ -1666,6 +1668,23 @@ class ServerArgs(DisaggServerArgsMixin):
             "--model-path",
             type=str,
             help="The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
+        )
+        parser.add_argument(
+            "--artifact-preflight",
+            choices=("metadata", "full"),
+            default=ServerArgs.artifact_preflight,
+            help=(
+                "Resolve every configured model, component, weights override, and "
+                "LoRA, print a report, then exit before model construction. "
+                "'metadata' reads Hub metadata and tensor headers; 'full' also "
+                "downloads the selected artifacts."
+            ),
+        )
+        parser.add_argument(
+            "--artifact-report-format",
+            choices=("text", "json"),
+            default=ServerArgs.artifact_report_format,
+            help="Output format used by --artifact-preflight.",
         )
         parser.add_argument(
             "--model-subfolder",
