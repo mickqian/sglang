@@ -38,6 +38,7 @@ class SchedulerLoader(ComponentLoader):
 
     component_names = ["scheduler"]
     expected_library = "diffusers"
+    contains_model_weights = False
 
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, *args

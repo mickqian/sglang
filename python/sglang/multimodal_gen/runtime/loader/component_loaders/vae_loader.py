@@ -129,6 +129,7 @@ class VAELoader(ComponentLoader):
 
     component_names = ["vae", "audio_vae", "video_vae"]
     expected_library = "diffusers"
+    manages_checkpoint_quantization = True
 
     def customized_load_kwargs_for_component(
         self, server_args: ServerArgs, component_name: str

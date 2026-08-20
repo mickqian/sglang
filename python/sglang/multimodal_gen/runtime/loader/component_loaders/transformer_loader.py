@@ -148,6 +148,7 @@ class TransformerLoader(ComponentLoader):
         "video_dit",
     ]
     expected_library = "diffusers"
+    manages_checkpoint_quantization = True
 
     def server_args_for_component_load(
         self,

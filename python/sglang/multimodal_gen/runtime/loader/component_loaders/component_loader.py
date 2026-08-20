@@ -122,6 +122,13 @@ class ComponentLoader(ABC):
     # diffusers or transformers
     expected_library: str = ""
 
+    # Tokenizers, processors, and schedulers override this because they do not
+    # restore model weights. Weight-bearing customized loaders are routed to the
+    # native library when the checkpoint declares quantization, unless the
+    # loader explicitly manages that metadata itself.
+    contains_model_weights = True
+    manages_checkpoint_quantization = False
+
     _loaders_registered = False
 
     def __init_subclass__(cls, **kwargs):
@@ -254,6 +261,21 @@ class ComponentLoader(ABC):
                     matched_backend_key,
                 )
         try:
+            if (
+                self.contains_model_weights
+                and not self.manages_checkpoint_quantization
+                and self._checkpoint_declares_quantization(
+                    component_model_path,
+                    server_args,
+                    component_name,
+                    transformers_or_diffusers,
+                )
+            ):
+                raise NativeComponentLoaderRequired(
+                    f"Component {component_name!r} declares checkpoint "
+                    f"quantization; delegating restoration to native "
+                    f"{transformers_or_diffusers} AutoQuantizer"
+                )
             component = self._load_customized_with_context(
                 component_model_path,
                 server_args,
@@ -325,6 +347,35 @@ class ComponentLoader(ABC):
                 current_gpu_mem,
             )
         return component, consumed
+
+    @staticmethod
+    def _checkpoint_declares_quantization(
+        component_model_path: str,
+        server_args: ServerArgs,
+        component_name: str,
+        transformers_or_diffusers: str,
+    ) -> bool:
+        if transformers_or_diffusers == "transformers":
+            config = get_hf_config(
+                component_model_path,
+                trust_remote_code=server_args.trust_remote_code,
+                revision=server_args.revision,
+            ).to_dict()
+        elif transformers_or_diffusers == "diffusers":
+            config = get_diffusers_component_config(component_model_path)
+        else:
+            raise ComponentCheckpointUnsupportedError(
+                f"Cannot inspect checkpoint quantization for {component_name!r}: "
+                f"unsupported component library {transformers_or_diffusers!r}"
+            )
+
+        try:
+            return resolve_checkpoint_quant_spec(config) is not None
+        except (TypeError, ValueError) as error:
+            raise ComponentCheckpointUnsupportedError(
+                f"Cannot parse checkpoint quantization for {component_name!r}: "
+                f"{error}"
+            ) from error
 
     def load_native(
         self,
@@ -513,6 +564,7 @@ class ImageProcessorLoader(ComponentLoader):
 
     component_names = ["image_processor"]
     expected_library = "transformers"
+    contains_model_weights = False
 
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
@@ -527,6 +579,7 @@ class AutoProcessorLoader(ComponentLoader):
 
     component_names = ["processor", "text_processor"]
     expected_library = "transformers"
+    contains_model_weights = False
 
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
@@ -539,6 +592,7 @@ class TokenizerLoader(ComponentLoader):
 
     component_names = ["tokenizer", "text_tokenizer"]
     expected_library = "transformers"
+    contains_model_weights = False
 
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str

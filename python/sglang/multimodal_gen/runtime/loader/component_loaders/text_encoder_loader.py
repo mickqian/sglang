@@ -263,6 +263,7 @@ class TextEncoderLoader(ComponentLoader):
 
     component_names = ["text_encoder"]
     expected_library = "transformers"
+    manages_checkpoint_quantization = True
 
     def should_raise_customized_load_error(
         self, server_args: ServerArgs, component_name: str
