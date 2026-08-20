@@ -95,6 +95,10 @@ _LORA_ALPHA_METADATA_KEYS = (
     "ss_network_alpha",
     "alpha",
 )
+_TENSOR_QUANTIZATION_METADATA_KEYS = (
+    "quantization_config",
+    "_quantization_metadata",
+)
 
 
 def _metadata_number(value: str) -> int | float | None:
@@ -597,20 +601,54 @@ def _merge_tensor_summaries(summaries: list[TensorSummary]) -> TensorSummary | N
 
 def _resolve_quantization_metadata(
     inventory: ArtifactInventory,
+    tensor_summaries: list[TensorSummary],
 ) -> tuple[str | None, str | None]:
+    declarations: set[tuple[str, str]] = set()
     config_files = tuple(
         item.path
         for item in inventory.files
         if PurePosixPath(item.path).name == "config.json"
     )
-    if len(config_files) != 1:
+    if len(config_files) == 1:
+        quant_spec = resolve_checkpoint_quant_spec(
+            _read_inventory_json(inventory, config_files[0])
+        )
+        if quant_spec is not None and quant_spec.declared_method is not None:
+            declarations.add((quant_spec.declared_method, quant_spec.source))
+
+    for summary in tensor_summaries:
+        for metadata_key in _TENSOR_QUANTIZATION_METADATA_KEYS:
+            serialized = summary.metadata.get(metadata_key)
+            if serialized is None:
+                continue
+            try:
+                quantization_config = json.loads(serialized)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid safetensors {metadata_key}: expected a JSON object"
+                ) from error
+            if not isinstance(quantization_config, dict):
+                raise ValueError(
+                    f"Invalid safetensors {metadata_key}: expected a JSON object"
+                )
+            quant_spec = resolve_checkpoint_quant_spec(
+                {"quantization_config": quantization_config}
+            )
+            if quant_spec is not None and quant_spec.declared_method is not None:
+                declarations.add(
+                    (quant_spec.declared_method, f"safetensors:{metadata_key}")
+                )
+
+    methods = {method for method, _ in declarations}
+    if len(methods) > 1:
+        raise ValueError(
+            f"Conflicting artifact quantization metadata: {sorted(declarations)}"
+        )
+    if not declarations:
         return None, None
-    quant_spec = resolve_checkpoint_quant_spec(
-        _read_inventory_json(inventory, config_files[0])
-    )
-    if quant_spec is None:
-        return None, None
-    return quant_spec.declared_method, quant_spec.source
+    method = methods.pop()
+    sources = ",".join(sorted(source for _, source in declarations))
+    return method, sources
 
 
 def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
@@ -654,7 +692,9 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
             lora_alphas.add(lora_alpha)
     if len(lora_alphas) > 1:
         raise ValueError(f"Conflicting LoRA alpha across artifact files: {lora_alphas}")
-    quantization_method, quantization_source = _resolve_quantization_metadata(inventory)
+    quantization_method, quantization_source = _resolve_quantization_metadata(
+        inventory, summaries
+    )
     formats = {PurePosixPath(path).suffix.removeprefix(".") for path in selected_files}
     if len(formats) == 1:
         container_format = next(iter(formats))

@@ -167,3 +167,26 @@ def test_lora_artifact_reports_tensor_and_quant_metadata(tmp_path):
     assert artifact.tensor_summary.metadata["sampler_steps"] == "4"
     assert artifact.request_defaults == {"num_inference_steps": 4}
     assert artifact.lora_alpha == 8
+
+
+def test_single_file_reports_serialized_quantization_metadata(tmp_path):
+    weight_path = tmp_path / "transformer.safetensors"
+    save_file(
+        {"blocks.0.weight": torch.zeros(2, 4)},
+        weight_path,
+        metadata={
+            "_quantization_metadata": ('{"quant_method":"modelopt","quant_algo":"FP8"}')
+        },
+    )
+
+    artifact = resolve_artifact(
+        ArtifactRequest(
+            name="transformer",
+            role="component_weights",
+            component="transformer",
+            source=str(weight_path),
+        )
+    )
+
+    assert artifact.quantization_method == "modelopt"
+    assert artifact.quantization_source == "safetensors:_quantization_metadata"
