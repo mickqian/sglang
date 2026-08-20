@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import unquote, urlparse
@@ -78,6 +79,76 @@ class ResolvedArtifact:
     quantization_method: str | None
     quantization_source: str | None
     tensor_summary: TensorSummary | None
+    request_defaults: dict[str, int | float] = field(default_factory=dict)
+    request_default_sources: dict[str, str] = field(default_factory=dict)
+    lora_alpha: int | None = None
+
+
+_REQUEST_METADATA_KEYS = {
+    "num_inference_steps": ("num_inference_steps", "inference_steps", "sampler_steps"),
+    "guidance_scale": ("guidance_scale", "cfg_scale"),
+    "flow_shift": ("flow_shift",),
+}
+_LORA_ALPHA_METADATA_KEYS = ("lora_alpha", "network_alpha", "ss_network_alpha")
+
+
+def _metadata_number(value: str) -> int | float | None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if (
+        isinstance(parsed, bool)
+        or not isinstance(parsed, (int, float))
+        or not math.isfinite(parsed)
+    ):
+        return None
+    return parsed
+
+
+def infer_request_defaults_from_tensor_metadata(
+    metadata: dict[str, str],
+) -> tuple[dict[str, int | float], dict[str, str]]:
+    """Read only explicit, numeric sampling metadata; never infer from filenames."""
+    defaults: dict[str, int | float] = {}
+    sources: dict[str, str] = {}
+    for field_name, metadata_keys in _REQUEST_METADATA_KEYS.items():
+        candidates = {
+            key: parsed
+            for key in metadata_keys
+            if key in metadata
+            and (parsed := _metadata_number(metadata[key])) is not None
+        }
+        values = set(candidates.values())
+        if len(values) > 1:
+            raise ValueError(
+                f"Conflicting tensor metadata for {field_name}: {candidates}"
+            )
+        if values:
+            defaults[field_name] = values.pop()
+            sources[field_name] = f"safetensors:{next(iter(candidates))}"
+    return defaults, sources
+
+
+def infer_lora_alpha_from_tensor_metadata(metadata: dict[str, str]) -> int | None:
+    candidates = {
+        key: parsed
+        for key in _LORA_ALPHA_METADATA_KEYS
+        if key in metadata and (parsed := _metadata_number(metadata[key])) is not None
+    }
+    values = set(candidates.values())
+    if len(values) > 1:
+        raise ValueError(f"Conflicting LoRA alpha tensor metadata: {candidates}")
+    if not values:
+        return None
+    value = values.pop()
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"LoRA alpha tensor metadata must be a positive integer: {value}"
+        )
+    return value
 
 
 def _validate_relative_hub_path(path: str, field_name: str) -> str:
@@ -557,6 +628,27 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
             )
         else:
             summaries.append(_summarize_remote_safetensors(inventory, selected_file))
+    request_defaults: dict[str, int | float] = {}
+    request_default_sources: dict[str, str] = {}
+    lora_alphas: set[int] = set()
+    for summary in summaries:
+        summary_defaults, summary_sources = infer_request_defaults_from_tensor_metadata(
+            summary.metadata
+        )
+        for field_name, value in summary_defaults.items():
+            existing = request_defaults.get(field_name)
+            if existing is not None and existing != value:
+                raise ValueError(
+                    f"Conflicting artifact metadata for {field_name}: "
+                    f"{existing} vs {value}"
+                )
+            request_defaults[field_name] = value
+            request_default_sources[field_name] = summary_sources[field_name]
+        lora_alpha = infer_lora_alpha_from_tensor_metadata(summary.metadata)
+        if lora_alpha is not None:
+            lora_alphas.add(lora_alpha)
+    if len(lora_alphas) > 1:
+        raise ValueError(f"Conflicting LoRA alpha across artifact files: {lora_alphas}")
     quantization_method, quantization_source = _resolve_quantization_metadata(inventory)
     formats = {PurePosixPath(path).suffix.removeprefix(".") for path in selected_files}
     if len(formats) == 1:
@@ -573,6 +665,9 @@ def resolve_artifact(request: ArtifactRequest) -> ResolvedArtifact:
         quantization_method=quantization_method,
         quantization_source=quantization_source,
         tensor_summary=_merge_tensor_summaries(summaries),
+        request_defaults=request_defaults,
+        request_default_sources=request_default_sources,
+        lora_alpha=next(iter(lora_alphas), None),
     )
 
 

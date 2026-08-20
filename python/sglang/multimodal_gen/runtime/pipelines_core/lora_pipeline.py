@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
@@ -18,6 +19,10 @@ from sglang.multimodal_gen.runtime.layers.lora.linear import (
     BaseLayerWithLoRA,
     replace_submodule,
     wrap_with_lora_layer,
+)
+from sglang.multimodal_gen.runtime.loader.artifact_resolver import (
+    infer_lora_alpha_from_tensor_metadata,
+    infer_request_defaults_from_tensor_metadata,
 )
 from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
@@ -822,6 +827,8 @@ class LoRAPipeline(ComposedPipelineBase):
         if rank != 0:
             lora_local_path = maybe_download_lora(lora_path, weight_name=weight_name)
 
+        with safe_open(lora_local_path, framework="pt", device="cpu") as weights:
+            tensor_metadata = dict(weights.metadata() or {})
         raw_state_dict = load_file(lora_local_path)
         lora_state_dict = normalize_lora_state_dict(raw_state_dict, logger=logger)
         adapter_lora_alpha = lora_alpha
@@ -833,6 +840,21 @@ class LoRAPipeline(ComposedPipelineBase):
                 adapter_config = json.load(f)
             if adapter_config.get("lora_alpha") is not None:
                 adapter_lora_alpha = int(adapter_config["lora_alpha"])
+        if adapter_lora_alpha is None:
+            adapter_lora_alpha = infer_lora_alpha_from_tensor_metadata(tensor_metadata)
+
+        if lora_path == self.server_args.lora_path:
+            request_defaults, request_default_sources = (
+                infer_request_defaults_from_tensor_metadata(tensor_metadata)
+            )
+            for field_name, value in request_defaults.items():
+                self.server_args.artifact_request_defaults.setdefault(field_name, value)
+            if request_defaults:
+                logger.info(
+                    "Applied startup LoRA request defaults %s from %s",
+                    request_defaults,
+                    request_default_sources,
+                )
 
         if lora_nickname in self.lora_adapters:
             self.lora_adapters[lora_nickname].clear()

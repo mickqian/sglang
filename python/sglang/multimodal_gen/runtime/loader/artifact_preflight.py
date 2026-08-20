@@ -102,6 +102,13 @@ def _format_text_report(mode: str, artifacts: tuple[ResolvedArtifact, ...]) -> s
             if summary.lora_ranks:
                 details += f"; lora_ranks={list(summary.lora_ranks)}"
             lines.append(f"  metadata: {details}")
+        if artifact.request_defaults:
+            lines.append(
+                f"  request defaults: {artifact.request_defaults} "
+                f"({artifact.request_default_sources})"
+            )
+        if artifact.lora_alpha is not None:
+            lines.append(f"  LoRA alpha: {artifact.lora_alpha} (safetensors metadata)")
     return "\n".join(lines)
 
 
