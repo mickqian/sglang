@@ -1,13 +1,191 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
 from enum import Enum
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import torch
 from diffusers.loaders import lora_conversion_utils as lcu
 
 logger = logging.getLogger("LoRAFormatAdapter")
+
+_PEFT_ADAPTER_SLOT = re.compile(r"(\.lora_[AB])\.([^.]+)\.weight$")
+_PEFT_WRAPPER_PREFIXES = (
+    "peft_model.base_model.model.",
+    "base_model.model.",
+)
+
+
+def _normalize_peft_wrappers(
+    state_dict: Mapping[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """Remove a uniform PEFT model wrapper and named adapter slot."""
+    wrapper_prefix = next(
+        (
+            prefix
+            for prefix in _PEFT_WRAPPER_PREFIXES
+            if state_dict and all(name.startswith(prefix) for name in state_dict)
+        ),
+        "",
+    )
+    normalized: Dict[str, torch.Tensor] = {}
+    adapter_slots = set()
+    has_bare_lora_weights = False
+    for name, tensor in state_dict.items():
+        if wrapper_prefix:
+            name = name.removeprefix(wrapper_prefix)
+        slot_match = _PEFT_ADAPTER_SLOT.search(name)
+        if slot_match is not None:
+            adapter_slots.add(slot_match.group(2))
+        elif name.endswith((".lora_A.weight", ".lora_B.weight")):
+            has_bare_lora_weights = True
+        target = _PEFT_ADAPTER_SLOT.sub(r"\1.weight", name)
+        if target in normalized:
+            raise ValueError(
+                "LoRA checkpoint contains multiple PEFT adapter slots for "
+                f"the same tensor: {target!r}"
+            )
+        normalized[target] = tensor
+    if len(adapter_slots) > 1:
+        raise ValueError(
+            f"LoRA checkpoint contains multiple PEFT adapter slots: "
+            f"{sorted(adapter_slots)}"
+        )
+    if adapter_slots and has_bare_lora_weights:
+        raise ValueError("LoRA checkpoint mixes named and unnamed PEFT adapter slots")
+    return normalized
+
+
+def get_peft_lora_alpha(adapter_config: Mapping[str, Any]) -> int | None:
+    alpha = adapter_config.get("lora_alpha")
+    if alpha is None:
+        return None
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or alpha <= 0:
+        raise ValueError("PEFT lora_alpha must be a positive integer")
+    if isinstance(alpha, float) and not alpha.is_integer():
+        raise ValueError("PEFT lora_alpha must be a positive integer")
+    return int(alpha)
+
+
+def _reject_unsupported_peft_options(adapter_config: Mapping[str, Any]) -> None:
+    unsupported = {
+        name
+        for name in (
+            "alora_invocation_tokens",
+            "layer_replication",
+            "modules_to_save",
+            "target_parameters",
+            "trainable_token_indices",
+            "use_bdlora",
+            "use_qalora",
+        )
+        if adapter_config.get(name)
+    }
+    if adapter_config.get("bias") not in (None, "none"):
+        unsupported.add("bias")
+    if adapter_config.get("fan_in_fan_out", False):
+        unsupported.add("fan_in_fan_out")
+    if adapter_config.get("lora_bias", False):
+        unsupported.add("lora_bias")
+    if unsupported:
+        raise ValueError(
+            "PEFT adapter requires unsupported auxiliary/runtime features: "
+            f"{sorted(unsupported)}"
+        )
+
+
+def _apply_peft_scaling(
+    state_dict: Dict[str, torch.Tensor], adapter_config: Mapping[str, Any]
+) -> Dict[str, torch.Tensor]:
+    """Represent PEFT scaling variants with native LoRA tensors and alpha."""
+    _reject_unsupported_peft_options(adapter_config)
+    if adapter_config.get("use_dora", False) or any(
+        "lora_magnitude_vector" in name or "dora_scale" in name for name in state_dict
+    ):
+        raise ValueError(
+            "DoRA adapters are not supported by the native diffusion LoRA layers"
+        )
+    unsupported_tensor_names = [
+        name
+        for name in state_dict
+        if any(
+            marker in name
+            for marker in ("lora_embedding_", "modules_to_save", "trainable_tokens")
+        )
+    ]
+    if unsupported_tensor_names:
+        raise ValueError(
+            "PEFT adapter contains unsupported auxiliary tensors: "
+            f"{unsupported_tensor_names[:8]}"
+        )
+
+    normalized = dict(state_dict)
+    alpha_pattern = adapter_config.get("alpha_pattern", {})
+    if not isinstance(alpha_pattern, dict):
+        raise ValueError("PEFT alpha_pattern must be an object")
+    compiled_alpha_patterns = []
+    for pattern, value in alpha_pattern.items():
+        if not isinstance(pattern, str):
+            raise ValueError("PEFT alpha_pattern keys must be strings")
+        try:
+            expression = re.compile(rf"(.*\.)?({pattern})$")
+        except re.error as error:
+            raise ValueError(
+                f"Invalid PEFT alpha_pattern expression {pattern!r}: {error}"
+            ) from error
+        alpha = get_peft_lora_alpha({"lora_alpha": value})
+        if alpha is None:
+            raise ValueError(
+                f"PEFT alpha_pattern value for {pattern!r} must be "
+                "a positive integer"
+            )
+        compiled_alpha_patterns.append((expression, alpha))
+
+    for name in state_dict:
+        suffix = ".lora_A.weight"
+        if not name.endswith(suffix):
+            continue
+        base = name[: -len(suffix)]
+        matched_alpha = None
+        for expression, alpha in compiled_alpha_patterns:
+            if expression.match(base):
+                matched_alpha = alpha
+                break
+        if matched_alpha is None:
+            continue
+        alpha_key = f"{base}.alpha"
+        existing_alpha = normalized.get(alpha_key)
+        if existing_alpha is not None and (
+            existing_alpha.numel() != 1 or int(existing_alpha.item()) != matched_alpha
+        ):
+            raise ValueError(f"PEFT alpha_pattern conflicts with tensor {alpha_key!r}")
+        normalized[alpha_key] = torch.tensor(matched_alpha)
+
+    use_rslora = adapter_config.get("use_rslora", False)
+    if not isinstance(use_rslora, bool):
+        raise ValueError("PEFT use_rslora must be boolean")
+    if not use_rslora:
+        return normalized
+
+    scaled_count = 0
+    suffix = ".lora_B.weight"
+    for name, weight in state_dict.items():
+        if not name.endswith(suffix):
+            continue
+        lora_a_name = f"{name[: -len(suffix)]}.lora_A.weight"
+        lora_a = state_dict.get(lora_a_name)
+        if lora_a is None or lora_a.ndim < 2:
+            raise ValueError(f"RSLoRA weight {name!r} has no matching rank-bearing A")
+        rank = int(lora_a.shape[-2])
+        if rank <= 0:
+            raise ValueError(f"RSLoRA weight {name!r} has invalid rank {rank}")
+        normalized[name] = weight * math.sqrt(rank)
+        scaled_count += 1
+    if scaled_count == 0:
+        raise ValueError("PEFT use_rslora is true, but no LoRA A/B pairs were found")
+    return normalized
 
 
 class LoRAFormat(str, Enum):
@@ -539,10 +717,13 @@ def convert_lora_state_dict_by_format(
 def normalize_lora_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     logger: Optional[logging.Logger] = None,
+    *,
+    adapter_config: Mapping[str, Any] | None = None,
 ) -> Dict[str, torch.Tensor]:
     """Normalize any supported LoRA format into a single canonical layout."""
     log = logger or globals()["logger"]
 
+    state_dict = _normalize_peft_wrappers(state_dict)
     keys = list(state_dict.keys())
     log.info(
         "[LoRAFormatAdapter] normalize_lora_state_dict called, #keys=%d",
@@ -558,6 +739,7 @@ def normalize_lora_state_dict(
     log.info("[LoRAFormatAdapter] detected format: %s", fmt)
 
     normalized = convert_lora_state_dict_by_format(state_dict, fmt, log)
+    normalized = _apply_peft_scaling(normalized, adapter_config or {})
 
     norm_keys = list(normalized.keys())
     if norm_keys:
