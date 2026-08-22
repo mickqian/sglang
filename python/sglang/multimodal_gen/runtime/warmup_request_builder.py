@@ -39,6 +39,7 @@ SERVER_WARMUP_IMAGE_MAX_AREA = 768 * 768
 SERVER_WARMUP_DIFFUSERS_IMAGE_MAX_AREA = 512 * 512
 SERVER_WARMUP_VIDEO_MAX_AREA = 832 * 480
 SERVER_WARMUP_MAX_VIDEO_FRAMES = 17
+SERVER_WARMUP_LTX2_TWO_STAGE_FRAME_BUDGET = 24
 SERVER_WARMUP_IMAGE_STEPS = 2
 SERVER_WARMUP_VIDEO_STEPS = 2
 
@@ -245,7 +246,15 @@ def _resolve_warmup_num_frames(
     ):
         warmup_num_frames = num_frames
     else:
-        warmup_num_frames = min(num_frames, SERVER_WARMUP_MAX_VIDEO_FRAMES)
+        # LTX two-stage specializes both the spatial upsampler and refinement
+        # path by latent shape. Cover the common one-second serving bucket so
+        # its first real request does not pay this setup at stage boundaries.
+        frame_budget = (
+            SERVER_WARMUP_LTX2_TWO_STAGE_FRAME_BUDGET
+            if is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
+            else SERVER_WARMUP_MAX_VIDEO_FRAMES
+        )
+        warmup_num_frames = min(num_frames, frame_budget)
 
     return server_args.pipeline_config.adjust_num_frames(warmup_num_frames)
 

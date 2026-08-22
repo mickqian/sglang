@@ -563,7 +563,7 @@ class TestWarmupReqCfgParallel(unittest.TestCase):
 
         server_args.pipeline_config.task_type = ModelTaskType.T2V
         server_args.pipeline_config.vae_scale_factor = 32
-        server_args.pipeline_config.adjust_num_frames.side_effect = lambda value: value
+        server_args.pipeline_config.adjust_num_frames.return_value = 25
 
         sampling_defaults = SamplingParams(
             width=1920,
@@ -584,6 +584,8 @@ class TestWarmupReqCfgParallel(unittest.TestCase):
         self.assertEqual((reqs[0].width, reqs[0].height), (832, 448))
         self.assertEqual(reqs[0].width % 64, 0)
         self.assertEqual(reqs[0].height % 64, 0)
+        self.assertEqual(reqs[0].num_frames, 25)
+        server_args.pipeline_config.adjust_num_frames.assert_called_once_with(24)
 
     def test_server_based_warmup_uses_representative_image_fallback(self):
         server_args = MagicMock()
