@@ -39,7 +39,7 @@ SERVER_WARMUP_IMAGE_MAX_AREA = 768 * 768
 SERVER_WARMUP_DIFFUSERS_IMAGE_MAX_AREA = 512 * 512
 SERVER_WARMUP_VIDEO_MAX_AREA = 832 * 480
 SERVER_WARMUP_MAX_VIDEO_FRAMES = 17
-SERVER_WARMUP_LTX2_TWO_STAGE_FRAME_BUDGET = 24
+SERVER_WARMUP_LTX2_TWO_STAGE_FRAMES = 25
 SERVER_WARMUP_IMAGE_STEPS = 2
 SERVER_WARMUP_VIDEO_STEPS = 2
 
@@ -250,7 +250,7 @@ def _resolve_warmup_num_frames(
         # path by latent shape. Cover the common one-second serving bucket so
         # its first real request does not pay this setup at stage boundaries.
         frame_budget = (
-            SERVER_WARMUP_LTX2_TWO_STAGE_FRAME_BUDGET
+            SERVER_WARMUP_LTX2_TWO_STAGE_FRAMES
             if is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
             else SERVER_WARMUP_MAX_VIDEO_FRAMES
         )

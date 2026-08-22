@@ -585,7 +585,7 @@ class TestWarmupReqCfgParallel(unittest.TestCase):
         self.assertEqual(reqs[0].width % 64, 0)
         self.assertEqual(reqs[0].height % 64, 0)
         self.assertEqual(reqs[0].num_frames, 25)
-        server_args.pipeline_config.adjust_num_frames.assert_called_once_with(24)
+        server_args.pipeline_config.adjust_num_frames.assert_called_once_with(25)
 
     def test_server_based_warmup_uses_representative_image_fallback(self):
         server_args = MagicMock()
