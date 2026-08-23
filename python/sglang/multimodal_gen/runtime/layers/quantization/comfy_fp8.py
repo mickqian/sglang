@@ -22,6 +22,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.weight_only_fp8 import (
+    FP8_WEIGHT_DTYPE,
+    maybe_promote_fp8_weight,
+)
 from sglang.multimodal_gen.runtime.models.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
@@ -30,6 +34,9 @@ from sglang.multimodal_gen.runtime.models.parameter import (
 
 class ComfyFullPrecisionFp8LinearMethod(LinearMethodBase):
     """Keep FP8 storage but honor Comfy's full-precision matmul marker."""
+
+    def __init__(self, cache_dequantized_weights: bool = True) -> None:
+        self.cache_dequantized_weights = cache_dequantized_weights
 
     def create_weights(
         self,
@@ -66,6 +73,7 @@ class ComfyFullPrecisionFp8LinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
+        layer._fp8_dequant_decided = False
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         layer.weight = nn.Parameter(layer.weight.data, requires_grad=False)
@@ -77,9 +85,19 @@ class ComfyFullPrecisionFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Comfy's marker disables quantized GEMM for this layer. Materialize one
-        # compute-dtype matrix per call so the checkpoint's FP8 residency benefit
-        # is retained instead of permanently expanding every fc2 weight to BF16.
+        if self.cache_dequantized_weights and not layer._fp8_dequant_decided:
+            maybe_promote_fp8_weight(
+                layer,
+                x.dtype,
+                lambda dtype: layer.weight.to(dtype=dtype).mul_(
+                    layer.weight_scale[0].to(dtype=dtype)
+                ),
+            )
+
+        if layer.weight.dtype != FP8_WEIGHT_DTYPE:
+            return F.linear(x, layer.weight, bias)
+
+        # low-memory and offloaded deployments retain the serialized FP8 weight
         weight = layer.weight.to(dtype=x.dtype)
         weight.mul_(layer.weight_scale[0].to(dtype=x.dtype))
         return F.linear(x, weight, bias)
@@ -90,9 +108,15 @@ class ComfyFp8Config(QuantizationConfig):
 
     checkpoint_uses_native_qkv_layout = True
 
-    def __init__(self, layer_markers: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        layer_markers: dict[str, dict[str, Any]],
+        *,
+        cache_dequantized_weights: bool = True,
+    ) -> None:
         super().__init__()
         self.layer_markers = layer_markers
+        self.cache_dequantized_weights = cache_dequantized_weights
         self._fp8_config = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="static",
@@ -137,7 +161,7 @@ class ComfyFp8Config(QuantizationConfig):
         if marker is None:
             return UnquantizedLinearMethod()
         if marker.get("full_precision_matrix_mult", False):
-            return ComfyFullPrecisionFp8LinearMethod()
+            return ComfyFullPrecisionFp8LinearMethod(self.cache_dequantized_weights)
         return Fp8LinearMethod(self._fp8_config)
 
 

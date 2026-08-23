@@ -125,6 +125,8 @@ def inspect_minimax_h3_safetensors(
 
 def resolve_minimax_h3_checkpoint_quantization(
     layer_markers: dict[str, dict[str, Any]],
+    *,
+    cache_dequantized_weights: bool = True,
 ) -> QuantizationConfig | None:
     if not layer_markers:
         return None
@@ -133,7 +135,10 @@ def resolve_minimax_h3_checkpoint_quantization(
     if formats == ["int8_tensorwise"]:
         return KitchenInt8Config(layer_markers=layer_markers)
     if formats == ["float8_e4m3fn"]:
-        return ComfyFp8Config(layer_markers)
+        return ComfyFp8Config(
+            layer_markers,
+            cache_dequantized_weights=cache_dequantized_weights,
+        )
     raise NotImplementedError(
         "Unsupported MiniMax-H3 Comfy quantization format(s): " + ", ".join(formats)
     )

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -437,7 +438,14 @@ _dequant_cache_logged = False
 _dequant_low_memory_logged = False
 
 
-def _maybe_promote_fp8_weight(module: nn.Module, x_dtype: torch.dtype) -> None:
+def maybe_promote_fp8_weight(
+    module: nn.Module,
+    x_dtype: torch.dtype,
+    dequantize_weight: Callable[[torch.dtype], torch.Tensor],
+    *,
+    compute_dtype: torch.dtype | None = None,
+    enable_fused_w8a8: bool = False,
+) -> None:
     """Dequantize the FP8 weight once, on the first device-resident forward.
 
     Every later forward then runs a plain compute-dtype GEMM instead of
@@ -461,10 +469,10 @@ def _maybe_promote_fp8_weight(module: nn.Module, x_dtype: torch.dtype) -> None:
     module._fp8_dequant_decided = True
     if not envs.SGLANG_DIFFUSION_FP8_WEIGHT_DEQUANT_CACHE:
         return
-    if module.enable_fused_w8a8:
+    if enable_fused_w8a8:
         # The W8A8 GEMM path consumes the FP8 weight directly.
         return
-    dtype = module.compute_dtype or x_dtype
+    dtype = compute_dtype or x_dtype
     if dtype not in (torch.float16, torch.bfloat16, torch.float32):
         return
     needed_bytes = weight.numel() * dtype.itemsize
@@ -472,7 +480,7 @@ def _maybe_promote_fp8_weight(module: nn.Module, x_dtype: torch.dtype) -> None:
     if free_bytes < needed_bytes + _DEQUANT_CACHE_RESERVE_BYTES:
         if not _dequant_low_memory_logged:
             logger.warning(
-                "Keeping weight-only FP8 linear weights FP8-resident (low "
+                "Keeping storage-only FP8 linear weights FP8-resident (low "
                 "free device memory); they dequantize on every forward."
             )
             _dequant_low_memory_logged = True
@@ -480,16 +488,28 @@ def _maybe_promote_fp8_weight(module: nn.Module, x_dtype: torch.dtype) -> None:
     # Server warmup commonly runs under inference_mode. A cached inference
     # tensor has no version counter, so Dynamo cannot later guard it.
     with torch.inference_mode(False), torch.no_grad():
-        dequant = dequantize_rowwise_fp8_weight(weight, module.weight_scale, dtype)
+        dequant = dequantize_weight(dtype)
     module.weight = nn.Parameter(dequant, requires_grad=False)
     if not _dequant_cache_logged:
         logger.info(
-            "Dequantizing weight-only FP8 linear weights once at first use "
+            "Dequantizing storage-only FP8 linear weights once at first use "
             "(bit-identical outputs; set "
             "SGLANG_DIFFUSION_FP8_WEIGHT_DEQUANT_CACHE=0 to keep weights "
             "FP8-resident)."
         )
         _dequant_cache_logged = True
+
+
+def _maybe_promote_fp8_weight(module: nn.Module, x_dtype: torch.dtype) -> None:
+    maybe_promote_fp8_weight(
+        module,
+        x_dtype,
+        lambda dtype: dequantize_rowwise_fp8_weight(
+            module.weight, module.weight_scale, dtype
+        ),
+        compute_dtype=module.compute_dtype,
+        enable_fused_w8a8=module.enable_fused_w8a8,
+    )
 
 
 def swap_linears_to_weight_only_fp8(module: nn.Module) -> None:

@@ -31,6 +31,9 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
 )
 from sglang.multimodal_gen.runtime.loader.utils import _normalize_component_type
 from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
+    RESIDENT,
+)
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
@@ -233,7 +236,10 @@ class TransformerLoader(ComponentLoader):
                     safetensors_list
                 )
                 checkpoint_quant_config = resolve_minimax_h3_checkpoint_quantization(
-                    layer_markers
+                    layer_markers,
+                    cache_dequantized_weights=(
+                        component_server_args.residency_mode(component_name) == RESIDENT
+                    ),
                 )
                 if adaln_curve_shape is not None:
                     (

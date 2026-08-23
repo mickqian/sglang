@@ -379,6 +379,22 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             UnquantizedLinearMethod,
         )
 
+    def test_minimax_h3_comfy_fp8_disables_cache_when_offloaded(self):
+        config = resolve_minimax_h3_checkpoint_quantization(
+            {
+                "blocks.0.mlp.fc2": {
+                    "format": "float8_e4m3fn",
+                    "full_precision_matrix_mult": True,
+                }
+            },
+            cache_dequantized_weights=False,
+        )
+
+        layer = LinearBase(input_size=1, output_size=1)
+        method = config.get_quant_method(layer, "blocks.0.mlp.fc2")
+        self.assertIsInstance(method, ComfyFullPrecisionFp8LinearMethod)
+        self.assertFalse(method.cache_dequantized_weights)
+
     def test_comfy_full_precision_fp8_dequantizes_before_linear(self):
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(
@@ -388,12 +404,39 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         layer.weight_scale = torch.nn.Parameter(
             torch.tensor([0.5]), requires_grad=False
         )
+        layer._fp8_dequant_decided = False
 
         output = ComfyFullPrecisionFp8LinearMethod().apply(
             layer, torch.tensor([[3.0, 1.0]])
         )
 
         torch.testing.assert_close(output, torch.tensor([[1.0]]))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_comfy_full_precision_fp8_caches_bit_identically(self):
+        layer = torch.nn.Module().cuda()
+        layer.weight = torch.nn.Parameter(
+            torch.tensor([[2.0, -4.0]], dtype=torch.float8_e4m3fn, device="cuda"),
+            requires_grad=False,
+        )
+        layer.weight_scale = torch.nn.Parameter(
+            torch.tensor([0.5], device="cuda"), requires_grad=False
+        )
+        layer._fp8_dequant_decided = False
+        x = torch.tensor([[3.0, 1.0]], dtype=torch.bfloat16, device="cuda")
+        method = ComfyFullPrecisionFp8LinearMethod()
+
+        with patch("torch.cuda.mem_get_info", return_value=(1 << 50, 1 << 50)):
+            output = method.apply(layer, x)
+
+        self.assertEqual(layer.weight.dtype, torch.bfloat16)
+        self.assertTrue(
+            torch.equal(
+                output,
+                torch.tensor([[1.0]], dtype=torch.bfloat16, device="cuda"),
+            )
+        )
+        self.assertTrue(torch.equal(output, method.apply(layer, x)))
 
     def test_checkpoint_quantization_metadata_drives_load_spec(self):
         config = ComfyFp8Config({})
