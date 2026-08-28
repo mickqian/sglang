@@ -1,7 +1,10 @@
+import gc
 import pathlib
 import unittest
+import weakref
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -40,10 +43,13 @@ class _FakeServerArgs:
         self.pipeline_config = pipeline_config
         self.num_gpus = num_gpus
         self.model_paths = {}
+        self.component_weights_paths = {}
         self.revision = "test-revision"
         self.trust_remote_code = True
         self.layerwise_components = set()
         self.component_quantizations = {}
+        self.direct_components = set()
+        self.validated_direct_components = []
 
     def resolve_component_attention_backend(self, _component_name):
         return None, None
@@ -53,6 +59,38 @@ class _FakeServerArgs:
 
     def should_configure_layerwise_offload_for_lazy_component(self, component_name):
         return component_name in self.layerwise_components
+
+    def should_direct_gpu_weight_load_component(
+        self, component_name, *, legacy_fallback
+    ):
+        return component_name in self.direct_components
+
+    def validate_direct_gpu_weight_loading_component(self, component_name):
+        self.validated_direct_components.append(component_name)
+
+
+class _RecordingVAE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.state = config.state
+        self.state.construct_device = torch.empty(0).device.type
+        self.weight = nn.Parameter(torch.empty(1))
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        self.state.load_args = (strict, assign)
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+
+class MiniMaxH3VideoVAE(_RecordingVAE):
+    pass
+
+
+class MiniMaxH3AudioVAE(_RecordingVAE):
+    pass
+
+
+MiniMaxH3VideoVAE.__module__ = "sglang.multimodal_gen.runtime.models.vaes.minimax_h3"
+MiniMaxH3AudioVAE.__module__ = "sglang.multimodal_gen.runtime.models.vaes.minimax_h3"
 
 
 class TestDeploymentBytesRoot(unittest.TestCase):
@@ -124,6 +162,185 @@ class TestMatchCheckpointDtypes(unittest.TestCase):
 
 
 class TestVAELoader(unittest.TestCase):
+    @staticmethod
+    def _pipeline_config(state, native_components):
+        config = SimpleNamespace(state=state, update_model_arch=lambda _config: None)
+        return SimpleNamespace(
+            native_only_components=native_components,
+            vae_config=config,
+            vae_precision="fp32",
+            audio_vae_config=config,
+            audio_vae_precision="fp32",
+        )
+
+    def _run_customized(
+        self,
+        state,
+        *,
+        component_name="video_vae",
+        vae_cls=MiniMaxH3VideoVAE,
+        direct=True,
+        header_quantized=False,
+        source_dtype=torch.float32,
+    ):
+        state.load_calls = []
+        server_args = _FakeServerArgs(
+            self._pipeline_config(state, ("video_vae", "audio_vae"))
+        )
+        if direct:
+            server_args.direct_components.add(component_name)
+        loader = vae_loader.VAELoader()
+
+        def load_file(path, **kwargs):
+            state.load_calls.append((path, kwargs))
+            tensor = torch.ones(1, dtype=source_dtype)
+            state.source_ref = weakref.ref(tensor)
+            state.source_data_ptr = tensor.data_ptr()
+            return {"weight": tensor}
+
+        def hold_decoder(_model, _args, _name, component_path):
+            gc.collect()
+            state.hold_path = component_path
+            state.released_at_hold = state.source_ref() is None
+
+        def optimize_vae(model):
+            gc.collect()
+            state.released_at_optimize = state.source_ref() is None
+            return model
+
+        with TemporaryDirectory() as root:
+            checkpoint = pathlib.Path(root) / "weights.safetensors"
+            checkpoint.touch()
+            component_config = {
+                "_class_name": vae_cls.__name__,
+                "auto_map": {"AutoModel": "remote_module.RemoteVAE"},
+            }
+            with (
+                patch.multiple(
+                    vae_loader,
+                    get_diffusers_component_config=Mock(return_value=component_config),
+                    safetensors_declares_quantization=Mock(
+                        return_value=header_quantized
+                    ),
+                    safetensors_load_file=load_file,
+                    _hold_decoder_weights_in_decode_dtype=hold_decoder,
+                ),
+                patch.object(
+                    vae_loader.ModelRegistry,
+                    "resolve_model_cls",
+                    return_value=(vae_cls, vae_cls.__name__),
+                ),
+                patch.object(
+                    loader,
+                    "target_device",
+                    return_value=torch.device("cuda:2" if direct else "cpu"),
+                ),
+                patch.object(
+                    vae_loader.current_platform,
+                    "optimize_vae",
+                    new=optimize_vae,
+                ),
+            ):
+                result = loader.load_customized(
+                    str(checkpoint), server_args, component_name
+                )
+        return result, server_args
+
+    def test_native_h3_vaes_load_directly_to_cuda_and_assign(self):
+        cases = (
+            ("video_vae", MiniMaxH3VideoVAE),
+            ("audio_vae", MiniMaxH3AudioVAE),
+        )
+        for component_name, vae_cls in cases:
+            with self.subTest(component_name=component_name):
+                state = SimpleNamespace()
+                loaded, server_args = self._run_customized(
+                    state, component_name=component_name, vae_cls=vae_cls
+                )
+                self.assertEqual(
+                    server_args.validated_direct_components, [component_name]
+                )
+                self.assertEqual(state.construct_device, "cpu")
+                self.assertEqual(state.load_calls[0][1], {"device": "cuda:2"})
+                self.assertEqual(state.load_args, (True, True))
+                self.assertEqual(loaded.weight.data_ptr(), state.source_data_ptr)
+                self.assertEqual(state.hold_path, "")
+                self.assertTrue(state.released_at_hold)
+                self.assertTrue(state.released_at_optimize)
+
+    def test_direct_vae_rejects_quantized_header_and_raw_dtype(self):
+        for declared, source_dtype, message in (
+            (True, torch.float32, "unquantized safetensors"),
+            (False, torch.int8, "torch.int8"),
+        ):
+            with self.subTest(declared=declared, source_dtype=source_dtype):
+                state = SimpleNamespace()
+                with self.assertRaisesRegex(
+                    ComponentCheckpointUnsupportedError, message
+                ):
+                    self._run_customized(
+                        state,
+                        header_quantized=declared,
+                        source_dtype=source_dtype,
+                    )
+
+    def test_direct_vae_rejects_nonnative_and_unrecognized_native_classes(self):
+        cases = (
+            (
+                (),
+                {"_class_name": "RemoteVAE", "auto_map": {"AutoModel": "x.Remote"}},
+                (_RecordingVAE, "RemoteVAE"),
+                "auto_map",
+            ),
+            (
+                ("video_vae",),
+                {"_class_name": "OtherVAE"},
+                (_RecordingVAE, "OtherVAE"),
+                "MiniMaxH3VideoVAE",
+            ),
+        )
+        for native_components, config, resolved, message in cases:
+            with self.subTest(config=config):
+                state = SimpleNamespace()
+                server_args = _FakeServerArgs(
+                    self._pipeline_config(state, native_components)
+                )
+                server_args.direct_components.add("video_vae")
+                loader = vae_loader.VAELoader()
+
+                with (
+                    patch.object(
+                        vae_loader,
+                        "get_diffusers_component_config",
+                        return_value=config,
+                    ),
+                    patch.object(
+                        vae_loader.ModelRegistry,
+                        "resolve_model_cls",
+                        return_value=resolved,
+                    ),
+                    patch.object(
+                        loader, "target_device", return_value=torch.device("cpu")
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ComponentCheckpointUnsupportedError, message
+                    ):
+                        loader.load_customized(
+                            "/unused/video_vae",
+                            server_args,
+                            "video_vae",
+                        )
+                self.assertTrue(
+                    loader.should_raise_customized_load_error(server_args, "video_vae")
+                )
+
+    def test_disabled_direct_vae_preserves_cpu_checkpoint_load(self):
+        state = SimpleNamespace()
+        self._run_customized(state, direct=False)
+        self.assertEqual(state.load_calls[0][1], {})
+        self.assertEqual(state.load_args, (True, False))
+
     def test_weights_override_keeps_base_component_config(self):
         loader = vae_loader.VAELoader()
         server_args = _FakeServerArgs(QwenImagePipelineConfig())

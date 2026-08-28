@@ -30,6 +30,7 @@ class TestComponentDirectGpuLoading(unittest.TestCase):
         "transformer_2": ["diffusers", "Transformer"],
         "dual_tower_bridge": ["diffusers", "Bridge"],
         "vae": ["diffusers", "AutoencoderKL"],
+        "text_encoder": ["transformers", "CLIPTextModel"],
     }
 
     @staticmethod
@@ -73,7 +74,7 @@ class TestComponentDirectGpuLoading(unittest.TestCase):
     def test_unknown_and_unsupported_selections_fail_closed(self):
         cases = (
             ({"missing": False}, "Unknown component"),
-            ({"vae": True}, "not supported"),
+            ({"text_encoder": True}, "not supported"),
         )
         for component_values, message in cases:
             with self.subTest(component_values=component_values):

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import os
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -38,6 +39,9 @@ from sglang.multimodal_gen.runtime.utils.precision import (
     resolve_component_precision,
     resolve_decode_precision,
 )
+from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+    safetensors_declares_quantization,
+)
 from sglang.multimodal_gen.runtime.weights.source import (
     materialize_weight,
     resolve_weight,
@@ -49,6 +53,10 @@ from sglang.srt.model_loader.checkpoint_quantization import (
 
 logger = init_logger(__name__)
 VAE_CHANNELS_LAST_3D_ENV = "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D"
+_DIRECT_GPU_NATIVE_VAE_CLASSES = {
+    "MiniMaxH3AudioVAE": "sglang.multimodal_gen.runtime.models.vaes.minimax_h3",
+    "MiniMaxH3VideoVAE": "sglang.multimodal_gen.runtime.models.vaes.minimax_h3",
+}
 
 
 def _require_native_loader_for_quantized_vae(
@@ -251,7 +259,7 @@ def _hold_decoder_weights_in_decode_dtype(
             component_name,
             held,
             dtype,
-            "file-backed" if file_backed else "anonymous host memory",
+            "file-backed" if file_backed else "in-memory",
         )
 
 
@@ -275,6 +283,16 @@ class VAELoader(ComponentLoader):
 
     component_names = ["vae", "audio_vae", "video_vae"]
     expected_library = "diffusers"
+    supports_direct_gpu_weight_loading = True
+
+    def should_raise_customized_load_error(
+        self, server_args: ServerArgs, component_name: str
+    ) -> bool:
+        return super().should_raise_customized_load_error(
+            server_args, component_name
+        ) or server_args.should_direct_gpu_weight_load_component(
+            component_name, legacy_fallback=False
+        )
 
     @staticmethod
     def resolve_model_weights_path(
@@ -318,6 +336,11 @@ class VAELoader(ComponentLoader):
         cpu_offload_flag: bool = False,
     ):
         """Load the VAE based on the model path, and inference args."""
+        direct_gpu_weight_loading = server_args.should_direct_gpu_weight_load_component(
+            component_name, legacy_fallback=False
+        )
+        if direct_gpu_weight_loading:
+            server_args.validate_direct_gpu_weight_loading_component(component_name)
         component_weights_path = self.resolve_model_weights_path(
             component_model_path,
             server_args,
@@ -368,7 +391,21 @@ class VAELoader(ComponentLoader):
 
         auto_map = config.get("auto_map", {})
         auto_model_map = auto_map.get("AutoModel")
-        if auto_model_map and component_weights_path != component_model_path:
+        if direct_gpu_weight_loading and not native_only:
+            detail = (
+                "a custom Diffusers auto_map class"
+                if auto_model_map
+                else "a non-native VAE"
+            )
+            raise ComponentCheckpointUnsupportedError(
+                f"Direct GPU weight loading cannot load {detail} for "
+                f"{component_name!r}; only native MiniMax H3 VAEs are supported"
+            )
+        if (
+            auto_model_map
+            and not native_only
+            and component_weights_path != component_model_path
+        ):
             raise ComponentCheckpointUnsupportedError(
                 f"{component_name!r} uses a custom Diffusers class that cannot "
                 "consume a weights-only override"
@@ -403,9 +440,22 @@ class VAELoader(ComponentLoader):
         with (
             set_default_torch_dtype(vae_dtype),
             skip_init_modules(),
+            torch.device("cpu") if direct_gpu_weight_loading else nullcontext(),
         ):
-            vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
-            vae = vae_cls(vae_config).to(target_device)
+            vae_cls, resolved_class_name = ModelRegistry.resolve_model_cls(class_name)
+            expected_module = _DIRECT_GPU_NATIVE_VAE_CLASSES.get(resolved_class_name)
+            if direct_gpu_weight_loading and (
+                expected_module is None
+                or vae_cls.__name__ != resolved_class_name
+                or vae_cls.__module__ != expected_module
+            ):
+                raise ComponentCheckpointUnsupportedError(
+                    "Direct GPU weight loading supports only native "
+                    "MiniMaxH3VideoVAE and MiniMaxH3AudioVAE components"
+                )
+            vae = vae_cls(vae_config)
+            if not direct_gpu_weight_loading:
+                vae = vae.to(target_device)
 
         if os.path.isfile(component_weights_path):
             if not component_weights_path.endswith(".safetensors"):
@@ -426,9 +476,32 @@ class VAELoader(ComponentLoader):
         assert (
             len(safetensors_list) >= 1
         ), f"Found no safetensors files in {component_weights_path}"
+        if direct_gpu_weight_loading and any(
+            safetensors_declares_quantization(path) for path in safetensors_list
+        ):
+            raise ComponentCheckpointUnsupportedError(
+                "Direct GPU VAE loading supports only unquantized safetensors"
+            )
         loaded = {}
         for sf_path in safetensors_list:
-            loaded.update(safetensors_load_file(sf_path))
+            if direct_gpu_weight_loading:
+                loaded.update(safetensors_load_file(sf_path, device=str(target_device)))
+            else:
+                loaded.update(safetensors_load_file(sf_path))
+        if direct_gpu_weight_loading:
+            unsupported_dtypes = sorted(
+                {
+                    str(tensor.dtype)
+                    for tensor in loaded.values()
+                    if tensor.dtype
+                    not in (torch.float16, torch.bfloat16, torch.float32)
+                }
+            )
+            if unsupported_dtypes:
+                raise ComponentCheckpointUnsupportedError(
+                    "Direct GPU VAE loading found unsupported source dtype(s): "
+                    f"{', '.join(unsupported_dtypes)}"
+                )
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_name)
         strict_load = native_only
         # `loaded` holds views into the safetensors mapping. When the component
@@ -454,15 +527,17 @@ class VAELoader(ComponentLoader):
                 component=f"{component_name or 'vae'} (VAE)",
             )
         )
-        if keep_mapping:
+        if keep_mapping or direct_gpu_weight_loading:
             _match_checkpoint_dtypes(loaded, vae.state_dict())
         vae.load_state_dict(
             loaded,
-            strict=strict_load,
-            assign=keep_mapping,
+            strict=True if direct_gpu_weight_loading else strict_load,
+            assign=direct_gpu_weight_loading or keep_mapping,
         )
+        if direct_gpu_weight_loading:
+            del loaded
 
-        if not strict_load:
+        if not direct_gpu_weight_loading and not strict_load:
             state_keys = set(vae.state_dict().keys())
             loaded_keys = set(loaded.keys())
             missing_keys = sorted(state_keys - loaded_keys)
@@ -478,7 +553,10 @@ class VAELoader(ComponentLoader):
                 logger.info("VAE: converted %d Conv3d weights to channels_last_3d", n)
 
         _hold_decoder_weights_in_decode_dtype(
-            vae, server_args, component_name, component_weights_path
+            vae,
+            server_args,
+            component_name,
+            "" if direct_gpu_weight_loading else component_weights_path,
         )
         vae = current_platform.optimize_vae(vae)
         return vae
