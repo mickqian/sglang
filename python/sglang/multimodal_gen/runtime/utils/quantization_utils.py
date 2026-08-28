@@ -657,6 +657,22 @@ def get_metadata_from_safetensors_file(file_path: str):
         logger.warning(e)
 
 
+def safetensors_declares_quantization(file_path: str) -> bool:
+    """Whether a safetensors header explicitly declares quantized weights."""
+    with safe_open(file_path, framework="pt", device="cpu") as checkpoint:
+        metadata = checkpoint.metadata() or {}
+        declared = (
+            "_quantization_metadata",
+            "quantization_config",
+            "quantization_format",
+            "quantization_map_base64",
+            "quant_format",
+        )
+        return any(key in metadata for key in declared) or any(
+            key.endswith(".comfy_quant") for key in checkpoint.keys()
+        )
+
+
 def _canonicalize_modulation_exclude(module_name: str) -> str:
     """Map a serialized modulation weight's parent to the runtime linear prefix.
 
