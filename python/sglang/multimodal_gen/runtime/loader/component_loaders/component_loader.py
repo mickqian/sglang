@@ -133,6 +133,8 @@ class ComponentLoader(ABC):
     # Gates only --component-quantizations.<name>. Quantization declared by a
     # checkpoint is discovered and admitted by the component's normal loader.
     supports_online_quantization_override = False
+    supports_direct_gpu_weight_loading = False
+    supports_legacy_direct_gpu_weight_loading = False
 
     _loaders_registered = False
 
@@ -649,6 +651,7 @@ class PipelineComponentLoader:
         component_architecture: str | None = None,
         component_attn_backend: Any = None,
         component_attn_name: str | None = None,
+        component_type: str | None = None,
     ):
         """
         Load a pipeline component.
@@ -658,11 +661,14 @@ class PipelineComponentLoader:
             component_model_path: Path to the component model
             transformers_or_diffusers: Whether the component is from transformers or diffusers
             component_architecture: the class name of the module
+            component_type: loader family when it differs from the logical component name
         """
 
         # Get the appropriate loader for this component type
         loader = ComponentLoader.for_component_type(
-            component_name, transformers_or_diffusers, component_architecture
+            component_type or component_name,
+            transformers_or_diffusers,
+            component_architecture,
         )
 
         try:

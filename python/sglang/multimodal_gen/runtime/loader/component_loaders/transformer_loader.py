@@ -154,6 +154,8 @@ class TransformerLoader(ComponentLoader):
 
     allow_global_attention_backend_fallback = False
     supports_online_quantization_override = True
+    supports_direct_gpu_weight_loading = True
+    supports_legacy_direct_gpu_weight_loading = True
 
     component_names = [
         "transformer",
@@ -190,6 +192,9 @@ class TransformerLoader(ComponentLoader):
             super().should_raise_customized_load_error(server_args, component_name)
             or component_server_args.transformer_weights_path is not None
             or component_server_args.quantization is not None
+            or server_args.should_direct_gpu_weight_load_component(
+                component_name, legacy_fallback=True
+            )
         )
 
     def load_customized(
@@ -405,12 +410,20 @@ class TransformerLoader(ComponentLoader):
                 ),
             )
         )
-        direct_gpu_weight_loading = bool(
-            component_server_args.direct_gpu_weight_loading
+        direct_gpu_weight_loading = server_args.should_direct_gpu_weight_load_component(
+            component_name, legacy_fallback=True
         )
+        if direct_gpu_weight_loading:
+            server_args.validate_direct_gpu_weight_loading_component(component_name)
         if direct_gpu_weight_loading and quant_spec.runtime_quant_config is not None:
             raise ValueError(
                 "--direct-gpu-weight-loading supports only unquantized DiT checkpoints"
+            )
+        if direct_gpu_weight_loading and (
+            quant_spec.gguf_file is not None or not safetensors_list
+        ):
+            raise ValueError(
+                "Direct GPU weight loading requires a safetensors checkpoint"
             )
         weight_load_plan = WeightLoadPlan.for_component(
             checkpoint_load_device=checkpoint_load_device,

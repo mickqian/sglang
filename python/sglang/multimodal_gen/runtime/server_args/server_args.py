@@ -343,6 +343,8 @@ class ServerArgs(DisaggServerArgsMixin):
     dit_cpu_offload: bool | None = None
     # trade checkpoint-loading peak memory for faster ordinary DiT startup
     direct_gpu_weight_loading: bool = False
+    # Exact model_index.json component keys. Entries override the legacy DiT flag.
+    component_direct_gpu_weight_loading: dict[str, bool] = field(default_factory=dict)
     # if true, select the DiT layerwise group
     dit_layerwise_offload: bool | None = None
     layerwise_offload_components: list[str] | None = None
@@ -1727,6 +1729,12 @@ class ServerArgs(DisaggServerArgsMixin):
         # configure logger before use
         configure_logger(server_args=self)
 
+        self.component_direct_gpu_weight_loading = (
+            self._normalize_component_direct_gpu_weight_loading_map(
+                self.component_direct_gpu_weight_loading
+            )
+        )
+
         component_paths: dict[str, str] = {}
         component_weights_paths = dict(self.component_weights_paths)
         for component, path in self.component_paths.items():
@@ -2278,10 +2286,11 @@ class ServerArgs(DisaggServerArgsMixin):
             "--direct-gpu-weight-loading",
             action=StoreBoolean,
             default=ServerArgs.direct_gpu_weight_loading,
-            help="Load the full unquantized DiT checkpoint state dict directly "
-            "onto GPU before assigning model parameters. This may reduce startup "
-            "time depending on the model, but temporarily requires checkpoint "
-            "weights and model weights to coexist on GPU. Disabled by default.",
+            help="Load unquantized safetensors directly onto GPU for native "
+            "TransformerLoader components. Exact "
+            "--component-direct-gpu-weight-loading.<key> entries override this "
+            "legacy family-wide flag. Requires resident TP=1 components without "
+            "FSDP; startup time and peak memory remain model-dependent.",
         )
         parser.add_argument(
             "--cpu-offload-components",
@@ -2845,7 +2854,7 @@ class ServerArgs(DisaggServerArgsMixin):
         unknown_args: list[str],
         *,
         option_prefixes: tuple[str, ...],
-        alias_suffix: str,
+        alias_suffix: str | None,
     ) -> tuple[dict[str, str], list[str]]:
         component_values: dict[str, str] = {}
         remaining: list[str] = []
@@ -2860,6 +2869,7 @@ class ServerArgs(DisaggServerArgsMixin):
                     break
             if (
                 component is None
+                and alias_suffix is not None
                 and key_part.startswith("--")
                 and key_part.endswith(alias_suffix)
             ):
@@ -2884,6 +2894,60 @@ class ServerArgs(DisaggServerArgsMixin):
         return {
             component: os.path.expanduser(value)
             for component, value in component_values.items()
+        }, remaining
+
+    @staticmethod
+    def _normalize_component_direct_gpu_weight_loading_map(
+        values: object,
+    ) -> dict[str, bool]:
+        if not isinstance(values, dict):
+            raise ValueError("component_direct_gpu_weight_loading must be a mapping")
+        normalized: dict[str, bool] = {}
+        for raw_component, enabled in values.items():
+            component = (
+                raw_component.strip().replace("-", "_")
+                if isinstance(raw_component, str)
+                else ""
+            )
+            if not component or not isinstance(enabled, bool):
+                raise ValueError(
+                    "Component direct GPU weight loading entries require an exact "
+                    "component key and a boolean value"
+                )
+            if component in normalized and normalized[component] != enabled:
+                raise ValueError(
+                    f"Conflicting direct GPU weight loading values for {component!r}"
+                )
+            normalized[component] = enabled
+        return normalized
+
+    @classmethod
+    def _extract_component_direct_gpu_weight_loading(
+        cls, unknown_args: list[str]
+    ) -> tuple[dict[str, bool], list[str]]:
+        values, remaining = cls._extract_dynamic_component_map(
+            unknown_args,
+            option_prefixes=(
+                "--component-direct-gpu-weight-loading.",
+                "--component_direct_gpu_weight_loading.",
+            ),
+            alias_suffix=None,
+        )
+        invalid = next(
+            (
+                (component, value)
+                for component, value in values.items()
+                if value.lower() not in ("true", "false")
+            ),
+            None,
+        )
+        if invalid is not None:
+            raise ValueError(
+                f"Invalid boolean value for {invalid[0]!r}: {invalid[1]!r}. "
+                "Expected 'true' or 'false'."
+            )
+        return {
+            key: value.lower() == "true" for key, value in values.items()
         }, remaining
 
     @classmethod
@@ -3015,8 +3079,11 @@ class ServerArgs(DisaggServerArgsMixin):
         if unknown_args is None:
             unknown_args = []
 
+        dynamic_direct_gpu_loading, remaining = (
+            cls._extract_component_direct_gpu_weight_loading(unknown_args)
+        )
         dynamic_quantizations, remaining = cls._extract_component_quantizations(
-            unknown_args
+            remaining
         )
         dynamic_ignored_layers, remaining = (
             cls._extract_component_quantization_ignored_layers(remaining)
@@ -3075,6 +3142,13 @@ class ServerArgs(DisaggServerArgsMixin):
             existing.update(dynamic_attention_backends)
             provided_args["component_attention_backends"] = existing
             explicit_arg_names.add("component_attention_backends")
+        if dynamic_direct_gpu_loading:
+            existing = cls._normalize_component_direct_gpu_weight_loading_map(
+                provided_args.get("component_direct_gpu_weight_loading") or {}
+            )
+            existing.update(dynamic_direct_gpu_loading)
+            provided_args["component_direct_gpu_weight_loading"] = existing
+            explicit_arg_names.add("component_direct_gpu_weight_loading")
 
         provided_args["_explicit_arg_names"] = explicit_arg_names
         return cls.from_dict(provided_args)
@@ -3370,19 +3444,27 @@ class ServerArgs(DisaggServerArgsMixin):
                 )
 
     def _validate_direct_gpu_weight_loading(self) -> None:
-        if not self.direct_gpu_weight_loading:
-            return
+        # Device and parallelism gates are role-local: a CPU encoder process may
+        # carry selectors for a remote CUDA denoiser.
+        return
+
+    def should_direct_gpu_weight_load_component(
+        self, component_name: str, *, legacy_fallback: bool
+    ) -> bool:
+        if component_name in self.component_direct_gpu_weight_loading:
+            return self.component_direct_gpu_weight_loading[component_name]
+        return bool(legacy_fallback and self.direct_gpu_weight_loading)
+
+    def validate_direct_gpu_weight_loading_component(self, component_name: str) -> None:
         if not current_platform.is_cuda():
-            raise ValueError("--direct-gpu-weight-loading requires CUDA")
-        if (
-            self.should_cpu_offload_component("transformer")
-            or self.residency_mode("transformer") == LAYERWISE_OFFLOAD
-        ):
+            raise ValueError("Direct GPU weight loading requires CUDA")
+        if self.residency_mode(component_name) != RESIDENT:
             raise ValueError(
-                "--direct-gpu-weight-loading requires a GPU-resident DiT; disable "
-                "DiT CPU and layerwise offload"
+                "Direct GPU weight loading requires a GPU-resident component; "
+                f"{component_name!r} is configured for "
+                f"{self.residency_mode(component_name)!r}"
             )
-        if self.use_fsdp_inference:
+        if self.should_use_fsdp_for_component(component_name):
             raise ValueError(
                 "--direct-gpu-weight-loading does not support FSDP inference"
             )

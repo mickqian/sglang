@@ -371,6 +371,13 @@ class DiffusersPipeline(ComposedPipelineBase):
         loaded_modules: dict[str, torch.nn.Module] | None = None,
         executor: PipelineExecutor | None = None,
     ):
+        if server_args.direct_gpu_weight_loading or any(
+            server_args.component_direct_gpu_weight_loading.values()
+        ):
+            raise ValueError(
+                "Direct GPU weight loading is supported only by native SGLang "
+                "component loaders, not the Diffusers pipeline backend"
+            )
         self.server_args = server_args
         self.model_path = model_path
         self._stages: list[PipelineStage] = []

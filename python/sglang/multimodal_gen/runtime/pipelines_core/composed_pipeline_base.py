@@ -19,6 +19,7 @@ from sglang.multimodal_gen.runtime.disaggregation.roles import (
     filter_modules_for_role,
 )
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
+    ComponentLoader,
     PipelineComponentLoader,
 )
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_loading_order import (
@@ -110,6 +111,8 @@ class ComposedPipelineBase(ABC):
         self.component_residency_strategies: dict[str, ComponentResidencyStrategy] = {}
         self.executor = executor or self.build_executor(server_args=server_args)
         self.component_residency_manager: ComponentResidencyManager | None = None
+        self._model_index_for_loading: dict[str, Any] | None = None
+        self._direct_gpu_selected_components: set[str] = set()
 
         base_required_config_modules = (
             required_config_modules
@@ -120,6 +123,17 @@ class ComposedPipelineBase(ABC):
             raise NotImplementedError("Subclass must set _required_config_modules")
         self._required_config_modules = list(base_required_config_modules)
         self._extra_config_module_map = dict(self._extra_config_module_map)
+
+        if server_args.component_direct_gpu_weight_loading or (
+            server_args.direct_gpu_weight_loading and loaded_modules
+        ):
+            model_index = self._load_config()
+            self._direct_gpu_selected_components = (
+                self._validate_component_direct_gpu_weight_loading(
+                    model_index, server_args
+                )
+            )
+            self._model_index_for_loading = model_index
 
         # Filter modules based on disaggregation role
         if self._disagg_role != RoleType.MONOLITHIC:
@@ -138,6 +152,14 @@ class ComposedPipelineBase(ABC):
                     "Disagg role=%s: skipping modules %s",
                     self._disagg_role.value,
                     sorted(skipped),
+                )
+
+        preloaded = set(loaded_modules or {}) & set(self._required_config_modules)
+        for component_name in preloaded:
+            if component_name in self._direct_gpu_selected_components:
+                raise ValueError(
+                    "Direct GPU weight loading cannot use a preloaded component: "
+                    f"{component_name!r}"
                 )
 
         # [module_name, gpu memory usage]
@@ -360,6 +382,56 @@ class ComposedPipelineBase(ABC):
         logger.debug("Resolved component path: %s", component_model_path)
         return component_model_path
 
+    @staticmethod
+    def _validate_component_direct_gpu_weight_loading(
+        model_index: dict[str, Any],
+        server_args: ServerArgs,
+    ) -> set[str]:
+        if not server_args.direct_gpu_weight_loading and not (
+            server_args.component_direct_gpu_weight_loading
+        ):
+            return set()
+        declared = {
+            name: spec
+            for name, spec in model_index.items()
+            if isinstance(spec, (list, tuple))
+            and len(spec) == 2
+            and spec[0] is not None
+        }
+        unknown = set(server_args.component_direct_gpu_weight_loading) - set(declared)
+        if unknown:
+            raise ValueError(
+                "Unknown component direct GPU weight loading key(s): "
+                f"{', '.join(sorted(unknown))}"
+            )
+        if not server_args.direct_gpu_weight_loading and not any(
+            server_args.component_direct_gpu_weight_loading.values()
+        ):
+            return set()
+
+        selected_components: set[str] = set()
+        for component_name, (library, architecture) in declared.items():
+            if not server_args.direct_gpu_weight_loading and not (
+                server_args.component_direct_gpu_weight_loading.get(component_name)
+            ):
+                continue
+            loader = ComponentLoader.for_component_type(
+                component_name, library, architecture
+            )
+            selected = server_args.should_direct_gpu_weight_load_component(
+                component_name,
+                legacy_fallback=loader.supports_legacy_direct_gpu_weight_loading,
+            )
+            if not selected:
+                continue
+            if not loader.supports_direct_gpu_weight_loading:
+                raise ValueError(
+                    "Direct GPU weight loading is not supported for component "
+                    f"{component_name!r}"
+                )
+            selected_components.add(component_name)
+        return selected_components
+
     def load_modules(
         self,
         server_args: ServerArgs,
@@ -371,7 +443,15 @@ class ComposedPipelineBase(ABC):
         If provided, loaded_modules will be used instead of loading from config/pretrained weights.
         """
 
-        model_index = self._load_config()
+        model_index = self._model_index_for_loading
+        self._model_index_for_loading = None
+        if model_index is None:
+            model_index = self._load_config()
+            self._direct_gpu_selected_components = (
+                self._validate_component_direct_gpu_weight_loading(
+                    model_index, server_args
+                )
+            )
         logger.info("Loading pipeline modules from config: %s", model_index)
 
         # remove keys that are not pipeline modules
@@ -558,7 +638,8 @@ class ComposedPipelineBase(ABC):
                     matched_backend_key,
                 )
             module, memory_usage = PipelineComponentLoader.load_component(
-                component_name=load_module_name,
+                component_name=module_name,
+                component_type=load_module_name,
                 component_model_path=component_model_path,
                 transformers_or_diffusers=transformers_or_diffusers,
                 server_args=server_args,
@@ -567,7 +648,7 @@ class ComposedPipelineBase(ABC):
                 component_attn_name=matched_backend_key or module_name,
             )
 
-            self.memory_usages[load_module_name] = memory_usage
+            self.memory_usages[module_name] = memory_usage
 
             if module_name in loaded_components:
                 logger.warning("Overwriting module %s", module_name)

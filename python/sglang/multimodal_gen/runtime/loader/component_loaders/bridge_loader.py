@@ -27,10 +27,25 @@ class BridgeLoader(PlainStateDictComponentLoader):
 
     component_names = ["dual_tower_bridge"]
     expected_library = "diffusers"
+    supports_direct_gpu_weight_loading = True
+
+    def should_raise_customized_load_error(
+        self, server_args: ServerArgs, component_name: str
+    ) -> bool:
+        return super().should_raise_customized_load_error(
+            server_args, component_name
+        ) or server_args.should_direct_gpu_weight_load_component(
+            component_name, legacy_fallback=False
+        )
 
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
+        direct_gpu_weight_loading = server_args.should_direct_gpu_weight_load_component(
+            component_name, legacy_fallback=False
+        )
+        if direct_gpu_weight_loading:
+            server_args.validate_direct_gpu_weight_loading_component(component_name)
         config = self.load_component_config(component_model_path, component_name)
         hf_config = deepcopy(config)
         class_name = config.pop("_class_name", None)
@@ -81,10 +96,14 @@ class BridgeLoader(PlainStateDictComponentLoader):
 
         # Use the FSDP loader when FSDP is requested or shard rules are declared.
         fsdp_shard_conditions = getattr(model_cls, "_fsdp_shard_conditions", None)
-        if use_fsdp or (
-            server_args.residency_mode(component_name) == RESIDENT
-            and server_args.hsdp_shard_dim is not None
-            and fsdp_shard_conditions
+        if (
+            direct_gpu_weight_loading
+            or use_fsdp
+            or (
+                server_args.residency_mode(component_name) == RESIDENT
+                and server_args.hsdp_shard_dim is not None
+                and fsdp_shard_conditions
+            )
         ):
             local_torch_device = get_local_torch_device()
             # Load with FSDP support
@@ -102,8 +121,11 @@ class BridgeLoader(PlainStateDictComponentLoader):
                 reduce_dtype=torch.float32,
                 output_dtype=None,
                 strict=False,
-                weight_load_plan=WeightLoadPlan(
-                    checkpoint_load_device=local_torch_device
+                weight_load_plan=WeightLoadPlan.for_component(
+                    checkpoint_load_device=local_torch_device,
+                    needs_device_weight_postprocess=False,
+                    component_starts_on_cpu=component_starts_on_cpu,
+                    load_full_state_dict_on_device=direct_gpu_weight_loading,
                 ),
             )
         else:
