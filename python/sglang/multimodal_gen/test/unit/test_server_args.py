@@ -478,6 +478,10 @@ class TestServerArgsPathExpansion(unittest.TestCase):
                     "component_weights_paths": {
                         "transformer": "owner/repo/transformer.safetensors"
                     },
+                    "component_direct_gpu_weight_loading": {
+                        "transformer": True,
+                        "dual_tower_bridge": False,
+                    },
                 },
                 config_file,
             )
@@ -502,6 +506,8 @@ class TestServerArgsPathExpansion(unittest.TestCase):
                 "--transformer-quantization=fp8",
                 "--component-attention-backends.transformer",
                 "fa3",
+                "--component-direct-gpu-weight-loading.transformer",
+                "false",
             ]
 
             with patch.object(sys, "argv", ["sglang", "serve"] + argv):
@@ -549,6 +555,10 @@ class TestServerArgsPathExpansion(unittest.TestCase):
         self.assertEqual(
             {"text_encoder": ["model.layers.0", "lm_head"]},
             server_args.component_quantization_ignored_layers,
+        )
+        self.assertEqual(
+            {"transformer": False, "dual_tower_bridge": False},
+            server_args.component_direct_gpu_weight_loading,
         )
 
     def test_serve_cli_defaults_warmup_on(self):
@@ -3123,6 +3133,7 @@ class TestDirectGpuWeightLoading(unittest.TestCase):
     def _args(self) -> ServerArgs:
         args = ServerArgs.__new__(ServerArgs)
         args.direct_gpu_weight_loading = True
+        args.component_direct_gpu_weight_loading = {}
         args.component_residency = None
         args.cpu_offload_components = None
         args.dit_cpu_offload = False
@@ -3135,6 +3146,7 @@ class TestDirectGpuWeightLoading(unittest.TestCase):
         args.tp_size = 1
         args._explicit_arg_names = set()
         args._required_resident_components = set()
+        args._fsdp_disabled_components = set()
         args._component_layerwise_capabilities = {}
         return args
 
@@ -3150,7 +3162,7 @@ class TestDirectGpuWeightLoading(unittest.TestCase):
         self.assertFalse(default_args.direct_gpu_weight_loading)
         self.assertTrue(enabled_args.direct_gpu_weight_loading)
 
-    def test_rejects_cpu_offload_fsdp_and_tp(self):
+    def test_role_local_runtime_rejects_cpu_offload_fsdp_and_tp(self):
         cpu_offload_args = self._args()
         cpu_offload_args.dit_cpu_offload = True
         fsdp_args = self._args()
@@ -3159,12 +3171,77 @@ class TestDirectGpuWeightLoading(unittest.TestCase):
         tp_args.tp_size = 2
 
         with patch.object(current_platform, "is_cuda", return_value=True):
-            with self.assertRaisesRegex(ValueError, "GPU-resident DiT"):
-                cpu_offload_args._validate_direct_gpu_weight_loading()
+            # Declared-key admission cannot assume this role loads transformer.
+            cpu_offload_args._validate_direct_gpu_weight_loading()
+            with self.assertRaisesRegex(ValueError, "GPU-resident component"):
+                cpu_offload_args.validate_direct_gpu_weight_loading_component(
+                    "transformer"
+                )
             with self.assertRaisesRegex(ValueError, "FSDP"):
-                fsdp_args._validate_direct_gpu_weight_loading()
+                fsdp_args.validate_direct_gpu_weight_loading_component("transformer")
             with self.assertRaisesRegex(ValueError, "tp-size 1"):
-                tp_args._validate_direct_gpu_weight_loading()
+                tp_args.validate_direct_gpu_weight_loading_component("transformer")
+
+    def test_cpu_role_can_carry_remote_component_selector(self):
+        args = self._args()
+        args.direct_gpu_weight_loading = False
+        args.component_direct_gpu_weight_loading = {"transformer": True}
+
+        with patch.object(current_platform, "is_cuda", return_value=False):
+            args._validate_direct_gpu_weight_loading()
+            with self.assertRaisesRegex(ValueError, "requires CUDA"):
+                args.validate_direct_gpu_weight_loading_component("transformer")
+
+    def test_exact_component_value_overrides_legacy_global(self):
+        args = self._args()
+        args.component_direct_gpu_weight_loading = {
+            "transformer": False,
+            "dual_tower_bridge": True,
+        }
+
+        self.assertFalse(
+            args.should_direct_gpu_weight_load_component(
+                "transformer", legacy_fallback=True
+            )
+        )
+        self.assertTrue(
+            args.should_direct_gpu_weight_load_component(
+                "transformer_2", legacy_fallback=True
+            )
+        )
+        self.assertTrue(
+            args.should_direct_gpu_weight_load_component(
+                "dual_tower_bridge", legacy_fallback=False
+            )
+        )
+
+    def test_component_cli_requires_explicit_boolean(self):
+        parsed, remaining = ServerArgs._extract_component_direct_gpu_weight_loading(
+            [
+                "--component-direct-gpu-weight-loading.transformer=false",
+                "--component-direct-gpu-weight-loading.dual-tower-bridge",
+                "true",
+            ]
+        )
+
+        self.assertEqual(parsed, {"transformer": False, "dual_tower_bridge": True})
+        self.assertEqual(remaining, [])
+        with self.assertRaisesRegex(ValueError, "Expected 'true' or 'false'"):
+            ServerArgs._extract_component_direct_gpu_weight_loading(
+                ["--component-direct-gpu-weight-loading.transformer=yes"]
+            )
+
+    def test_component_config_requires_yaml_boolean_values(self):
+        self.assertEqual(
+            ServerArgs._normalize_component_direct_gpu_weight_loading_map(
+                {"transformer-2": True}
+            ),
+            {"transformer_2": True},
+        )
+        with self.assertRaisesRegex(ValueError, "boolean value"):
+            ServerArgs._normalize_component_direct_gpu_weight_loading_map(
+                {"transformer": "true"}
+            )
 
 
 if __name__ == "__main__":
