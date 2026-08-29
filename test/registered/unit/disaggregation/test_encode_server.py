@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.encoder.server import (
     rid_to_receive_count,
     rid_to_receive_endpoint,
 )
+from sglang.srt.managers.io_struct import unwrap_from_pickle
 from sglang.srt.managers.schedule_batch import Modality
 from sglang.srt.utils.common import safe_pickle_loads
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -55,7 +56,7 @@ class TestEncoderDPErrorHandling(CustomTestCase):
                 request,
                 "register_destinations",
             )
-        return safe_pickle_loads(send.await_args.args[1])
+        return unwrap_from_pickle(send.await_args.args[1])
 
     def test_worker_reports_third_party_exception_with_callable_code(self):
         class RpcLikeError(Exception):
