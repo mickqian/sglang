@@ -87,7 +87,13 @@ class TestEncoderDPErrorHandling(CustomTestCase):
             dispatcher.pending_futures[0]["req"] = future
             dispatcher.req_id_to_rank["req"] = 0
             valid = {"req_id": "req", "_dp_type": "encode", "content": None}
-            recv = AsyncMock(side_effect=[["not", "an", "envelope"], valid])
+            recv = AsyncMock(
+                side_effect=[
+                    ["not", "an", "envelope"],
+                    valid,
+                    asyncio.CancelledError(),
+                ]
+            )
 
             with patch.object(encoder_runtime, "async_sock_recv", recv):
                 listener = asyncio.create_task(dispatcher._result_listener())
