@@ -1403,10 +1403,15 @@ page cache cannot hold the per-step weight sweep, so every step re-reads it
 from disk and the drive becomes the denoise clock: a real desktop 4090 with a
 990 Pro measured 38 s/step, reading 52.9 GB per step (faulted sequentially, so
 almost none of it shows in majflt — measure `read_bytes`, not major faults).
-Two things cut that read directly: resident DiT layers (~1 GB/step each — on a
-physically small host raise them as far as VRAM allows, the opposite of the
-capped-host guidance above), and more RAM (64 GB caches the sweep and returns
-to the quoted times). The
+Three things help, field-measured on that machine: `--pin-cpu-memory false`
+(pinned memory cannot be reclaimed and starves the page cache the sweep lives
+on — dropping it freed 14 GiB, raised read throughput 42% and cut the denoise
+8.5%, at the price of a slower decode: a clear net win over a 50-step
+request); resident DiT layers up to what VRAM truly holds (each keeps ~0.8 GB
+per group off the disk — the flag counts per DiT group, and the 480P recipe
+already sits near the 24 GB ceiling); and more RAM (64 GB caches the sweep and
+returns to the quoted times — the only change that removes the disk from the
+loop rather than negotiating with it). The
 VRAM axis holds too: capped at 16 GiB the same recipe wins ~250 vs 292–301 s,
 and at 24 GiB (with `--dit-layerwise-resident-layers 6` — measured at a
 22 GiB cap so a desktop's own allocations fit; a headless card can raise it

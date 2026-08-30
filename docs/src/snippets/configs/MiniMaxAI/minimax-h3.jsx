@@ -137,6 +137,7 @@ function consumerHints(s) {
   hints.push("every figure here is anchored at 480P: activations grow with the pixel count, so at 768P drop the resident DiT layers to 0 first, then video_vae to 24 if the decode still collides -- the flags trade speed for headroom in that order");
   hints.push("on a physical 32 GB host the page cache cannot hold the per-step weight sweep, so every step re-reads ~40-65 GB from disk and the drive is the denoise clock: a real desktop 4090 with a 990 Pro measured 38 s/step (52.9 GB read per step). Resident DiT layers cut that read directly (~1 GB/step each), so raise them as far as VRAM allows; 64 GB of RAM caches the sweep and returns to the quoted times");
   hints.push("on Windows run under WSL2, and keep the checkpoint inside the ext4 side (under ~), never on /mnt/c -- the NTFS bridge reads an order of magnitude slower and multiplies the disk clock");
+  hints.push("disk-clocked hosts: add --pin-cpu-memory false. Pinned memory cannot be reclaimed, and on this host class it starves the page cache the weight sweep lives on -- field-measured, dropping it freed 14 GiB, raised read throughput 42% and cut the denoise 8.5%; the decode pays (+17 s) but a 50-step request nets a large win");
   return hints;
 }
 
