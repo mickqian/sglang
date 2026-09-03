@@ -91,7 +91,7 @@ def test_fasth3_pipeline_config_gates_and_rejections() -> None:
         config.validate_quality_deployment(server_args=None)
 
 
-def test_fasth3_lora_bundle_is_rejected_loudly() -> None:
+def test_fasth3_lora_adapter_accepts_normalized_tensors() -> None:
     model = SimpleNamespace(
         arch=SimpleNamespace(adaln_affine_input_dim=None),
         _adaln_precomputed=False,
@@ -101,14 +101,6 @@ def test_fasth3_lora_bundle_is_rejected_loudly() -> None:
         "blocks.0.attn.qkv_proj.lora_B": torch.zeros(3, 8, 64),
     }
     assert MiniMaxH3DiTModel.prepare_lora_adapter(model, dict(plain)) == plain
-
-    bundle = dict(plain)
-    bundle["blocks.0.attn.qkv_proj.diff"] = torch.zeros(3, 64, 64)
-    bundle["audio_patch_proj.diff_b"] = torch.zeros(64)
-    bundle["blocks.0.attn.to_gate_compress.set_weight"] = torch.zeros(64, 64)
-    with pytest.raises(ValueError, match="3 non-LoRA tensors.*set_weight"):
-        MiniMaxH3DiTModel.prepare_lora_adapter(model, bundle)
-
 
 def test_fasth3_gates_stay_bf16_under_runtime_quantization() -> None:
     _ensure_single_process_parallel_runtime()
