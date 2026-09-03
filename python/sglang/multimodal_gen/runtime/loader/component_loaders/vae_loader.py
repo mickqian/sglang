@@ -401,6 +401,27 @@ def _log_vae_checkpoint_adaptations(
         )
 
 
+def _process_quantized_vae_weights(
+    vae: nn.Module,
+    quant_config: KitchenInt8Config | None,
+    component_name: str,
+) -> None:
+    if quant_config is None:
+        return
+    processed_layers = process_quantized_linear_weights(
+        vae,
+        None,
+        component_name,
+        error_type=ComponentCheckpointUnsupportedError,
+    )
+    logger.info(
+        "Processed %d %s linear layers for %s",
+        processed_layers,
+        quant_config.get_name(),
+        component_name,
+    )
+
+
 def _direct_gpu_vae_state_slots(
     vae: nn.Module, component_name: str
 ) -> tuple[dict[str, torch.Tensor], dict[str, tuple[nn.Module, str, bool]]]:
@@ -739,19 +760,7 @@ class VAELoader(WeightOverrideComponentLoader):
                 vae_config=vae_config,
             )
             _log_vae_checkpoint_adaptations(*adaptations)
-            if quant_config is not None:
-                processed_layers = process_quantized_linear_weights(
-                    vae,
-                    None,
-                    component_name,
-                    error_type=ComponentCheckpointUnsupportedError,
-                )
-                logger.info(
-                    "Processed %d %s linear layers for %s",
-                    processed_layers,
-                    quant_config.get_name(),
-                    component_name,
-                )
+            _process_quantized_vae_weights(vae, quant_config, component_name)
             if _should_use_channels_last_3d(server_args, component_name):
                 n = _convert_conv3d_weights_to_channels_last_3d(vae)
                 if n > 0:
@@ -808,19 +817,7 @@ class VAELoader(WeightOverrideComponentLoader):
             strict=strict_load,
             assign=keep_mapping,
         )
-        if quant_config is not None:
-            processed_layers = process_quantized_linear_weights(
-                vae,
-                None,
-                component_name,
-                error_type=ComponentCheckpointUnsupportedError,
-            )
-            logger.info(
-                "Processed %d %s linear layers for %s",
-                processed_layers,
-                quant_config.get_name(),
-                component_name,
-            )
+        _process_quantized_vae_weights(vae, quant_config, component_name)
 
         if not strict_load:
             state_keys = set(vae.state_dict().keys())
