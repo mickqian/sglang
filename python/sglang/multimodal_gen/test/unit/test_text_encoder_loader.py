@@ -13,6 +13,7 @@ from torch import nn
 from sglang.multimodal_gen.runtime.layers.linear import LinearBase
 from sglang.multimodal_gen.runtime.layers.quantization.comfy_nvfp4 import (
     ComfyFullPrecisionNvfp4LinearMethod,
+    ComfyNativeNvfp4LinearMethod,
     ComfyNvfp4Config,
     ComfyRowwiseInt8EmbeddingMethod,
 )
@@ -625,6 +626,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
             "model.language_model.layers.0.self_attn.o_proj"
         ]
         self.assertTrue(marker["_has_pre_quant_scale"])
+        self.assertFalse(marker["_has_input_scale"])
 
     def test_nvfp4_awq_portable_linear_and_rowwise_embedding(self):
         config = ComfyNvfp4Config(
@@ -671,6 +673,55 @@ class TestTextEncoderQuantization(unittest.TestCase):
         torch.testing.assert_close(
             rows,
             torch.tensor([[10.0, 12.0], [0.5, 1.0]], dtype=torch.bfloat16),
+        )
+
+    def test_nvfp4_awq_native_linear_dispatch(self):
+        config = ComfyNvfp4Config({"proj": {"format": "nvfp4"}})
+
+        with mock.patch(
+            "sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant."
+            "current_platform.get_device_capability",
+            return_value=None,
+        ):
+            method = config.get_quant_method(
+                LinearBase(input_size=16, output_size=16), "proj"
+            )
+
+        self.assertIsInstance(method, ComfyNativeNvfp4LinearMethod)
+        self.assertFalse(method.has_input_scale)
+        self.assertTrue(config.swap_weight_nibbles)
+        self.assertEqual(config.checkpoint_weight_scale_layout, "swizzled")
+
+        static_method = ComfyNvfp4Config(
+            {"proj": {"format": "nvfp4", "_has_input_scale": True}}
+        ).get_quant_method(LinearBase(input_size=16, output_size=16), "proj")
+        self.assertIsInstance(static_method, ComfyNativeNvfp4LinearMethod)
+        self.assertTrue(static_method.has_input_scale)
+
+        with self.assertRaisesRegex(ValueError, "pre-quant scale"):
+            ComfyNvfp4Config(
+                {"proj": {"format": "nvfp4", "_has_pre_quant_scale": True}}
+            )
+
+    def test_nvfp4_native_fused_output_scales(self):
+        method = ComfyNativeNvfp4LinearMethod(
+            ComfyNvfp4Config({"proj": {"format": "nvfp4"}}),
+            has_input_scale=False,
+        )
+        layer = nn.Module()
+        layer.params_dtype = torch.bfloat16
+        layer.logical_widths = [2, 1, 3]
+        layer.weight_scale_2 = nn.Parameter(
+            torch.tensor([1.0, 4.0, 2.0]), requires_grad=False
+        )
+
+        with mock.patch.object(method, "_process_weight_storage_after_loading"):
+            method.process_weights_after_loading(layer)
+
+        torch.testing.assert_close(layer.comfy_weight_scale, torch.tensor(4.0))
+        torch.testing.assert_close(
+            layer.comfy_output_scale,
+            torch.tensor([0.25, 0.25, 1.0, 0.5, 0.5, 0.5], dtype=torch.bfloat16),
         )
 
     def test_gguf_maps_h3_names_and_drops_unused_language_layers(self):
