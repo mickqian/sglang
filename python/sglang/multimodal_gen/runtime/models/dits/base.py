@@ -109,6 +109,25 @@ class BaseDiT(nn.Module, ABC):
         """Apply model-specific LoRA transforms after names are normalized."""
         return adapter
 
+    def split_lora_runtime_state(
+        self,
+        adapter: dict[str, torch.Tensor],
+        metadata: dict[str, str],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+        """Separate tensors that need model-forward semantics from plain LoRA."""
+        return adapter, {}
+
+    def set_lora_runtime_state(
+        self,
+        states: list[dict[str, Any]],
+        strengths: list[float],
+    ) -> None:
+        """Activate model-specific state for the current LoRA combination."""
+        if any(states):
+            raise ValueError(
+                f"{self.__class__.__name__} does not support LoRA runtime state"
+            )
+
     def validate_weight_update_source(self, *, weights_path: str | None) -> None:
         """Reject a weight update this model cannot stay coherent under.
 

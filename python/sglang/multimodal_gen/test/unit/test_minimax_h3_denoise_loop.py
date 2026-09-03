@@ -293,7 +293,10 @@ def test_cube_metadata_is_updated_per_step():
         )
 
     minimax_h3_denoise_loop(
-        model=SimpleNamespace(prepare_adaln_plans=lambda _: None),
+        model=SimpleNamespace(
+            prepare_adaln_plans=lambda _: None,
+            prepare_pdd_plans=lambda *_args, **_kwargs: None,
+        ),
         model_forward=model_forward,
         positive=branch,
         initial_video_rows=torch.zeros(branch.img_pos.numel(), 96),

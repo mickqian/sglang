@@ -26,7 +26,11 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
-from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import MiniMaxH3DiTModel
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
+    MiniMaxH3DiTModel,
+    MiniMaxH3FinalLayer,
+    _pdd_plan_from_sigmas,
+)
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
     FastH3Pipeline,
@@ -173,6 +177,109 @@ def test_fasth3_lora_adapter_accepts_normalized_tensors() -> None:
         "blocks.0.attn.qkv_proj.lora_B": torch.zeros(3, 8, 64),
     }
     assert MiniMaxH3DiTModel.prepare_lora_adapter(model, dict(plain)) == plain
+
+
+def test_h3_pdd_head_bank_is_split_from_plain_lora_and_tp_sharded(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "sglang.multimodal_gen.runtime.models.dits.minimax_h3.get_tp_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        "sglang.multimodal_gen.runtime.models.dits.minimax_h3.get_tp_rank", lambda: 1
+    )
+    video = SimpleNamespace(weight=torch.empty(2, 3))
+    audio = SimpleNamespace(weight=torch.empty(1, 3))
+    model = SimpleNamespace(
+        arch=SimpleNamespace(hidden_size=3),
+        device=torch.device("cpu"),
+        final_layer=SimpleNamespace(video_out=video, audio_out=audio),
+    )
+    adapter = {
+        "proj_out.weight": torch.arange(4 * 4 * 3).view(4, 4, 3).float(),
+        "proj_out.bias": torch.arange(4 * 4).view(4, 4).float(),
+        "audio_proj_out.weight": torch.arange(4 * 2 * 3).view(4, 2, 3).float(),
+        "audio_proj_out.bias": torch.arange(4 * 2).view(4, 2).float(),
+        "transformer_blocks.0.attn.to_q.lora_A": torch.ones(1, 3),
+    }
+
+    ordinary, state = MiniMaxH3DiTModel.split_lora_runtime_state(
+        model,
+        adapter,
+        {"pdd_num_steps": "4", "pdd_block_size": "2"},
+    )
+
+    assert list(ordinary) == ["transformer_blocks.0.attn.to_q.lora_A"]
+    torch.testing.assert_close(state["video_weight"], adapter["proj_out.weight"][:, 2:])
+    torch.testing.assert_close(
+        state["audio_bias"], adapter["audio_proj_out.bias"][:, 1:]
+    )
+    assert (state["num_steps"], state["block_size"]) == (4, 2)
+
+    applied = []
+    model.final_layer.set_pdd_heads = applied.append
+    MiniMaxH3DiTModel.set_lora_runtime_state(model, [state], [1.0])
+    MiniMaxH3DiTModel.set_lora_runtime_state(model, [], [])
+    assert applied == [state, None]
+    with pytest.raises(ValueError, match="absolute weights"):
+        MiniMaxH3DiTModel.set_lora_runtime_state(model, [state], [0.5])
+
+
+def test_h3_pdd_plan_matches_released_shifted_fine_grid() -> None:
+    sigmas = minimax_h3_time_shift_sigmas(num_steps=9, shift_scale=12.0)
+    plans = _pdd_plan_from_sigmas(sigmas, num_steps=32, block_size=4)
+    base = torch.linspace(1.0, 0.0, 33, dtype=torch.float64)
+    fine = 12.0 * base / (1.0 + 11.0 * base)
+    expected = fine[:4] - fine[1:5]
+    expected = (expected / expected.sum()).to(torch.float32)
+
+    assert len(plans) == 8
+    assert [start for start, _ in plans] == list(range(0, 32, 4))
+    torch.testing.assert_close(plans[0][1], expected)
+    assert all(
+        float(coefficients.sum()) == pytest.approx(1.0) for _, coefficients in plans
+    )
+    hidden = torch.arange(12, dtype=torch.float32).view(4, 3)
+    weight = torch.arange(32 * 2 * 3, dtype=torch.float32).view(32, 2, 3)
+    bias = torch.arange(32 * 2, dtype=torch.float32).view(32, 2)
+    full_plan = torch.zeros(32)
+    start, coefficients = plans[2]
+    full_plan[start : start + coefficients.numel()] = coefficients
+    expected_output = torch.nn.functional.linear(
+        hidden,
+        torch.einsum("n,noi->oi", full_plan, weight),
+        torch.einsum("n,no->o", full_plan, bias),
+    )
+    torch.testing.assert_close(
+        MiniMaxH3FinalLayer._pdd_linear(hidden, plans[2], weight, bias),
+        expected_output,
+    )
+
+    with pytest.raises(ValueError, match="uniformly spaced shifted schedule"):
+        _pdd_plan_from_sigmas(
+            [1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.0],
+            num_steps=32,
+            block_size=4,
+        )
+
+
+def test_h3_pdd_synthetic_warmup_keeps_runtime_head_shape() -> None:
+    model = SimpleNamespace(
+        final_layer=SimpleNamespace(pdd_num_steps=32, pdd_block_size=4)
+    )
+
+    plans = MiniMaxH3DiTModel.prepare_pdd_plans(
+        model,
+        [1.0, 0.0],
+        [1.0, 0.0],
+        device=torch.device("cpu"),
+        synthetic_warmup=True,
+    )
+
+    assert plans is not None and len(plans) == 1
+    assert plans[0][0][0] == 0
+    torch.testing.assert_close(plans[0][0][1], torch.ones(1))
 
 
 def test_fasth3_gates_stay_bf16_under_runtime_quantization() -> None:

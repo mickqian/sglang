@@ -798,6 +798,7 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                         self._profile_denoising_step,
                         batch=batch,
                     ),
+                    synthetic_warmup=batch.is_warmup,
                 )
         finally:
             self._finish_active_component_use()
