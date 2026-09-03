@@ -459,10 +459,15 @@ def _match_registered_model_detectors(
 ) -> list[str]:
     model_path = model_path.lower()
     pipeline_name = pipeline_name.lower()
+    path_matches = [
+        model_id for model_id, detector in _MODEL_NAME_DETECTORS if detector(model_path)
+    ]
+    if path_matches:
+        return path_matches
     return [
         model_id
         for model_id, detector in _MODEL_NAME_DETECTORS
-        if detector(model_path) or (pipeline_name and detector(pipeline_name))
+        if pipeline_name and detector(pipeline_name)
     ]
 
 
@@ -593,6 +598,19 @@ class ModelInfo:
     pipeline_cls: Type[ComposedPipelineBase]
     sampling_param_cls: Any
     pipeline_config_cls: Type[PipelineConfig]
+
+
+def _get_native_pipeline_for_config(
+    config_info: ConfigInfo,
+) -> tuple[str, Type[ComposedPipelineBase]] | None:
+    """Return the unique native pipeline registered for a config pair."""
+    matches = [
+        (pipeline_name, pipeline_cls)
+        for pipeline_name, pipeline_cls in _PIPELINE_REGISTRY.items()
+        if _PIPELINE_CONFIG_REGISTRY.get(pipeline_name)
+        == (config_info.pipeline_config_cls, config_info.sampling_param_cls)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _get_diffusers_model_info(
@@ -727,9 +745,24 @@ def get_model_info(
                 )
             return None
 
+    declared_pipeline_class_name = pipeline_class_name
+    config_info = None
     pipeline_cls = _PIPELINE_REGISTRY.get(pipeline_class_name)
     if not pipeline_cls:
-        if backend == Backend.AUTO:
+        config_info = _get_config_info(model_path, model_id=model_id)
+        native_pipeline = (
+            _get_native_pipeline_for_config(config_info)
+            if config_info is not None
+            else None
+        )
+        if native_pipeline is not None:
+            pipeline_class_name, pipeline_cls = native_pipeline
+            logger.info(
+                "Using native pipeline '%s' for external pipeline class '%s'",
+                pipeline_class_name,
+                declared_pipeline_class_name,
+            )
+        elif backend == Backend.AUTO:
             logger.warning(
                 f"Pipeline class '{pipeline_class_name}' specified in '{model_path}' has no native sglang support. "
                 f"Falling back to diffusers backend."
@@ -744,7 +777,8 @@ def get_model_info(
             return None
 
     # 3. Get configuration classes (sampling, pipeline config)
-    config_info = _get_config_info(model_path, model_id=model_id)
+    if config_info is None:
+        config_info = _get_config_info(model_path, model_id=model_id)
     if not config_info:
         if backend == Backend.AUTO:
             logger.warning(

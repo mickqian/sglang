@@ -4,9 +4,13 @@ from __future__ import annotations
 import shutil
 
 from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
+    FastH3PipelineConfig,
     MiniMaxH3PipelineConfig,
 )
-from sglang.multimodal_gen.configs.sample.minimax_h3 import MiniMaxH3SamplingParams
+from sglang.multimodal_gen.configs.sample.minimax_h3 import (
+    FastH3SamplingParams,
+    MiniMaxH3SamplingParams,
+)
 from sglang.multimodal_gen.runtime.disaggregation.roles import RoleType
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
@@ -204,6 +208,8 @@ class FastH3Pipeline(MiniMaxH3Pipeline):
     """
 
     pipeline_name = "FastH3Pipeline"
+    pipeline_config_cls = FastH3PipelineConfig
+    sampling_params_cls = FastH3SamplingParams
     default_model_subfolder = None
     _modular_release_tasks = ("t2va",)
 

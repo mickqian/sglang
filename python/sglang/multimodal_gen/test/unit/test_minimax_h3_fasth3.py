@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
 )
 from sglang.multimodal_gen.configs.sample.minimax_h3 import FastH3SamplingParams
 from sglang.multimodal_gen.registry import (
+    _get_config_info,
     get_model_info,
     get_non_diffusers_pipeline_name,
 )
@@ -60,6 +62,26 @@ def test_registry_resolves_fasth3_configs() -> None:
         "FastVideo__FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-0123abcd"
     )
     assert get_model_info(materialized).sampling_param_cls is FastH3SamplingParams
+
+
+def test_registry_routes_modular_fasth3_class_to_native_pipeline() -> None:
+    model_id = "FastVideo/FastVideo-Minimax-FastH3-Preview-v0.2"
+    get_model_info.cache_clear()
+    _get_config_info.cache_clear()
+    try:
+        with patch(
+            "sglang.multimodal_gen.registry.maybe_download_model_index",
+            return_value={"_class_name": "MiniMaxH3ModularPipeline"},
+        ):
+            info = get_model_info(model_id)
+    finally:
+        get_model_info.cache_clear()
+        _get_config_info.cache_clear()
+
+    assert info is not None
+    assert info.pipeline_cls is FastH3Pipeline
+    assert info.pipeline_config_cls is FastH3PipelineConfig
+    assert info.sampling_param_cls is FastH3SamplingParams
 
 
 def test_modular_h3_component_names_and_release_defaults() -> None:
