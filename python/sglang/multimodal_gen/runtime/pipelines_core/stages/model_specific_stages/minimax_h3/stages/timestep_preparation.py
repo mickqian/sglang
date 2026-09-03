@@ -42,7 +42,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 "and has no implementation yet."
             )
         self._generate_sigmas_from_plan(
-            batch, plan, server_args.pipeline_config.dmd_denoising_steps
+            batch, plan, self._denoising_steps_for_request(batch, server_args)
         )
         self._publish_native_timestep_state(batch)
         return batch
@@ -65,8 +65,21 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             plan.default_flow_shift,
             plan.default_audio_flow_shift,
             self.freeze_for_dedup(self.sigma_shift_scales),
-            self.freeze_for_dedup(server_args.pipeline_config.dmd_denoising_steps),
+            self.freeze_for_dedup(
+                self._denoising_steps_for_request(batch, server_args)
+            ),
         )
+
+    @staticmethod
+    def _denoising_steps_for_request(
+        batch: Req, server_args: ServerArgs
+    ) -> list[int] | None:
+        # Synthetic warmup deliberately reduces the number of forwards. It is
+        # not a model sample, so keep its short uniform grid while enforcing the
+        # trained ladder for every real request.
+        if batch.is_warmup:
+            return None
+        return server_args.pipeline_config.dmd_denoising_steps
 
     @staticmethod
     def _publish_native_timestep_state(batch: Req) -> None:

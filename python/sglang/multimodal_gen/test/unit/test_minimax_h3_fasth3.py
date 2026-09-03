@@ -25,6 +25,9 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import MiniMaxH3DiTModel
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.timestep_preparation import (
+    MiniMaxH3TimestepPreparationStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
     minimax_h3_time_shift_sigmas,
 )
@@ -84,6 +87,16 @@ def test_fasth3_pipeline_config_gates_and_rejections() -> None:
         shift_scale=1.0,
         denoising_steps=config.dmd_denoising_steps,
     ) == pytest.approx([0.999, 0.749, 0.5, 0.25, 0.0])
+    server_args = SimpleNamespace(pipeline_config=config)
+    assert (
+        MiniMaxH3TimestepPreparationStage._denoising_steps_for_request(
+            SimpleNamespace(is_warmup=True), server_args
+        )
+        is None
+    )
+    assert MiniMaxH3TimestepPreparationStage._denoising_steps_for_request(
+        SimpleNamespace(is_warmup=False), server_args
+    ) == [999, 749, 500, 250]
     assert not MiniMaxH3PipelineConfig().dit_config.arch_config.has_gate_compress
     mapping = config.dit_config.arch_config.param_names_mapping
     source = "transformer_blocks.7.attn.to_gate_compress.weight"
