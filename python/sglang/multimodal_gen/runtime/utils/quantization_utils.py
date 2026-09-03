@@ -35,6 +35,10 @@ from sglang.srt.model_loader.checkpoint_quantization import (
 logger = init_logger(__name__)
 
 
+def comfy_quant_key_filter(name: str) -> bool:
+    return not name.endswith(".comfy_quant")
+
+
 def inspect_comfy_quant_markers(
     safetensors_list: list[str],
     param_name_mapper: Callable[[str], str] | None = None,

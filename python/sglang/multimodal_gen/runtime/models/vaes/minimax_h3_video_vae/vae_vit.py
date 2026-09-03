@@ -254,7 +254,7 @@ class ViT3DDecoder(ViTBase):
                 block.ff.w1,
                 block.ff.w2,
             ):
-                if linear.weight.dtype != dtype:
+                if isinstance(linear, nn.Linear) and linear.weight.dtype != dtype:
                     linear.to(dtype=dtype)
                     converted += 1
         self._autocast_linear_dtype = dtype
