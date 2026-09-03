@@ -147,7 +147,27 @@ def inspect_comfy_quant_markers(
                 )
             raw_markers.setdefault(prefix, {"format": "mxfp8"})
 
-    missing_markers = marked_dtype_weight_prefixes - raw_markers.keys()
+    missing_markers: set[str] = set()
+    for prefix in marked_dtype_weight_prefixes - raw_markers.keys():
+        weight_dtype, _ = checkpoint_meta[f"{prefix}.weight"]
+        has_explicit_scale = any(
+            f"{prefix}.{suffix}" in checkpoint_meta
+            for suffix in ("weight_scale", "input_scale")
+        )
+        if weight_dtype == "F8_E4M3" and not has_explicit_scale:
+            # Plain FP8 storage checkpoints (for example Quanto exports) keep
+            # rounded E4M3 weights without a scale tensor. Their exact
+            # dequantization is weight.float() -- equivalently, scale=1. Keep
+            # the compact storage and materialize a compute-dtype matrix only
+            # while the layer runs. Scaled FP8 remains marker-driven so a
+            # damaged export cannot silently take this path.
+            raw_markers[prefix] = {
+                "format": "float8_e4m3fn",
+                "full_precision_matrix_mult": True,
+                "_implicit_weight_scale": True,
+            }
+        else:
+            missing_markers.add(prefix)
     if missing_markers:
         raise ValueError(
             "Quantized weights are missing comfy_quant metadata: "
@@ -157,6 +177,8 @@ def inspect_comfy_quant_markers(
     for prefix, marker in raw_markers.items():
         marker_format = marker.get("format")
         required = {f"{prefix}.weight", f"{prefix}.weight_scale"}
+        if marker.get("_implicit_weight_scale", False):
+            required.remove(f"{prefix}.weight_scale")
         if marker_format == "asym_w4a8_int8":
             required = {
                 f"{prefix}.weight",

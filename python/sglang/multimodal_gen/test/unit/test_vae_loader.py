@@ -21,6 +21,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.wan import (
     WanT2V480PConfig,
 )
 from sglang.multimodal_gen.runtime.layers.linear import TensorOutputReplicatedLinear
+from sglang.multimodal_gen.runtime.layers.quantization.comfy_fp8 import (
+    ComfyFullPrecisionFp8LinearMethod,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders import (
     component_loader,
     vae_loader,
@@ -450,47 +453,50 @@ class TestSerializedVAEQuantization(unittest.TestCase):
         pipeline_config.native_only_components = ("vae",)
         return _FakeServerArgs(pipeline_config)
 
+    def _load_checkpoint(self, checkpoint: pathlib.Path, direct_gpu_loading: bool):
+        loader = vae_loader.VAELoader()
+        server_args = self._server_args()
+        server_args.component_direct_gpu_weight_loading = {
+            "vae": direct_gpu_loading
+        }
+        with (
+            patch.object(
+                vae_loader,
+                "get_diffusers_component_config",
+                return_value={"_class_name": "TestVAE"},
+            ),
+            patch.object(
+                loader,
+                "resolve_component_weights_path",
+                return_value=str(checkpoint),
+            ),
+            patch.object(
+                vae_loader.ModelRegistry,
+                "resolve_model_cls",
+                return_value=(self._VAE, None),
+            ),
+            patch.object(loader, "target_device", return_value=torch.device("cpu")),
+            patch.object(
+                vae_loader.current_platform,
+                "optimize_vae",
+                side_effect=lambda vae: vae,
+            ),
+        ):
+            return loader.load_customized(checkpoint.parent, server_args, "vae")
+
     def test_native_vae_restores_marked_int8_linears(self):
         with TemporaryDirectory() as root:
             checkpoint = pathlib.Path(root) / "vae.safetensors"
             self._save_checkpoint(checkpoint)
             for direct_gpu_loading in (False, True):
                 with self.subTest(direct_gpu_loading=direct_gpu_loading):
-                    loader = vae_loader.VAELoader()
-                    server_args = self._server_args()
-                    server_args.component_direct_gpu_weight_loading = {
-                        "vae": direct_gpu_loading
-                    }
-                    with (
-                        patch.object(
-                            vae_loader,
-                            "get_diffusers_component_config",
-                            return_value={"_class_name": "TestVAE"},
-                        ),
-                        patch.object(
-                            loader,
-                            "resolve_component_weights_path",
-                            return_value=str(checkpoint),
-                        ),
-                        patch.object(
-                            vae_loader.ModelRegistry,
-                            "resolve_model_cls",
-                            return_value=(self._VAE, None),
-                        ),
-                        patch.object(
-                            loader, "target_device", return_value=torch.device("cpu")
-                        ),
-                        patch.object(
-                            vae_loader.current_platform,
-                            "optimize_vae",
-                            side_effect=lambda vae: vae,
-                        ),
-                        patch(
-                            "sglang.multimodal_gen.runtime.layers.quantization."
-                            "kitchen_int8._load_comfy_kitchen"
-                        ),
+                    with patch(
+                        "sglang.multimodal_gen.runtime.layers.quantization."
+                        "kitchen_int8._load_comfy_kitchen"
                     ):
-                        loaded = loader.load_customized(root, server_args, "vae")
+                        loaded = self._load_checkpoint(
+                            checkpoint, direct_gpu_loading
+                        )
 
                     self.assertIsInstance(
                         loaded.decoder.proj, TensorOutputReplicatedLinear
@@ -501,6 +507,33 @@ class TestSerializedVAEQuantization(unittest.TestCase):
                         torch.equal(loaded.decoder.proj.weight_scale, torch.ones(4, 1))
                     )
                     self.assertNotIn("decoder.proj.comfy_quant", loaded.state_dict())
+
+    def test_native_vae_restores_plain_fp8_storage(self):
+        with TemporaryDirectory() as root:
+            checkpoint = pathlib.Path(root) / "vae.safetensors"
+            safetensors_save_file(
+                {
+                    "decoder.proj.weight": torch.arange(
+                        64, dtype=torch.float32
+                    ).reshape(4, 16).to(torch.float8_e4m3fn),
+                    "decoder.proj.bias": torch.arange(4, dtype=torch.bfloat16),
+                },
+                checkpoint,
+            )
+            for direct_gpu_loading in (False, True):
+                with self.subTest(direct_gpu_loading=direct_gpu_loading):
+                    loaded = self._load_checkpoint(checkpoint, direct_gpu_loading)
+
+                    self.assertIsInstance(
+                        loaded.decoder.proj.quant_method,
+                        ComfyFullPrecisionFp8LinearMethod,
+                    )
+                    self.assertEqual(
+                        loaded.decoder.proj.weight.dtype, torch.float8_e4m3fn
+                    )
+                    self.assertNotIn(
+                        "decoder.proj.weight_scale", loaded.state_dict()
+                    )
 
 
 class TestVAELoader(unittest.TestCase):

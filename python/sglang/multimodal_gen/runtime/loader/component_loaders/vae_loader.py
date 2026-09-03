@@ -17,6 +17,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImagePipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.wan import WanT2V480PConfig
+from sglang.multimodal_gen.runtime.layers.quantization.comfy_fp8 import ComfyFp8Config
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
 )
@@ -408,7 +409,7 @@ def _log_vae_checkpoint_adaptations(
 
 def _process_quantized_vae_weights(
     vae: nn.Module,
-    quant_config: KitchenInt8Config | None,
+    quant_config: KitchenInt8Config | ComfyFp8Config | None,
     component_name: str,
 ) -> None:
     if quant_config is None:
@@ -728,7 +729,9 @@ class VAELoader(WeightOverrideComponentLoader):
         )
         layer_markers = inspect_comfy_quant_markers(safetensors_list)
         quant_config = resolve_comfy_checkpoint_quantization(layer_markers)
-        if quant_config is not None and not isinstance(quant_config, KitchenInt8Config):
+        if quant_config is not None and not isinstance(
+            quant_config, (KitchenInt8Config, ComfyFp8Config)
+        ):
             raise ComponentCheckpointUnsupportedError(
                 f"Native VAE loading does not yet support serialized "
                 f"{quant_config.get_name()!r} linear weights"

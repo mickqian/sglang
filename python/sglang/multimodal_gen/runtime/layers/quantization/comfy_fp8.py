@@ -31,6 +31,9 @@ from sglang.multimodal_gen.runtime.models.parameter import (
 class ComfyFullPrecisionFp8LinearMethod(LinearMethodBase):
     """Keep FP8 storage but honor Comfy's full-precision matmul marker."""
 
+    def __init__(self, implicit_weight_scale: bool = False) -> None:
+        self.implicit_weight_scale = implicit_weight_scale
+
     def create_weights(
         self,
         layer: nn.Module,
@@ -61,15 +64,25 @@ class ComfyFullPrecisionFp8LinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight", weight)
-        weight_scale = PerTensorScaleParameter(
-            data=torch.empty(1, dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale", weight_scale)
+        if self.implicit_weight_scale:
+            layer.register_buffer(
+                "weight_scale",
+                torch.ones(1, dtype=torch.float32),
+                persistent=False,
+            )
+        else:
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(1, dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         layer.weight = nn.Parameter(layer.weight.data, requires_grad=False)
-        layer.weight_scale = nn.Parameter(layer.weight_scale.data, requires_grad=False)
+        if isinstance(layer.weight_scale, nn.Parameter):
+            layer.weight_scale = nn.Parameter(
+                layer.weight_scale.data, requires_grad=False
+            )
 
     def apply(
         self,
@@ -142,7 +155,9 @@ class ComfyFp8Config(QuantizationConfig):
             return UnquantizedLinearMethod()
         self.selected.append(prefix)
         if marker.get("full_precision_matrix_mult", False):
-            return ComfyFullPrecisionFp8LinearMethod()
+            return ComfyFullPrecisionFp8LinearMethod(
+                implicit_weight_scale=marker.get("_implicit_weight_scale", False)
+            )
         activation_scheme = marker.get("_activation_scheme", "static")
         return Fp8LinearMethod(self._fp8_configs[activation_scheme])
 
