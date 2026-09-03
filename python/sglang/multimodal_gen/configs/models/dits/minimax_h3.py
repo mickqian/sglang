@@ -95,6 +95,7 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     adaln_out_features: int = 18 * 5376
     final_adaln_out_features: int = 2 * 5376
     rope_inv_freq_len: int = 16
+    rope_theta: float = 10000.0
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5

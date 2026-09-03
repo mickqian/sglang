@@ -41,6 +41,7 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MiniMaxH3Attention,
     MiniMaxH3DiTBlock,
     MiniMaxH3DiTModel,
+    MiniMaxH3Rope,
     _copy_grouped_qkv_tp_shard,
     _diffusers_h3_checkpoint,
     _modulate_gate,
@@ -563,6 +564,18 @@ def test_meta_model_enforces_mixed_precision_weight_contract():
             assert tensor.dtype == torch.float32, name
         elif tensor.is_floating_point():
             assert tensor.dtype == torch.bfloat16, name
+
+
+def test_rope_materializes_derived_frequencies_from_meta():
+    reference = MiniMaxH3Rope(inv_freq_len=4, theta=100.0)
+    with torch.device("meta"):
+        rope = MiniMaxH3Rope(inv_freq_len=4, theta=100.0)
+
+    rope.to("cpu")
+
+    assert "inv_freq" not in rope.state_dict()
+    assert not rope.inv_freq.is_meta
+    torch.testing.assert_close(rope.inv_freq, reference.inv_freq, rtol=0, atol=0)
 
 
 def test_pruned_meta_model_preserves_curve_adaln_fp32_island():
