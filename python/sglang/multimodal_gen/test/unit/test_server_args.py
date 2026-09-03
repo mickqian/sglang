@@ -868,6 +868,13 @@ class TestDiffusionModelDetection(unittest.TestCase):
             os.mkdir(model_path)
             self.assertTrue(get_is_diffusion_model(model_path))
 
+    def test_registered_family_variant_is_detected_before_cli_parsing(self):
+        self.assertTrue(
+            get_is_diffusion_model(
+                "FastVideo/FastVideo-Minimax-FastH3-Preview-v0.2"
+            )
+        )
+
 
 class TestMiniMaxH3Routing(unittest.TestCase):
     def test_semantic_variants_map_to_checkpoint_partitions(self):
