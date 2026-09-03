@@ -35,6 +35,9 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
+from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
+    FlashAttentionImpl,
+)
 from sglang.multimodal_gen.runtime.layers.attention.backends.video_sparse_attn import (
     construct_variable_block_sizes,
     get_non_pad_index,
@@ -372,10 +375,6 @@ class VideoSparseAttentionH3Impl(AttentionImpl):
         self.layer_idx = int(match.group(1)) if match else None
         # The token refiner and any other non-packed caller resolve the same
         # backend object; they run the exact dense kernel instead.
-        from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
-            FlashAttentionImpl,
-        )
-
         self._dense_fallback = FlashAttentionImpl(
             num_heads=num_heads,
             head_size=head_size,
@@ -392,8 +391,11 @@ class VideoSparseAttentionH3Impl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "VSA-H3 serves MiniMax-H3's packed varlen attention; use forward_varlen."
+        return self._dense_fallback.forward(
+            query,
+            key,
+            value,
+            attn_metadata=attn_metadata,
         )
 
     def forward_varlen(

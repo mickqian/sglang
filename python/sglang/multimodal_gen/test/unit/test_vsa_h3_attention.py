@@ -10,6 +10,7 @@ tile masking, the untile permutation, and the softmax scale.
 from __future__ import annotations
 
 import math
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -90,6 +91,29 @@ def _run(impl, meta, used, total, q, k, v, gate=None):
         cu_seqlens_host=(0, used, total),
         attn_metadata=meta,
         gate_compress=gate,
+    )
+
+
+def test_non_varlen_attention_uses_dense_fallback() -> None:
+    impl = _impl()
+    dense_fallback = Mock()
+    expected = torch.randn(1, 2, HEADS, HEAD_DIM)
+    dense_fallback.forward.return_value = expected
+    impl._dense_fallback = dense_fallback
+
+    query = torch.randn(1, 2, HEADS, HEAD_DIM)
+    key = torch.randn(1, 2, HEADS, HEAD_DIM)
+    value = torch.randn(1, 2, HEADS, HEAD_DIM)
+    metadata = Mock()
+
+    output = impl.forward(query, key, value, metadata)
+
+    assert output is expected
+    dense_fallback.forward.assert_called_once_with(
+        query,
+        key,
+        value,
+        attn_metadata=metadata,
     )
 
 
