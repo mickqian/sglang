@@ -357,6 +357,35 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
         raise
 
 
+def initialize_missing_checkpoint_parameters(
+    model: torch.nn.Module, loaded_weights: set[str]
+) -> set[str]:
+    """Initialize parameters whose checkpoint-absence contract is explicit."""
+    initialized: set[str] = set()
+    parameters = dict(model.named_parameters(remove_duplicate=False))
+    with torch.no_grad():
+        for name in parameters.keys() - loaded_weights:
+            parameter = parameters[name]
+            initializer = vars(parameter).get("missing_param_init")
+            if initializer is None or initializer == "error":
+                continue
+            if parameter.is_meta:
+                raise ValueError(
+                    f"Cannot initialize missing meta parameter {name!r} without "
+                    "a target device"
+                )
+            if initializer == "ones":
+                parameter.fill_(1)
+            elif initializer == "zeros":
+                parameter.zero_()
+            else:
+                raise ValueError(
+                    f"Unsupported missing_param_init={initializer!r} for {name!r}"
+                )
+            initialized.add(name)
+    return initialized
+
+
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     """Remap the name of FP8 k/v_scale parameters.
 

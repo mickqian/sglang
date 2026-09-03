@@ -163,7 +163,7 @@ class ComfyFullPrecisionNvfp4LinearMethod(ModelOptFp4LinearMethod):
 
 
 class ComfyNvfp4Config(ModelOptFp4Config):
-    """Dispatch full-precision Comfy NVFP4 linears and their INT8 embedding."""
+    """Dispatch Comfy NVFP4 linears and their optional INT8 embedding."""
 
     checkpoint_uses_comfy_quantization = True
 
@@ -172,6 +172,8 @@ class ComfyNvfp4Config(ModelOptFp4Config):
             is_checkpoint_nvfp4_serialized=True,
             group_size=16,
             exclude_modules=[],
+            swap_weight_nibbles=True,
+            checkpoint_weight_scale_layout="swizzled",
             checkpoint_uses_comfy_quantization=True,
         )
         self.layer_markers = layer_markers
@@ -185,10 +187,12 @@ class ComfyNvfp4Config(ModelOptFp4Config):
                     f"Unsupported Comfy NVFP4 companion for {prefix!r}: "
                     f"{marker_format!r}"
                 )
-            if marker.get("full_precision_matrix_mult") is not True:
+            if marker.get("_has_pre_quant_scale") and not marker.get(
+                "full_precision_matrix_mult", False
+            ):
                 raise ValueError(
-                    f"Comfy NVFP4 layer {prefix!r} must request "
-                    "full_precision_matrix_mult"
+                    f"Comfy NVFP4 layer {prefix!r} has a pre-quant scale that "
+                    "the native NVFP4 GEMM cannot consume"
                 )
 
     @classmethod
@@ -236,10 +240,12 @@ class ComfyNvfp4Config(ModelOptFp4Config):
         if marker.get("format") != "nvfp4":
             raise ValueError(f"Unsupported quantized linear marker for {prefix!r}")
         self.selected.append(prefix)
-        return ComfyFullPrecisionNvfp4LinearMethod(
-            self,
-            has_pre_quant_scale=bool(marker.get("_has_pre_quant_scale")),
-        )
+        if marker.get("full_precision_matrix_mult", False):
+            return ComfyFullPrecisionNvfp4LinearMethod(
+                self,
+                has_pre_quant_scale=bool(marker.get("_has_pre_quant_scale")),
+            )
+        return ModelOptFp4LinearMethod(self)
 
     def quantizes_embedding(self, prefix: str) -> bool:
         marker = self.layer_markers.get(prefix)

@@ -18,12 +18,26 @@ from sglang.multimodal_gen.runtime.loader.utils import (
 from sglang.multimodal_gen.runtime.loader.weight_utils import (
     _disable_runai_streamer_rank_discovery_collective,
     get_lock,
+    initialize_missing_checkpoint_parameters,
 )
 from sglang.multimodal_gen.runtime.weights.source import (
     filter_duplicate_precision_variant_safetensors,
 )
 
 _DIST_STREAMER_MOD = "runai_model_streamer.distributed_streamer.distributed_streamer"
+
+
+class TestMissingCheckpointParameterDefaults(unittest.TestCase):
+    def test_initializes_only_declared_missing_parameters(self):
+        model = torch.nn.Linear(2, 2)
+        model.weight.missing_param_init = "ones"
+        model.bias.missing_param_init = "zeros"
+
+        initialized = initialize_missing_checkpoint_parameters(model, set())
+
+        self.assertEqual(initialized, {"weight", "bias"})
+        torch.testing.assert_close(model.weight, torch.ones_like(model.weight))
+        torch.testing.assert_close(model.bias, torch.zeros_like(model.bias))
 
 
 class TestPrecisionVariantSelection(unittest.TestCase):

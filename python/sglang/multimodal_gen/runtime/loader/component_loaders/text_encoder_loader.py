@@ -61,6 +61,7 @@ from sglang.multimodal_gen.runtime.loader.utils import (
 )
 from sglang.multimodal_gen.runtime.loader.weight_utils import (
     filter_files_not_needed_for_inference,
+    initialize_missing_checkpoint_parameters,
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
@@ -838,6 +839,9 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
             if isinstance(quant_config, QuantoInt8Config):
                 checkpoint_weights = normalize_quanto_int8_weights(checkpoint_weights)
             loaded_weights = model.load_weights(checkpoint_weights)
+            loaded_weights.update(
+                initialize_missing_checkpoint_parameters(model, loaded_weights)
+            )
 
             if quant_config is not None and not isinstance(quant_config, GGUFConfig):
                 postprocess_device: torch.device | None = local_torch_device
