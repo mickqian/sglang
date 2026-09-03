@@ -10,6 +10,10 @@ import torch.nn as nn
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEConfig,
 )
+from sglang.multimodal_gen.runtime.loader.utils import (
+    get_param_names_mapping,
+    hf_to_custom_state_dict,
+)
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3 import MiniMaxH3VideoVAE
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_audio_vae.audio_vae import (
     CausalAttention,
@@ -33,6 +37,30 @@ def _init_kwargs(config: MiniMaxH3VideoVAEConfig):
     ) as init:
         model = MiniMaxH3VideoVAE(config)
     return model, init.call_args.kwargs
+
+
+def test_diffusers_video_vae_weight_names_map_to_native_layout():
+    config = MiniMaxH3VideoVAEConfig()
+    state, _ = hf_to_custom_state_dict(
+        {
+            "encoder.down_blocks.1.resnets.0.conv_shortcut.weight": torch.ones(1),
+            "decoder.proj_in.weight": torch.ones(1),
+            "decoder.transformer_blocks.0.attn.to_q.weight": torch.zeros(1, 1),
+            "decoder.transformer_blocks.0.attn.to_k.weight": torch.ones(1, 1),
+            "decoder.transformer_blocks.0.attn.to_v.weight": torch.full((1, 1), 2),
+        },
+        get_param_names_mapping(config.arch_config.param_names_mapping),
+    )
+
+    assert set(state) == {
+        "encoder.down.1.block.0.nin_shortcut.weight",
+        "decoder.x_embedder.weight",
+        "decoder.transformer_blocks.0.attn.to_qkv.weight",
+    }
+    torch.testing.assert_close(
+        state["decoder.transformer_blocks.0.attn.to_qkv.weight"],
+        torch.tensor([[0.0], [1.0], [2.0]]),
+    )
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,32 @@ from sglang.multimodal_gen.configs.models.vaes.minimax_h3_contract import (
 
 @dataclass
 class MiniMaxH3VideoVAEArchConfig(VAEArchConfig):
+    param_names_mapping: dict = field(
+        default_factory=lambda: {
+            r"^encoder\.down_blocks\.(\d+)\.resnets\.(\d+)\.(.*)$": r"encoder.down.\1.block.\2.\3",
+            r"^encoder\.down_blocks\.(\d+)\.downsamplers\.0\.(.*)$": r"encoder.down.\1.downsample.\2",
+            r"^(encoder\.down\.\d+\.block\.\d+)\.conv_shortcut\.(.*)$": r"\1.nin_shortcut.\2",
+            r"^decoder\.proj_in\.(.*)$": r"decoder.x_embedder.\1",
+            r"^(decoder\.transformer_blocks\.\d+\.attn)\.to_q\.(.*)$": (
+                r"\1.to_qkv.\2",
+                0,
+                3,
+            ),
+            r"^(decoder\.transformer_blocks\.\d+\.attn)\.to_k\.(.*)$": (
+                r"\1.to_qkv.\2",
+                1,
+                3,
+            ),
+            r"^(decoder\.transformer_blocks\.\d+\.attn)\.to_v\.(.*)$": (
+                r"\1.to_qkv.\2",
+                2,
+                3,
+            ),
+            r"^(decoder\.transformer_blocks\.\d+\.attn)\.to_out\.0\.(.*)$": r"\1.to_out.\2",
+            r"^(decoder\.transformer_blocks\.\d+)\.ff\.net\.0\.proj\.(.*)$": r"\1.ff.w1.\2",
+            r"^(decoder\.transformer_blocks\.\d+)\.ff\.net\.2\.(.*)$": r"\1.ff.w2.\2",
+        }
+    )
     latent_channels: int = 24
     latents_mean: list[float] | None = None
     latents_std: list[float] | None = None

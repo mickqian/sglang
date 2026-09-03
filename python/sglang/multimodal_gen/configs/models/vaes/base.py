@@ -63,6 +63,7 @@ def should_use_spatial_shard_parallel_decode(
 
 @dataclass
 class VAEArchConfig(ArchConfig):
+    param_names_mapping: dict = field(default_factory=dict)
     scaling_factor: float | torch.Tensor = 0
 
     temporal_compression_ratio: int = 4

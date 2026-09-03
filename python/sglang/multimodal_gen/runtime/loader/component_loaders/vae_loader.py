@@ -29,6 +29,8 @@ from sglang.multimodal_gen.runtime.loader.utils import (
     _list_safetensors_files,
     _normalize_component_type,
     checkpoint_bytes,
+    get_param_names_mapping,
+    hf_to_custom_state_dict,
     keep_checkpoint_mapped,
     set_default_torch_dtype,
     skip_init_modules,
@@ -788,6 +790,13 @@ class VAELoader(WeightOverrideComponentLoader):
                     for name, tensor in safetensors_load_file(sf_path).items()
                     if comfy_quant_key_filter(name)
                 }
+            )
+        param_names_mapping = vae_config.arch_config.param_names_mapping
+        if param_names_mapping:
+            loaded, _ = hf_to_custom_state_dict(
+                loaded,
+                get_param_names_mapping(param_names_mapping),
+                valid_target_names=set(vae.state_dict()),
             )
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_type)
         num_deparameterized = _adopt_plain_weight_norm_state(vae, loaded)
