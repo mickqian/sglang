@@ -317,6 +317,9 @@ def inspect_comfy_quant_markers(
                 )
             pre_quant_scale_key = f"{prefix}.pre_quant_scale"
             marker["_has_pre_quant_scale"] = pre_quant_scale_key in checkpoint_meta
+            marker["_has_input_scale"] = (
+                f"{prefix}.input_scale" in checkpoint_meta
+            )
             if marker["_has_pre_quant_scale"]:
                 pre_scale_dtype, pre_scale_shape = checkpoint_meta[pre_quant_scale_key]
                 if pre_scale_dtype not in ("BF16", "F16", "F32") or (
