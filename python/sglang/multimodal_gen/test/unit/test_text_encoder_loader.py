@@ -688,6 +688,7 @@ class TestTextEncoderQuantization(unittest.TestCase):
         checkpoint_meta = {
             name: meta(name)
             for name in (
+                "model.embed_tokens.weight",
                 "model.layers.49.self_attn.q_proj.weight",
                 "model.layers.50.self_attn.q_proj.weight",
                 "visual.blocks.0.attn.qkv.weight",
@@ -711,7 +712,13 @@ class TestTextEncoderQuantization(unittest.TestCase):
         config.retain_tensor_meta(encoder.should_materialize_checkpoint_weight)
         self.assertEqual(
             config.quantized_prefixes,
-            {"model.language_model.layers.49.self_attn.q_proj"},
+            {
+                "model.language_model.embed_tokens",
+                "model.language_model.layers.49.self_attn.q_proj",
+            },
+        )
+        self.assertTrue(
+            config.quantizes_embedding("model.language_model.embed_tokens")
         )
         vision_meta = config.tensor_meta["model.visual.blocks.0.attn.qkv_proj.weight"]
         self.assertTrue(vision_meta.dequantize_on_load)
