@@ -16,8 +16,8 @@ from sglang.multimodal_gen.runtime.distributed import (
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
+    TensorOutputReplicatedLinear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -78,11 +78,6 @@ def _make_text_rms_norm(hidden_size: int, eps: float) -> RMSNorm:
     )
 
 
-class Qwen3VLQuantizedLinear(ReplicatedLinear):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x)[0]
-
-
 class Qwen3VLColumnParallelLinear(ColumnParallelLinear):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return super().forward(x)[0]
@@ -136,7 +131,7 @@ def _make_text_linear(
                 quant_config=quant_config,
                 prefix=prefix,
             )
-        return Qwen3VLQuantizedLinear(
+        return TensorOutputReplicatedLinear(
             in_features,
             out_features,
             bias=bias,
@@ -194,7 +189,7 @@ def _make_text_row_linear(
             prefix=prefix,
         )
     if quant_config is not None:
-        return Qwen3VLQuantizedLinear(
+        return TensorOutputReplicatedLinear(
             in_features,
             out_features,
             bias=bias,

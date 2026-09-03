@@ -34,8 +34,8 @@ from sglang.multimodal_gen.runtime.layers.attention import (
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
+    TensorOutputReplicatedLinear,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
@@ -176,11 +176,6 @@ class Ideogram4RMSNorm(nn.Module):
         return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
-class Ideogram4QuantizedLinear(ReplicatedLinear):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x)[0]
-
-
 class Ideogram4ColumnParallelLinear(ColumnParallelLinear):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return super().forward(x)[0]
@@ -229,7 +224,7 @@ def _linear(
             quant_config=quant_config,
             prefix=prefix,
         )
-    return Ideogram4QuantizedLinear(
+    return TensorOutputReplicatedLinear(
         in_features,
         out_features,
         bias=bias,
@@ -269,7 +264,7 @@ def _merged_column_linear(
             quant_config=quant_config,
             prefix=prefix,
         )
-    return Ideogram4QuantizedLinear(
+    return TensorOutputReplicatedLinear(
         in_features,
         out_features,
         bias=bias,
@@ -306,7 +301,7 @@ def _row_linear(
             quant_config=quant_config,
             prefix=prefix,
         )
-    return Ideogram4QuantizedLinear(
+    return TensorOutputReplicatedLinear(
         in_features,
         out_features,
         bias=bias,

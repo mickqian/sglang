@@ -34,8 +34,6 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.text_encoder_loader 
     TextEncoderLoader,
     _configure_encoder_quantization,
     _get_encoder_quant_config,
-    _process_quantized_encoder_weights,
-    _require_quantized_encoder_layers,
     _resolve_and_configure_encoder_quantization,
 )
 from sglang.multimodal_gen.runtime.loader.gguf_weights import GGUFTensorMeta
@@ -48,6 +46,12 @@ from sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLEncoder,
 )
 from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import Qwen3VLTextModel
+from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+    process_quantized_linear_weights as _process_quantized_encoder_weights,
+)
+from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+    require_quantized_linear_layers as _require_quantized_encoder_layers,
+)
 from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 
 
@@ -856,7 +860,7 @@ class _SRTQuantizedLinear(SrtLinearBase):
         self.quant_method = quant_method
 
 
-class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
+class TestQuantizedLinearPostprocess(unittest.TestCase):
     def test_processes_srt_quantized_linear(self):
         quant_method = _RecordingQuantMethod()
         model = _SRTQuantizedLinear(quant_method)
@@ -871,10 +875,7 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         self.assertEqual(quant_method.devices, [torch.device("cpu")])
 
     def test_rejects_native_encoder_without_quantized_layers(self):
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError,
-            "does not construct quantized linear layers",
-        ):
+        with self.assertRaisesRegex(ValueError, "does not construct quantized"):
             _require_quantized_encoder_layers(nn.Linear(2, 2), "text_encoder")
 
     def test_rejects_unconsumed_comfy_marker(self):
@@ -887,9 +888,7 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
                 }
             }
         )
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError, "did not consume"
-        ):
+        with self.assertRaisesRegex(ValueError, "did not consume"):
             _require_quantized_encoder_layers(
                 _QuantizedEncoder(_RecordingQuantMethod()),
                 "text_encoder",
