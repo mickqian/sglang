@@ -102,6 +102,7 @@ def test_fasth3_lora_adapter_accepts_normalized_tensors() -> None:
     }
     assert MiniMaxH3DiTModel.prepare_lora_adapter(model, dict(plain)) == plain
 
+
 def test_fasth3_gates_stay_bf16_under_runtime_quantization() -> None:
     _ensure_single_process_parallel_runtime()
     with torch.device("meta"):
