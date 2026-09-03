@@ -53,6 +53,10 @@ class QuantizationConfig(SRTQuantizationConfig):
         """Whether this checkpoint config owns the named embedding table."""
         return False
 
+    def has_packed_weight(self, prefix: str) -> bool:
+        """Whether the checkpoint stores this optional linear in packed form."""
+        return False
+
     def remap_checkpoint_prefixes(self, param_names_mapping: dict) -> None:
         """Translate checkpoint module names to the native model namespace."""
         return

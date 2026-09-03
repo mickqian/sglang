@@ -26,6 +26,8 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
+from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
+from sglang.multimodal_gen.runtime.loader.gguf_weights import GGUFTensorMeta
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MiniMaxH3DiTModel,
     MiniMaxH3FinalLayer,
@@ -296,4 +298,37 @@ def test_fasth3_gates_stay_bf16_under_runtime_quantization() -> None:
     assert isinstance(attn.to_gate_compress.quant_method, UnquantizedLinearMethod)
     assert attn.to_gate_compress.weight.dtype == torch.bfloat16
     assert attn.to_gate_compress.weight.missing_param_init == "error"
+    assert model.token_refiner.blocks[0].attn.to_gate_compress is None
+
+
+def test_fasth3_gate_uses_checkpoint_declared_packed_layout() -> None:
+    _ensure_single_process_parallel_runtime()
+    prefix = "blocks.0.attn.to_gate_compress"
+    hidden_size = FastH3PipelineConfig().dit_config.arch_config.hidden_size
+    metadata = GGUFTensorMeta(
+        ggml_type=12,
+        logical_shape=(hidden_size, hidden_size),
+        stored_shape=(hidden_size, hidden_size // 256 * 144),
+        stored_dtype=torch.uint8,
+        param_name=f"{prefix}.qweight",
+    )
+    quant_config = GGUFConfig("gate.gguf", {f"{prefix}.weight": metadata})
+
+    assert quant_config.has_packed_weight(prefix)
+    assert not quant_config.has_packed_weight("blocks.0.attn.qkv_proj")
+
+    class GateCheckpointConfig(Fp8Config):
+        def has_packed_weight(self, candidate: str) -> bool:
+            return candidate == prefix
+
+    with torch.device("meta"):
+        model = MiniMaxH3DiTModel(
+            config=FastH3PipelineConfig().dit_config,
+            hf_config={},
+            quant_config=GateCheckpointConfig(),
+        )
+
+    gate = model.blocks[0].attn.to_gate_compress
+    assert gate is not None
+    assert not isinstance(gate.quant_method, UnquantizedLinearMethod)
     assert model.token_refiner.blocks[0].attn.to_gate_compress is None

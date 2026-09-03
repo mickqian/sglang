@@ -118,6 +118,9 @@ class GGUFConfig(QuantizationConfig):
         block_size, _ = gguf.GGML_QUANT_SIZES[metadata.weight_type]
         return input_size_per_partition % block_size == 0
 
+    def has_packed_weight(self, prefix: str) -> bool:
+        return prefix in self.quantized_prefixes
+
 
 class GGUFLinearMethod(LinearMethodBase):
     """Register TP-local packed weights and reuse SRT dequantization."""
