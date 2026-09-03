@@ -35,8 +35,6 @@ from sglang.multimodal_gen.runtime.loader.component_loaders.text_encoder_loader 
     TextEncoderLoader,
     _configure_encoder_quantization,
     _get_encoder_quant_config,
-    _process_quantized_encoder_weights,
-    _require_quantized_encoder_layers,
     _resolve_and_configure_encoder_quantization,
 )
 from sglang.multimodal_gen.runtime.loader.gguf_weights import GGUFTensorMeta
@@ -49,6 +47,10 @@ from sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLEncoder,
 )
 from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import Qwen3VLTextModel
+from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+    process_quantized_linear_weights,
+    require_quantized_linear_layers,
+)
 from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 
 
@@ -882,12 +884,12 @@ class _SRTQuantizedLinear(SrtLinearBase):
         self.quant_method = quant_method
 
 
-class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
+class TestQuantizedLinearPostprocess(unittest.TestCase):
     def test_processes_srt_quantized_linear(self):
         quant_method = _RecordingQuantMethod()
         model = _SRTQuantizedLinear(quant_method)
 
-        processed = _process_quantized_encoder_weights(
+        processed = process_quantized_linear_weights(
             model,
             torch.device("cpu"),
             "image_encoder",
@@ -897,11 +899,8 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         self.assertEqual(quant_method.devices, [torch.device("cpu")])
 
     def test_rejects_native_encoder_without_quantized_layers(self):
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError,
-            "does not construct quantized linear layers",
-        ):
-            _require_quantized_encoder_layers(nn.Linear(2, 2), "text_encoder")
+        with self.assertRaisesRegex(ValueError, "does not construct quantized"):
+            require_quantized_linear_layers(nn.Linear(2, 2), "text_encoder")
 
     def test_rejects_unconsumed_comfy_marker(self):
         config = KitchenInt8Config(
@@ -913,10 +912,8 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
                 }
             }
         )
-        with self.assertRaisesRegex(
-            ComponentCheckpointUnsupportedError, "did not consume"
-        ):
-            _require_quantized_encoder_layers(
+        with self.assertRaisesRegex(ValueError, "did not consume"):
+            require_quantized_linear_layers(
                 _QuantizedEncoder(_RecordingQuantMethod()),
                 "text_encoder",
                 quant_config=config,
@@ -926,7 +923,7 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         quant_method = _RecordingQuantMethod()
         model = _QuantizedEncoder(quant_method)
 
-        processed = _process_quantized_encoder_weights(
+        processed = process_quantized_linear_weights(
             model,
             torch.device("cpu"),
             "text_encoder",
@@ -941,7 +938,7 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         quant_method = _RecordingQuantMethod()
         model = _QuantizedEncoder(quant_method)
 
-        processed = _process_quantized_encoder_weights(
+        processed = process_quantized_linear_weights(
             model,
             torch.device("cuda", torch.cuda.current_device()),
             "text_encoder",
@@ -957,7 +954,7 @@ class TestQuantizedTextEncoderPostprocess(unittest.TestCase):
         model = _QuantizedEncoder(_RecordingQuantMethod(error=RuntimeError("boom")))
 
         with self.assertRaisesRegex(RuntimeError, "boom"):
-            _process_quantized_encoder_weights(
+            process_quantized_linear_weights(
                 model,
                 torch.device("cuda", torch.cuda.current_device()),
                 "text_encoder",

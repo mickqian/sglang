@@ -181,8 +181,9 @@ Direct-GPU loading is also capability-based. The existing
 currently supports standard native `vae` and `video_vae` state dicts on CUDA:
 it streams each safetensors tensor directly to the resident
 module, rather than materializing a complete CPU state dict. It rejects custom
-Diffusers `auto_map` classes, quantized checkpoints, tied state entries, and
-any component-offload or layerwise-offload placement.
+Diffusers `auto_map` classes, tied state entries, and any component-offload or
+layerwise-offload placement. Self-describing ConvRot INT8 VAE checkpoints use
+the same path when every marked linear matches the native component graph.
 
 Component overrides accept a local component directory, a standalone Hub
 repository, or a Hub component subfolder written as `owner/repo/subfolder`.

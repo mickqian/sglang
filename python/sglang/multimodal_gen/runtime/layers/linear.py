@@ -314,6 +314,13 @@ class ReplicatedLinear(LinearBase):
         return s
 
 
+class TensorOutputReplicatedLinear(ReplicatedLinear):
+    """Replicated linear with the same output contract as ``nn.Linear``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return super().forward(x)[0]
+
+
 class MergedReplicatedLinear(ReplicatedLinear):
     """Packed replicated linear layers with shard-aware weight loading.
 
