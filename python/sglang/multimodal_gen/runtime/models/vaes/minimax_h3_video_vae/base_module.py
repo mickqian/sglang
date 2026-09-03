@@ -161,6 +161,7 @@ class RotaryEmbeddingND(nn.Module):
         super().__init__()
         self.dim = dim
         self.n_dim = n_dim
+        self.rotary_base = rotary_base
 
         if dim % (2 * n_dim) != 0:
             raise ValueError(
@@ -172,10 +173,22 @@ class RotaryEmbeddingND(nn.Module):
         else:
             self.angle_scale = 1.0
 
-        inv_freq = 1 / rotary_base ** torch.arange(
-            0, 1, 2 * n_dim / dim, dtype=torch.float32
+        self.register_buffer("inv_freq", self._make_inv_freq(), persistent=False)
+
+    def _make_inv_freq(self, device: torch.device | None = None) -> torch.Tensor:
+        return 1 / self.rotary_base ** torch.arange(
+            0, 1, 2 * self.n_dim / self.dim, dtype=torch.float32, device=device
         )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _apply(self, fn, recurse=True):
+        # Direct GPU loading constructs the VAE on meta and assigns checkpoint
+        # state without allocating a second model. This derived, non-persistent
+        # buffer is absent from that state, so rebuild it before Module._apply
+        # attempts to move a meta tensor.
+        if self.inv_freq.is_meta:
+            target = fn(torch.empty(0))
+            self.inv_freq = self._make_inv_freq(device=target.device)
+        return super()._apply(fn, recurse=recurse)
 
     def forward(self, img_ids):
         B, N, D = img_ids.shape

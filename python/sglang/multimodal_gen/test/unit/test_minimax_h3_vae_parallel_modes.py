@@ -21,6 +21,9 @@ from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.attention im
     Attention,
     _apply_qk_norm,
 )
+from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.base_module import (
+    RotaryEmbeddingND,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
@@ -85,6 +88,19 @@ def test_vit_qk_norm_supports_affine_free_rmsnorm():
     output = _apply_qk_norm(norm, hidden_states)
 
     assert output.shape == hidden_states.shape
+
+
+def test_vit_rope_rebuilds_nonpersistent_buffer_after_meta_construction():
+    with torch.device("meta"):
+        rope = RotaryEmbeddingND(dim=96, rotary_base=100, n_dim=3)
+
+    rope.to("cpu")
+
+    assert not rope.inv_freq.is_meta
+    torch.testing.assert_close(
+        rope.inv_freq,
+        1 / 100 ** torch.arange(0, 1, 1 / 16, dtype=torch.float32),
+    )
 
 
 def test_audio_vae_attention_defaults_to_local_sdpa_and_allows_fa():
