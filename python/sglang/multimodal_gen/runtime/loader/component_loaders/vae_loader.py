@@ -17,6 +17,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImagePipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.wan import WanT2V480PConfig
+from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
+    KitchenInt8Config,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
     ComponentCheckpointUnsupportedError,
     NativeComponentLoaderRequired,
@@ -45,6 +48,14 @@ from sglang.multimodal_gen.runtime.utils.precision import (
     autocast_enabled,
     resolve_component_precision,
     resolve_decode_precision,
+)
+from sglang.multimodal_gen.runtime.utils.quantization_utils import (
+    comfy_quant_key_filter,
+    inspect_comfy_quant_markers,
+    process_quantized_linear_weights,
+    replace_marked_torch_linears,
+    require_quantized_linear_layers,
+    resolve_comfy_checkpoint_quantization,
 )
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 from sglang.srt.model_loader.checkpoint_quantization import (
@@ -660,23 +671,6 @@ class VAELoader(WeightOverrideComponentLoader):
             vae = current_platform.optimize_vae(vae)
             return vae
 
-        # Load from ModelRegistry (standard VAE classes)
-        if direct_gpu_weight_loading:
-            with (
-                set_default_torch_dtype(vae_dtype),
-                skip_init_modules(),
-                torch.device("meta"),
-            ):
-                vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
-                vae = vae_cls(vae_config)
-        else:
-            with (
-                set_default_torch_dtype(vae_dtype),
-                skip_init_modules(),
-            ):
-                vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
-                vae = vae_cls(vae_config).to(target_device)
-
         if os.path.isfile(component_weights_path):
             if not component_weights_path.endswith(".safetensors"):
                 raise ValueError(
@@ -697,6 +691,49 @@ class VAELoader(WeightOverrideComponentLoader):
         assert len(safetensors_list) >= 1, (
             f"Found no safetensors files in {component_weights_path}"
         )
+        layer_markers = inspect_comfy_quant_markers(safetensors_list)
+        quant_config = resolve_comfy_checkpoint_quantization(layer_markers)
+        if quant_config is not None and not isinstance(quant_config, KitchenInt8Config):
+            raise ComponentCheckpointUnsupportedError(
+                f"Native VAE loading does not yet support serialized "
+                f"{quant_config.get_name()!r} linear weights"
+            )
+        if quant_config is not None and direct_gpu_weight_loading:
+            raise ComponentCheckpointUnsupportedError(
+                f"Direct GPU loading for {component_name!r} cannot restore "
+                f"serialized {quant_config.get_name()!r} linear weights"
+            )
+
+        # Load from ModelRegistry (standard VAE classes).
+        if direct_gpu_weight_loading:
+            with (
+                set_default_torch_dtype(vae_dtype),
+                skip_init_modules(),
+                torch.device("meta"),
+            ):
+                vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
+                vae = vae_cls(vae_config)
+        else:
+            with (
+                set_default_torch_dtype(vae_dtype),
+                skip_init_modules(),
+            ):
+                vae_cls, _ = ModelRegistry.resolve_model_cls(class_name)
+                vae = vae_cls(vae_config).to(target_device)
+        if quant_config is not None:
+            replace_marked_torch_linears(
+                vae,
+                quant_config,
+                layer_markers,
+                error_type=ComponentCheckpointUnsupportedError,
+            )
+            require_quantized_linear_layers(
+                vae,
+                component_name,
+                quant_config=quant_config,
+                error_type=ComponentCheckpointUnsupportedError,
+            )
+
         if direct_gpu_weight_loading:
             adaptations = _assign_direct_gpu_vae_state(
                 vae,
@@ -717,7 +754,13 @@ class VAELoader(WeightOverrideComponentLoader):
 
         loaded = {}
         for sf_path in safetensors_list:
-            loaded.update(safetensors_load_file(sf_path))
+            loaded.update(
+                {
+                    name: tensor
+                    for name, tensor in safetensors_load_file(sf_path).items()
+                    if comfy_quant_key_filter(name)
+                }
+            )
         _backfill_ltx2_audio_vae_latent_stats(loaded, component_type)
         num_deparameterized = _adopt_plain_weight_norm_state(vae, loaded)
         target_state = vae.state_dict()
@@ -756,6 +799,19 @@ class VAELoader(WeightOverrideComponentLoader):
             strict=strict_load,
             assign=keep_mapping,
         )
+        if quant_config is not None:
+            processed_layers = process_quantized_linear_weights(
+                vae,
+                None,
+                component_name,
+                error_type=ComponentCheckpointUnsupportedError,
+            )
+            logger.info(
+                "Processed %d %s linear layers for %s",
+                processed_layers,
+                quant_config.get_name(),
+                component_name,
+            )
 
         if not strict_load:
             state_keys = set(vae.state_dict().keys())

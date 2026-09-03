@@ -1,3 +1,4 @@
+import json
 import pathlib
 import unittest
 from tempfile import TemporaryDirectory
@@ -19,6 +20,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.wan import (
     Wan2_2_I2V_A14B_Config,
     WanT2V480PConfig,
 )
+from sglang.multimodal_gen.runtime.layers.linear import TensorOutputReplicatedLinear
 from sglang.multimodal_gen.runtime.loader.component_loaders import (
     component_loader,
     vae_loader,
@@ -413,6 +415,104 @@ class TestDirectGPUVAEState(unittest.TestCase):
             loader.load("/quantized/vae", server_args, "vae", "diffusers")
 
         native_load.assert_not_called()
+
+
+class TestSerializedVAEQuantization(unittest.TestCase):
+    class _VAE(nn.Module):
+        def __init__(self, _config):
+            super().__init__()
+            self.decoder = nn.Module()
+            self.decoder.proj = nn.Linear(16, 4)
+
+    @staticmethod
+    def _save_checkpoint(path: pathlib.Path) -> None:
+        marker = {
+            "format": "int8_tensorwise",
+            "convrot": True,
+            "convrot_groupsize": 16,
+        }
+        safetensors_save_file(
+            {
+                "decoder.proj.weight": torch.arange(64, dtype=torch.int8).reshape(
+                    4, 16
+                ),
+                "decoder.proj.weight_scale": torch.ones(4, 1),
+                "decoder.proj.bias": torch.arange(4, dtype=torch.bfloat16),
+                "decoder.proj.comfy_quant": torch.tensor(
+                    list(json.dumps(marker).encode()), dtype=torch.uint8
+                ),
+            },
+            path,
+        )
+
+    def _server_args(self):
+        pipeline_config = QwenImagePipelineConfig()
+        pipeline_config.native_only_components = ("vae",)
+        return _FakeServerArgs(pipeline_config)
+
+    def test_native_vae_restores_marked_int8_linears(self):
+        loader = vae_loader.VAELoader()
+        server_args = self._server_args()
+        with TemporaryDirectory() as root:
+            checkpoint = pathlib.Path(root) / "vae.safetensors"
+            self._save_checkpoint(checkpoint)
+            with (
+                patch.object(
+                    vae_loader,
+                    "get_diffusers_component_config",
+                    return_value={"_class_name": "TestVAE"},
+                ),
+                patch.object(
+                    loader,
+                    "resolve_component_weights_path",
+                    return_value=str(checkpoint),
+                ),
+                patch.object(
+                    vae_loader.ModelRegistry,
+                    "resolve_model_cls",
+                    return_value=(self._VAE, None),
+                ),
+                patch.object(loader, "target_device", return_value=torch.device("cpu")),
+                patch.object(
+                    vae_loader.current_platform,
+                    "optimize_vae",
+                    side_effect=lambda vae: vae,
+                ),
+                patch(
+                    "sglang.multimodal_gen.runtime.layers.quantization."
+                    "kitchen_int8._load_comfy_kitchen"
+                ),
+            ):
+                loaded = loader.load_customized(root, server_args, "vae")
+
+        self.assertIsInstance(loaded.decoder.proj, TensorOutputReplicatedLinear)
+        self.assertEqual(loaded.decoder.proj.weight.dtype, torch.int8)
+        self.assertTrue(torch.equal(loaded.decoder.proj.weight_scale, torch.ones(4, 1)))
+        self.assertNotIn("decoder.proj.comfy_quant", loaded.state_dict())
+
+    def test_direct_gpu_loading_rejects_serialized_int8_linears(self):
+        loader = vae_loader.VAELoader()
+        server_args = self._server_args()
+        server_args.component_direct_gpu_weight_loading = {"vae": True}
+        with TemporaryDirectory() as root:
+            checkpoint = pathlib.Path(root) / "vae.safetensors"
+            self._save_checkpoint(checkpoint)
+            with (
+                patch.object(
+                    vae_loader,
+                    "get_diffusers_component_config",
+                    return_value={"_class_name": "TestVAE"},
+                ),
+                patch.object(
+                    loader,
+                    "resolve_component_weights_path",
+                    return_value=str(checkpoint),
+                ),
+                self.assertRaisesRegex(
+                    ComponentCheckpointUnsupportedError, "Direct GPU loading"
+                ),
+            ):
+                loader.load_customized(root, server_args, "vae")
 
 
 class TestVAELoader(unittest.TestCase):
