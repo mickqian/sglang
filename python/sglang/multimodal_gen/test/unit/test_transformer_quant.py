@@ -773,6 +773,60 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             {"format": "float8_e4m3fn", "_activation_scheme": "dynamic"},
         )
 
+    def test_plain_fp8_storage_uses_an_implicit_unit_scale(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones(
+                        (2, 2), dtype=torch.float8_e4m3fn
+                    )
+                },
+                checkpoint.name,
+            )
+
+            _, markers = inspect_minimax_h3_safetensors([checkpoint.name])
+
+        marker = markers["blocks.0.mlp.fc1"]
+        self.assertEqual(marker["format"], "float8_e4m3fn")
+        self.assertTrue(marker["full_precision_matrix_mult"])
+        self.assertTrue(marker["_implicit_weight_scale"])
+        config = resolve_minimax_h3_checkpoint_quantization(markers)
+        layer = ReplicatedLinear(
+            2,
+            2,
+            bias=False,
+            params_dtype=torch.float32,
+            quant_config=config,
+            prefix="blocks.0.mlp.fc1",
+        )
+        self.assertNotIn("weight_scale", layer.state_dict())
+        self.assertTrue(torch.equal(layer.weight_scale, torch.ones(1)))
+
+    def test_unmarked_scaled_fp8_does_not_become_plain_storage(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones(
+                        (2, 2), dtype=torch.float8_e4m3fn
+                    ),
+                    "blocks.0.mlp.fc1.weight_scale": torch.ones(1),
+                },
+                checkpoint.name,
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing comfy_quant metadata"):
+                inspect_minimax_h3_safetensors([checkpoint.name])
+
+    def test_unmarked_int8_does_not_become_plain_storage(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {"blocks.0.mlp.fc1.weight": torch.ones((2, 2), dtype=torch.int8)},
+                checkpoint.name,
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing comfy_quant metadata"):
+                inspect_minimax_h3_safetensors([checkpoint.name])
+
     def test_minimax_h3_comfy_int8_resolves_serialized_kitchen(self):
         config = resolve_minimax_h3_checkpoint_quantization(
             {
