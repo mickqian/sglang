@@ -121,6 +121,9 @@ class GGUFConfig(QuantizationConfig):
     def has_packed_weight(self, prefix: str) -> bool:
         return prefix in self.quantized_prefixes
 
+    def quantizes_embedding(self, prefix: str) -> bool:
+        return prefix in self.quantized_prefixes
+
 
 class GGUFLinearMethod(LinearMethodBase):
     """Register TP-local packed weights and reuse SRT dequantization."""
