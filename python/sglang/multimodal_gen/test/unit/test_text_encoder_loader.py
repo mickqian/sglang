@@ -27,6 +27,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a8_conf
 )
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
 from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
+from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+    ModelOptFp4LinearMethod,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
     ComponentCheckpointUnsupportedError,
     NativeComponentLoaderRequired,
@@ -672,6 +675,27 @@ class TestTextEncoderQuantization(unittest.TestCase):
             rows,
             torch.tensor([[10.0, 12.0], [0.5, 1.0]], dtype=torch.bfloat16),
         )
+
+    def test_nvfp4_awq_native_linear_dispatch(self):
+        config = ComfyNvfp4Config({"proj": {"format": "nvfp4"}})
+
+        with mock.patch(
+            "sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant."
+            "current_platform.get_device_capability",
+            return_value=None,
+        ):
+            method = config.get_quant_method(
+                LinearBase(input_size=16, output_size=16), "proj"
+            )
+
+        self.assertIsInstance(method, ModelOptFp4LinearMethod)
+        self.assertTrue(config.swap_weight_nibbles)
+        self.assertEqual(config.checkpoint_weight_scale_layout, "swizzled")
+
+        with self.assertRaisesRegex(ValueError, "pre-quant scale"):
+            ComfyNvfp4Config(
+                {"proj": {"format": "nvfp4", "_has_pre_quant_scale": True}}
+            )
 
     def test_gguf_maps_h3_names_and_drops_unused_language_layers(self):
         self.get_quant_config.return_value = None
