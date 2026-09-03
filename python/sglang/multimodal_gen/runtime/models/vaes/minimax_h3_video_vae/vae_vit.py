@@ -86,7 +86,7 @@ class ViTBase(ModelMixin, ConfigMixin):
     def init_mask_config(self, dim, is_3d=False):
         self._mask_dim = dim
         self._mask_is_3d = is_3d
-        self.register_buffer("mask_token", torch.zeros(1, 1, dim))
+        self.register_buffer("mask_token", torch.zeros(1, 1, dim), persistent=False)
 
     def set_mask_config(self, mask_config):
         self.mask_prob = mask_config.get("mask_prob", 0.0)
