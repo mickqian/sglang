@@ -25,6 +25,11 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 from sglang.multimodal_gen.runtime.layers.linear import UnquantizedLinearMethod
 from sglang.multimodal_gen.runtime.layers.quantization.fp8 import Fp8Config
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import MiniMaxH3DiTModel
+from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
+from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
+    FastH3Pipeline,
+    MiniMaxH3Pipeline,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.timestep_preparation import (
     MiniMaxH3TimestepPreparationStage,
 )
@@ -55,6 +60,31 @@ def test_registry_resolves_fasth3_configs() -> None:
         "FastVideo__FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-0123abcd"
     )
     assert get_model_info(materialized).sampling_param_cls is FastH3SamplingParams
+
+
+def test_modular_h3_component_names_and_release_defaults() -> None:
+    modular_index = {
+        "_class_name": "MiniMaxH3ModularPipeline",
+        "vae": ["diffusers", "AutoencoderKLMiniMaxH3", {}],
+    }
+    base_pipeline = MiniMaxH3Pipeline.__new__(MiniMaxH3Pipeline)
+    base_pipeline._extra_config_module_map = {}
+    base_pipeline._configure_component_names(modular_index)
+    assert base_pipeline._extra_config_module_map == {"video_vae": "vae"}
+    base_metadata = base_pipeline._release_metadata_from_model_index(modular_index)
+    assert base_metadata.tasks == ("t2va", "fl2va")
+
+    fast_pipeline = FastH3Pipeline.__new__(FastH3Pipeline)
+    fast_pipeline._extra_config_module_map = {}
+    fast_metadata = fast_pipeline._release_metadata_from_model_index(modular_index)
+    assert fast_metadata.tasks == ("t2va",)
+
+    video_vae_cls, _ = ModelRegistry.resolve_model_cls("AutoencoderKLMiniMaxH3")
+    audio_vae_cls, _ = ModelRegistry.resolve_model_cls(
+        "AutoencoderKLMiniMaxH3Audio"
+    )
+    assert video_vae_cls.__name__ == "MiniMaxH3VideoVAE"
+    assert audio_vae_cls.__name__ == "MiniMaxH3AudioVAE"
 
 
 def test_fasth3_sampling_defaults_and_task_rejection() -> None:

@@ -18,6 +18,7 @@ from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae import (
 
 
 class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
+    _aliases = ["AutoencoderKLMiniMaxH3"]
     layerwise_offload_dit_group_enabled = False
     # EncoderFCN3D indexes its down containers instead of calling them, so they
     # cannot host layerwise hooks. Keep the small encoder resident.
@@ -88,6 +89,7 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
 
 
 class MiniMaxH3AudioVAE(DacAudioVAE, LayerwiseOffloadableModuleMixin):
+    _aliases = ["AutoencoderKLMiniMaxH3Audio"]
     layerwise_offload_dit_group_enabled = False
     # BigVGAN stores each executable upsampler inside a one-element ModuleList.
     # The outer ``decoder.ups`` containers are indexed but never called, so hooks

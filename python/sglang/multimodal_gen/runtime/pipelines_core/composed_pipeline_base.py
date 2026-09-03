@@ -53,7 +53,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
+    has_diffusers_pipeline_index,
     maybe_download_model,
+    parse_diffusers_component_entry,
     prepare_diffusers_component_path_for_loading,
     verify_model_config_and_directory,
 )
@@ -176,8 +178,8 @@ class ComposedPipelineBase(ABC):
 
     def _load_config(self) -> dict[str, Any]:
         model_subfolder = self.server_args.model_subfolder
-        if model_subfolder is None and not os.path.isfile(
-            os.path.join(self.model_path, "model_index.json")
+        if model_subfolder is None and not has_diffusers_pipeline_index(
+            self.model_path
         ):
             model_subfolder = self.default_model_subfolder
 
@@ -540,15 +542,15 @@ class ComposedPipelineBase(ABC):
                 if module_name in self.required_config_modules:
                     self.required_config_modules.remove(module_name)
                 continue
-            if (
-                not isinstance(component_spec, (list, tuple))
-                or len(component_spec) != 2
-            ):
+            component_class = parse_diffusers_component_entry(component_spec)
+            if component_class is None:
                 raise ValueError(
                     f"Module {module_name!r} in model_index.json must be null or "
-                    f"a [library, architecture] pair, got {component_spec!r}"
+                    "a classic [library, architecture] or modular "
+                    f"[library, architecture, load metadata] entry, got "
+                    f"{component_spec!r}"
                 )
-            transformers_or_diffusers, architecture = component_spec
+            transformers_or_diffusers, architecture = component_class
             if transformers_or_diffusers is None:
                 logger.warning(
                     "Module %s in model_index.json has null value, removing from required_config_modules",
