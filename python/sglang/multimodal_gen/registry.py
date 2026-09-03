@@ -454,6 +454,18 @@ def _normalize_hf_cache_path(path: str) -> str:
     return os.path.normpath(path).lower().replace("\\", "/")
 
 
+def _match_registered_model_detectors(
+    model_path: str, pipeline_name: str = ""
+) -> list[str]:
+    model_path = model_path.lower()
+    pipeline_name = pipeline_name.lower()
+    return [
+        model_id
+        for model_id, detector in _MODEL_NAME_DETECTORS
+        if detector(model_path) or (pipeline_name and detector(pipeline_name))
+    ]
+
+
 def has_registered_diffusion_model_path(model_path: str) -> bool:
     _ensure_registry_initialized()
     all_model_hf_paths = sorted(_MODEL_HF_PATH_TO_NAME.keys(), key=len, reverse=True)
@@ -475,7 +487,11 @@ def has_registered_diffusion_model_path(model_path: str) -> bool:
         if cache_repo_fragment in normalized_model_path:
             return True
 
-    return False
+    # Family detectors are also part of the registry contract. Consult them
+    # before the top-level CLI falls back to the LLM parser; otherwise a new
+    # checkpoint from an already supported family never reaches diffusion's
+    # model resolver.
+    return bool(_match_registered_model_detectors(model_path))
 
 
 @lru_cache(maxsize=1)
@@ -545,13 +561,9 @@ def _get_config_info(
     config = maybe_download_model_index(model_path)
     pipeline_name = config.get("_class_name", "").lower()
 
-    matched_model_names = []
-    for model_id, detector in _MODEL_NAME_DETECTORS:
-        if detector(model_path.lower()) or detector(pipeline_name):
-            logger.debug(
-                f"Matched model name '{model_id}' using a registered detector."
-            )
-            matched_model_names += [model_id]
+    matched_model_names = _match_registered_model_detectors(model_path, pipeline_name)
+    for model_id in matched_model_names:
+        logger.debug(f"Matched model name '{model_id}' using a registered detector.")
 
     if len(matched_model_names) >= 1:
         if len(matched_model_names) > 1:
