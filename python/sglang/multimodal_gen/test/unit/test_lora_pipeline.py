@@ -38,6 +38,8 @@ def _make_pipeline(layer: BaseLayerWithLoRA) -> _TestLoRAPipeline:
     )
     pipeline.lora_initialized = True
     pipeline.lora_adapters = defaultdict(dict)
+    pipeline.lora_parameter_bases = defaultdict(dict)
+    pipeline.active_parameter_delta_modules = set()
     pipeline.loaded_adapter_paths = {"adapter": "/adapter"}
     pipeline.loaded_adapter_alphas = {"adapter": None}
     pipeline.cur_adapter_name = {}
@@ -52,6 +54,40 @@ def _make_pipeline(layer: BaseLayerWithLoRA) -> _TestLoRAPipeline:
     pipeline.lora_adapters["adapter"]["linear.lora_A"] = torch.ones(1, 2)
     pipeline.lora_adapters["adapter"]["linear.lora_B"] = torch.ones(2, 1)
     return pipeline
+
+
+def test_exact_parameter_delta_tracks_strength_and_deactivation():
+    layer = _make_layer()
+    pipeline = _make_pipeline(layer)
+    norm = torch.nn.RMSNorm(2)
+    pipeline.modules["transformer"].add_module("norm", norm)
+    base = norm.weight.detach().clone()
+    delta = torch.tensor([0.25, -0.5])
+    pipeline.lora_adapters["adapter"]["norm.parameter_delta"] = delta
+
+    with patch(_RANK_PATCH, return_value=0):
+        pipeline.set_lora(
+            "adapter",
+            None,
+            target="transformer",
+            strength=0.5,
+            merge_mode="dynamic",
+        )
+    torch.testing.assert_close(norm.weight, base + 0.5 * delta)
+
+    pipeline._temporarily_disable_offload = lambda *args, **kwargs: nullcontext([])
+    pipeline.deactivate_lora_weights("transformer")
+    torch.testing.assert_close(norm.weight, base)
+
+    with patch(_RANK_PATCH, return_value=0):
+        pipeline.set_lora(
+            "adapter",
+            None,
+            target="transformer",
+            strength=1.5,
+            merge_mode="dynamic",
+        )
+    torch.testing.assert_close(norm.weight, base + 1.5 * delta)
 
 
 def test_merge_cache_only_accepts_cpu_backed_weights():

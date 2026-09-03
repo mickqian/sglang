@@ -17,6 +17,7 @@ logger = logging.getLogger("LoRAFormatAdapter")
 _LINEAR_DIFF_SUFFIX = ".diff"
 _LINEAR_DIFF_BIAS_SUFFIX = ".diff_b"
 _SET_WEIGHT_SUFFIX = ".set_weight"
+PARAMETER_DELTA_SUFFIX = ".parameter_delta"
 
 
 class LoRAFormat(str, Enum):
@@ -543,11 +544,11 @@ def convert_lora_state_dict_by_format(
     return dict(state_dict)
 
 
-def _normalize_linear_diff_patches(
+def _normalize_additive_patches(
     state_dict: Mapping[str, torch.Tensor],
     log: logging.Logger,
 ) -> Dict[str, torch.Tensor]:
-    """Represent additive Comfy linear weight/bias patches as exact LoRA pairs."""
+    """Normalize Comfy additive patches without losing their exact deltas."""
     set_weights = sorted(
         name for name in state_dict if name.endswith(_SET_WEIGHT_SUFFIX)
     )
@@ -567,13 +568,7 @@ def _normalize_linear_diff_patches(
         for name, tensor in state_dict.items()
         if name.endswith(_LINEAR_DIFF_BIAS_SUFFIX)
     }
-    orphan_biases = sorted(bias_patches.keys() - weight_patches.keys())
-    if orphan_biases:
-        raise ValueError(
-            "LoRA checkpoint contains .diff_b without a matching linear .diff "
-            f"tensor (e.g. {orphan_biases[0]!r})"
-        )
-    if not weight_patches:
+    if not weight_patches and not bias_patches:
         return dict(state_dict)
 
     normalized = {
@@ -581,11 +576,29 @@ def _normalize_linear_diff_patches(
         for name, tensor in state_dict.items()
         if not name.endswith((_LINEAR_DIFF_SUFFIX, _LINEAR_DIFF_BIAS_SUFFIX))
     }
+    linear_patch_count = 0
+    parameter_patch_count = 0
     for base, delta in weight_patches.items():
+        if delta.ndim == 1:
+            if delta.shape[0] == 0:
+                raise ValueError(
+                    f"Additive parameter patch {base + _LINEAR_DIFF_SUFFIX!r} "
+                    "must be non-empty"
+                )
+            parameter_delta_key = f"{base}{PARAMETER_DELTA_SUFFIX}"
+            if parameter_delta_key in normalized:
+                raise ValueError(
+                    f"Additive patch {base!r} conflicts with existing adapter "
+                    f"tensor {parameter_delta_key!r}"
+                )
+            normalized[parameter_delta_key] = delta
+            parameter_patch_count += 1
+            continue
         if delta.ndim != 2 or min(delta.shape) == 0:
             raise ValueError(
                 f"Additive patch {base + _LINEAR_DIFF_SUFFIX!r} must be a "
-                f"non-empty 2D linear weight, got shape {tuple(delta.shape)}"
+                "non-empty 2D linear weight or 1D parameter vector, got shape "
+                f"{tuple(delta.shape)}"
             )
         output_size, input_size = delta.shape
         rank = min(output_size, input_size)
@@ -612,6 +625,7 @@ def _normalize_linear_diff_patches(
             normalized[a_key] = delta
             normalized[b_key] = identity
         normalized[alpha_key] = torch.tensor(rank, device=delta.device)
+        linear_patch_count += 1
 
         bias = bias_patches.get(base)
         if bias is not None:
@@ -622,9 +636,33 @@ def _normalize_linear_diff_patches(
                 )
             normalized[output_offset_key] = bias
 
+    for base in sorted(bias_patches.keys() - weight_patches.keys()):
+        bias = bias_patches[base]
+        b_key = f"{base}.lora_B.weight"
+        output_offset_key = f"{base}.lora_output_offset"
+        if b_key not in normalized:
+            raise ValueError(
+                "Additive bias patch is present without a matching linear .diff "
+                "or LoRA projection "
+                f"(e.g. {base + _LINEAR_DIFF_BIAS_SUFFIX!r})"
+            )
+        if output_offset_key in normalized:
+            raise ValueError(
+                f"Additive bias patch {base!r} conflicts with existing adapter "
+                f"tensor {output_offset_key!r}"
+            )
+        if bias.ndim != 1 or bias.shape[0] != normalized[b_key].shape[-2]:
+            raise ValueError(
+                f"Additive bias patch {base + _LINEAR_DIFF_BIAS_SUFFIX!r} must "
+                "match the LoRA output size, got shapes "
+                f"{tuple(bias.shape)} and {tuple(normalized[b_key].shape)}"
+            )
+        normalized[output_offset_key] = bias
+
     log.info(
-        "[LoRAFormatAdapter] converted %d additive linear .diff patch(es)",
-        len(weight_patches),
+        "[LoRAFormatAdapter] converted %d additive linear and %d parameter patch(es)",
+        linear_patch_count,
+        parameter_patch_count,
     )
     return normalized
 
@@ -655,7 +693,7 @@ def normalize_lora_state_dict(
 
     normalized = convert_lora_state_dict_by_format(state_dict, fmt, log)
     normalized = apply_peft_config(normalized, adapter_config or {})
-    normalized = _normalize_linear_diff_patches(normalized, log)
+    normalized = _normalize_additive_patches(normalized, log)
 
     norm_keys = list(normalized.keys())
     if norm_keys:
