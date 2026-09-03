@@ -35,8 +35,8 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
-from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn import (
-    FlashAttentionImpl,
+from sglang.multimodal_gen.runtime.layers.attention.backends.sdpa import (
+    SDPAImpl,
 )
 from sglang.multimodal_gen.runtime.layers.attention.backends.video_sparse_attn import (
     construct_variable_block_sizes,
@@ -375,7 +375,7 @@ class VideoSparseAttentionH3Impl(AttentionImpl):
         self.layer_idx = int(match.group(1)) if match else None
         # The token refiner and any other non-packed caller resolve the same
         # backend object; they run the exact dense kernel instead.
-        self._dense_fallback = FlashAttentionImpl(
+        self._dense_fallback = SDPAImpl(
             num_heads=num_heads,
             head_size=head_size,
             causal=causal,
