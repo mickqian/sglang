@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import modelscope
 import pytest
-from huggingface_hub.errors import LocalEntryNotFoundError
+from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
@@ -15,6 +15,9 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     _is_revisionless_snapshot_root,
     _verify_diffusers_model_complete,
     maybe_download_model,
+    maybe_download_model_index,
+    parse_diffusers_component_entry,
+    verify_model_config_and_directory,
 )
 from sglang.srt.environ import envs
 
@@ -63,6 +66,92 @@ def _write_model_index(root):
             }
         )
     )
+
+
+def _write_modular_model_index(root):
+    local_repo = "org/modular-pipeline"
+    (root / "modular_model_index.json").write_text(
+        json.dumps(
+            {
+                "_class_name": "ModularPipeline",
+                "_diffusers_version": "0.37.0",
+                "transformer": [
+                    "diffusers",
+                    "TransformerModel",
+                    {
+                        "pretrained_model_name_or_path": local_repo,
+                        "subfolder": "transformer",
+                    },
+                ],
+                "vae": [
+                    "diffusers",
+                    "AutoencoderKL",
+                    {
+                        "pretrained_model_name_or_path": local_repo,
+                        "subfolder": "vae",
+                    },
+                ],
+                "transformer_ref": [
+                    "diffusers",
+                    "TransformerModel",
+                    {
+                        "pretrained_model_name_or_path": "org/base-pipeline",
+                        "subfolder": "transformer_ref",
+                    },
+                ],
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        (["diffusers", "AutoencoderKL"], ("diffusers", "AutoencoderKL")),
+        (
+            ["diffusers", "AutoencoderKL", {"subfolder": "vae"}],
+            ("diffusers", "AutoencoderKL"),
+        ),
+        ([None, None, {"subfolder": "optional"}], (None, None)),
+        (["diffusers", "AutoencoderKL", "invalid"], None),
+    ],
+)
+def test_parse_diffusers_component_entry(entry, expected):
+    assert parse_diffusers_component_entry(entry) == expected
+
+
+def test_modular_pipeline_completeness_ignores_external_components(tmp_path):
+    _write_modular_model_index(tmp_path)
+    _populate_components(tmp_path, ("transformer", "vae"))
+
+    assert _verify_diffusers_model_complete(str(tmp_path))
+    assert verify_model_config_and_directory(str(tmp_path))["_class_name"] == (
+        "ModularPipeline"
+    )
+
+
+def test_remote_pipeline_index_falls_back_to_modular(monkeypatch, tmp_path):
+    _write_modular_model_index(tmp_path)
+    calls = []
+
+    def fake_hf_hub_download(*, repo_id, filename):
+        calls.append((repo_id, filename))
+        if filename == "model_index.json":
+            raise EntryNotFoundError("missing classic pipeline index")
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(hf_diffusers_utils, "hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr(
+        hf_diffusers_utils, "maybe_load_overlay_model_index", lambda *_, **__: None
+    )
+
+    config = maybe_download_model_index("org/modular-pipeline")
+
+    assert config["pipeline_name"] == "ModularPipeline"
+    assert calls == [
+        ("org/modular-pipeline", "model_index.json"),
+        ("org/modular-pipeline", "modular_model_index.json"),
+    ]
 
 
 def test_diffusers_cache_validation_rejects_declared_component_without_weights(

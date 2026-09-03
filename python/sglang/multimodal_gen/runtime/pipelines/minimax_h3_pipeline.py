@@ -36,6 +36,7 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
     is_video_pipeline = True
     pipeline_config_cls = MiniMaxH3PipelineConfig
     sampling_params_cls = MiniMaxH3SamplingParams
+    _modular_release_tasks = ("t2va", "fl2va")
     _required_config_modules = [
         "processor",
         "text_encoder",
@@ -101,7 +102,8 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
                 )
             self.server_args.model_subfolder = semantic_subfolder
         model_index = super()._load_config()
-        self.release_metadata = MiniMaxH3ReleaseMetadata.from_model_index(model_index)
+        self._configure_component_names(model_index)
+        self.release_metadata = self._release_metadata_from_model_index(model_index)
         if (
             model_variant is not None
             and self.release_metadata.partition != model_variant.strip().lower()
@@ -111,6 +113,28 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
                 f"--model-variant {model_variant!r}"
             )
         return model_index
+
+    def _configure_component_names(self, model_index: dict) -> None:
+        if "video_vae" not in model_index and "vae" in model_index:
+            # Modular Diffusers H3 releases use the conventional ``vae`` key
+            # for the video VAE exposed as ``video_vae`` by the original repo.
+            self._extra_config_module_map["video_vae"] = "vae"
+
+    def _release_metadata_from_model_index(
+        self, model_index: dict
+    ) -> MiniMaxH3ReleaseMetadata:
+        if "_minimax_h3" in model_index:
+            return MiniMaxH3ReleaseMetadata.from_model_index(model_index)
+        if model_index.get("_class_name") != "MiniMaxH3ModularPipeline":
+            return MiniMaxH3ReleaseMetadata.from_model_index(model_index)
+        return MiniMaxH3ReleaseMetadata(
+            schema_version=1,
+            partition="fl2va",
+            tasks=self._modular_release_tasks,
+            task_aliases={},
+            video_sigma_shift=12.0,
+            audio_sigma_shift=3.0,
+        )
 
     def validate_disagg_role(self, role: RoleType) -> None:
         if role != RoleType.MONOLITHIC:
@@ -181,6 +205,7 @@ class FastH3Pipeline(MiniMaxH3Pipeline):
 
     pipeline_name = "FastH3Pipeline"
     default_model_subfolder = None
+    _modular_release_tasks = ("t2va",)
 
 
 EntryClass = [MiniMaxH3Pipeline, FastH3Pipeline]

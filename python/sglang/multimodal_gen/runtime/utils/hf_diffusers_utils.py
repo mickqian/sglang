@@ -73,6 +73,10 @@ _WEIGHT_FILE_PATTERNS = (
     "*.pth",
     "*.ckpt",
 )
+_PIPELINE_INDEX_FILENAMES = (
+    "model_index.json",
+    "modular_model_index.json",
+)
 
 
 def _model_hub_name() -> str:
@@ -128,20 +132,38 @@ def _is_modelscope_not_found_error(error: BaseException) -> bool:
     return False
 
 
+def parse_diffusers_component_entry(
+    value: Any,
+) -> tuple[str | None, str | None] | None:
+    """Return the library/class pair from classic or modular indexes."""
+    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+        return None
+    if not all(item is None or isinstance(item, str) for item in value[:2]):
+        return None
+    if len(value) == 3 and value[2] is not None and not isinstance(value[2], dict):
+        return None
+    return value[0], value[1]
+
+
 def _is_diffusers_component_entry(value: Any) -> bool:
-    return (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(item is None or isinstance(item, str) for item in value)
-    )
+    return parse_diffusers_component_entry(value) is not None
+
+
+def _find_local_pipeline_index_path(model_path: str) -> str | None:
+    for filename in _PIPELINE_INDEX_FILENAMES:
+        candidate = os.path.join(model_path, filename)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def has_diffusers_pipeline_index(model_path: str) -> bool:
+    return _find_local_pipeline_index_path(model_path) is not None
 
 
 def _is_weight_bearing_diffusers_component(key: str, value: Any) -> bool:
-    if (
-        key.startswith("_")
-        or not _is_diffusers_component_entry(value)
-        or not any(item is not None for item in value)
-    ):
+    component_class = parse_diffusers_component_entry(value)
+    if key.startswith("_") or component_class is None or not any(component_class):
         return False
 
     key_lower = key.lower()
@@ -149,23 +171,47 @@ def _is_weight_bearing_diffusers_component(key: str, value: Any) -> bool:
 
 
 def _get_declared_weight_component_dirs(model_path: str) -> list[str]:
-    model_index_path = os.path.join(model_path, "model_index.json")
-    if not os.path.exists(model_index_path):
+    model_index_path = _find_local_pipeline_index_path(model_path)
+    if model_index_path is None:
         return []
 
     try:
         with open(model_index_path) as f:
             model_index = json.load(f)
     except Exception as exc:
-        logger.warning(
-            "Failed to read model_index.json at %s: %s", model_index_path, exc
-        )
+        logger.warning("Failed to read pipeline index at %s: %s", model_index_path, exc)
         return []
 
+    entries: list[tuple[str, str | None]] = []
+    for key, value in model_index.items():
+        if not _is_weight_bearing_diffusers_component(key, value):
+            continue
+        metadata = value[2] if len(value) == 3 else None
+        subfolder = metadata.get("subfolder", key) if metadata else key
+        source = metadata.get("pretrained_model_name_or_path") if metadata else None
+        if not isinstance(subfolder, str) or not subfolder:
+            continue
+        entries.append((subfolder, source if isinstance(source, str) else None))
+
+    # A modular index may point some optional components at another repository.
+    # The source shared by the local component directories identifies this
+    # snapshot; if only the index is cached, the majority source is the best
+    # available equivalent signal. External entries are resolved on demand and
+    # are not required to exist inside this snapshot.
+    local_sources = [
+        source
+        for subfolder, source in entries
+        if source is not None and os.path.isdir(os.path.join(model_path, subfolder))
+    ]
+    sources = local_sources or [source for _, source in entries if source is not None]
+    local_source = max(sources, key=sources.count) if sources else None
     return [
-        key
-        for key, value in model_index.items()
-        if _is_weight_bearing_diffusers_component(key, value)
+        subfolder
+        for subfolder, source in entries
+        if source is None
+        or local_source is None
+        or source == local_source
+        or os.path.isdir(os.path.join(model_path, subfolder))
     ]
 
 
@@ -374,23 +420,11 @@ def _ci_validate_diffusers_model(model_path: str) -> tuple[bool, bool]:
 
 def _verify_diffusers_model_complete(path: str) -> bool:
     """Check if a diffusers model directory has all required component subdirectories."""
-    config_path = os.path.join(path, "model_index.json")
-    if not os.path.exists(config_path):
+    config_path = _find_local_pipeline_index_path(path)
+    if config_path is None:
         return False
 
-    try:
-        with open(config_path) as config_file:
-            model_index = json.load(config_file)
-    except Exception as exc:
-        logger.warning("Failed to read model_index.json at %s: %s", config_path, exc)
-        return False
-
-    component_keys = [
-        key
-        for key, value in model_index.items()
-        if _is_diffusers_component_entry(value)
-        and any(item is not None for item in value)
-    ]
+    component_keys = _get_declared_weight_component_dirs(path)
     if component_keys:
         return all(
             os.path.exists(os.path.join(path, key)) for key in component_keys
@@ -694,11 +728,10 @@ def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:
         The loaded model configuration as a dictionary
     """
 
-    # Check for model_index.json which is required for diffusers models
-    config_path = os.path.join(model_path, "model_index.json")
-    if not os.path.exists(config_path):
+    config_path = _find_local_pipeline_index_path(model_path)
+    if config_path is None:
         raise ValueError(
-            f"Model directory {model_path} does not contain model_index.json. "
+            f"Model directory {model_path} does not contain a pipeline index. "
             "Only HuggingFace diffusers format is supported."
         )
 
@@ -708,17 +741,11 @@ def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:
 
     # Verify diffusers version exists
     if "_diffusers_version" not in config:
-        raise ValueError("model_index.json does not contain _diffusers_version")
+        raise ValueError("Pipeline index does not contain _diffusers_version")
 
     logger.info("Diffusers version: %s", config["_diffusers_version"])
 
-    component_keys = [
-        key
-        for key, value in config.items()
-        if isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(isinstance(item, str) for item in value)
-    ]
+    component_keys = _get_declared_weight_component_dirs(model_path)
     if component_keys:
         missing_components = [
             component_key
@@ -745,49 +772,52 @@ def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:
     return cast(dict[str, Any], config)
 
 
-def _resolve_remote_repo_model_index_path(model_name_or_path: str) -> str:
-    """Return a local path to a remote repo's ``model_index.json``"""
-    try:
-        # Cache-aware: no local_dir, so the selected Hub reuses its cache and
-        # revalidates the remote file when online.
-        return hf_hub_download(repo_id=model_name_or_path, filename="model_index.json")
-    except EntryNotFoundError:
-        # Repo exists but has no model_index.json (single-model repo); let the
-        # caller fall through to the single-model path.
-        raise
-    except Exception as online_err:
-        cached_path = None
-        if not envs.SGLANG_USE_MODELSCOPE.get():
-            from huggingface_hub import try_to_load_from_cache
+def _resolve_remote_repo_pipeline_index_path(model_name_or_path: str) -> str:
+    """Return the classic or modular pipeline index from a remote repo."""
+    missing_error: EntryNotFoundError | None = None
+    for filename in _PIPELINE_INDEX_FILENAMES:
+        try:
+            # Cache-aware: no local_dir, so the selected Hub reuses its cache and
+            # revalidates the remote file when online.
+            return hf_hub_download(repo_id=model_name_or_path, filename=filename)
+        except EntryNotFoundError as error:
+            missing_error = error
+        except Exception as online_error:
+            cached_path = None
+            if not envs.SGLANG_USE_MODELSCOPE.get():
+                from huggingface_hub import try_to_load_from_cache
 
-            cached = try_to_load_from_cache(
-                repo_id=model_name_or_path, filename="model_index.json"
-            )
-            if isinstance(cached, str) and os.path.exists(cached):
-                cached_path = cached
-        if cached_path is not None:
+                cached = try_to_load_from_cache(
+                    repo_id=model_name_or_path, filename=filename
+                )
+                if isinstance(cached, str) and os.path.exists(cached):
+                    cached_path = cached
+            if cached_path is None:
+                raise
             logger.warning(
-                "Could not fetch model_index.json for '%s' from the Hugging Face "
-                "Hub (%s); using the locally cached copy at '%s'. The cached copy "
-                "may be out of date — provide an HF token or clear the cache to "
-                "force a refresh.",
+                "Could not fetch %s for '%s' from the Hugging Face Hub (%s); "
+                "using the locally cached copy at '%s'. The cached copy may be "
+                "out of date — provide an HF token or clear the cache to force "
+                "a refresh.",
+                filename,
                 model_name_or_path,
-                online_err,
+                online_error,
                 cached_path,
             )
             return cached_path
-        raise
+    assert missing_error is not None
+    raise missing_error
 
 
 def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
     """
-    Download and extract just the model_index.json for a Hugging Face model.
+    Download and parse a classic or modular Diffusers pipeline index.
 
     Args:
         model_name_or_path: Path or HF Hub model ID
 
     Returns:
-        The parsed model_index.json as a dictionary
+        The parsed pipeline index as a dictionary
     """
     overlay_config = maybe_load_overlay_model_index(
         model_name_or_path,
@@ -810,44 +840,49 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
                 return config
             raise
 
-    # For remote models, resolve model_index.json (Hub-first, cache fallback).
+    # For remote models, resolve a pipeline index (Hub-first, cache fallback).
     try:
-        model_index_path = _resolve_remote_repo_model_index_path(model_name_or_path)
+        model_index_path = _resolve_remote_repo_pipeline_index_path(model_name_or_path)
 
-        # Load the model_index.json
+        index_filename = os.path.basename(model_index_path)
         with open(model_index_path) as f:
             config: dict[str, Any] = json.load(f)
 
         # Verify it has the required fields
         if "_class_name" not in config:
             raise ValueError(
-                f"model_index.json for {model_name_or_path} does not contain _class_name field"
+                f"{index_filename} for {model_name_or_path} does not contain "
+                "_class_name field"
             )
 
         if "_diffusers_version" not in config:
             raise ValueError(
-                f"model_index.json for {model_name_or_path} does not contain _diffusers_version field"
+                f"{index_filename} for {model_name_or_path} does not contain "
+                "_diffusers_version field"
             )
 
         # Add the pipeline name for downstream use
         config["pipeline_name"] = config["_class_name"]
 
         logger.debug(
-            "Resolved model_index.json for %s, pipeline: %s",
+            "Resolved %s for %s, pipeline: %s",
+            index_filename,
             model_name_or_path,
             config["_class_name"],
         )
         return config
     except EntryNotFoundError:
         logger.debug(
-            "model_index.json not found for %s. Assuming it is a single model and downloading it.",
+            "Pipeline index not found for %s. Assuming it is a single model "
+            "and downloading it.",
             model_name_or_path,
         )
         local_path = maybe_download_model(model_name_or_path)
         config_path = os.path.join(local_path, "config.json")
         if not os.path.exists(config_path):
             raise ValueError(
-                f"Failed to find config.json for {model_name_or_path} after failing to find model_index.json"
+                f"Failed to find config.json for {model_name_or_path} after "
+                "failing to find a Diffusers pipeline index. "
                 f"You might be looking for models ending with '-Diffusers'"
             )
         with open(config_path) as f:
@@ -855,7 +890,8 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
         return config
     except Exception as e:
         raise ValueError(
-            f"Failed to download or parse model_index.json for {model_name_or_path}: {e}"
+            f"Failed to download or parse a pipeline index for "
+            f"{model_name_or_path}: {e}"
         ) from e
 
 
