@@ -448,13 +448,29 @@ class MiniMaxH3Rope(nn.Module):
     with 16 frequencies per axis (inv_freq = base^-(arange(0,32,2)/32)).
     """
 
-    def __init__(self, inv_freq_len: int) -> None:
+    def __init__(self, inv_freq_len: int, theta: float) -> None:
         super().__init__()
-        self.register_buffer(
-            "inv_freq",
-            torch.empty(inv_freq_len, dtype=_FP32_DTYPE),
-            persistent=True,
+        self.inv_freq_len = inv_freq_len
+        self.theta = theta
+        self.register_buffer("inv_freq", self._make_inv_freq(), persistent=False)
+
+    def _make_inv_freq(self, device: torch.device | None = None) -> torch.Tensor:
+        return 1.0 / self.theta ** (
+            torch.arange(
+                0,
+                2 * self.inv_freq_len,
+                2,
+                dtype=_FP32_DTYPE,
+                device=device,
+            )
+            / (2 * self.inv_freq_len)
         )
+
+    def _apply(self, fn, recurse=True):
+        if self.inv_freq.is_meta:
+            target = fn(torch.empty(0))
+            self.inv_freq = self._make_inv_freq(device=target.device)
+        return super()._apply(fn, recurse=recurse)
 
     def forward(self, img_position_ids: torch.Tensor) -> torch.Tensor:
         """img_position_ids: [1, S, 3] (t, h, w) -> freqs [S, rot_dim=96]."""
@@ -1894,7 +1910,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     requires_grad=False,
                 ),
             )
-        self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len)
+        self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len, arch.rope_theta)
         self.token_refiner = MiniMaxH3TokenRefiner(
             arch,
             quant_config,
@@ -2015,7 +2031,6 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     raise ValueError(
                         f"{name} must stay fp32 with curve AdaLN, got {param.dtype}."
                     )
-        # assign=True loading may re-register this persistent buffer as a parameter
         rope_inv_freq = self.rope.inv_freq
         if rope_inv_freq.dtype != _FP32_DTYPE:
             raise ValueError(
