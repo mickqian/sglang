@@ -320,6 +320,9 @@ class MiniMaxH3DenoiseBranch:
         audio_rows: torch.Tensor,
         step_timesteps: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         adaln_slot: torch.Tensor | None = None,
+        pdd_plan: tuple[
+            tuple[int, torch.Tensor], tuple[int, torch.Tensor]
+        ] | None = None,
     ) -> dict[str, Any]:
         x = self.x_buffer
         audio_x = self.audio_x_buffer
@@ -354,6 +357,8 @@ class MiniMaxH3DenoiseBranch:
             # Device scalar, never a Python int: an int would key one breakable
             # CUDA graph per slot value and go stale when LRU reuses the slot.
             kwargs["adaln_cache_slot"] = adaln_slot
+        if pdd_plan is not None:
+            kwargs["pdd_plan"] = pdd_plan
         return kwargs
 
     def _expand_step_timesteps(
@@ -462,6 +467,7 @@ def minimax_h3_denoise_loop(
     attn_metadata: AttentionMetadata | None = None,
     on_step: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,
     step_profiler: Callable[[int], AbstractContextManager] | None = None,
+    synthetic_warmup: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the full denoise loop; returns final (video_rows, audio_rows).
 
@@ -540,6 +546,12 @@ def minimax_h3_denoise_loop(
         imgvid_cond_noise_aug=float(imgvid_cond_noise_aug_for_inference),
         audio_ref_cond_noise_aug=float(audio_cond_noise_aug_for_inference),
     )
+    pdd_plans = model.prepare_pdd_plans(
+        sigmas_video,
+        sigmas_audio,
+        device=device,
+        synthetic_warmup=synthetic_warmup,
+    )
     # Every step's timesteps are settled by now. Rebuilding AdaLN reads all
     # 24.2 GiB of adaln_proj whatever is missing, so fill the whole request in
     # one pass here instead of topping up step by step inside the loop.
@@ -570,6 +582,7 @@ def minimax_h3_denoise_loop(
                 adaln_slot=(
                     None if adaln_plan_slots is None else adaln_plan_slots[step]
                 ),
+                pdd_plan=None if pdd_plans is None else pdd_plans[step],
             )
             if attn_metadata is not None:
                 attn_metadata.current_timestep = step

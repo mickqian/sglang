@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from safetensors import safe_open
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
@@ -138,6 +139,7 @@ class LoRAPipeline(ComposedPipelineBase):
     # e.g., [jinx][transformer_blocks.0.attn.to_v.lora_A]
     lora_adapters: dict[str, dict[str, torch.Tensor]]
     lora_parameter_bases: dict[str, dict[str, torch.Tensor]]
+    lora_runtime_states: dict[str, dict[str, Any]]
     active_parameter_delta_modules: set[str]
     loaded_adapter_paths: dict[str, str]  # nickname -> lora_path
     loaded_adapter_alphas: dict[str, int | None]
@@ -171,6 +173,7 @@ class LoRAPipeline(ComposedPipelineBase):
         # Initialize all mutable instance attributes to avoid sharing across instances
         self.lora_adapters = defaultdict(dict)
         self.lora_parameter_bases = defaultdict(dict)
+        self.lora_runtime_states = {}
         self.active_parameter_delta_modules = set()
         self.loaded_adapter_paths = {}
         self.loaded_adapter_alphas = {}
@@ -411,6 +414,29 @@ class LoRAPipeline(ComposedPipelineBase):
         else:
             self.active_parameter_delta_modules.discard(module_name)
         return len(deltas)
+
+    def _set_lora_runtime_state(
+        self,
+        module_name: str,
+        lora_nicknames: list[str],
+        strengths: list[float],
+    ) -> None:
+        """Keep model-forward adapter semantics in the LoRA lifecycle."""
+        states = (
+            [self.lora_runtime_states[nickname] for nickname in lora_nicknames]
+            if module_name == "transformer"
+            else [{} for _ in lora_nicknames]
+        )
+        target_name = (
+            "fake_score_transformer" if module_name == "critic" else module_name
+        )
+        module = self.modules[target_name]
+        if isinstance(module, BaseDiT):
+            module.set_lora_runtime_state(states, strengths)
+        elif any(states):
+            raise TypeError(
+                f"{type(module).__name__} cannot apply LoRA runtime state"
+            )
 
     def convert_module_lora_layers(
         self,
@@ -963,6 +989,8 @@ class LoRAPipeline(ComposedPipelineBase):
             lora_local_path = maybe_download_lora(lora_path, weight_name=weight_name)
 
         raw_state_dict = load_file(lora_local_path)
+        with safe_open(lora_local_path, framework="pt", device="cpu") as adapter_file:
+            adapter_metadata = dict(adapter_file.metadata() or {})
         adapter_config = load_peft_config(lora_local_path)
         lora_state_dict = normalize_lora_state_dict(
             raw_state_dict,
@@ -975,6 +1003,16 @@ class LoRAPipeline(ComposedPipelineBase):
 
         if lora_nickname in self.lora_adapters:
             self.lora_adapters[lora_nickname].clear()
+
+        transformer = self.modules["transformer"]
+        if isinstance(transformer, BaseDiT):
+            lora_state_dict, runtime_state = transformer.split_lora_runtime_state(
+                lora_state_dict,
+                adapter_metadata,
+            )
+        else:
+            runtime_state = {}
+        self.lora_runtime_states[lora_nickname] = runtime_state
 
         config = self.server_args.pipeline_config.dit_config.arch_config
 
@@ -1026,7 +1064,6 @@ class LoRAPipeline(ComposedPipelineBase):
             adapter_lora_alpha,
             self.device,
         )
-        transformer = self.modules["transformer"]
         if isinstance(transformer, BaseDiT):
             self.lora_adapters[lora_nickname] = transformer.prepare_lora_adapter(
                 self.lora_adapters[lora_nickname]
@@ -1220,6 +1257,11 @@ class LoRAPipeline(ComposedPipelineBase):
                             merge_cache.finalize(
                                 {"module": module_name, "paths": tgt_paths}
                             )
+                    self._set_lora_runtime_state(
+                        module_name,
+                        tgt_nicknames,
+                        tgt_strengths,
+                    )
                     adapted_count += count
                     if patched_count:
                         logger.info(
@@ -1337,6 +1379,7 @@ class LoRAPipeline(ComposedPipelineBase):
         with offload_context:
             for module_name, lora_layers_dict in target_modules:
                 self._apply_parameter_deltas(module_name, [], [])
+                self._set_lora_runtime_state(module_name, [], [])
                 for layer in lora_layers_dict.values():
                     if layer.merged:
                         layer.unmerge_lora_weights()
@@ -1375,6 +1418,11 @@ class LoRAPipeline(ComposedPipelineBase):
                         nicknames,
                         [strength] * len(nicknames),
                         allow_no_match=len(target_modules) > 1,
+                    )
+                    self._set_lora_runtime_state(
+                        module_name,
+                        nicknames,
+                        [strength] * len(nicknames),
                     )
                 if not self._should_merge_lora_for_layers(
                     module_name, lora_layers_dict, self.server_args.lora_merge_mode
@@ -1450,6 +1498,7 @@ class LoRAPipeline(ComposedPipelineBase):
                     or module_name in self.active_parameter_delta_modules
                 ):
                     self._apply_parameter_deltas(module_name, [], [])
+                    self._set_lora_runtime_state(module_name, [], [])
                     for layer in lora_layers_dict.values():
                         if not layer.disable_lora:
                             layer.disable_lora = True
@@ -1463,6 +1512,7 @@ class LoRAPipeline(ComposedPipelineBase):
                 continue
             with self._temporarily_disable_offload(target_modules=target_modules):
                 self._apply_parameter_deltas(module_name, [], [])
+                self._set_lora_runtime_state(module_name, [], [])
                 for name, layer in lora_layers_dict.items():
                     # Check layer-level state to avoid raising exception
                     if hasattr(layer, "merged") and not layer.merged:
