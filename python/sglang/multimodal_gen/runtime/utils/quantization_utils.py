@@ -6,8 +6,15 @@ import struct
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import torch
 from safetensors import safe_open
+from torch import nn
 
+from sglang.multimodal_gen.runtime.layers.linear import (
+    LinearBase,
+    TensorOutputReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from sglang.multimodal_gen.runtime.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
@@ -25,14 +32,27 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a4_conf
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a8_config import (
     KitchenW4A8Config,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.quanto_int8_config import (
+    QuantoInt8Config,
+)
+from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
 from sglang.multimodal_gen.runtime.layers.quantization.mxfp8 import MXFP8Config
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 from sglang.srt.layers.modelopt_utils import canonicalize_modelopt_quant_algo
+from sglang.srt.layers.quantization.unquant import (
+    UnquantizedLinearMethod as SrtUnquantizedLinearMethod,
+)
 from sglang.srt.model_loader.checkpoint_quantization import (
     resolve_checkpoint_quant_spec,
 )
+from sglang.srt.model_loader.post_load import stage_module_for_post_load
 
 logger = init_logger(__name__)
+
+
+def comfy_quant_key_filter(name: str) -> bool:
+    return not name.endswith(".comfy_quant")
 
 
 def inspect_comfy_quant_markers(
@@ -348,6 +368,125 @@ def resolve_comfy_checkpoint_quantization(
     raise NotImplementedError(
         "Unsupported Comfy quantization format(s): " + ", ".join(formats)
     )
+
+
+def replace_marked_torch_linears(
+    model: nn.Module,
+    quant_config: QuantizationConfig,
+    layer_markers: dict[str, dict[str, Any]],
+    error_type: type[Exception] = ValueError,
+) -> int:
+    """Replace exactly the marked ``nn.Linear`` modules before weight loading."""
+    replaced = 0
+    for prefix in sorted(layer_markers):
+        parent_name, separator, child_name = prefix.rpartition(".")
+        try:
+            parent = model.get_submodule(parent_name) if separator else model
+        except AttributeError as error:
+            raise error_type(
+                f"Quantization marker {prefix!r} does not match the component"
+            ) from error
+        child = parent._modules.get(child_name)
+        if not isinstance(child, nn.Linear):
+            actual = type(child).__name__ if child is not None else "missing"
+            raise error_type(
+                f"Quantization marker {prefix!r} targets {actual}, expected nn.Linear"
+            )
+        with torch.device(child.weight.device):
+            replacement = TensorOutputReplicatedLinear(
+                child.in_features,
+                child.out_features,
+                bias=child.bias is not None,
+                params_dtype=child.weight.dtype,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        replacement.train(child.training)
+        parent._modules[child_name] = replacement
+        replaced += 1
+    return replaced
+
+
+def process_quantized_linear_weights(
+    model: nn.Module,
+    process_device: torch.device | None,
+    component_name: str,
+    error_type: type[Exception] = ValueError,
+) -> int:
+    """Run each constructed quantized linear's post-load hook exactly once."""
+    processed_layers = 0
+    for module in model.modules():
+        if not isinstance(module, (LinearBase, SrtLinearBase)):
+            continue
+        quant_method = module.quant_method
+        if quant_method is None or isinstance(
+            quant_method,
+            (UnquantizedLinearMethod, SrtUnquantizedLinearMethod),
+        ):
+            continue
+        if process_device is None:
+            quant_method.process_weights_after_loading(module)
+        else:
+            with stage_module_for_post_load(module, process_device):
+                quant_method.process_weights_after_loading(module)
+        processed_layers += 1
+    if processed_layers == 0:
+        raise error_type(
+            f"The {component_name!r} checkpoint declares quantization, but the "
+            "model did not construct any quantized linear layers"
+        )
+    return processed_layers
+
+
+def require_quantized_linear_layers(
+    model: nn.Module,
+    component_name: str,
+    quant_config: QuantizationConfig | None = None,
+    error_type: type[Exception] = ValueError,
+) -> None:
+    """Fail closed when checkpoint quantization was not consumed by the model."""
+    has_quantized_layers = any(
+        isinstance(module, (LinearBase, SrtLinearBase))
+        and module.quant_method is not None
+        and not isinstance(
+            module.quant_method,
+            (UnquantizedLinearMethod, SrtUnquantizedLinearMethod),
+        )
+        for module in model.modules()
+    )
+    if not has_quantized_layers:
+        raise error_type(
+            f"The native {type(model).__name__} implementation does not construct "
+            f"quantized linear layers for {component_name!r}"
+        )
+    if isinstance(
+        quant_config,
+        (
+            ComfyFp8Config,
+            ComfyNvfp4Config,
+            KitchenInt8Config,
+            KitchenW4A4Config,
+            KitchenW4A8Config,
+        ),
+    ):
+        expected = set(quant_config.layer_markers)
+        selected = set(quant_config.selected)
+    elif isinstance(quant_config, QuantoInt8Config):
+        expected = quant_config.layer_prefixes
+        selected = quant_config.selected
+    elif isinstance(quant_config, GGUFConfig):
+        expected = quant_config.quantized_prefixes
+        selected = quant_config.selected
+    else:
+        expected = set()
+        selected = set()
+    missing = expected - selected
+    if missing:
+        raise error_type(
+            f"The native {type(model).__name__} implementation did not consume "
+            f"serialized quantization markers for {component_name!r}: "
+            f"{sorted(missing)[:5]}"
+        )
 
 
 def normalize_flat_modelopt_quant_config(

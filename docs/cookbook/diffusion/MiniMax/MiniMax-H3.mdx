@@ -91,6 +91,7 @@ may be either a normal style adapter or a timestep-distilled Turbo adapter.
 | DiT | [NVFP4, optionally mixed with INT8 or FP8](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot) | `--component-weights-paths.transformer OWNER/REPO/path/FILE.safetensors` | Auto-detected; NVFP4 execution requires NVIDIA compute capability 10.0+. |
 | DiT | [AutoRound W4A16 component](https://huggingface.co/Ar4ikov/MiniMax-H3-transformer-W4A16-RTN) | `--component-paths.transformer Ar4ikov/MiniMax-H3-transformer-W4A16-RTN` | Self-describing Diffusers component; SGLang reuses the SRT GPTQ/Marlin backend. The linked export is FL2VA. |
 | DiT | GGUF, full or AdaLN-pruned ([full](https://huggingface.co/leejet/MiniMax-H3-GGUF), [pruned](https://huggingface.co/unsloth/MiniMax-H3-GGUF)) | `--component-weights-paths.transformer OWNER/REPO/FILE.gguf` | CUDA capacity path; aligned TP and layerwise offload are supported, FSDP and LoRA are not. |
+| Video VAE | [ConvRot INT8 safetensors](https://huggingface.co/GuangyuanSD/minimax_h3_video_vae_int8_convrot) | `--component-weights-paths.video_vae GuangyuanSD/minimax_h3_video_vae_int8_convrot/minimax_h3_video_vae_int8_convrot.safetensors` | Auto-detected native VAE path; requires `comfy-kitchen`. Add `--component-direct-gpu-weight-loading.video_vae` when the VAE stays resident. |
 | Text encoder | [Serialized FP8 component](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct-FP8) | `--component-paths.text_encoder Qwen/Qwen3-VL-32B-Instruct-FP8` | Only eligible language-model linears use FP8; embeddings, norms, and the vision tower keep their declared precision. |
 | Text encoder | ConvRot INT8, W4A8, or W4A4 safetensors ([INT8](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/text_encoders), [W4A8](https://huggingface.co/Winnougan/MiniMax-H3-INT4_Convrot_ComfyUI), [W4A4](https://huggingface.co/Merserk/MiniMax-H3-INT4-ConvRot)) | `--component-weights-paths.text_encoder OWNER/REPO/path/FILE.safetensors` | Auto-detected; requires `comfy-kitchen`. Unmarked vision and embedding tensors keep their declared precision. |
 | Text encoder | [NVFP4-AWQ](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/text_encoders) or [Quanto qint8](https://huggingface.co/DeepBeepMeep/MiniMax-H3/tree/main/Qwen3-VL-32B-Instruct) safetensors | `--component-weights-paths.text_encoder OWNER/REPO/path/FILE.safetensors` | Memory-oriented formats: compressed storage is restored, then each active matrix uses BF16/FP16 compute. |
@@ -106,10 +107,10 @@ and the ConvRot storage/backend contract.
 For H3, the registered component names are `transformer`, `text_encoder`,
 `video_vae`, and `audio_vae`. The shorter `--transformer-weights-path` and
 `--text-encoder-path` aliases remain supported. `conditioning_projection` is an
-H3 text-encoder sidecar key, not a standalone model component. Plain
-video/audio VAE safetensors can use `--component-weights-paths.video_vae` or
-`--component-weights-paths.audio_vae`, but SGLang does not currently advertise
-a native quantized H3 VAE format.
+H3 text-encoder sidecar key, not a standalone model component. Plain video/audio
+VAE safetensors use `--component-weights-paths.video_vae` or
+`--component-weights-paths.audio_vae`; the table lists the quantized VAE format
+that has completed native end-to-end validation.
 
 Pre-quantized files are self-describing: do not combine those rows with
 `--quantization` or `--component-quantizations.*`. Only byte-identical official

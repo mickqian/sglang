@@ -13,13 +13,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
 )
 from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     build_nvfp4_config_from_safetensors_list,
+    comfy_quant_key_filter,
     inspect_comfy_quant_markers,
     resolve_comfy_checkpoint_quantization,
 )
-
-
-def comfy_quant_key_filter(name: str) -> bool:
-    return not name.endswith(".comfy_quant")
 
 
 def inspect_minimax_h3_safetensors(

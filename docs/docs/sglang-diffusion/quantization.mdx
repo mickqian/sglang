@@ -181,9 +181,9 @@ backend.
       <td><code>comfy-int8-convrot</code></td>
       <td>One selected safetensors file with per-layer <code>int8_tensorwise</code> and ConvRot metadata</td>
       <td><code>--component-weights-paths.&lt;component&gt;</code></td>
-      <td>Native DiTs and encoders whose parameter mappings preserve each marked linear; MiniMax-H3 DiT and Qwen3-VL encoder checkpoints have validated tensor contracts</td>
+      <td>Native DiTs, encoders, and VAEs whose parameter mappings preserve each marked linear; MiniMax-H3 DiT, Qwen3-VL encoder, and video VAE checkpoints have validated tensor contracts</td>
       <td><code>comfy-kitchen</code></td>
-      <td>CUDA; auto-detected; uses the fused Kitchen INT8 kernel and validates weight/scale layout before model construction. TP requires every row-parallel input shard to preserve the checkpoint's ConvRot group boundary. The H3 256-group DiT supports TP1/2/4, not TP8; its Qwen3-VL encoder keeps TP8 by replicating only incompatible row projections. Offload is supported; FSDP is not.</td>
+      <td>CUDA; auto-detected; uses the fused Kitchen INT8 kernel and validates weight/scale layout before model construction. TP requires every row-parallel input shard to preserve the checkpoint's ConvRot group boundary. The H3 256-group DiT supports TP1/2/4, not TP8; its Qwen3-VL encoder keeps TP8 by replicating only incompatible row projections. Compatible native VAEs also support direct GPU loading. Offload is supported; FSDP is not.</td>
     </tr>
     <tr>
       <td><code>mxfp8</code></td>
