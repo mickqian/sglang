@@ -41,7 +41,9 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 f"{self.__class__.__name__} is a MiniMax H3 contract stage "
                 "and has no implementation yet."
             )
-        self._generate_sigmas_from_plan(batch, plan)
+        self._generate_sigmas_from_plan(
+            batch, plan, server_args.pipeline_config.dmd_denoising_steps
+        )
         self._publish_native_timestep_state(batch)
         return batch
 
@@ -63,6 +65,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             plan.default_flow_shift,
             plan.default_audio_flow_shift,
             self.freeze_for_dedup(self.sigma_shift_scales),
+            self.freeze_for_dedup(server_args.pipeline_config.dmd_denoising_steps),
         )
 
     @staticmethod
@@ -87,7 +90,9 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             dtype=torch.float32,
         )
 
-    def _generate_sigmas_from_plan(self, batch: Req, plan) -> None:
+    def _generate_sigmas_from_plan(
+        self, batch: Req, plan, dmd_denoising_steps: list[int] | None
+    ) -> None:
         """Generate the fixed per-modality float32 time-shift schedules."""
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
             minimax_h3_time_shift_sigmas,
@@ -155,6 +160,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             sigmas[modality] = minimax_h3_time_shift_sigmas(
                 num_steps=requested_num_steps,
                 shift_scale=scales[modality],
+                denoising_steps=dmd_denoising_steps,
             )
         batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY] = sigmas
 

@@ -33,6 +33,7 @@ def minimax_h3_time_shift_sigmas(
     *,
     num_steps: int = 50,
     shift_scale: float = 6.0,
+    denoising_steps: list[int] | None = None,
 ) -> list[float]:
     if shift_scale <= 0:
         raise ValueError("MiniMax H3 shift_scale must be > 0")
@@ -41,14 +42,43 @@ def minimax_h3_time_shift_sigmas(
 
     import torch
 
-    # The rectified-flow sigma range is fixed at [1.0, 0.0].
-    base = torch.linspace(
-        1.0,
-        0.0,
-        int(num_steps),
-        device="cpu",
-        dtype=torch.float32,
-    )
+    if denoising_steps is None:
+        # The rectified-flow sigma range is fixed at [1.0, 0.0].
+        base = torch.linspace(
+            1.0,
+            0.0,
+            int(num_steps),
+            device="cpu",
+            dtype=torch.float32,
+        )
+    else:
+        if len(denoising_steps) + 1 != num_steps:
+            raise ValueError(
+                "MiniMax H3 dmd_denoising_steps must contain one entry per "
+                f"denoiser evaluation: got {len(denoising_steps)} entries for "
+                f"num_inference_steps={num_steps}"
+            )
+        if any(
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or step <= 0
+            or step > 1000
+            for step in denoising_steps
+        ):
+            raise ValueError(
+                "MiniMax H3 dmd_denoising_steps must be integers in [1, 1000]"
+            )
+        if any(
+            left <= right for left, right in zip(denoising_steps, denoising_steps[1:])
+        ):
+            raise ValueError(
+                "MiniMax H3 dmd_denoising_steps must be strictly decreasing"
+            )
+        base = torch.tensor(
+            [step / 1000.0 for step in denoising_steps] + [0.0],
+            device="cpu",
+            dtype=torch.float32,
+        )
     shifted = float(shift_scale) * base / (1 + (float(shift_scale) - 1) * base)
     shifted, _ = torch.unique_consecutive(shifted, return_counts=True)
     # A one-point request is still exactly one point.  Normal serving uses

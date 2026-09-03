@@ -298,6 +298,10 @@ class MiniMaxH3PipelineConfig(PipelineConfig):
 class FastH3PipelineConfig(MiniMaxH3PipelineConfig):
     """FastH3: 4-step VSA-distilled MiniMax-H3, t2va only."""
 
+    dmd_denoising_steps: list[int] | None = field(
+        default_factory=lambda: [999, 749, 500, 250]
+    )
+
     def __post_init__(self) -> None:
         self.dit_config.arch_config.has_gate_compress = True
 
