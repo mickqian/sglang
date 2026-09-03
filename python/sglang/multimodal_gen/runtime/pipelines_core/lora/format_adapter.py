@@ -14,6 +14,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.lora.peft_adapter import (
 
 logger = logging.getLogger("LoRAFormatAdapter")
 
+_LINEAR_DIFF_SUFFIX = ".diff"
+_LINEAR_DIFF_BIAS_SUFFIX = ".diff_b"
+_SET_WEIGHT_SUFFIX = ".set_weight"
+
 
 class LoRAFormat(str, Enum):
     """Supported external LoRA formats before normalization."""
@@ -539,6 +543,92 @@ def convert_lora_state_dict_by_format(
     return dict(state_dict)
 
 
+def _normalize_linear_diff_patches(
+    state_dict: Mapping[str, torch.Tensor],
+    log: logging.Logger,
+) -> Dict[str, torch.Tensor]:
+    """Represent additive Comfy linear weight/bias patches as exact LoRA pairs."""
+    set_weights = sorted(
+        name for name in state_dict if name.endswith(_SET_WEIGHT_SUFFIX)
+    )
+    if set_weights:
+        raise ValueError(
+            "LoRA checkpoint contains replacement .set_weight tensors, which "
+            f"cannot be composed as additive adapters (e.g. {set_weights[0]!r})"
+        )
+
+    weight_patches = {
+        name[: -len(_LINEAR_DIFF_SUFFIX)]: tensor
+        for name, tensor in state_dict.items()
+        if name.endswith(_LINEAR_DIFF_SUFFIX)
+    }
+    bias_patches = {
+        name[: -len(_LINEAR_DIFF_BIAS_SUFFIX)]: tensor
+        for name, tensor in state_dict.items()
+        if name.endswith(_LINEAR_DIFF_BIAS_SUFFIX)
+    }
+    orphan_biases = sorted(bias_patches.keys() - weight_patches.keys())
+    if orphan_biases:
+        raise ValueError(
+            "LoRA checkpoint contains .diff_b without a matching linear .diff "
+            f"tensor (e.g. {orphan_biases[0]!r})"
+        )
+    if not weight_patches:
+        return dict(state_dict)
+
+    normalized = {
+        name: tensor
+        for name, tensor in state_dict.items()
+        if not name.endswith((_LINEAR_DIFF_SUFFIX, _LINEAR_DIFF_BIAS_SUFFIX))
+    }
+    for base, delta in weight_patches.items():
+        if delta.ndim != 2 or min(delta.shape) == 0:
+            raise ValueError(
+                f"Additive patch {base + _LINEAR_DIFF_SUFFIX!r} must be a "
+                f"non-empty 2D linear weight, got shape {tuple(delta.shape)}"
+            )
+        output_size, input_size = delta.shape
+        rank = min(output_size, input_size)
+        a_key = f"{base}.lora_A.weight"
+        b_key = f"{base}.lora_B.weight"
+        alpha_key = f"{base}.alpha"
+        output_offset_key = f"{base}.lora_output_offset"
+        collisions = sorted(
+            key
+            for key in (a_key, b_key, alpha_key, output_offset_key)
+            if key in normalized
+        )
+        if collisions:
+            raise ValueError(
+                f"Additive patch {base!r} conflicts with existing adapter "
+                f"tensor(s): {collisions}"
+            )
+
+        identity = torch.eye(rank, dtype=delta.dtype, device=delta.device)
+        if input_size <= output_size:
+            normalized[a_key] = identity
+            normalized[b_key] = delta
+        else:
+            normalized[a_key] = delta
+            normalized[b_key] = identity
+        normalized[alpha_key] = torch.tensor(rank, device=delta.device)
+
+        bias = bias_patches.get(base)
+        if bias is not None:
+            if bias.ndim != 1 or bias.shape[0] != output_size:
+                raise ValueError(
+                    f"Additive bias patch {base + _LINEAR_DIFF_BIAS_SUFFIX!r} "
+                    f"must have shape ({output_size},), got {tuple(bias.shape)}"
+                )
+            normalized[output_offset_key] = bias
+
+    log.info(
+        "[LoRAFormatAdapter] converted %d additive linear .diff patch(es)",
+        len(weight_patches),
+    )
+    return normalized
+
+
 def normalize_lora_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     logger: Optional[logging.Logger] = None,
@@ -565,6 +655,7 @@ def normalize_lora_state_dict(
 
     normalized = convert_lora_state_dict_by_format(state_dict, fmt, log)
     normalized = apply_peft_config(normalized, adapter_config or {})
+    normalized = _normalize_linear_diff_patches(normalized, log)
 
     norm_keys = list(normalized.keys())
     if norm_keys:

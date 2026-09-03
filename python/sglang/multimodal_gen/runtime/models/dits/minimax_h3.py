@@ -93,19 +93,6 @@ logger = init_logger(__name__)
 
 _ARCH_DEFAULTS = MiniMaxH3DiTArchConfig()
 
-_NON_LORA_DELTA_SUFFIXES = (".diff", ".diff_b", ".set_weight")
-
-
-def _reject_non_lora_delta_tensors(adapter: dict[str, torch.Tensor]) -> None:
-    offending = sorted(key for key in adapter if key.endswith(_NON_LORA_DELTA_SUFFIXES))
-    if offending:
-        raise ValueError(
-            f"LoRA adapter carries {len(offending)} non-LoRA tensors "
-            f"(.diff/.diff_b/.set_weight, e.g. {offending[0]}) that no MiniMax-H3 "
-            "LoRA mapping rule applies; serve a checkpoint with them merged instead."
-        )
-
-
 def _diffusers_h3_checkpoint(
     iterator: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -1569,7 +1556,6 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         self, adapter: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
         """Project released-checkpoint AdaLN LoRAs onto pruned coordinates."""
-        _reject_non_lora_delta_tensors(adapter)
         if self._adaln_precomputed:
             _reject_adaln_lora(list(adapter))
         full_width = self.arch.adaln_affine_input_dim
