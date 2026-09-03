@@ -28,6 +28,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import 
     ComposedPipelineBase,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.lora.format_adapter import (
+    PARAMETER_DELTA_SUFFIX,
     normalize_lora_state_dict,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.lora.lora_merge_cache import (
@@ -136,6 +137,8 @@ class LoRAPipeline(ComposedPipelineBase):
     # [lora_nickname][target_LoRA_weight_name_in_SGLang_dit] = weight
     # e.g., [jinx][transformer_blocks.0.attn.to_v.lora_A]
     lora_adapters: dict[str, dict[str, torch.Tensor]]
+    lora_parameter_bases: dict[str, dict[str, torch.Tensor]]
+    active_parameter_delta_modules: set[str]
     loaded_adapter_paths: dict[str, str]  # nickname -> lora_path
     loaded_adapter_alphas: dict[str, int | None]
     # nickname -> adapter_config lora_alpha
@@ -167,6 +170,8 @@ class LoRAPipeline(ComposedPipelineBase):
 
         # Initialize all mutable instance attributes to avoid sharing across instances
         self.lora_adapters = defaultdict(dict)
+        self.lora_parameter_bases = defaultdict(dict)
+        self.active_parameter_delta_modules = set()
         self.loaded_adapter_paths = {}
         self.loaded_adapter_alphas = {}
         self.cur_adapter_name = {}
@@ -323,6 +328,89 @@ class LoRAPipeline(ComposedPipelineBase):
             if module is not None and is_layerwise_offloaded_module(module):
                 return True
         return False
+
+    def _apply_parameter_deltas(
+        self,
+        module_name: str,
+        lora_nicknames: list[str],
+        strengths: list[float],
+        *,
+        allow_no_match: bool = False,
+    ) -> int:
+        """Restore base parameters, then apply exact additive adapter deltas."""
+        target_name = (
+            "fake_score_transformer" if module_name == "critic" else module_name
+        )
+        parameters = dict(self.modules[target_name].named_parameters())
+        deltas: defaultdict[str, list[tuple[torch.Tensor, float]]] = defaultdict(
+            list
+        )
+        for nickname, strength in zip(lora_nicknames, strengths):
+            for name, tensor in self.lora_adapters[nickname].items():
+                if not name.endswith(PARAMETER_DELTA_SUFFIX):
+                    continue
+                parameter_name = name[: -len(PARAMETER_DELTA_SUFFIX)] + ".weight"
+                deltas[parameter_name].append((tensor, strength))
+
+        bases = self.lora_parameter_bases[module_name]
+        missing_names = sorted(set(deltas) - set(parameters))
+        if missing_names and len(missing_names) != len(deltas):
+            raise ValueError(
+                f"Additive adapter parameters only partially match {module_name}; "
+                f"the first missing parameter is {missing_names[0]!r}"
+            )
+        if missing_names:
+            if not allow_no_match:
+                raise ValueError(
+                    f"Additive adapter parameter {missing_names[0]!r} does not "
+                    f"exist in {module_name}"
+                )
+            deltas.clear()
+        for name, entries in deltas.items():
+            parameter = parameters[name]
+            if isinstance(parameter, DTensor):
+                raise ValueError(
+                    f"Additive adapter parameter {name!r} is FSDP-sharded; "
+                    "exact parameter deltas require replicated weights"
+                )
+            if parameter.device.type == "meta" or not parameter.is_floating_point():
+                raise ValueError(
+                    f"Additive adapter parameter {name!r} cannot be updated in "
+                    f"place (device={parameter.device}, dtype={parameter.dtype})"
+                )
+            for delta, _ in entries:
+                if delta.shape != parameter.shape:
+                    raise ValueError(
+                        f"Additive adapter parameter {name!r} has shape "
+                        f"{tuple(delta.shape)}, expected {tuple(parameter.shape)}"
+                    )
+
+        names_to_restore = set(bases) | set(deltas)
+        for name in names_to_restore:
+            parameter = parameters.get(name)
+            if parameter is None:
+                raise ValueError(
+                    f"Previously patched parameter {name!r} no longer exists in "
+                    f"{module_name}"
+                )
+            if name not in bases:
+                bases[name] = parameter.detach().to(device="cpu", copy=True)
+
+        with torch.no_grad():
+            for name in sorted(names_to_restore):
+                parameter = parameters[name]
+                value = bases[name].to(device=parameter.device, dtype=torch.float32)
+                for delta, strength in deltas.get(name, []):
+                    value.add_(
+                        delta.to(device=parameter.device, dtype=torch.float32),
+                        alpha=strength,
+                    )
+                parameter.copy_(value.to(dtype=parameter.dtype))
+        if deltas:
+            self.active_parameter_delta_modules.add(module_name)
+        else:
+            self.active_parameter_delta_modules.discard(module_name)
+        return len(deltas)
 
     def convert_module_lora_layers(
         self,
@@ -571,9 +659,11 @@ class LoRAPipeline(ComposedPipelineBase):
         module_name: str,
         lora_layers: dict[str, BaseLayerWithLoRA],
     ) -> bool:
-        return self.is_lora_merged.get(
-            module_name, False
-        ) or self._has_active_unmerged_lora(lora_layers)
+        return (
+            self.is_lora_merged.get(module_name, False)
+            or self._has_active_unmerged_lora(lora_layers)
+            or module_name in self.active_parameter_delta_modules
+        )
 
     def _resolve_lora_merge_mode(
         self,
@@ -1093,6 +1183,12 @@ class LoRAPipeline(ComposedPipelineBase):
             with weight_update_context:
                 # Apply LoRA to modules for this target
                 for module_name, lora_layers_dict in target_modules:
+                    patched_count = self._apply_parameter_deltas(
+                        module_name,
+                        tgt_nicknames,
+                        tgt_strengths,
+                        allow_no_match=len(target_modules) > 1,
+                    )
                     effective_merge_weights = merge_weights_by_module[module_name]
                     count = None
                     if not effective_merge_weights and not adapter_updated:
@@ -1125,6 +1221,12 @@ class LoRAPipeline(ComposedPipelineBase):
                                 {"module": module_name, "paths": tgt_paths}
                             )
                     adapted_count += count
+                    if patched_count:
+                        logger.info(
+                            "Applied exact additive deltas to %d %s parameter(s)",
+                            patched_count,
+                            module_name,
+                        )
                     self.cur_adapter_name[module_name] = merged_name
                     self.cur_adapter_path[module_name] = ",".join(
                         str(p or self.loaded_adapter_paths.get(n, ""))
@@ -1224,7 +1326,7 @@ class LoRAPipeline(ComposedPipelineBase):
         for module_name, lora_layers_dict in target_modules:
             if self.is_lora_merged.get(module_name, False) or any(
                 layer.merged for layer in lora_layers_dict.values()
-            ):
+            ) or module_name in self.active_parameter_delta_modules:
                 modules_requiring_unmerge.append((module_name, lora_layers_dict))
 
         offload_context = self._temporarily_disable_offload(
@@ -1232,6 +1334,7 @@ class LoRAPipeline(ComposedPipelineBase):
         )
         with offload_context:
             for module_name, lora_layers_dict in target_modules:
+                self._apply_parameter_deltas(module_name, [], [])
                 for layer in lora_layers_dict.values():
                     if layer.merged:
                         layer.unmerge_lora_weights()
@@ -1262,6 +1365,15 @@ class LoRAPipeline(ComposedPipelineBase):
         # Disable layerwise offload if enabled: load all layers to GPU
         with self._temporarily_disable_offload(target_modules=target_modules):
             for module_name, lora_layers_dict in target_modules:
+                adapter_config = self.cur_adapter_config.get(module_name)
+                if adapter_config is not None:
+                    nicknames, _ = adapter_config
+                    self._apply_parameter_deltas(
+                        module_name,
+                        nicknames,
+                        [strength] * len(nicknames),
+                        allow_no_match=len(target_modules) > 1,
+                    )
                 if not self._should_merge_lora_for_layers(
                     module_name, lora_layers_dict, self.server_args.lora_merge_mode
                 ):
@@ -1331,7 +1443,10 @@ class LoRAPipeline(ComposedPipelineBase):
 
         for module_name, lora_layers_dict in target_modules:
             if not self.is_lora_merged.get(module_name, False):
-                if self._has_active_unmerged_lora(lora_layers_dict):
+                if self._has_active_unmerged_lora(
+                    lora_layers_dict
+                ) or module_name in self.active_parameter_delta_modules:
+                    self._apply_parameter_deltas(module_name, [], [])
                     for layer in lora_layers_dict.values():
                         if not layer.disable_lora:
                             layer.disable_lora = True
@@ -1344,6 +1459,7 @@ class LoRAPipeline(ComposedPipelineBase):
                     )
                 continue
             with self._temporarily_disable_offload(target_modules=target_modules):
+                self._apply_parameter_deltas(module_name, [], [])
                 for name, layer in lora_layers_dict.items():
                     # Check layer-level state to avoid raising exception
                     if hasattr(layer, "merged") and not layer.merged:

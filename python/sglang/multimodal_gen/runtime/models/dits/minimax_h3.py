@@ -1602,9 +1602,13 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             a64 = a.to(torch.float64)
             b64 = b.to(device=work_device, dtype=torch.float64)
             projected[a_key] = (a64 @ work_basis.T).to(torch.float32)
-            projected[a_key[: -len("lora_A")] + "lora_output_offset"] = (
-                b64 @ (a64 @ work_mean)
-            ).to(torch.float32)
+            output_offset_key = a_key[: -len("lora_A")] + "lora_output_offset"
+            output_offset = b64 @ (a64 @ work_mean)
+            if output_offset_key in adapter:
+                output_offset = output_offset + adapter[output_offset_key].to(
+                    device=work_device, dtype=torch.float64
+                )
+            projected[output_offset_key] = output_offset.to(torch.float32)
 
         logger.info(
             "Projected %d MiniMax H3 AdaLN LoRA modules from width %d to %d",

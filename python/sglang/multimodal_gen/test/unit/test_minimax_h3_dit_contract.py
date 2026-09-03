@@ -70,12 +70,19 @@ def test_pruned_adaln_lora_projection_preserves_affine_term():
     prefix = "blocks.0.adaln_proj.linear."
     a = torch.tensor([[2.0, 3.0, 4.0]])
     b = torch.tensor([[5.0], [6.0]])
+    bias_delta = torch.tensor([7.0, 8.0])
     actual = MiniMaxH3DiTModel.prepare_lora_adapter(
-        model, {prefix + "lora_A": a, prefix + "lora_B": b}
+        model,
+        {
+            prefix + "lora_A": a,
+            prefix + "lora_B": b,
+            prefix + "lora_output_offset": bias_delta,
+        },
     )
     torch.testing.assert_close(actual[prefix + "lora_A"], a @ model.adaln_basis.T)
     torch.testing.assert_close(
-        actual[prefix + "lora_output_offset"], b @ (a @ model.adaln_mean)
+        actual[prefix + "lora_output_offset"],
+        b @ (a @ model.adaln_mean) + bias_delta,
     )
 
 

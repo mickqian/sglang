@@ -276,6 +276,8 @@ _QKV_MAPPING = {
 def _make_loader_pipeline() -> _TestLoRAPipeline:
     pipeline = object.__new__(_TestLoRAPipeline)
     pipeline.lora_adapters = defaultdict(dict)
+    pipeline.lora_parameter_bases = defaultdict(dict)
+    pipeline.active_parameter_delta_modules = set()
     pipeline.loaded_adapter_paths = {}
     pipeline.loaded_adapter_alphas = {}
     pipeline.device = "cpu"

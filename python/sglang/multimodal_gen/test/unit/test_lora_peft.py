@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import save_file
 
 from sglang.multimodal_gen.runtime.pipelines_core.lora.format_adapter import (
+    PARAMETER_DELTA_SUFFIX,
     normalize_lora_state_dict,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.lora.peft_adapter import (
@@ -51,6 +52,22 @@ def test_additive_linear_patch_is_preserved_as_lora(shape):
     assert normalized["transformer.proj.alpha"].item() == min(shape)
     assert normalized["transformer.proj.lora_output_offset"] is bias
     assert not any(name.endswith((".diff", ".diff_b")) for name in normalized)
+
+
+def test_additive_parameter_and_standalone_lora_bias_are_preserved():
+    delta = torch.randn(7)
+    bias = torch.randn(5)
+    normalized = normalize_lora_state_dict(
+        {
+            "transformer.norm.diff": delta,
+            "transformer.proj.lora_A.weight": torch.randn(3, 7),
+            "transformer.proj.lora_B.weight": torch.randn(5, 3),
+            "transformer.proj.diff_b": bias,
+        }
+    )
+
+    assert normalized[f"transformer.norm{PARAMETER_DELTA_SUFFIX}"] is delta
+    assert normalized["transformer.proj.lora_output_offset"] is bias
 
 
 @pytest.mark.parametrize(
