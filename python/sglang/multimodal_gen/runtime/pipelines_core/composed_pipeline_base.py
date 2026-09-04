@@ -205,7 +205,8 @@ class ComposedPipelineBase(ABC):
                 allow_patterns=[f"{model_subfolder}/**"],
                 ignore_patterns=component_weight_ignore_patterns(
                     model_subfolder,
-                    self.server_args.component_weights_paths,
+                    self.server_args.component_paths.keys()
+                    | self.server_args.component_weights_paths.keys(),
                 ),
                 revision=self.server_args.revision,
             )

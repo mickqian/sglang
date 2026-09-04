@@ -442,14 +442,24 @@ def test_cached_probe_preserves_additional_ignore_patterns(monkeypatch, tmp_path
     ]
 
 
-def test_partition_download_skips_overridden_component_weights(tmp_path):
+@pytest.mark.parametrize(
+    "component_paths,component_weights_paths",
+    [
+        ({"transformer": "org/variant/transformer"}, {}),
+        ({}, {"transformer": "org/variant/model.safetensors"}),
+    ],
+)
+def test_partition_download_skips_overridden_component_weights(
+    tmp_path, component_paths, component_weights_paths
+):
     pipeline = SimpleNamespace(
         model_path="org/repo",
         default_model_subfolder=None,
         server_args=SimpleNamespace(
             model_subfolder="Ref2VA",
             revision=None,
-            component_weights_paths={"transformer": "org/variant/model.safetensors"},
+            component_paths=component_paths,
+            component_weights_paths=component_weights_paths,
         ),
     )
 
