@@ -29,17 +29,19 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 from sglang.multimodal_gen.runtime.layers.quantization.comfy_nvfp4 import (
     ComfyNvfp4Config,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
+    Int8WeightOnlyConfig,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.quanto_int8_config import (
-    QuantoInt8Config,
     inspect_quanto_int8_checkpoint,
 )
-from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
-from sglang.multimodal_gen.runtime.layers.quantization.quanto_int8 import (
-    normalize_quanto_int8_weights,
+from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_config import (
+    inspect_torchao_int8_checkpoint,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
     ComponentCheckpointUnsupportedError,
     NativeComponentLoaderRequired,
@@ -171,9 +173,9 @@ def _get_encoder_quant_config(
         if srt_quant_config is not None:
             return srt_quant_config
 
-    quant_config = get_quant_config(component_config, component_model_path)
     name_mapper = None
     parameter_name_mapper = None
+    mapping_fn = None
     if model_cls is not None:
         mapping = vars(model_cls).get("param_names_mapping", {})
         if mapping:
@@ -193,6 +195,21 @@ def _get_encoder_quant_config(
                 # mappings use to delimit a parameter name.
                 mapped_name = parameter_name_mapper(f"{name}.weight")
                 return mapped_name.removesuffix(".weight")
+
+    safetensors_list = (
+        [component_weights_path]
+        if component_weights_path.endswith(".safetensors")
+        else _list_safetensors_files(component_weights_path)
+    )
+    torchao_config = inspect_torchao_int8_checkpoint(
+        component_config,
+        safetensors_list,
+        param_name_mapper=mapping_fn,
+    )
+    if torchao_config is not None:
+        return torchao_config
+
+    quant_config = get_quant_config(component_config, component_model_path)
 
     if names_gguf_checkpoint(component_weights_path):
         if quant_config is not None:
@@ -802,6 +819,10 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                 quant_config.retain_tensor_meta(
                     model.should_materialize_checkpoint_weight
                 )
+            elif isinstance(quant_config, Int8WeightOnlyConfig):
+                quant_config.retain_checkpoint_layers(
+                    model.should_materialize_checkpoint_weight
+                )
             if quant_config is not None:
                 require_quantized_linear_layers(
                     model,
@@ -835,13 +856,17 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                     model_path,
                     to_cpu=component_starts_on_cpu,
                 )
-            if isinstance(quant_config, QuantoInt8Config):
-                checkpoint_weights = normalize_quanto_int8_weights(checkpoint_weights)
+            if quant_config is not None:
+                checkpoint_weights = quant_config.normalize_checkpoint_weights(
+                    checkpoint_weights
+                )
             loaded_weights = model.load_weights(checkpoint_weights)
 
             if quant_config is not None and not isinstance(quant_config, GGUFConfig):
                 postprocess_device: torch.device | None = local_torch_device
-                if isinstance(quant_config, (ComfyNvfp4Config, QuantoInt8Config)) or (
+                if isinstance(
+                    quant_config, (ComfyNvfp4Config, Int8WeightOnlyConfig)
+                ) or (
                     isinstance(quant_config, KitchenInt8Config)
                     and quant_config.is_checkpoint_int8_serialized
                 ):

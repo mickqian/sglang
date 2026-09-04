@@ -5,78 +5,32 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
 
 import torch
 from safetensors import safe_open
 
-from sglang.multimodal_gen.runtime.layers.linear import (
-    LinearBase as DiffusionLinearBase,
-)
-from sglang.multimodal_gen.runtime.layers.linear import (
-    UnquantizedLinearMethod as DiffusionUnquantizedLinearMethod,
-)
-from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
-    QuantizationConfig,
-    QuantizeMethodBase,
+from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
+    Int8WeightOnlyConfig,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.quanto_int8 import (
-    QuantoInt8LinearMethod,
-)
-from sglang.srt.layers.linear import LinearBase as SrtLinearBase
-from sglang.srt.layers.quantization.unquant import (
-    UnquantizedLinearMethod as SrtUnquantizedLinearMethod,
+    normalize_quanto_int8_weights,
 )
 
 _FLOAT_DTYPES = {"BF16", "F16", "F32"}
 
 
-class QuantoInt8Config(QuantizationConfig):
+class QuantoInt8Config(Int8WeightOnlyConfig):
     """Dispatch linears declared qint8 in an Optimum Quanto quantization map."""
-
-    supports_srt_linear_layers = True
-
-    def __init__(self, layer_prefixes: set[str]) -> None:
-        super().__init__()
-        self.layer_prefixes = layer_prefixes
-        self.selected: set[str] = set()
 
     @classmethod
     def get_name(cls) -> str:
         return "quanto_int8"
 
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.float16]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 0
-
-    @staticmethod
-    def get_config_filenames() -> list[str]:
-        return []
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> QuantoInt8Config:
-        raise ValueError(
-            "QuantoInt8Config must be constructed from safetensors metadata"
-        )
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> QuantizeMethodBase | None:
-        if isinstance(layer, DiffusionLinearBase):
-            unquantized_method = DiffusionUnquantizedLinearMethod
-        elif isinstance(layer, SrtLinearBase):
-            unquantized_method = SrtUnquantizedLinearMethod
-        else:
-            return None
-        if prefix not in self.layer_prefixes:
-            return unquantized_method()
-        self.selected.add(prefix)
-        return QuantoInt8LinearMethod()
+    def normalize_checkpoint_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        return normalize_quanto_int8_weights(weights)
 
 
 def inspect_quanto_int8_checkpoint(
@@ -124,7 +78,7 @@ def inspect_quanto_int8_checkpoint(
                 f"missing tensors={sorted(missing_data)[:5]}"
             )
 
-        mapped_prefixes: set[str] = set()
+        mapped_scale_dtypes: dict[str, torch.dtype] = {}
         for prefix, quantization in quantization_map.items():
             if quantization.get("weights") != "qint8":
                 raise ValueError(
@@ -182,13 +136,17 @@ def inspect_quanto_int8_checkpoint(
             mapped_prefix = (
                 param_name_mapper(prefix) if param_name_mapper is not None else prefix
             )
-            if mapped_prefix in mapped_prefixes:
+            if mapped_prefix in mapped_scale_dtypes:
                 raise ValueError(
                     f"Quanto layers collide after parameter mapping at {mapped_prefix!r}"
                 )
-            mapped_prefixes.add(mapped_prefix)
+            mapped_scale_dtypes[mapped_prefix] = {
+                "BF16": torch.bfloat16,
+                "F16": torch.float16,
+                "F32": torch.float32,
+            }[scale_slice.get_dtype()]
 
-    return QuantoInt8Config(mapped_prefixes)
+    return QuantoInt8Config(mapped_scale_dtypes)
 
 
 __all__ = ["QuantoInt8Config", "inspect_quanto_int8_checkpoint"]

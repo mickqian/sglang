@@ -110,7 +110,7 @@ def test_native_vision_accepts_srt_linear_quantization():
         "model.visual.blocks.0.mlp.linear_fc1",
         "model.visual.blocks.0.mlp.linear_fc2",
     }
-    quant_config = QuantoInt8Config(prefixes)
+    quant_config = QuantoInt8Config({prefix: torch.bfloat16 for prefix in prefixes})
     with get_parallel().override(tp_size=1, tp_rank=0):
         model = Qwen3VLVisionTransformer(
             config,

@@ -4,6 +4,7 @@
 # Adapted from vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/layers/quantization/base_config.py
 
 import inspect
+from collections.abc import Iterable
 
 import torch
 
@@ -39,6 +40,7 @@ class QuantizationConfig(SRTQuantizationConfig):
     checkpoint_uses_comfy_quantization: bool = False
     supports_srt_linear_layers: bool = False
     supports_quantized_embeddings: bool = False
+    normalizes_checkpoint_weights: bool = False
 
     def get_scaled_act_names(self) -> list[str]:
         return []
@@ -60,3 +62,13 @@ class QuantizationConfig(SRTQuantizationConfig):
     def remap_checkpoint_prefixes(self, param_names_mapping: dict) -> None:
         """Translate checkpoint module names to the native model namespace."""
         return
+
+    def normalize_checkpoint_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Translate serialized format tensors to runtime parameter names."""
+        return weights
+
+    def supports_cpu_weight_loading(self) -> bool:
+        """Whether serialized quantized parameters can be loaded on CPU."""
+        return False

@@ -23,6 +23,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.comfy_fp8 import ComfyFp8
 from sglang.multimodal_gen.runtime.layers.quantization.comfy_nvfp4 import (
     ComfyNvfp4Config,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
+    Int8WeightOnlyConfig,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
 )
@@ -31,9 +34,6 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a4_conf
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a8_config import (
     KitchenW4A8Config,
-)
-from sglang.multimodal_gen.runtime.layers.quantization.configs.quanto_int8_config import (
-    QuantoInt8Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
 from sglang.multimodal_gen.runtime.layers.quantization.mxfp8 import MXFP8Config
@@ -502,7 +502,7 @@ def require_quantized_linear_layers(
     ):
         expected = set(quant_config.layer_markers)
         selected = set(quant_config.selected)
-    elif isinstance(quant_config, QuantoInt8Config):
+    elif isinstance(quant_config, Int8WeightOnlyConfig):
         expected = quant_config.layer_prefixes
         selected = quant_config.selected
     elif isinstance(quant_config, GGUFConfig):
