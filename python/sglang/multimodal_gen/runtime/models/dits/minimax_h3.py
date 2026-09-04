@@ -108,6 +108,53 @@ _PDD_SIDECAR_HEAD_KEYS = {
 }
 _PDDHeadPlan = tuple[int, torch.Tensor]
 _PDD_PARTITION_TOLERANCE = 0.015
+_NATIVE_LORA_KEY_FORMAT = "minimax-h3-native"
+
+
+def _native_lora_runtime_state(metadata: dict[str, str]) -> dict[str, Any]:
+    key_format = metadata.get("key_format")
+    semantic_keys = {"base_schedule", "qkv_layout"} & metadata.keys()
+    if semantic_keys and key_format != _NATIVE_LORA_KEY_FORMAT:
+        raise ValueError(
+            "MiniMax H3 LoRA semantic metadata requires "
+            f"key_format={_NATIVE_LORA_KEY_FORMAT!r}; got keys "
+            f"{sorted(semantic_keys)}"
+        )
+    if key_format != _NATIVE_LORA_KEY_FORMAT:
+        return {}
+    if metadata.get("qkv_layout") != "grouped":
+        raise ValueError("MiniMax H3 native LoRA requires qkv_layout='grouped'")
+
+    raw_schedule = metadata.get("base_schedule")
+    if raw_schedule is None:
+        raise ValueError("MiniMax H3 native LoRA requires base_schedule metadata")
+    try:
+        base_schedule = tuple(float(value.strip()) for value in raw_schedule.split(","))
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax H3 native LoRA base_schedule must contain comma-separated "
+            "finite numbers"
+        ) from error
+    if (
+        len(base_schedule) < 2
+        or any(not math.isfinite(value) for value in base_schedule)
+        or base_schedule[0] != 1.0
+        or base_schedule[-1] != 0.0
+        or any(left <= right for left, right in zip(base_schedule, base_schedule[1:]))
+    ):
+        raise ValueError(
+            "MiniMax H3 native LoRA base_schedule must start at 1, end at 0, "
+            "and be strictly decreasing"
+        )
+
+    tasks = frozenset(
+        value.strip().lower()
+        for value in metadata.get("tasks", "").split(",")
+        if value.strip()
+    )
+    if not tasks:
+        raise ValueError("MiniMax H3 native LoRA requires tasks metadata")
+    return {"base_schedule": base_schedule, "tasks": tasks}
 
 
 def _positive_pdd_metadata(metadata: dict[str, str], key: str) -> int:
@@ -1888,14 +1935,38 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         adapter: dict[str, torch.Tensor],
         metadata: dict[str, str],
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-        """Extract PDD output heads before ordinary LoRA name conversion."""
+        """Extract H3 adapter semantics before ordinary LoRA name conversion."""
         sidecar_keys = {name for name in adapter if name.startswith("h3_pdd.")}
         if sidecar_keys:
             adapter = self._normalize_pdd_sidecar(adapter, metadata, sidecar_keys)
 
+        runtime_state = _native_lora_runtime_state(metadata)
+        qkv_b_names = [
+            name
+            for name in adapter
+            if name.endswith((".attn.qkv_proj.lora_B", ".attn.qkv_proj.lora_B.weight"))
+        ]
+        if qkv_b_names:
+            # H3's external fused QKV layout is per-head [Q, K, V], matching
+            # its base checkpoint. Individual to_q/to_k/to_v LoRAs take the
+            # separate mapping path and never enter this branch.
+            adapter = dict(adapter)
+            for name in qkv_b_names:
+                adapter[name] = _reorder_grouped_qkv_to_qkv(
+                    adapter[name],
+                    num_query_groups=self.arch.num_attention_heads,
+                    heads_per_group=1,
+                    head_dim=self.arch.attention_head_dim,
+                )
+
         present = _PDD_HEAD_KEYS.keys() & adapter.keys()
         if not present:
-            return adapter, {}
+            return adapter, runtime_state
+        if runtime_state:
+            raise ValueError(
+                "MiniMax H3 PDD output heads cannot be combined with an "
+                "adapter-declared base_schedule"
+            )
         missing = _PDD_HEAD_KEYS.keys() - adapter.keys()
         if missing:
             raise ValueError(
@@ -2152,16 +2223,28 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             (state, strength) for state, strength in zip(states, strengths) if state
         ]
         if len(active) > 1:
-            raise ValueError("Only one MiniMax H3 PDD adapter can be active at a time")
+            raise ValueError(
+                "Only one MiniMax H3 semantic adapter can be active at a time"
+            )
         if not active:
             self.final_layer.set_pdd_heads(None)
+            self._active_lora_base_schedule = None
+            self._active_lora_tasks = frozenset()
             return
         state, strength = active[0]
         if strength != 1.0:
             raise ValueError(
-                "MiniMax H3 PDD output heads are absolute weights; use lora_scale=1.0"
+                "MiniMax H3 PDD heads and adapter schedules are absolute runtime "
+                "semantics; use lora_scale=1.0"
             )
-        self.final_layer.set_pdd_heads(state)
+        self.final_layer.set_pdd_heads(state if "video_weight" in state else None)
+        self._active_lora_base_schedule = state.get("base_schedule")
+        self._active_lora_tasks = state.get("tasks", frozenset())
+
+    def get_lora_denoise_schedule(
+        self,
+    ) -> tuple[tuple[float, ...] | None, frozenset[str]]:
+        return self._active_lora_base_schedule, self._active_lora_tasks
 
     def prepare_pdd_plans(
         self,
@@ -2526,6 +2609,8 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             ]
         )
         self.layer_names = ["token_refiner.blocks", "blocks"]
+        self._active_lora_base_schedule: tuple[float, ...] | None = None
+        self._active_lora_tasks: frozenset[str] = frozenset()
         self.final_layer = MiniMaxH3FinalLayer(
             arch,
             quant_config,

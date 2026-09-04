@@ -128,6 +128,12 @@ class BaseDiT(nn.Module, ABC):
                 f"{self.__class__.__name__} does not support LoRA runtime state"
             )
 
+    def get_lora_denoise_schedule(
+        self,
+    ) -> tuple[tuple[float, ...] | None, frozenset[str]]:
+        """Return an active adapter's sigma positions and admitted tasks."""
+        return None, frozenset()
+
     def validate_weight_update_source(self, *, weights_path: str | None) -> None:
         """Reject a weight update this model cannot stay coherent under.
 

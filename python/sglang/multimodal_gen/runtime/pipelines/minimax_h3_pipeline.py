@@ -182,6 +182,7 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_stage(
             MiniMaxH3TimestepPreparationStage(
                 sigma_shift_scales=sigma_shift_scales,
+                transformer=self.get_module("transformer"),
             )
         )
         self.add_stage(
