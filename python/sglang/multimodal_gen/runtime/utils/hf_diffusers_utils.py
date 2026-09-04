@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Iterable
 from functools import reduce
 from pathlib import Path
 from typing import Any, Optional, Union, cast
@@ -72,7 +73,9 @@ _WEIGHT_FILE_PATTERNS = (
     "*.pt",
     "*.pth",
     "*.ckpt",
+    "*.gguf",
 )
+_DEFAULT_MODEL_IGNORE_PATTERNS = ("*.onnx", "*.msgpack")
 _PIPELINE_INDEX_FILENAMES = (
     "model_index.json",
     "modular_model_index.json",
@@ -81,6 +84,18 @@ _PIPELINE_INDEX_FILENAMES = (
 
 def _model_hub_name() -> str:
     return "ModelScope" if envs.SGLANG_USE_MODELSCOPE.get() else "Hugging Face Hub"
+
+
+def component_weight_ignore_patterns(
+    pipeline_subfolder: str, component_names: Iterable[str]
+) -> list[str]:
+    """Keep base component configs while skipping weights replaced by an override."""
+    return [
+        f"{pipeline_subfolder}/{component}/{recursive}{pattern}"
+        for component in sorted(set(component_names))
+        for recursive in ("", "**/")
+        for pattern in _WEIGHT_FILE_PATTERNS
+    ]
 
 
 def _is_revisionless_snapshot_root(local_path: str) -> bool:
@@ -961,6 +976,7 @@ def maybe_download_model(
     download: bool = True,
     is_lora: bool = False,
     allow_patterns: list[str] | None = None,
+    ignore_patterns: list[str] | None = None,
     force_diffusers_model: bool = False,
     revision: str | None = None,
     skip_overlay_resolution: bool = False,
@@ -973,11 +989,15 @@ def maybe_download_model(
         local_dir: Local directory to save the model
         download: Whether to download the model from Hugging Face Hub
         is_lora: If True, skip model completeness verification (LoRA models don't have transformer/vae directories)
+        ignore_patterns: Additional Hub snapshot patterns to exclude
         force_diffusers_model: If True, apply diffusers model check. Otherwise it should be a component model
         revision: Specific Hugging Face Hub revision to resolve
     Returns:
         Local path to the model
     """
+    snapshot_ignore_patterns = list(
+        dict.fromkeys((*_DEFAULT_MODEL_IGNORE_PATTERNS, *(ignore_patterns or ())))
+    )
     if force_diffusers_model and not skip_overlay_resolution:
         # return overlay model path if applicable
         overlay_model_path = maybe_resolve_overlay_model_path(
@@ -1039,7 +1059,7 @@ def maybe_download_model(
         )
         local_path = snapshot_download(
             repo_id=model_name_or_path,
-            ignore_patterns=["*.onnx", "*.msgpack"],
+            ignore_patterns=snapshot_ignore_patterns,
             allow_patterns=allow_patterns,
             local_dir=local_dir,
             local_files_only=True,
@@ -1156,7 +1176,7 @@ def maybe_download_model(
             with get_lock(model_name_or_path).acquire(poll_interval=2):
                 local_path = snapshot_download(
                     repo_id=model_name_or_path,
-                    ignore_patterns=["*.onnx", "*.msgpack"],
+                    ignore_patterns=snapshot_ignore_patterns,
                     allow_patterns=allow_patterns,
                     local_dir=local_dir,
                     max_workers=8,
@@ -1174,7 +1194,7 @@ def maybe_download_model(
                 with get_lock(model_name_or_path).acquire(poll_interval=2):
                     local_path = snapshot_download(
                         repo_id=model_name_or_path,
-                        ignore_patterns=["*.onnx", "*.msgpack"],
+                        ignore_patterns=snapshot_ignore_patterns,
                         allow_patterns=allow_patterns,
                         local_dir=local_dir,
                         max_workers=8,

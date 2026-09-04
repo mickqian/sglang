@@ -53,6 +53,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.progressive_resolution.
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
+    component_weight_ignore_patterns,
     has_diffusers_pipeline_index,
     maybe_download_model,
     parse_diffusers_component_entry,
@@ -202,6 +203,10 @@ class ComposedPipelineBase(ABC):
             model_root = maybe_download_model(
                 self.model_path,
                 allow_patterns=[f"{model_subfolder}/**"],
+                ignore_patterns=component_weight_ignore_patterns(
+                    model_subfolder,
+                    self.server_args.component_weights_paths,
+                ),
                 revision=self.server_args.revision,
             )
             model_path = os.path.join(model_root, model_subfolder)

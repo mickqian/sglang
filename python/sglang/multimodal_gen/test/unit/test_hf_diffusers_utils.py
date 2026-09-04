@@ -421,6 +421,59 @@ def test_metadata_only_cached_pipeline_subfolder_is_not_an_offline_hit(
     assert calls == ["probe"]
 
 
+def test_cached_probe_preserves_additional_ignore_patterns(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(hf_diffusers_utils, "snapshot_download", fake_snapshot_download)
+
+    assert maybe_download_model(
+        "org/repo",
+        download=False,
+        ignore_patterns=["FL2VA/transformer/*.safetensors"],
+    ) == str(tmp_path)
+    assert calls[0]["ignore_patterns"] == [
+        "*.onnx",
+        "*.msgpack",
+        "FL2VA/transformer/*.safetensors",
+    ]
+
+
+def test_partition_download_skips_overridden_component_weights(tmp_path):
+    pipeline = SimpleNamespace(
+        model_path="org/repo",
+        default_model_subfolder=None,
+        server_args=SimpleNamespace(
+            model_subfolder="Ref2VA",
+            revision=None,
+            component_weights_paths={"transformer": "org/variant/model.safetensors"},
+        ),
+    )
+
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "maybe_download_model",
+            return_value=str(tmp_path),
+        ) as download,
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "verify_model_config_and_directory",
+            return_value={"_diffusers_version": "0.37.0"},
+        ),
+    ):
+        ComposedPipelineBase._load_config(pipeline)
+
+    ignore_patterns = download.call_args.kwargs["ignore_patterns"]
+    assert "Ref2VA/transformer/*.safetensors" in ignore_patterns
+    assert "Ref2VA/transformer/**/*.safetensors" in ignore_patterns
+    assert "Ref2VA/transformer/*.gguf" in ignore_patterns
+    assert "Ref2VA/transformer/**/*.gguf" in ignore_patterns
+
+
 def test_complete_cached_snapshot_is_served_without_download(
     recording_snapshot_download, tmp_path
 ):
