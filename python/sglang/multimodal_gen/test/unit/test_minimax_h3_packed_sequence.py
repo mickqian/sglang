@@ -152,7 +152,9 @@ class TestMiniMaxH3PackedSequence(unittest.TestCase):
         frame_rescale = 5.0 / 3.0
         self.assertAlmostEqual(action_t[1] - action_t[0], frame_rescale)
         self.assertAlmostEqual(action_t[2] - action_t[1], 4 * frame_rescale)
-        self.assertEqual(built["action_text_rows"].tolist(), list(action_spans))
+        self.assertEqual(
+            built["action_text_rows"].tolist(), [list(span) for span in action_spans]
+        )
         self.assertEqual(built["action_text_spans_local"], action_spans)
         self.assertEqual(built["action_frame_rows"], 4)
         self.assertEqual(built["action_video_start"], 35 + 4 + 8)

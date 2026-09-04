@@ -56,19 +56,13 @@ def build_minimax_h3_world_control_attention(
             query_frame = frame_ids[query]
             key_frame = frame_ids[key_value]
             same_action = (
-                (query_action >= 0)
-                & (key_action >= 0)
-                & (query_action == key_action)
+                (query_action >= 0) & (key_action >= 0) & (query_action == key_action)
             )
             frame_reads_action = (
-                (query_frame >= 0)
-                & (key_action >= 0)
-                & (query_frame == key_action)
+                (query_frame >= 0) & (key_action >= 0) & (query_frame == key_action)
             )
             action_reads_other_frame = (
-                (query_action >= 0)
-                & (key_frame >= 0)
-                & (query_action != key_frame)
+                (query_action >= 0) & (key_frame >= 0) & (query_action != key_frame)
             )
             action_leaks = (key_action >= 0) & ~same_action & ~frame_reads_action
             return torch.where(
@@ -96,9 +90,9 @@ def build_minimax_h3_world_control_attention(
     if video_stop > used:
         raise ValueError("H3-World target video rows exceed the packed live sequence")
     target_rows = torch.arange(video_start, video_stop, device=device)
-    frame_ids[video_start:video_stop] = (
-        (target_rows - video_start) // frame_rows
-    ).to(torch.int32)
+    frame_ids[video_start:video_stop] = ((target_rows - video_start) // frame_rows).to(
+        torch.int32
+    )
     return attention
 
 

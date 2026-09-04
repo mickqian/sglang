@@ -866,7 +866,9 @@ def _minimax_h3_attention_core_impl(
 
     if world_control_attention is not None:
         if ring_active:
-            raise ValueError("H3-World action routing does not support Ring parallelism")
+            raise ValueError(
+                "H3-World action routing does not support Ring parallelism"
+            )
         out = minimax_h3_world_control_attention(
             q,
             k,

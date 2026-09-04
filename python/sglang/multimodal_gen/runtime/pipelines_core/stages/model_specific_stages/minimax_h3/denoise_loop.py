@@ -250,7 +250,9 @@ class MiniMaxH3DenoiseBranch:
         ulysses_world_size, ulysses_rank = get_ulysses_ctx()
         ring_world_size, ring_rank = get_ring_ctx()
         if "action_text_rows" in packed and ring_world_size > 1:
-            raise ValueError("H3-World action routing does not support Ring parallelism")
+            raise ValueError(
+                "H3-World action routing does not support Ring parallelism"
+            )
         # Combined SP-local rank/world size: the group coordinator lays out
         # ring as the outer (slower-varying) dimension and Ulysses as the
         # inner one (see set_seq_parallel_pg_by_sp_groups), so this matches
@@ -339,9 +341,7 @@ class MiniMaxH3DenoiseBranch:
                 "cu_seqlens_q_host": refiner_cu_host,
                 "max_seqlen_q": max(
                     stop - start
-                    for start, stop in zip(
-                        refiner_cu_host[:-1], refiner_cu_host[1:]
-                    )
+                    for start, stop in zip(refiner_cu_host[:-1], refiner_cu_host[1:])
                 ),
             },
         }
