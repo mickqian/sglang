@@ -559,12 +559,10 @@ def _validate_gguf_runtime_support(
             "Run without --use-fsdp-inference, or keep this component offloaded "
             "so FSDP does not manage it."
         )
-    if server_args.lora_path is not None:
-        raise ValueError(
-            "LoRA is not supported on a GGUF transformer: an adapter cannot be "
-            "merged into packed GGML blocks. Use the unquantized checkpoint to "
-            "serve LoRA."
-        )
+    # LoRA admission depends on the resolved weight layout. Ordinary GGML
+    # blocks expose only ``qweight`` and are rejected by LoRAPipeline before
+    # layer replacement. Native NVFP4 GGUF is normalized to the existing
+    # ``weight``-based runtime and can use dynamic (unmerged) LoRA.
     # H3's AdaLN paths read the transformer's safetensors directly -- the cache
     # builder needs unquantized weights, and the online rebuild is handed the
     # safetensors file list, which is empty for a GGUF load.

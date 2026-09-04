@@ -47,6 +47,8 @@ from sglang.srt.utils.common import is_flashinfer_available, round_up
 
 logger = logging.getLogger(__name__)
 
+_NVFP4_DYNAMIC_SCALE_RANGE = 448.0 * 6.0
+
 if is_flashinfer_available():
     import flashinfer
 else:
@@ -898,6 +900,97 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             output_shape=output_shape,
             bias=bias,
         )
+
+
+class DynamicNvfp4LinearMethod(ModelOptFp4LinearMethod):
+    """Run serialized NVFP4 weights with static or dynamic activation scales."""
+
+    def __init__(
+        self, quant_config: ModelOptFp4Config, *, has_input_scale: bool
+    ) -> None:
+        super().__init__(quant_config)
+        self.has_input_scale = has_input_scale
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs: Any,
+    ) -> None:
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        if not self.has_input_scale:
+            layer.register_parameter("input_scale", None)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight_scale = (
+            layer.weight_scale_2.max()
+            .to(torch.float32)
+            .clamp_min(torch.finfo(torch.float32).tiny)
+        )
+        partition_scales = layer.weight_scale_2.to(torch.float32) / weight_scale
+        widths = torch.tensor(
+            layer.logical_widths,
+            device=partition_scales.device,
+            dtype=torch.long,
+        )
+        output_scale = torch.repeat_interleave(partition_scales, widths).to(
+            layer.params_dtype
+        )
+        copy_or_rebind_param(layer, "dynamic_weight_scale", weight_scale)
+        copy_or_rebind_param(layer, "dynamic_output_scale", output_scale)
+        if self.has_input_scale:
+            input_scale = layer.input_scale.max().to(torch.float32)
+            copy_or_rebind_param(layer, "input_scale_inv", input_scale.reciprocal())
+            copy_or_rebind_param(layer, "alpha", input_scale * weight_scale)
+        self._process_weight_storage_after_loading(layer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        input_shape = x.shape
+        x = x.reshape(-1, input_shape[-1]).contiguous()
+        if self.has_input_scale:
+            input_scale_inv = layer.input_scale_inv
+            alpha = layer.alpha
+        else:
+            input_scale = (
+                x.abs().amax().to(torch.float32) / _NVFP4_DYNAMIC_SCALE_RANGE
+            ).clamp_min(torch.finfo(torch.float32).tiny)
+            input_scale_inv = input_scale.reciprocal()
+            alpha = input_scale * layer.dynamic_weight_scale
+
+        fp4_quantize = _get_fp4_quantize_op()
+        if fp4_quantize is None:
+            raise RuntimeError(
+                "No FP4 quantization kernel available. Install flashinfer."
+            )
+        x_fp4, x_scale_interleaved = fp4_quantize(x, input_scale_inv)
+        output = self._apply_quantized_input(
+            layer,
+            x_fp4,
+            x_scale_interleaved,
+            alpha=alpha,
+            output_dtype=x.dtype,
+            output_shape=list(input_shape[:-1]) + [layer.output_size_per_partition],
+            bias=None,
+        )
+        output = output * layer.dynamic_output_scale
+        return output + bias if bias is not None else output
 
 
 def apply_nvfp4_gemm_prequantized(

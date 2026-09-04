@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import gguf
 import numpy as np
 import torch
 from gguf import GGMLQuantizationType as WeightType
@@ -28,6 +29,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.gguf import (
     GGUFConfig,
     GGUFLinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+    DynamicNvfp4LinearMethod,
+)
 from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     GGUFTensorMeta,
     gguf_weights_iterator,
@@ -35,12 +39,14 @@ from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     read_gguf_tensor_meta,
     remap_gguf_tensor_meta,
 )
+from sglang.srt.layers.quantization.dequantization import dequantize_nvfp4
 from sglang.srt.layers.quantization.gguf import UNQUANTIZED_TYPES
 from sglang.srt.utils.hf_transformers import check_gguf_file
 
 _F32 = WeightType.F32
 _BF16 = WeightType.BF16
 _Q4_K = WeightType.Q4_K
+_NVFP4 = WeightType.NVFP4
 
 _Q4_K_BLOCK, _Q4_K_TYPE_SIZE = 256, 144
 
@@ -331,12 +337,44 @@ class TestGGUFTensorMeta(unittest.TestCase):
         self.assertFalse(check_gguf_file(str(other)))
         self.assertFalse(check_gguf_file(str(self.tmp / "missing.gguf")))
 
-    def test_quantized_non_linear_tensor_is_rejected(self):
-        path = self.tmp / "bad-norm.gguf"
+    def test_quantized_non_linear_tensor_dequantizes_during_load(self):
+        path = self.tmp / "quantized-norm.gguf"
         _write_gguf(path, [("norm.weight", [256], _Q4_K, bytes(144))])
 
-        with self.assertRaisesRegex(ValueError, "only for 2D linear"):
-            read_gguf_tensor_meta(str(path))
+        metadata = read_gguf_tensor_meta(str(path))
+        loaded = dict(gguf_weights_iterator(str(path), metadata))["norm.weight"]
+
+        self.assertTrue(metadata["norm.weight"].dequantize_on_load)
+        self.assertEqual(loaded.dtype, torch.bfloat16)
+        self.assertEqual(tuple(loaded.shape), (256,))
+
+    def test_native_nvfp4_splits_container_blocks_losslessly(self):
+        path = self.tmp / "nvfp4.gguf"
+        payload = bytes(range(36)) + bytes(reversed(range(36)))
+        _write_gguf(path, [("w.weight", [64, 2], _NVFP4, payload)])
+
+        metadata = read_gguf_tensor_meta(str(path))
+        loaded = dict(gguf_weights_iterator(str(path), metadata))
+
+        self.assertTrue(metadata["w.weight"].is_native_nvfp4)
+        self.assertEqual(metadata["w.weight"].param_name, "w.weight")
+        self.assertEqual(tuple(loaded["w.weight"].shape), (2, 32))
+        self.assertEqual(loaded["w.weight"].dtype, torch.uint8)
+        self.assertEqual(tuple(loaded["w.weight_scale"].shape), (2, 4))
+        self.assertEqual(loaded["w.weight_scale"].dtype, torch.float8_e4m3fn)
+
+        expected = torch.from_numpy(
+            gguf.dequantize(
+                np.frombuffer(payload, dtype=np.uint8).reshape(2, 36), _NVFP4
+            ).copy()
+        )
+        actual = dequantize_nvfp4(
+            loaded["w.weight"],
+            loaded["w.weight_scale"],
+            None,
+            out_dtype=torch.float32,
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 class TestGGUFQuantMethodSelection(unittest.TestCase):
@@ -361,6 +399,26 @@ class TestGGUFQuantMethodSelection(unittest.TestCase):
         self.assertEqual(layer.qweight.dtype, torch.uint8)
         self.assertEqual(tuple(layer.qweight.shape), (4, 288))
         self.assertEqual(layer.quant_method.weight_type, _Q4_K)
+
+    def test_native_nvfp4_layer_reuses_dynamic_modelopt_method(self):
+        config = self._config(
+            **{
+                "w.weight": GGUFTensorMeta(
+                    ggml_type=int(_NVFP4),
+                    logical_shape=(4, 64),
+                    stored_shape=(4, 36),
+                    stored_dtype=torch.uint8,
+                    param_name="w.weight",
+                )
+            }
+        )
+
+        layer = ReplicatedLinear(64, 4, bias=False, quant_config=config, prefix="w")
+
+        self.assertIsInstance(layer.quant_method, DynamicNvfp4LinearMethod)
+        self.assertEqual(tuple(layer.weight.shape), (4, 32))
+        self.assertEqual(tuple(layer.weight_scale.shape), (4, 4))
+        self.assertIsNone(layer.input_scale)
 
     def test_unquantized_layer_falls_back(self):
         """H3 keeps its FP32 projections unquantized inside the same file."""
@@ -597,9 +655,9 @@ class TestGGUFIncompatibleOptions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "svdquant"):
             self._resolve(nunchaku_config=object())
 
-    def test_rejects_lora(self):
-        with self.assertRaisesRegex(ValueError, "LoRA"):
-            self._resolve(lora_path="some/adapter")
+    def test_defers_lora_validation_until_weight_layout_is_known(self):
+        spec = self._resolve(lora_path="some/adapter")
+        self.assertEqual(spec.gguf_file, str(self.gguf))
 
     def test_rejects_h3_adaln_online(self):
         with self.assertRaisesRegex(ValueError, "adaln-online"):
@@ -808,6 +866,17 @@ class TestGGUFRejectsLoraConversion(unittest.TestCase):
         layer.register_parameter("weight", torch.nn.Parameter(torch.zeros(4, 8)))
         return layer
 
+    def _native_nvfp4_layer(self):
+        meta = GGUFTensorMeta(
+            ggml_type=int(_NVFP4),
+            logical_shape=(4, 64),
+            stored_shape=(4, 36),
+            stored_dtype=torch.uint8,
+            param_name="w.weight",
+        )
+        config = GGUFConfig(gguf_file="/dev/null", tensor_meta={"w.weight": meta})
+        return ReplicatedLinear(64, 4, bias=False, quant_config=config, prefix="w")
+
     def test_packed_weights_are_rejected(self):
         pipeline = self._pipeline_with(self._gguf_like_layer())
         with self.assertRaisesRegex(ValueError, "LoRA is not supported"):
@@ -818,6 +887,18 @@ class TestGGUFRejectsLoraConversion(unittest.TestCase):
     def test_plain_weights_are_accepted(self):
         pipeline = self._pipeline_with(self._plain_layer())
         pipeline._reject_lora_on_packed_weights()
+
+    def test_native_nvfp4_weights_accept_dynamic_lora(self):
+        from sglang.multimodal_gen.runtime.layers.lora.linear import (
+            wrap_with_lora_layer,
+        )
+
+        layer = self._native_nvfp4_layer()
+        pipeline = self._pipeline_with(layer)
+        pipeline._reject_lora_on_packed_weights()
+        wrapped = wrap_with_lora_layer(layer, snapshot_base=False)
+        self.assertIsNotNone(wrapped)
+        self.assertFalse(wrapped.can_merge_base_weight)
 
     def test_rejects_while_still_offloaded(self):
         """The check must not need the weights materialized.
