@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import msgspec
+
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
     MINIMAX_H3_MAX_DURATION_SECONDS,
     MINIMAX_H3_MIN_DURATION_SECONDS,
@@ -41,20 +43,7 @@ MINIMAX_H3_RESOLVED_MATERIAL_SHAPES_EXTRA_KEY = "minimax_h3_resolved_material_sh
 def _replace_plan_shape(
     plan: MiniMaxH3ResolvedPlan, shape: dict[str, Any]
 ) -> MiniMaxH3ResolvedPlan:
-    return MiniMaxH3ResolvedPlan(
-        task=plan.task,
-        prompt=plan.prompt,
-        seed=plan.seed,
-        materials=plan.materials,
-        encoders=plan.encoders,
-        branches=plan.branches,
-        default_flow_shift=plan.default_flow_shift,
-        default_audio_flow_shift=plan.default_audio_flow_shift,
-        flow_shift=plan.flow_shift,
-        audio_flow_shift=plan.audio_flow_shift,
-        shape=shape,
-        condition_mask=plan.condition_mask,
-    )
+    return msgspec.structs.replace(plan, shape=shape)
 
 
 def _display_shape(facts: dict[str, Any], *, label: str) -> tuple[float, float]:
