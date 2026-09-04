@@ -25,6 +25,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.comfy_nvfp4 import (
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
     Int8WeightOnlyConfig,
+    SglW8A8Int8Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
@@ -157,7 +158,8 @@ def inspect_comfy_quant_markers(
 
     missing_markers: set[str] = set()
     for prefix in marked_dtype_weight_prefixes - raw_markers.keys():
-        weight_dtype, _ = checkpoint_meta[f"{prefix}.weight"]
+        weight_dtype, weight_shape = checkpoint_meta[f"{prefix}.weight"]
+        scale_meta = checkpoint_meta.get(f"{prefix}.weight_scale")
         has_explicit_scale = any(
             f"{prefix}.{suffix}" in checkpoint_meta
             for suffix in ("weight_scale", "input_scale")
@@ -174,6 +176,22 @@ def inspect_comfy_quant_markers(
                 "full_precision_matrix_mult": True,
                 "_implicit_weight_scale": True,
             }
+        elif (
+            weight_dtype == "I8"
+            and len(weight_shape) == 2
+            and scale_meta
+            in {
+                ("BF16", (weight_shape[0], 1)),
+                ("F16", (weight_shape[0], 1)),
+            }
+            and f"{prefix}.input_scale" not in checkpoint_meta
+        ):
+            # LightX2V's int8-sgl files are self-describing through their exact
+            # tensor ABI but do not carry Comfy markers: per-output-channel I8
+            # weights, floating row scales, and dynamic per-token activations.
+            # Restrict marker-free inference to F16/BF16 scales so ordinary F32
+            # rowwise weight-only exports keep their existing admission path.
+            raw_markers[prefix] = {"format": "w8a8_int8"}
         else:
             missing_markers.add(prefix)
     if missing_markers:
@@ -201,6 +219,7 @@ def inspect_comfy_quant_markers(
             "asym_w4a8_int8",
             "convrot_w4a4",
             "nvfp4",
+            "w8a8_int8",
         ):
             continue
         missing = required - checkpoint_meta.keys()
@@ -213,6 +232,20 @@ def inspect_comfy_quant_markers(
             marker["_activation_scheme"] = (
                 "static" if f"{prefix}.input_scale" in checkpoint_meta else "dynamic"
             )
+            continue
+        if marker_format == "w8a8_int8":
+            weight_dtype, weight_shape = checkpoint_meta[f"{prefix}.weight"]
+            scale_dtype, scale_shape = checkpoint_meta[f"{prefix}.weight_scale"]
+            if weight_dtype != "I8" or scale_dtype not in ("BF16", "F16", "F32"):
+                raise ValueError(
+                    f"W8A8 INT8 layer {prefix!r} needs I8 weights and floating "
+                    f"row scales, got {weight_dtype} and {scale_dtype}"
+                )
+            if len(weight_shape) != 2 or scale_shape != (weight_shape[0], 1):
+                raise ValueError(
+                    f"W8A8 INT8 layer {prefix!r} has incompatible weight/scale "
+                    f"shapes: {weight_shape} and {scale_shape}"
+                )
             continue
         if marker_format == "asym_w4a8_int8":
             weight_dtype, weight_shape = checkpoint_meta[f"{prefix}.weight"]
@@ -381,6 +414,8 @@ def resolve_comfy_checkpoint_quantization(
     formats = sorted({str(marker.get("format")) for marker in layer_markers.values()})
     if formats == ["int8_tensorwise"]:
         return KitchenInt8Config(layer_markers=layer_markers)
+    if formats == ["w8a8_int8"]:
+        return SglW8A8Int8Config(set(layer_markers))
     if formats == ["asym_w4a8_int8"]:
         return KitchenW4A8Config(layer_markers)
     if formats == ["asym_w4a8_int8", "int8_tensorwise"]:
@@ -504,7 +539,7 @@ def require_quantized_linear_layers(
     ):
         expected = set(quant_config.layer_markers)
         selected = set(quant_config.selected)
-    elif isinstance(quant_config, Int8WeightOnlyConfig):
+    elif isinstance(quant_config, (Int8WeightOnlyConfig, SglW8A8Int8Config)):
         expected = quant_config.layer_prefixes
         selected = quant_config.selected
     elif isinstance(quant_config, GGUFConfig):

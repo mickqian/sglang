@@ -57,6 +57,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.comfy_fp8 import (
     ComfyFp8Config,
     ComfyFullPrecisionFp8LinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
+    SglW8A8Int8Config,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
 )
@@ -139,6 +142,7 @@ from sglang.srt.layers.quantization.bitsandbytes import (
 )
 from sglang.srt.layers.quantization.fp8 import Fp8Config as SRTFp8Config
 from sglang.srt.layers.quantization.fp8 import Fp8LinearMethod as SRTFp8LinearMethod
+from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8LinearMethod
 
 
 class _FakeFluxTransformer:
@@ -885,6 +889,48 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
             save_file(
                 {"blocks.0.mlp.fc1.weight": torch.ones((2, 2), dtype=torch.int8)},
+                checkpoint.name,
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing comfy_quant metadata"):
+                inspect_minimax_h3_safetensors([checkpoint.name])
+
+    def test_unmarked_lightx2v_w8a8_int8_uses_srt_kernel(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones((2, 4), dtype=torch.int8),
+                    "blocks.0.mlp.fc1.weight_scale": torch.ones(
+                        (2, 1), dtype=torch.bfloat16
+                    ),
+                },
+                checkpoint.name,
+            )
+
+            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
+
+        self.assertEqual(markers, {"blocks.0.mlp.fc1": {"format": "w8a8_int8"}})
+        config = resolve_minimax_h3_checkpoint_quantization(markers)
+        self.assertIsInstance(config, SglW8A8Int8Config)
+        layer = ReplicatedLinear(
+            4,
+            2,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="blocks.0.mlp.fc1",
+        )
+        self.assertIsInstance(layer.quant_method, W8A8Int8LinearMethod)
+        self.assertEqual(layer.weight.dtype, torch.int8)
+        self.assertEqual(layer.weight_scale.dtype, torch.float32)
+
+    def test_unmarked_f32_rowwise_int8_remains_ambiguous(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {
+                    "blocks.0.mlp.fc1.weight": torch.ones((2, 4), dtype=torch.int8),
+                    "blocks.0.mlp.fc1.weight_scale": torch.ones((2, 1)),
+                },
                 checkpoint.name,
             )
 

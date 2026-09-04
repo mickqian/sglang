@@ -25,6 +25,10 @@ from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 from sglang.srt.layers.quantization.unquant import (
     UnquantizedLinearMethod as SrtUnquantizedLinearMethod,
 )
+from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config as SrtW8A8Int8Config
+from sglang.srt.layers.quantization.w8a8_int8 import (
+    W8A8Int8LinearMethod,
+)
 
 
 class Int8WeightOnlyConfig(QuantizationConfig):
@@ -86,4 +90,51 @@ class Int8WeightOnlyConfig(QuantizationConfig):
         return True
 
 
-__all__ = ["Int8WeightOnlyConfig"]
+class SglW8A8Int8Config(QuantizationConfig):
+    """Select serialized W8A8 INT8 linears and reuse SRT's fused kernel."""
+
+    def __init__(self, layer_prefixes: set[str]) -> None:
+        super().__init__()
+        if not layer_prefixes:
+            raise ValueError("W8A8 INT8 checkpoints need at least one linear")
+        self.layer_prefixes = layer_prefixes
+        self.selected: set[str] = set()
+        self._srt_config = SrtW8A8Int8Config({"is_dynamic": True})
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "w8a8_int8"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return SrtW8A8Int8Config.get_supported_act_dtypes()
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return SrtW8A8Int8Config.get_min_capability()
+
+    @staticmethod
+    def get_config_filenames() -> list[str]:
+        return []
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> SglW8A8Int8Config:
+        raise ValueError(
+            f"{cls.__name__} must be constructed from checkpoint tensor metadata"
+        )
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
+        if not isinstance(layer, DiffusionLinearBase):
+            return None
+        if prefix not in self.layer_prefixes:
+            return DiffusionUnquantizedLinearMethod()
+        self.selected.add(prefix)
+        return W8A8Int8LinearMethod(self._srt_config)
+
+    def supports_cpu_weight_loading(self) -> bool:
+        return True
+
+
+__all__ = ["Int8WeightOnlyConfig", "SglW8A8Int8Config"]
