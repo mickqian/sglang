@@ -527,7 +527,9 @@ def _split_hf_subfolder(path: str) -> tuple[str, str | None]:
     return path, None
 
 
-def prepare_diffusers_component_path_for_loading(component_path: str) -> str:
+def prepare_diffusers_component_path_for_loading(
+    component_path: str, revision: str | None = None
+) -> str:
     """Download component repos if needed and patch legacy flat ModelOpt configs."""
     if os.path.exists(component_path):
         local_component_path = component_path
@@ -535,13 +537,22 @@ def prepare_diffusers_component_path_for_loading(component_path: str) -> str:
         repo_id, subfolder = _split_hf_subfolder(component_path)
         if subfolder is not None:
             # component_path is 'namespace/repo/subfolder' — download only that subfolder
+            download_kwargs = {}
+            if revision is not None:
+                download_kwargs["revision"] = revision
             local_repo = maybe_download_model(
                 repo_id,
                 allow_patterns=[f"{subfolder}/**", f"{subfolder}/*"],
+                **download_kwargs,
             )
             local_component_path = os.path.join(local_repo, subfolder)
         else:
-            local_component_path = maybe_download_model(component_path)
+            download_kwargs = {}
+            if revision is not None:
+                download_kwargs["revision"] = revision
+            local_component_path = maybe_download_model(
+                component_path, **download_kwargs
+            )
     config_path = os.path.join(local_component_path, "config.json")
     if not os.path.exists(config_path):
         return local_component_path

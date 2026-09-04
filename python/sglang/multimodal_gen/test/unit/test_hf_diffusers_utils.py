@@ -52,6 +52,38 @@ def test_component_override_resolves_hub_subfolder_before_loading(tmp_path):
     )
 
 
+def test_modular_component_resolves_external_declared_source(tmp_path):
+    pipeline = SimpleNamespace(model_path=str(tmp_path / "bundle"))
+    server_args = SimpleNamespace(component_paths={})
+    component_spec = [
+        "transformers",
+        "Qwen3VLProcessor",
+        {
+            "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3",
+            "subfolder": "processor",
+            "revision": "release-revision",
+        },
+    ]
+
+    with patch(
+        "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+        "prepare_diffusers_component_path_for_loading",
+        return_value="/cache/processor",
+    ) as prepare_path:
+        component_path = ComposedPipelineBase._resolve_declared_component_path(
+            pipeline,
+            server_args,
+            "processor",
+            "processor",
+            component_spec,
+        )
+
+    assert component_path == "/cache/processor"
+    prepare_path.assert_called_once_with(
+        "MiniMaxAI/MiniMax-H3/processor", revision="release-revision"
+    )
+
+
 def _write_model_index(root):
     (root / "model_index.json").write_text(
         json.dumps(

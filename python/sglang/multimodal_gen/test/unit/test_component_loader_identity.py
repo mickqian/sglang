@@ -114,6 +114,28 @@ class TestComponentLoaderIdentity(unittest.TestCase):
             component_attn_name="auxiliary_head",
         )
 
+    def test_unknown_source_key_uses_known_runtime_component_loader(self):
+        loader = Mock()
+        loader.load.return_value = (nn.Linear(1, 1), 0.25)
+        server_args = SimpleNamespace()
+
+        with patch.object(
+            ComponentLoader, "for_component_type", return_value=loader
+        ) as loader_factory:
+            loaded = PipelineComponentLoader.load_component(
+                component_name="transformer",
+                component_type="transformer_ref",
+                component_model_path="/model/transformer_ref",
+                transformers_or_diffusers="diffusers",
+                server_args=server_args,
+                component_architecture="MiniMaxH3Transformer3DModel",
+            )
+
+        self.assertEqual(loaded[1], 0.25)
+        loader_factory.assert_called_once_with(
+            "transformer", "diffusers", "MiniMaxH3Transformer3DModel"
+        )
+
     def test_skipped_alias_keeps_exact_override_and_structural_config(self):
         pipeline = object.__new__(_AliasPipeline)
         pipeline.model_path = "/model"

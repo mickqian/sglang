@@ -352,8 +352,11 @@ class ComposedPipelineBase(ABC):
                 continue
 
             try:
-                component_path = self._resolve_component_path(
-                    server_args, component_name, structural_name
+                component_path = self._resolve_declared_component_path(
+                    server_args,
+                    component_name,
+                    structural_name,
+                    full_model_index.get(structural_name),
                 )
                 hf_config = get_diffusers_component_config(
                     component_path=component_path
@@ -396,6 +399,71 @@ class ComposedPipelineBase(ABC):
 
         logger.debug("Resolved component path: %s", component_model_path)
         return component_model_path
+
+    def _resolve_declared_component_path(
+        self,
+        server_args: ServerArgs,
+        module_name: str,
+        load_module_name: str,
+        component_spec: Any,
+    ) -> str:
+        if server_args.component_paths.get(module_name) is not None:
+            return self._resolve_component_path(
+                server_args, module_name, load_module_name
+            )
+        if (
+            not isinstance(component_spec, (list, tuple))
+            or len(component_spec) != 3
+            or not isinstance(component_spec[2], dict)
+        ):
+            return self._resolve_component_path(
+                server_args, module_name, load_module_name
+            )
+
+        metadata = component_spec[2]
+        source = metadata.get("pretrained_model_name_or_path")
+        if source is None:
+            return self._resolve_component_path(
+                server_args, module_name, load_module_name
+            )
+        if not isinstance(source, str) or not source:
+            raise ValueError(
+                f"Invalid pretrained_model_name_or_path for component "
+                f"{load_module_name!r}: {source!r}"
+            )
+
+        subfolder = metadata.get("subfolder")
+        if subfolder is None:
+            component_source = source
+        else:
+            if not isinstance(subfolder, str) or not subfolder:
+                raise ValueError(
+                    f"Invalid subfolder for component {load_module_name!r}: "
+                    f"{subfolder!r}"
+                )
+            subfolder = os.path.normpath(subfolder)
+            if (
+                os.path.isabs(subfolder)
+                or subfolder == ".."
+                or subfolder.startswith(f"..{os.sep}")
+            ):
+                raise ValueError(
+                    f"Component subfolder must stay inside its repository: "
+                    f"{subfolder!r}"
+                )
+            local_component_path = os.path.join(self.model_path, subfolder)
+            if os.path.isdir(local_component_path):
+                return local_component_path
+            component_source = os.path.join(source, subfolder)
+
+        revision = metadata.get("revision")
+        if revision is not None and not isinstance(revision, str):
+            raise ValueError(
+                f"Invalid revision for component {load_module_name!r}: {revision!r}"
+            )
+        return prepare_diffusers_component_path_for_loading(
+            component_source, revision=revision
+        )
 
     @staticmethod
     def _validate_direct_gpu_component_selection(
@@ -571,8 +639,11 @@ class ComposedPipelineBase(ABC):
                 load_module_name = self._extra_config_module_map[module_name]
             else:
                 load_module_name = module_name
-            component_model_path = self._resolve_component_path(
-                server_args, module_name, load_module_name
+            component_model_path = self._resolve_declared_component_path(
+                server_args,
+                module_name,
+                load_module_name,
+                component_spec,
             )
             # collect loading specs
             component_load_specs.append(

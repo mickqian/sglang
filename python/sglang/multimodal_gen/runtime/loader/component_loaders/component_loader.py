@@ -869,8 +869,22 @@ class PipelineComponentLoader:
         """
 
         # Get the appropriate loader for this component type
+        loader_component_type = component_type or component_name
+        ComponentLoader._ensure_loaders_registered()
+        if (
+            _normalize_component_type(loader_component_type)
+            not in component_name_to_loader_cls
+            and _normalize_component_type(component_name)
+            in component_name_to_loader_cls
+        ):
+            logger.info(
+                "Using loader type %s for unrecognized source component key %s",
+                component_name,
+                loader_component_type,
+            )
+            loader_component_type = component_name
         loader = ComponentLoader.for_component_type(
-            component_type or component_name,
+            loader_component_type,
             transformers_or_diffusers,
             component_architecture,
         )
