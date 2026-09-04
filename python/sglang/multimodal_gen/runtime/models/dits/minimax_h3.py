@@ -1733,7 +1733,12 @@ class MiniMaxH3FinalLayer(nn.Module):
             bias=True,
             gather_output=False,
             params_dtype=_FP32_DTYPE,
-            quant_config=None,
+            quant_config=(
+                quant_config
+                if quant_config is not None
+                and quant_config.has_packed_weight(f"{prefix}.video_out")
+                else None
+            ),
             prefix=f"{prefix}.video_out",
         )
         self.audio_out = ColumnParallelLinear(
@@ -1742,7 +1747,12 @@ class MiniMaxH3FinalLayer(nn.Module):
             bias=True,
             gather_output=False,
             params_dtype=_FP32_DTYPE,
-            quant_config=None,
+            quant_config=(
+                quant_config
+                if quant_config is not None
+                and quant_config.has_packed_weight(f"{prefix}.audio_out")
+                else None
+            ),
             prefix=f"{prefix}.audio_out",
         )
         self.pdd_video_weight: torch.Tensor | None = None
@@ -1877,7 +1887,7 @@ class MiniMaxH3FinalLayer(nn.Module):
                     self.pdd_audio_bias,
                 ),
             )
-        # Preserve full precision through both final output projections.
+        # Keep head activations and unpacked head weights in fp32.
         h = h.to(_FP32_DTYPE)
         video, _ = self.video_out(h)
         audio, _ = self.audio_out(h)

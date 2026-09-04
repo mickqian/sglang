@@ -30,7 +30,12 @@ from sglang.multimodal_gen.runtime.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.gguf import (
+    GGUFConfig,
+    GGUFLinearMethod,
+)
 from sglang.multimodal_gen.runtime.layers.usp import _usp_input_all_to_all_packed_qkv
+from sglang.multimodal_gen.runtime.loader.gguf_weights import GGUFTensorMeta
 from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     _needs_device_weight_postprocess,
 )
@@ -41,6 +46,7 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MiniMaxH3Attention,
     MiniMaxH3DiTBlock,
     MiniMaxH3DiTModel,
+    MiniMaxH3FinalLayer,
     MiniMaxH3Rope,
     _copy_grouped_qkv_tp_shard,
     _diffusers_h3_checkpoint,
@@ -62,6 +68,41 @@ def _ensure_single_process_parallel_runtime() -> None:
         return
     ensure_distributed_env_defaults()
     maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
+
+
+def test_final_heads_keep_checkpoint_declared_packed_layout():
+    _ensure_single_process_parallel_runtime()
+    arch = MiniMaxH3DiTArchConfig()
+    dimensions = {
+        "final_layer.video_out": arch.latents_dim
+        * arch.patch_size[0]
+        * arch.patch_size[1]
+        * arch.patch_size[2],
+        "final_layer.audio_out": arch.audio_latents_dim,
+    }
+    tensor_meta = {
+        f"{prefix}.weight": GGUFTensorMeta(
+            ggml_type=12,
+            logical_shape=(int(output_size), arch.hidden_size),
+            stored_shape=(int(output_size), arch.hidden_size // 256 * 144),
+            stored_dtype=torch.uint8,
+            param_name=f"{prefix}.qweight",
+        )
+        for prefix, output_size in dimensions.items()
+    }
+
+    with torch.device("meta"):
+        final_layer = MiniMaxH3FinalLayer(
+            arch,
+            GGUFConfig("minimax-h3.gguf", tensor_meta),
+            prefix="final_layer",
+            use_adaln_cache=True,
+        )
+
+    assert isinstance(final_layer.video_out.quant_method, GGUFLinearMethod)
+    assert isinstance(final_layer.audio_out.quant_method, GGUFLinearMethod)
+    assert final_layer.video_out.qweight.dtype == torch.uint8
+    assert final_layer.audio_out.qweight.dtype == torch.uint8
 
 
 def test_pruned_adaln_lora_projection_preserves_affine_term():
