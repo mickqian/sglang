@@ -3,6 +3,7 @@ This unittest is introduced in #22360, preventing duplicate transformer safetens
 """
 
 import json
+import os
 import sys
 import tempfile
 import types
@@ -691,6 +692,22 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                         for call in download.call_args_list
                     )
                 )
+
+    def test_resolve_transformer_checkpoint_files_accepts_pytorch_shards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = os.path.join(tmpdir, "diffusion_pytorch_model-00001.bin")
+            second = os.path.join(tmpdir, "diffusion_pytorch_model-00002.bin")
+            training = os.path.join(tmpdir, "training_args.bin")
+            for path in (first, second, training):
+                open(path, "a").close()
+
+            resolved = resolve_transformer_checkpoint_files(
+                self._make_server_args(), tmpdir
+            )
+
+        self.assertEqual(resolved.safetensors, ())
+        self.assertEqual(resolved.pytorch, (first, second))
+        self.assertEqual(resolved.weights, (first, second))
 
     def test_minimax_h3_hybrid_checkpoint_accepts_selected_partition(self):
         checkpoint = "/cache/minimax_h3_hybrid_fl2va_ref2va_b25-49.safetensors"

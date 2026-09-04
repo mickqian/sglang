@@ -39,7 +39,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.quanto_int8_confi
     inspect_quanto_int8_checkpoint,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_config import (
+    TorchAOInt8Config,
     inspect_torchao_int8_checkpoint,
+    torchao_int8_pt_weights_iterator,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
@@ -196,14 +198,25 @@ def _get_encoder_quant_config(
                 mapped_name = parameter_name_mapper(f"{name}.weight")
                 return mapped_name.removesuffix(".weight")
 
-    safetensors_list = (
-        [component_weights_path]
-        if component_weights_path.endswith(".safetensors")
-        else _list_safetensors_files(component_weights_path)
-    )
+    if os.path.isfile(component_weights_path):
+        checkpoint_files = (
+            [component_weights_path]
+            if component_weights_path.endswith((".safetensors", ".bin", ".pt"))
+            else []
+        )
+    else:
+        checkpoint_files = _list_safetensors_files(component_weights_path)
+        if not checkpoint_files:
+            for pattern in ("*.bin", "*.pt"):
+                checkpoint_files = filter_files_not_needed_for_inference(
+                    glob.glob(os.path.join(component_weights_path, pattern))
+                )
+                if checkpoint_files:
+                    checkpoint_files.sort()
+                    break
     torchao_config = inspect_torchao_int8_checkpoint(
         component_config,
-        safetensors_list,
+        checkpoint_files,
         param_name_mapper=mapping_fn,
     )
     if torchao_config is not None:
@@ -538,6 +551,7 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
         source: "Source",
         to_cpu: bool,
         key_filter: Callable[[str], bool] | None = None,
+        quant_config: object | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """get an iterator for the model weights based on the load format."""
         source_key_filter: Callable[[str], bool] | None
@@ -563,7 +577,13 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                 key_filter=source_key_filter,
             )
         else:
-            weights_iterator = pt_weights_iterator(hf_weights_files, to_cpu=to_cpu)
+            if isinstance(quant_config, TorchAOInt8Config):
+                device = "cpu" if to_cpu else get_local_torch_device()
+                weights_iterator = torchao_int8_pt_weights_iterator(
+                    hf_weights_files, device
+                )
+            else:
+                weights_iterator = pt_weights_iterator(hf_weights_files, to_cpu=to_cpu)
             if source_key_filter is not None:
                 weights_iterator = (
                     (name, tensor)
@@ -595,6 +615,7 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
             primary_weights,
             to_cpu,
             include_checkpoint_weight,
+            model.config.quant_config,
         )
 
         secondary_weights = cast(
@@ -606,6 +627,7 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
                 source,
                 to_cpu,
                 include_checkpoint_weight,
+                model.config.quant_config,
             )
 
     def load_customized(

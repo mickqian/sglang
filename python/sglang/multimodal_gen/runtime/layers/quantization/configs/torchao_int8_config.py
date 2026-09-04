@@ -63,9 +63,126 @@ class TorchAOInt8Config(Int8WeightOnlyConfig):
         return normalize_torchao_int8_weights(weights)
 
 
+def _read_checkpoint_tensor_meta(
+    checkpoint_files: list[str],
+) -> dict[str, tuple[str, tuple[int, ...]]]:
+    tensor_meta: dict[str, tuple[str, tuple[int, ...]]] = {}
+    pytorch_dtypes = {torch.int8: "I8", torch.float32: "F32"}
+
+    def add(name: str, dtype: str, shape: tuple[int, ...]) -> None:
+        if name in tensor_meta:
+            raise ValueError(f"Duplicate TorchAO checkpoint tensor {name!r}")
+        tensor_meta[name] = (dtype, shape)
+
+    for path in checkpoint_files:
+        if path.endswith(".safetensors"):
+            with safe_open(path, framework="pt", device="cpu") as checkpoint:
+                for name in checkpoint.keys():
+                    tensor = checkpoint.get_slice(name)
+                    add(
+                        name,
+                        tensor.get_dtype(),
+                        tuple(tensor.get_shape()),
+                    )
+            continue
+
+        if not path.endswith((".bin", ".pt")):
+            raise ValueError(f"Unsupported TorchAO checkpoint file {path!r}")
+        state = _load_torchao_int8_pt_state(path, "meta")
+        for name, tensor in _flatten_torchao_int8_tensor_subclasses(state.items()):
+            add(
+                name,
+                pytorch_dtypes.get(tensor.dtype, str(tensor.dtype)),
+                tuple(tensor.shape),
+            )
+        del state
+
+    return tensor_meta
+
+
+def _load_torchao_int8_pt_state(
+    path: str, device: str | torch.device
+) -> dict[str, torch.Tensor]:
+    unsafe_globals = set(torch.serialization.get_unsafe_globals_in_checkpoint(path))
+    expected_global = "torchao.quantization.Int8Tensor"
+    unexpected_globals = unsafe_globals - {expected_global}
+    if unexpected_globals:
+        raise ValueError(
+            f"TorchAO checkpoint file {path!r} contains unsupported globals: "
+            f"{sorted(unexpected_globals)}"
+        )
+
+    safe_globals: list[type] = []
+    if expected_global in unsafe_globals:
+        try:
+            from torchao.quantization import Int8Tensor
+        except ImportError as error:
+            raise ValueError(
+                "TorchAO tensor-subclass checkpoints require torchao>=0.18.0"
+            ) from error
+        safe_globals.append(Int8Tensor)
+
+    try:
+        with torch.serialization.safe_globals(safe_globals):
+            state = torch.load(path, map_location=device, weights_only=True)
+    except Exception as error:
+        raise ValueError(
+            f"Cannot safely load TorchAO checkpoint file {path!r}: {error}"
+        ) from error
+    if not isinstance(state, dict):
+        raise ValueError(f"TorchAO checkpoint file {path!r} is not a state dict")
+    if any(
+        not isinstance(name, str) or not isinstance(tensor, torch.Tensor)
+        for name, tensor in state.items()
+    ):
+        raise ValueError(
+            f"TorchAO checkpoint file {path!r} contains a non-tensor entry"
+        )
+    return state
+
+
+def _flatten_torchao_int8_tensor_subclasses(
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        tensor_type = type(tensor)
+        if (
+            tensor_type.__module__ != "torchao.quantization"
+            or tensor_type.__name__ != "Int8Tensor"
+        ):
+            yield name, tensor
+            continue
+        if not name.endswith(".weight"):
+            raise ValueError(
+                f"TorchAO Int8Tensor checkpoint entry must be a weight, got {name!r}"
+            )
+        data = vars(tensor)
+        required = {"qdata", "scale", "zero_point"}
+        missing = required - data.keys()
+        if missing:
+            raise ValueError(
+                f"TorchAO Int8Tensor {name!r} is missing fields: {sorted(missing)}"
+            )
+        prefix = name.removesuffix(".weight")
+        yield f"{prefix}{_QDATA_SUFFIX}", data["qdata"]
+        yield f"{prefix}{_SCALE_SUFFIX}", data["scale"]
+        yield f"{prefix}{_ZERO_POINT_SUFFIX}", data["zero_point"]
+
+
+def torchao_int8_pt_weights_iterator(
+    checkpoint_files: list[str], device: str | torch.device
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Safely flatten serialized TorchAO tensor subclasses shard by shard."""
+
+    for path in checkpoint_files:
+        state = _load_torchao_int8_pt_state(path, device)
+        yield from _flatten_torchao_int8_tensor_subclasses(state.items())
+        del state
+
+
 def inspect_torchao_int8_checkpoint(
     model_config: dict[str, Any],
-    safetensors_list: list[str],
+    checkpoint_files: list[str],
     *,
     param_name_mapper: ParameterNameMapper | None = None,
 ) -> TorchAOInt8Config | None:
@@ -75,17 +192,10 @@ def inspect_torchao_int8_checkpoint(
     if quant_spec is None or quant_spec.declared_method != "torchao":
         return None
     _validate_int8_weight_only_declaration(quant_spec.config)
-    if not safetensors_list:
-        raise ValueError("TorchAO INT8 checkpoint does not contain safetensors weights")
+    if not checkpoint_files:
+        raise ValueError("TorchAO INT8 checkpoint does not contain supported weights")
 
-    tensor_meta: dict[str, tuple[str, tuple[int, ...]]] = {}
-    for path in safetensors_list:
-        with safe_open(path, framework="pt", device="cpu") as checkpoint:
-            for name in checkpoint.keys():
-                if name in tensor_meta:
-                    raise ValueError(f"Duplicate TorchAO checkpoint tensor {name!r}")
-                tensor = checkpoint.get_slice(name)
-                tensor_meta[name] = (tensor.get_dtype(), tuple(tensor.get_shape()))
+    tensor_meta = _read_checkpoint_tensor_meta(checkpoint_files)
 
     data_prefixes = {
         name.removesuffix(_QDATA_SUFFIX)
@@ -203,4 +313,5 @@ __all__ = [
     "TorchAOInt8Config",
     "inspect_torchao_int8_checkpoint",
     "normalize_torchao_int8_weights",
+    "torchao_int8_pt_weights_iterator",
 ]

@@ -13,6 +13,9 @@ from sglang.multimodal_gen.runtime.layers.attention.selector import (
     get_component_forced_attn_backend,
     get_global_forced_attn_backend,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_config import (
+    torchao_int8_pt_weights_iterator,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
     OnlineQuantizationComponentLoader,
 )
@@ -268,12 +271,16 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             # A GGUF file holds the whole transformer; the remaining components
             # still load from the base model path.
             safetensors_list = []
+            pytorch_files = []
+            weight_files = []
             transformer_override_config_path = None
         else:
             checkpoint_files = resolve_transformer_checkpoint_files(
                 component_server_args, component_model_path
             )
             safetensors_list = list(checkpoint_files.safetensors)
+            pytorch_files = list(checkpoint_files.pytorch)
+            weight_files = list(checkpoint_files.weights)
             transformer_override_config_path = checkpoint_files.config_path
 
         # 2. dit config
@@ -337,6 +344,7 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             hf_config=config,
             server_args=component_server_args,
             safetensors_list=safetensors_list,
+            checkpoint_files=weight_files,
             component_model_path=component_model_path,
             model_cls=model_cls,
             cls_name=cls_name,
@@ -390,10 +398,10 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             )
         else:
             logger.info(
-                "Loading %s from %s safetensors file(s) %s, param_dtype: %s",
+                "Loading %s from %s checkpoint file(s) %s, param_dtype: %s",
                 cls_name,
-                len(safetensors_list),
-                f": {safetensors_list}" if get_log_level() == logging.DEBUG else "",
+                len(weight_files),
+                f": {weight_files}" if get_log_level() == logging.DEBUG else "",
                 quant_spec.param_dtype,
             )
         # prepare init_param
@@ -406,6 +414,13 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             comfy_quant_key_filter if quant_spec.uses_comfy_layer_markers else None
         )
         adaln_cache_path = component_server_args.minimax_h3_adaln_cache_path
+        if pytorch_files and (
+            adaln_cache_path is not None
+            or component_server_args.minimax_h3_adaln_online
+        ):
+            raise ValueError(
+                "MiniMax H3 AdaLN cache generation requires safetensors weights"
+            )
         if adaln_cache_path is not None:
             if not is_minimax_h3:
                 raise ValueError(
@@ -532,7 +547,7 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             model = maybe_load_fsdp_model(
                 model_cls=model_cls,
                 init_params=init_params,
-                weight_dir_list=safetensors_list,
+                weight_dir_list=weight_files,
                 device=local_torch_device,
                 hsdp_replicate_dim=server_args.hsdp_replicate_dim,
                 hsdp_shard_dim=server_args.hsdp_shard_dim,
@@ -552,7 +567,14 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                         key_filter=checkpoint_key_filter,
                     )
                     if quant_spec.gguf_file is not None
-                    else None
+                    else (
+                        torchao_int8_pt_weights_iterator(
+                            pytorch_files,
+                            weight_load_plan.checkpoint_load_device,
+                        )
+                        if pytorch_files
+                        else None
+                    )
                 ),
             )
 
