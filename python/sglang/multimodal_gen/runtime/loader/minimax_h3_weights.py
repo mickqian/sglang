@@ -30,6 +30,7 @@ class MiniMaxH3CheckpointLayout:
     adaln_curve_shape: tuple[int, int] | None
     adaln_curve_basis_shape: tuple[int, int] | None
     layer_markers: dict[str, dict[str, Any]]
+    uses_diffusers_layout: bool
     uses_separate_qkv: bool
 
 
@@ -45,6 +46,7 @@ def inspect_minimax_h3_safetensors(
     adaln_curve_shape = None
     adaln_curve_basis_shape = None
     adaln_curve_mean_shape = None
+    uses_diffusers_layout = False
     separate_qkv_parts: dict[str, set[str]] = {}
 
     for path in safetensors_list:
@@ -97,6 +99,9 @@ def inspect_minimax_h3_safetensors(
                     )
                 adaln_curve_mean_shape = shape
             for key in keys:
+                uses_diffusers_layout |= key.startswith(
+                    ("transformer_blocks.", "token_refiner.refiner_blocks.")
+                )
                 match = _SEPARATE_QKV_WEIGHT_RE.fullmatch(key)
                 if match is not None:
                     separate_qkv_parts.setdefault(match.group(1), set()).add(
@@ -141,6 +146,7 @@ def inspect_minimax_h3_safetensors(
         adaln_curve_shape=adaln_curve_shape,
         adaln_curve_basis_shape=adaln_curve_basis_shape,
         layer_markers=layer_markers,
+        uses_diffusers_layout=uses_diffusers_layout,
         uses_separate_qkv=uses_separate_qkv,
     )
 

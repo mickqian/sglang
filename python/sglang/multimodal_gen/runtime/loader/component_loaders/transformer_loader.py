@@ -318,6 +318,9 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                     safetensors_list, selected_variant
                 )
                 checkpoint_layout = inspect_minimax_h3_safetensors(safetensors_list)
+                dit_config.arch_config.checkpoint_uses_diffusers_layout |= (
+                    checkpoint_layout.uses_diffusers_layout
+                )
                 dit_config.arch_config.checkpoint_uses_separate_qkv_layout = (
                     checkpoint_layout.uses_separate_qkv
                 )

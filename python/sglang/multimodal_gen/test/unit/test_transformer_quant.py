@@ -912,13 +912,14 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint.name,
             )
 
-            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
+            layout = inspect_minimax_h3_safetensors([checkpoint.name])
 
+        self.assertTrue(layout.uses_diffusers_layout)
         self.assertEqual(
-            markers,
+            layout.layer_markers,
             {"transformer_blocks.0.ff.net.2": {"format": "w8a8_int8"}},
         )
-        config = resolve_minimax_h3_checkpoint_quantization(markers)
+        config = resolve_minimax_h3_checkpoint_quantization(layout.layer_markers)
         self.assertIsInstance(config, W8A8Int8Config)
         config.remap_checkpoint_prefixes(MiniMaxH3DiTArchConfig().param_names_mapping)
         layer = ReplicatedLinear(
