@@ -6,6 +6,7 @@ such as Nunchaku validation, NVFP4 fallback adjustments, and post-load patching
 are handled here behind a small helper/adapter layer.
 """
 
+import glob
 import json
 import os
 import re
@@ -42,6 +43,9 @@ from sglang.multimodal_gen.runtime.loader.gguf_weights import (
 from sglang.multimodal_gen.runtime.loader.utils import (
     _list_safetensors_files,
     get_param_names_mapping,
+)
+from sglang.multimodal_gen.runtime.loader.weight_utils import (
+    filter_files_not_needed_for_inference,
 )
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
     COMPONENT_OFFLOAD,
@@ -218,6 +222,11 @@ class TransformerCheckpointFiles:
 
     safetensors: tuple[str, ...]
     config_path: str | None
+    pytorch: tuple[str, ...] = ()
+
+    @property
+    def weights(self) -> tuple[str, ...]:
+        return self.safetensors or self.pytorch
 
 
 class _TransformerQuantAdapter:
@@ -645,7 +654,21 @@ def resolve_transformer_checkpoint_files(
         safetensors_list = _prefer_mixed_safetensors_files(safetensors_list)
 
     if not safetensors_list:
-        raise ValueError(f"no safetensors files found in {component_model_path}")
+        pytorch_files: list[str] = []
+        for pattern in ("*.bin", "*.pt"):
+            pytorch_files = filter_files_not_needed_for_inference(
+                glob.glob(os.path.join(component_model_path, pattern))
+            )
+            if pytorch_files:
+                pytorch_files.sort()
+                break
+        if not pytorch_files:
+            raise ValueError(f"no checkpoint weights found in {component_model_path}")
+        return TransformerCheckpointFiles(
+            safetensors=(),
+            config_path=None,
+            pytorch=tuple(pytorch_files),
+        )
 
     return TransformerCheckpointFiles(tuple(safetensors_list), None)
 
@@ -691,6 +714,7 @@ def resolve_transformer_quant_load_spec(
     component_model_path: str,
     model_cls: type[nn.Module],
     cls_name: str,
+    checkpoint_files: list[str] | None = None,
     component_name: str | None = None,
     gguf_file: str | None = None,
     checkpoint_quant_config: QuantizationConfig | None = None,
@@ -725,6 +749,7 @@ def resolve_transformer_quant_load_spec(
             hf_config=hf_config,
             server_args=server_args,
             safetensors_list=safetensors_list,
+            checkpoint_files=checkpoint_files,
             component_model_path=component_model_path,
             transformer_override_config_path=transformer_override_config_path,
             arch_config=arch_config,
@@ -995,6 +1020,7 @@ def _resolve_quant_config(
     hf_config: dict,
     server_args: ServerArgs,
     safetensors_list: list[str],
+    checkpoint_files: list[str] | None = None,
     component_model_path: str,
     transformer_override_config_path: str | None = None,
     arch_config: DiTArchConfig | None = None,
@@ -1018,7 +1044,7 @@ def _resolve_quant_config(
             checkpoint_config = json.load(config_file)
     torchao_config = inspect_torchao_int8_checkpoint(
         checkpoint_config,
-        safetensors_list,
+        checkpoint_files or safetensors_list,
         param_name_mapper=get_param_names_mapping(param_names_mapping_dict),
     )
     if torchao_config is not None:
@@ -1028,6 +1054,11 @@ def _resolve_quant_config(
                 "also set an online --quantization override"
             )
         return torchao_config
+    if checkpoint_files and not safetensors_list:
+        raise ValueError(
+            "PyTorch transformer checkpoints are supported only for serialized "
+            "TorchAO INT8 weights"
+        )
 
     override_quant_config = None
     override_declares_quantization = False

@@ -1,6 +1,7 @@
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from torchao.quantization import Int8Tensor
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MiniMaxH3DiTArchConfig,
@@ -9,6 +10,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_conf
     TorchAOInt8Config,
     inspect_torchao_int8_checkpoint,
     normalize_torchao_int8_weights,
+    torchao_int8_pt_weights_iterator,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.int8_weight_only import (
     Int8WeightOnlyLinearMethod,
@@ -93,6 +95,38 @@ def test_torchao_int8_rejects_unsupported_schema_and_asymmetric_weights(tmp_path
                 _diffusers_h3_checkpoint(load_file(checkpoint).items())
             )
         )
+
+
+def test_torchao_int8_inspects_pytorch_checkpoint_shards(tmp_path):
+    first = tmp_path / "pytorch_model-00001-of-00002.bin"
+    second = tmp_path / "pytorch_model-00002-of-00002.bin"
+    qdata = torch.tensor([[1, -2, 3], [4, 5, -6]], dtype=torch.int8)
+    scale = torch.tensor([[0.25], [0.5]], dtype=torch.float32)
+    zero_point = torch.zeros((2, 1), dtype=torch.int8)
+    quantized = Int8Tensor(
+        qdata,
+        scale,
+        [1, 3],
+        torch.bfloat16,
+        zero_point=zero_point,
+    )
+    torch.save({"input.bias": torch.zeros(2)}, first)
+    torch.save({"layer.weight": quantized}, second)
+
+    config = inspect_torchao_int8_checkpoint(
+        _torchao_config(), [str(first), str(second)]
+    )
+    normalized = dict(
+        normalize_torchao_int8_weights(
+            torchao_int8_pt_weights_iterator([str(first), str(second)], device="cpu")
+        )
+    )
+
+    assert isinstance(config, TorchAOInt8Config)
+    assert config.layer_scale_dtypes == {"layer": torch.float32}
+    torch.testing.assert_close(normalized["layer.weight"], qdata)
+    torch.testing.assert_close(normalized["layer.weight_scale"], scale)
+    assert "layer._weight_zero_point" not in normalized
 
 
 def test_int8_weight_only_linear_uses_per_row_scales():
