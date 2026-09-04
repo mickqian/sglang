@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, cast
 
 import torch
+from torch.nn import functional as F
 from torch.nn.parameter import Parameter
 
 from sglang.kernels.ops.quantization.int8_kernel import per_token_quant_int8
@@ -72,7 +73,10 @@ def _int8_scaled_mm_fallback(
     out_dtype: torch.dtype,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    output = torch._int_mm(mat_a, mat_b).to(torch.float32)
+    rows = mat_a.shape[0]
+    if rows <= 16:
+        mat_a = F.pad(mat_a, (0, 0, 0, 17 - rows))
+    output = torch._int_mm(mat_a, mat_b)[:rows].to(torch.float32)
     output.mul_(scales_a.reshape(-1, 1))
     output.mul_(scales_b.reshape(1, -1))
     if bias is not None:
