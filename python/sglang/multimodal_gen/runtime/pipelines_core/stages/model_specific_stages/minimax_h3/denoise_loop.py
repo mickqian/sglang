@@ -482,6 +482,11 @@ def minimax_h3_denoise_loop(
         raise ValueError("video/audio sigma schedules must have equal length")
     if len(sigmas_video) < 2:
         raise ValueError("sigma schedules need at least 2 entries")
+    sigmas_video, sigmas_audio = model.retime_pdd_schedules(
+        sigmas_video,
+        sigmas_audio,
+        synthetic_warmup=synthetic_warmup,
+    )
     n_cond = positive.video_target_start
     if keyframe_cond_rows is None:
         if n_cond != 0:
