@@ -38,6 +38,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.bitsandbytes import (
     build_bitsandbytes_4bit_quant_states,
     split_bitsandbytes_4bit_state,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
+    QuantizationConfig,
+)
 from sglang.multimodal_gen.runtime.loader import rank_local_checkpoint
 from sglang.multimodal_gen.runtime.loader.utils import (
     get_param_names_mapping,
@@ -357,6 +360,11 @@ def maybe_load_fsdp_model(
 
     # 2. load model from disk
     preprocess_loaded_state_dict = getattr(model, "preprocess_loaded_state_dict", None)
+    runtime_quant_config = init_params.get("quant_config")
+    checkpoint_weights_need_normalization = bool(
+        isinstance(runtime_quant_config, QuantizationConfig)
+        and runtime_quant_config.normalizes_checkpoint_weights
+    )
     bnb_quant_states = None
     preconverted_state_dict = None
     is_bnb_quantized = _is_bitsandbytes_quant_config(init_params.get("quant_config"))
@@ -366,6 +374,7 @@ def maybe_load_fsdp_model(
         and weight_dir_list
         and weights_iterator is None
         and preprocess_loaded_state_dict is None
+        and not checkpoint_weights_need_normalization
         and checkpoint_key_filter is None
         and not is_bnb_quantized
     ):
@@ -382,6 +391,7 @@ def maybe_load_fsdp_model(
         and weight_dir_list
         and weights_iterator is None
         and preprocess_loaded_state_dict is None
+        and not checkpoint_weights_need_normalization
         and checkpoint_key_filter is None
         and not is_bnb_quantized
     ):
@@ -409,6 +419,10 @@ def maybe_load_fsdp_model(
             )
         if preprocess_loaded_state_dict is not None:
             weight_iterator = preprocess_loaded_state_dict(weight_iterator)
+        if checkpoint_weights_need_normalization:
+            weight_iterator = runtime_quant_config.normalize_checkpoint_weights(
+                weight_iterator
+            )
         if is_bnb_quantized:
             normal_weights, raw_quant_state = split_bitsandbytes_4bit_state(
                 weight_iterator

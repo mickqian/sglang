@@ -479,6 +479,10 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                     quant_spec.gguf_file is not None
                     or quant_spec.is_serialized_kitchen_int8
                     or quant_spec.is_serialized_kitchen_w4a8
+                    or (
+                        quant_spec.quant_config is not None
+                        and quant_spec.quant_config.supports_cpu_weight_loading()
+                    )
                 ),
             )
         )

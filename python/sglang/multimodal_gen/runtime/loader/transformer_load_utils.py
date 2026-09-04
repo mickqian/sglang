@@ -32,11 +32,17 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config i
     NunchakuConfig,
     _patch_nunchaku_scales,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_config import (
+    inspect_torchao_int8_checkpoint,
+)
 from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     names_gguf_checkpoint,
     read_gguf_tensor_meta,
 )
-from sglang.multimodal_gen.runtime.loader.utils import _list_safetensors_files
+from sglang.multimodal_gen.runtime.loader.utils import (
+    _list_safetensors_files,
+    get_param_names_mapping,
+)
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
     COMPONENT_OFFLOAD,
     ComponentResidencyError,
@@ -1005,6 +1011,23 @@ def _resolve_quant_config(
     )
     reverse_param_names_mapping_dict = arch_config.reverse_param_names_mapping
     quant_ignore_remap_dict = arch_config.quant_ignore_remap
+
+    checkpoint_config = hf_config
+    if transformer_override_config_path is not None:
+        with open(transformer_override_config_path, encoding="utf-8") as config_file:
+            checkpoint_config = json.load(config_file)
+    torchao_config = inspect_torchao_int8_checkpoint(
+        checkpoint_config,
+        safetensors_list,
+        param_name_mapper=get_param_names_mapping(param_names_mapping_dict),
+    )
+    if torchao_config is not None:
+        if server_args.quantization is not None:
+            raise ValueError(
+                "The TorchAO checkpoint already contains quantized weights; do not "
+                "also set an online --quantization override"
+            )
+        return torchao_config
 
     override_quant_config = None
     override_declares_quantization = False
