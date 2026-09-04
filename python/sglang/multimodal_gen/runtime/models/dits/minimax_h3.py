@@ -100,7 +100,14 @@ _PDD_HEAD_KEYS = {
     "audio_proj_out.weight": "audio_weight",
     "audio_proj_out.bias": "audio_bias",
 }
+_PDD_SIDECAR_HEAD_KEYS = {
+    "h3_pdd.bank.video.weight": "proj_out.weight",
+    "h3_pdd.bank.video.bias": "proj_out.bias",
+    "h3_pdd.bank.audio.weight": "audio_proj_out.weight",
+    "h3_pdd.bank.audio.bias": "audio_proj_out.bias",
+}
 _PDDHeadPlan = tuple[int, torch.Tensor]
+_PDD_PARTITION_TOLERANCE = 0.015
 
 
 def _positive_pdd_metadata(metadata: dict[str, str], key: str) -> int:
@@ -116,20 +123,29 @@ def _positive_pdd_metadata(metadata: dict[str, str], key: str) -> int:
     return parsed
 
 
-def _pdd_plan_from_sigmas(
-    sigmas: list[float],
-    *,
-    num_steps: int,
-    block_size: int,
-) -> list[_PDDHeadPlan]:
-    """Refit the released fine-grid heads to one shifted coarse schedule."""
-    nfe = num_steps // block_size
-    if len(sigmas) != nfe + 1:
+def _optional_positive_pdd_float(metadata: dict[str, str], key: str) -> float | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
         raise ValueError(
-            f"PDD adapter requires num_inference_steps={nfe + 1} "
-            f"({nfe} denoiser evaluations), got {len(sigmas)} schedule points"
+            f"PDD adapter metadata {key!r} must be a positive finite number"
+        ) from error
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise ValueError(
+            f"PDD adapter metadata {key!r} must be a positive finite number"
         )
+    return parsed
+
+
+def _pdd_schedule_shift(
+    sigmas: list[float], base_schedule: torch.Tensor
+) -> tuple[torch.Tensor, float]:
     schedule = torch.tensor(sigmas, dtype=torch.float64)
+    if len(schedule) < 2 or len(schedule) != len(base_schedule):
+        raise ValueError("PDD requires matching sigma and base schedules")
     if not torch.isfinite(schedule).all() or not torch.all(
         schedule[:-1] > schedule[1:]
     ):
@@ -137,26 +153,104 @@ def _pdd_plan_from_sigmas(
     if abs(float(schedule[0]) - 1.0) > 1e-6 or abs(float(schedule[-1])) > 1e-6:
         raise ValueError("PDD sigma schedule must span exactly 1 to 0")
 
-    coarse_base = torch.linspace(1.0, 0.0, nfe + 1, dtype=torch.float64)
-    base = float(coarse_base[1])
+    base = float(base_schedule[1])
     shifted = float(schedule[1])
     denominator = base * (1.0 - shifted)
     if denominator <= 0.0:
         raise ValueError("PDD could not recover the scheduler shift from sigmas")
     shift = shifted * (1.0 - base) / denominator
-    expected = shift * coarse_base / (1.0 + (shift - 1.0) * coarse_base)
+    expected = shift * base_schedule / (1.0 + (shift - 1.0) * base_schedule)
     if not torch.allclose(schedule, expected, rtol=2e-6, atol=2e-6):
         raise ValueError("PDD requires the standard uniformly spaced shifted schedule")
+    return schedule, shift
+
+
+def _pdd_plan_from_sigmas(
+    sigmas: list[float],
+    *,
+    num_steps: int,
+    block_size: int,
+) -> list[_PDDHeadPlan]:
+    """Refit the released fine-grid heads to one shifted coarse schedule."""
+    nfe = len(sigmas) - 1
+    widths = _pdd_partition_widths(num_steps, nfe, block_size)
+    knots = [0]
+    for width in widths:
+        knots.append(knots[-1] + width)
+
+    coarse_base = 1.0 - torch.tensor(knots, dtype=torch.float64) / num_steps
+    _, shift = _pdd_schedule_shift(sigmas, coarse_base)
 
     fine_base = torch.linspace(1.0, 0.0, num_steps + 1, dtype=torch.float64)
     fine = shift * fine_base / (1.0 + (shift - 1.0) * fine_base)
     step_sizes = fine[:-1] - fine[1:]
     plans = []
-    for start in range(0, num_steps, block_size):
-        stop = start + block_size
+    for start, stop in zip(knots, knots[1:]):
         block = step_sizes[start:stop]
         plans.append((start, (block / block.sum()).to(torch.float32)))
     return plans
+
+
+def _pdd_partition_widths(
+    num_steps: int,
+    nfe: int,
+    trained_width: int,
+) -> list[int]:
+    """Tile a PDD fine grid, putting wider legal blocks before the tail."""
+    if nfe > 0 and num_steps % nfe == 0:
+        return [num_steps // nfe] * nfe
+    if (
+        nfe > 0
+        and trained_width > 0
+        and trained_width * nfe <= num_steps <= 2 * trained_width * nfe
+    ):
+        widths = [trained_width] * nfe
+        excess = num_steps - trained_width * nfe
+        for index in range(nfe):
+            added = min(excess, trained_width)
+            widths[index] += added
+            excess -= added
+        if excess == 0:
+            return widths
+
+    uniform = [count for count in range(1, num_steps + 1) if num_steps % count == 0]
+    uneven = [
+        count
+        for count in range(1, num_steps + 1)
+        if num_steps % count
+        and trained_width * count <= num_steps <= 2 * trained_width * count
+    ]
+    raise ValueError(
+        f"PDD {nfe} denoiser evaluations cannot tile its {num_steps}-point "
+        f"grid; supported uniform counts are {uniform} and supported "
+        f"trained-envelope counts are {uneven}"
+    )
+
+
+def _pdd_retime_sigmas(
+    sigmas: list[float],
+    *,
+    num_steps: int,
+    block_size: int,
+    expected_shift: float | None = None,
+) -> list[float]:
+    """Replace a standard coarse schedule with the sidecar's grid boundaries."""
+    nfe = len(sigmas) - 1
+    widths = _pdd_partition_widths(num_steps, nfe, block_size)
+    requested_base = torch.linspace(1.0, 0.0, nfe + 1, dtype=torch.float64)
+    _, shift = _pdd_schedule_shift(sigmas, requested_base)
+    if expected_shift is not None and not math.isclose(
+        shift, expected_shift, rel_tol=1e-4, abs_tol=1e-4
+    ):
+        raise ValueError(
+            f"PDD sidecar requires flow shift {expected_shift:g}, got {shift:g}"
+        )
+    knots = [0]
+    for width in widths:
+        knots.append(knots[-1] + width)
+    fine_base = 1.0 - torch.tensor(knots, dtype=torch.float64) / num_steps
+    retimed = shift * fine_base / (1.0 + (shift - 1.0) * fine_base)
+    return [float(value) for value in retimed.to(torch.float32)]
 
 
 def _diffusers_h3_checkpoint(
@@ -1556,6 +1650,8 @@ class MiniMaxH3FinalLayer(nn.Module):
         self.pdd_audio_bias: torch.Tensor | None = None
         self.pdd_num_steps: int | None = None
         self.pdd_block_size: int | None = None
+        self.pdd_shift_video: float | None = None
+        self.pdd_shift_audio: float | None = None
 
     def set_pdd_heads(self, state: dict[str, Any] | None) -> None:
         if state is None:
@@ -1565,6 +1661,8 @@ class MiniMaxH3FinalLayer(nn.Module):
             self.pdd_audio_bias = None
             self.pdd_num_steps = None
             self.pdd_block_size = None
+            self.pdd_shift_video = None
+            self.pdd_shift_audio = None
             return
         self.pdd_video_weight = state["video_weight"]
         self.pdd_video_bias = state["video_bias"]
@@ -1572,6 +1670,8 @@ class MiniMaxH3FinalLayer(nn.Module):
         self.pdd_audio_bias = state["audio_bias"]
         self.pdd_num_steps = int(state["num_steps"])
         self.pdd_block_size = int(state["block_size"])
+        self.pdd_shift_video = state.get("shift_video")
+        self.pdd_shift_audio = state.get("shift_audio")
 
     @staticmethod
     def _pdd_linear(
@@ -1789,6 +1889,10 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         metadata: dict[str, str],
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         """Extract PDD output heads before ordinary LoRA name conversion."""
+        sidecar_keys = {name for name in adapter if name.startswith("h3_pdd.")}
+        if sidecar_keys:
+            adapter = self._normalize_pdd_sidecar(adapter, metadata, sidecar_keys)
+
         present = _PDD_HEAD_KEYS.keys() & adapter.keys()
         if not present:
             return adapter, {}
@@ -1855,11 +1959,187 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             ),
             "num_steps": num_steps,
             "block_size": block_size,
+            "shift_video": _optional_positive_pdd_float(metadata, "pdd_shift_video"),
+            "shift_audio": _optional_positive_pdd_float(metadata, "pdd_shift_audio"),
         }
         ordinary = {
             name: tensor for name, tensor in adapter.items() if name not in present
         }
         return ordinary, state
+
+    def _normalize_pdd_sidecar(
+        self,
+        adapter: dict[str, torch.Tensor],
+        metadata: dict[str, str],
+        sidecar_keys: set[str],
+    ) -> dict[str, torch.Tensor]:
+        """Translate a complete Comfy PDD sidecar into the native PDD contract."""
+        kind = metadata.get("h3_pdd_backbone", "full")
+        if kind != "full":
+            raise ValueError(
+                "MiniMax H3 currently supports full PDD sidecars only; "
+                f"h3_pdd_backbone={kind!r} needs its paired baked checkpoint"
+            )
+
+        missing_heads = _PDD_SIDECAR_HEAD_KEYS.keys() - adapter.keys()
+        if missing_heads:
+            raise ValueError(
+                "MiniMax H3 PDD sidecar has an incomplete output-head bank; "
+                f"missing {sorted(missing_heads)}"
+            )
+
+        normalized = {
+            name: tensor
+            for name, tensor in adapter.items()
+            if not name.startswith("h3_pdd.")
+        }
+        consumed = set(_PDD_SIDECAR_HEAD_KEYS)
+        for source_name, target_name in _PDD_SIDECAR_HEAD_KEYS.items():
+            if target_name in normalized:
+                raise ValueError(
+                    f"MiniMax H3 PDD sidecar key {source_name!r} conflicts with "
+                    f"canonical key {target_name!r}"
+                )
+            normalized[target_name] = adapter[source_name]
+
+        adaln_prefix = "h3_pdd.adaln.blocks."
+        adaln_slots: dict[int, set[str]] = defaultdict(set)
+        for source_name in sorted(sidecar_keys):
+            if not source_name.startswith(adaln_prefix):
+                continue
+            fields = source_name[len(adaln_prefix) :].split(".")
+            if len(fields) != 2 or not fields[0].isdigit():
+                raise ValueError(
+                    f"Unsupported MiniMax H3 PDD AdaLN key {source_name!r}"
+                )
+            block = int(fields[0])
+            slot = fields[1]
+            if slot not in {"lora_A", "lora_B", "alpha"}:
+                raise ValueError(
+                    f"Unsupported MiniMax H3 PDD AdaLN key {source_name!r}"
+                )
+            target_suffix = f"{slot}.weight" if slot != "alpha" else slot
+            target_name = (
+                f"diffusion_model.blocks.{block}.adaln_proj.linear.{target_suffix}"
+            )
+            if target_name in normalized:
+                raise ValueError(
+                    f"MiniMax H3 PDD AdaLN key {source_name!r} conflicts with "
+                    f"canonical key {target_name!r}"
+                )
+            normalized[target_name] = adapter[source_name]
+            adaln_slots[block].add(slot)
+            consumed.add(source_name)
+
+        declared_adaln = _positive_pdd_metadata(metadata, "adaln_modules")
+        expected_slots = {"lora_A", "lora_B", "alpha"}
+        incomplete = {
+            block: sorted(expected_slots - slots)
+            for block, slots in adaln_slots.items()
+            if slots != expected_slots
+        }
+        if len(adaln_slots) != declared_adaln or incomplete:
+            raise ValueError(
+                "MiniMax H3 PDD sidecar declares "
+                f"{declared_adaln} AdaLN modules but carries {len(adaln_slots)} "
+                f"complete modules; incomplete={incomplete}"
+            )
+
+        backbone_a = [
+            name
+            for name in normalized
+            if name.startswith("diffusion_model.")
+            and ".adaln_proj." not in name
+            and name.endswith(".lora_A.weight")
+        ]
+        declared_backbone = _positive_pdd_metadata(metadata, "backbone_modules")
+        if len(backbone_a) != declared_backbone:
+            raise ValueError(
+                "MiniMax H3 PDD sidecar declares "
+                f"{declared_backbone} backbone modules but carries "
+                f"{len(backbone_a)}"
+            )
+        for a_name in backbone_a:
+            base = a_name[: -len(".lora_A.weight")]
+            required = {f"{base}.lora_B.weight", f"{base}.alpha"}
+            missing = required - normalized.keys()
+            if missing:
+                raise ValueError(
+                    f"MiniMax H3 PDD backbone module {base!r} is incomplete; "
+                    f"missing {sorted(missing)}"
+                )
+
+        base_video_name = "h3_pdd.base_video_out"
+        if base_video_name not in adapter:
+            raise ValueError(
+                "MiniMax H3 PDD sidecar is missing its partition fingerprint "
+                f"{base_video_name!r}"
+            )
+        reference = adapter[base_video_name]
+        live = self.final_layer.video_out.weight.detach()
+        tp_size = get_tp_world_size()
+        expected_shape = (live.shape[0] * tp_size, live.shape[1])
+        if tuple(reference.shape) != expected_shape:
+            raise ValueError(
+                f"MiniMax H3 PDD partition fingerprint must have shape "
+                f"{expected_shape}, got {tuple(reference.shape)}"
+            )
+        if not reference.is_floating_point() or not torch.isfinite(reference).all():
+            raise ValueError(
+                "MiniMax H3 PDD partition fingerprint must be a finite "
+                "floating-point tensor"
+            )
+        reference = reference.narrow(
+            0, get_tp_rank() * live.shape[0], live.shape[0]
+        ).to(device=live.device, dtype=torch.float32)
+        reference_norm = float(reference.norm())
+        if reference_norm == 0.0:
+            raise ValueError("MiniMax H3 PDD partition fingerprint is degenerate")
+        distance = float((live.to(torch.float32) - reference).norm()) / reference_norm
+        if not math.isfinite(distance):
+            raise ValueError("MiniMax H3 PDD partition fingerprint is degenerate")
+        if distance > _PDD_PARTITION_TOLERANCE:
+            raise ValueError(
+                "MiniMax H3 PDD sidecar was converted for a different model "
+                f"partition: final video head distance {distance:.4f} exceeds "
+                f"{_PDD_PARTITION_TOLERANCE}"
+            )
+        consumed.add(base_video_name)
+
+        grid_name = "h3_pdd.silu_temb_grid"
+        if grid_name not in adapter:
+            raise ValueError(
+                f"MiniMax H3 PDD sidecar is missing AdaLN grid {grid_name!r}"
+            )
+        grid_rows = _positive_pdd_metadata(metadata, "pdd_grid_rows")
+        if tuple(adapter[grid_name].shape) != (grid_rows, self.arch.time_embed_dim):
+            raise ValueError(
+                f"MiniMax H3 PDD AdaLN grid must have shape "
+                f"({grid_rows}, {self.arch.time_embed_dim}), got "
+                f"{tuple(adapter[grid_name].shape)}"
+            )
+        consumed.add(grid_name)
+
+        probe_names = {
+            "h3_pdd.backbone_probe",
+            "h3_pdd.backbone_probe_scale",
+        }
+        if sidecar_keys & probe_names:
+            if not probe_names <= sidecar_keys:
+                raise ValueError("MiniMax H3 PDD sidecar backbone probe is incomplete")
+            consumed.update(probe_names)
+            logger.warning(
+                "MiniMax H3 PDD sidecar checkpoint probe uses Comfy-specific "
+                "quantized storage and cannot be compared with native SGLang "
+                "weights; the FL2VA/Ref2VA partition fingerprint was verified"
+            )
+
+        unsupported = sorted(sidecar_keys - consumed)
+        if unsupported:
+            raise ValueError(
+                f"Unsupported MiniMax H3 PDD sidecar tensors: {unsupported[:8]}"
+            )
+        return normalized
 
     def set_lora_runtime_state(
         self,
@@ -1918,6 +2198,39 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             )
             for video_plan, audio_plan in zip(video, audio)
         ]
+
+    def retime_pdd_schedules(
+        self,
+        sigmas_video: list[float],
+        sigmas_audio: list[float],
+        *,
+        synthetic_warmup: bool = False,
+    ) -> tuple[list[float], list[float]]:
+        """Snap an active PDD request onto legal boundaries of its fine grid."""
+        num_steps = self.final_layer.pdd_num_steps
+        block_size = self.final_layer.pdd_block_size
+        if synthetic_warmup or num_steps is None or block_size is None:
+            return sigmas_video, sigmas_audio
+        widths = _pdd_partition_widths(num_steps, len(sigmas_video) - 1, block_size)
+        logger.info(
+            "MiniMax H3 PDD request uses %d denoiser evaluations with block widths %s",
+            len(widths),
+            widths,
+        )
+        return (
+            _pdd_retime_sigmas(
+                sigmas_video,
+                num_steps=num_steps,
+                block_size=block_size,
+                expected_shift=self.final_layer.pdd_shift_video,
+            ),
+            _pdd_retime_sigmas(
+                sigmas_audio,
+                num_steps=num_steps,
+                block_size=block_size,
+                expected_shift=self.final_layer.pdd_shift_audio,
+            ),
+        )
 
     def prepare_adaln_plans(
         self, step_timesteps: list[torch.Tensor]
