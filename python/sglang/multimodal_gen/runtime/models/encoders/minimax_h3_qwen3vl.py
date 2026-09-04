@@ -19,10 +19,14 @@ from sglang.multimodal_gen.configs.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3Qwen3VLConfig,
 )
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.layers.quantization.gguf import GGUFConfig
 from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
 from sglang.multimodal_gen.runtime.models.encoders.base import TextEncoder
-from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import Qwen3VLModel
+from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import (
+    QWEN3VL_GGUF_PARAM_NAMES_MAPPING,
+    Qwen3VLModel,
+)
 from sglang.multimodal_gen.runtime.weights.source import (
     materialize_weight,
     resolve_weight,
@@ -31,6 +35,7 @@ from sglang.multimodal_gen.runtime.weights.source import (
 MINIMAX_H3_QWEN3VL_HIDDEN_DIM = 5120
 _LAYER_WEIGHT_RE = re.compile(r"^model\.language_model\.layers\.(\d+)\.")
 _PARAM_NAMES_MAPPING = {
+    **QWEN3VL_GGUF_PARAM_NAMES_MAPPING,
     r"^model\.(embed_tokens|layers|norm|rotary_emb)\.": r"model.language_model.\1.",
     r"^language_model\.": r"model.language_model.",
     r"^visual\.": r"model.visual.",
@@ -316,6 +321,13 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
             arch,
             quant_config=config.quant_config,
             use_tensor_parallel=True,
+            include_visual=(
+                not isinstance(config.quant_config, GGUFConfig)
+                or any(
+                    metadata.param_name.startswith("model.visual.")
+                    for metadata in config.quant_config.tensor_meta.values()
+                )
+            ),
             prefix="model",
         )
         # H3 and ClipProj consume an unnormalized intermediate residual stream.

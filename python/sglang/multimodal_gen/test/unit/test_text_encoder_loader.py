@@ -46,8 +46,12 @@ from sglang.multimodal_gen.runtime.models.encoders.base import (
 from sglang.multimodal_gen.runtime.models.encoders.minimax_h3_qwen3vl import (
     MiniMaxH3ConditioningProjection,
     MiniMaxH3Qwen3VLEncoder,
+    _map_checkpoint_name,
 )
-from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import Qwen3VLTextModel
+from sglang.multimodal_gen.runtime.models.encoders.qwen3vl import (
+    Qwen3VLModel,
+    Qwen3VLTextModel,
+)
 from sglang.multimodal_gen.runtime.utils.quantization_utils import (
     process_quantized_linear_weights,
     require_quantized_linear_layers,
@@ -172,6 +176,36 @@ class TestTextEncoderClassResolution(unittest.TestCase):
                 "model.layers.0.self_attn.q_proj.weight"
             )
         )
+
+    def test_standard_qwen3vl_gguf_names_map_to_native_encoder(self):
+        self.assertEqual(
+            _map_checkpoint_name("blk.0.attn_q.weight"),
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+        )
+        self.assertEqual(
+            _map_checkpoint_name("token_embd.weight"),
+            "model.language_model.embed_tokens.weight",
+        )
+
+    def test_text_only_qwen3vl_does_not_construct_vision_tower(self):
+        config = SimpleNamespace(vision_config=object(), text_config=object())
+        with (
+            mock.patch(
+                "sglang.multimodal_gen.runtime.models.encoders.qwen3vl."
+                "Qwen3VLVisionTransformer"
+            ) as visual_cls,
+            mock.patch(
+                "sglang.multimodal_gen.runtime.models.encoders.qwen3vl."
+                "Qwen3VLTextModel",
+                return_value=nn.Identity(),
+            ),
+        ):
+            model = Qwen3VLModel(config, include_visual=False)
+
+        visual_cls.assert_not_called()
+        self.assertIsNone(model.visual)
+        with self.assertRaisesRegex(ValueError, "no vision tower"):
+            model._get_flat_visual_features(torch.empty(0), None)
 
     def test_bitsandbytes_native_load_requires_resident_encoder(self):
         loaded_encoder = nn.Linear(1, 1)

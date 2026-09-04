@@ -56,9 +56,6 @@ except ImportError:
 import torch
 import torch.nn as nn
 from transformers.activations import ACT2FN
-
-logger = logging.getLogger(__name__)
-
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLTextConfig,
@@ -67,6 +64,25 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLCausalLMOutputWithPast,
     Qwen3VLModelOutputWithPast,
 )
+
+logger = logging.getLogger(__name__)
+
+QWEN3VL_GGUF_PARAM_NAMES_MAPPING = {
+    r"^token_embd\.": r"model.embed_tokens.",
+    r"^output_norm\.": r"model.norm.",
+    r"^output\.": r"lm_head.",
+    r"^blk\.(\d+)\.attn_norm\.": r"model.layers.\1.input_layernorm.",
+    r"^blk\.(\d+)\.ffn_norm\.": r"model.layers.\1.post_attention_layernorm.",
+    r"^blk\.(\d+)\.attn_q\.": r"model.layers.\1.self_attn.q_proj.",
+    r"^blk\.(\d+)\.attn_k\.": r"model.layers.\1.self_attn.k_proj.",
+    r"^blk\.(\d+)\.attn_v\.": r"model.layers.\1.self_attn.v_proj.",
+    r"^blk\.(\d+)\.attn_output\.": r"model.layers.\1.self_attn.o_proj.",
+    r"^blk\.(\d+)\.attn_q_norm\.": r"model.layers.\1.self_attn.q_norm.",
+    r"^blk\.(\d+)\.attn_k_norm\.": r"model.layers.\1.self_attn.k_norm.",
+    r"^blk\.(\d+)\.ffn_gate\.": r"model.layers.\1.mlp.gate_proj.",
+    r"^blk\.(\d+)\.ffn_up\.": r"model.layers.\1.mlp.up_proj.",
+    r"^blk\.(\d+)\.ffn_down\.": r"model.layers.\1.mlp.down_proj.",
+}
 
 
 def _make_text_rms_norm(hidden_size: int, eps: float) -> RMSNorm:
@@ -686,6 +702,7 @@ class Qwen3VLModel(nn.Module):
         *,
         quant_config: QuantizationConfig | None = None,
         use_tensor_parallel: bool = False,
+        include_visual: bool = True,
         prefix: str = "",
     ):
         super().__init__()
@@ -694,10 +711,14 @@ class Qwen3VLModel(nn.Module):
             if quant_config is not None and quant_config.supports_srt_linear_layers
             else None
         )
-        self.visual = Qwen3VLVisionTransformer(
-            config.vision_config,
-            quant_config=vision_quant_config,
-            prefix=add_prefix("visual", prefix),
+        self.visual = (
+            Qwen3VLVisionTransformer(
+                config.vision_config,
+                quant_config=vision_quant_config,
+                prefix=add_prefix("visual", prefix),
+            )
+            if include_visual
+            else None
         )
         self.language_model = Qwen3VLTextModel(
             config.text_config,
@@ -910,6 +931,8 @@ class Qwen3VLModel(nn.Module):
         pixel_values: torch.FloatTensor,
         grid_thw: Optional[torch.LongTensor],
     ):
+        if self.visual is None:
+            raise ValueError("The selected Qwen3-VL checkpoint has no vision tower")
         visual_out = self.visual(pixel_values, grid_thw=grid_thw)
         return visual_out.pooler_output, visual_out.deepstack_features
 
