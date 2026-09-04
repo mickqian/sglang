@@ -268,10 +268,16 @@ class TestPipelineStageRoleFilter(unittest.TestCase):
                 revision="a" * 40,
             )
 
-            with patch(
-                "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base.maybe_download_model",
-                return_value=str(tmp_path),
-            ) as download_model:
+            with (
+                patch(
+                    "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base.has_diffusers_pipeline_index",
+                    return_value=True,
+                ),
+                patch(
+                    "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base.maybe_download_model",
+                    return_value=str(tmp_path),
+                ) as download_model,
+            ):
                 pipeline._load_config()
 
         download_model.assert_called_once_with(
