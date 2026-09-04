@@ -179,7 +179,7 @@ class ComposedPipelineBase(ABC):
     def _load_config(self) -> dict[str, Any]:
         model_subfolder = self.server_args.model_subfolder
         if model_subfolder is None and not has_diffusers_pipeline_index(
-            self.model_path
+            self.model_path, revision=self.server_args.revision
         ):
             model_subfolder = self.default_model_subfolder
 

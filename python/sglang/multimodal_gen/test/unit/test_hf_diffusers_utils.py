@@ -14,6 +14,7 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     _check_index_files_for_missing_shards,
     _is_revisionless_snapshot_root,
     _verify_diffusers_model_complete,
+    has_diffusers_pipeline_index,
     maybe_download_model,
     maybe_download_model_index,
     parse_diffusers_component_entry,
@@ -151,6 +152,27 @@ def test_remote_pipeline_index_falls_back_to_modular(monkeypatch, tmp_path):
     assert calls == [
         ("org/modular-pipeline", "model_index.json"),
         ("org/modular-pipeline", "modular_model_index.json"),
+    ]
+
+
+def test_remote_modular_pipeline_index_prevents_default_subfolder(
+    monkeypatch, tmp_path
+):
+    _write_modular_model_index(tmp_path)
+    calls = []
+
+    def fake_hf_hub_download(*, repo_id, filename, revision=None):
+        calls.append((repo_id, filename, revision))
+        if filename == "model_index.json":
+            raise EntryNotFoundError("missing classic pipeline index")
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(hf_diffusers_utils, "hf_hub_download", fake_hf_hub_download)
+
+    assert has_diffusers_pipeline_index("org/modular-pipeline", revision="release")
+    assert calls == [
+        ("org/modular-pipeline", "model_index.json", "release"),
+        ("org/modular-pipeline", "modular_model_index.json", "release"),
     ]
 
 

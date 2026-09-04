@@ -157,8 +157,17 @@ def _find_local_pipeline_index_path(model_path: str) -> str | None:
     return None
 
 
-def has_diffusers_pipeline_index(model_path: str) -> bool:
-    return _find_local_pipeline_index_path(model_path) is not None
+def has_diffusers_pipeline_index(
+    model_path: str, revision: str | None = None
+) -> bool:
+    local_index = _find_local_pipeline_index_path(model_path)
+    if local_index is not None or os.path.exists(model_path):
+        return local_index is not None
+    try:
+        _resolve_remote_repo_pipeline_index_path(model_path, revision=revision)
+    except EntryNotFoundError:
+        return False
+    return True
 
 
 def _is_weight_bearing_diffusers_component(key: str, value: Any) -> bool:
@@ -772,14 +781,19 @@ def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:
     return cast(dict[str, Any], config)
 
 
-def _resolve_remote_repo_pipeline_index_path(model_name_or_path: str) -> str:
+def _resolve_remote_repo_pipeline_index_path(
+    model_name_or_path: str, revision: str | None = None
+) -> str:
     """Return the classic or modular pipeline index from a remote repo."""
     missing_error: EntryNotFoundError | None = None
     for filename in _PIPELINE_INDEX_FILENAMES:
         try:
             # Cache-aware: no local_dir, so the selected Hub reuses its cache and
             # revalidates the remote file when online.
-            return hf_hub_download(repo_id=model_name_or_path, filename=filename)
+            download_kwargs = {"repo_id": model_name_or_path, "filename": filename}
+            if revision is not None:
+                download_kwargs["revision"] = revision
+            return hf_hub_download(**download_kwargs)
         except EntryNotFoundError as error:
             missing_error = error
         except Exception as online_error:
@@ -787,9 +801,13 @@ def _resolve_remote_repo_pipeline_index_path(model_name_or_path: str) -> str:
             if not envs.SGLANG_USE_MODELSCOPE.get():
                 from huggingface_hub import try_to_load_from_cache
 
-                cached = try_to_load_from_cache(
-                    repo_id=model_name_or_path, filename=filename
-                )
+                cache_kwargs = {
+                    "repo_id": model_name_or_path,
+                    "filename": filename,
+                }
+                if revision is not None:
+                    cache_kwargs["revision"] = revision
+                cached = try_to_load_from_cache(**cache_kwargs)
                 if isinstance(cached, str) and os.path.exists(cached):
                     cached_path = cached
             if cached_path is None:
