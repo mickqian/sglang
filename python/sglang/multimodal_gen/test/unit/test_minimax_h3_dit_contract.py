@@ -48,6 +48,9 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     _qkv_scale_block_rows,
     _reorder_grouped_qkv_to_qkv,
 )
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3_world import (
+    build_minimax_h3_world_control_attention,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.test.single_test_file.component_accuracy.utils import (
     ensure_distributed_env_defaults,
@@ -844,6 +847,24 @@ def test_packed_qkv_exchange_preserves_rank_and_head_order(_):
             [tensor[:, target_rank * 2 : (target_rank + 1) * 2] for tensor in tensors]
         )
         torch.testing.assert_close(actual[index], expected)
+
+
+def test_world_control_attention_binds_each_action_to_one_video_latent():
+    control = build_minimax_h3_world_control_attention(
+        action_text_rows=torch.tensor([[0, 2], [2, 4]]),
+        video_start=4,
+        frame_rows=2,
+        used=8,
+        device=torch.device("cpu"),
+    )
+    score = torch.tensor(0.0)
+
+    assert torch.isfinite(control.score_mod(score, 0, 0, 4, 0))
+    assert torch.isneginf(control.score_mod(score, 0, 0, 6, 0))
+    assert torch.isfinite(control.score_mod(score, 0, 0, 0, 4))
+    assert torch.isneginf(control.score_mod(score, 0, 0, 0, 6))
+    assert torch.isfinite(control.score_mod(score, 0, 0, 0, 1))
+    assert torch.isneginf(control.score_mod(score, 0, 0, 0, 2))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

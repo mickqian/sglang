@@ -80,6 +80,10 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_cache import (
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_cache import (
     native_adaln_weight_files,
 )
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3_world import (
+    MiniMaxH3WorldControlAttention,
+    minimax_h3_world_control_attention,
+)
 from sglang.multimodal_gen.runtime.models.parameter import BlockQuantScaleParameter
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
@@ -410,6 +414,7 @@ _FORWARD_SUPPORTED_KWARGS = frozenset(
         "block_token_tags",
         "block_combined_indices",
         "subblock_sparse_query_block_mask",
+        "world_control_attention",
         "skip_mask_out_condition",
         "prompt_embeds",
         "refined_prompt_embeds_length",
@@ -837,6 +842,7 @@ def _minimax_h3_attention_core_impl(
     max_seqlen: int,
     ulysses_active: bool,
     subblock_sparse_query_block_mask: torch.Tensor | None = None,
+    world_control_attention: MiniMaxH3WorldControlAttention | None = None,
     ring_active: bool = False,
     gate_compress: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -857,6 +863,20 @@ def _minimax_h3_attention_core_impl(
         q, k, v = _usp_input_all_to_all_packed_qkv(q, k, v)
         if gate_compress is not None:
             gate_compress = _usp_input_all_to_all(gate_compress[None], head_dim=2)[0]
+
+    if world_control_attention is not None:
+        if ring_active:
+            raise ValueError("H3-World action routing does not support Ring parallelism")
+        out = minimax_h3_world_control_attention(
+            q,
+            k,
+            v,
+            control=world_control_attention,
+            softmax_scale=attention.softmax_scale,
+        )
+        if ulysses_active:
+            out = _usp_output_all_to_all(out[None], head_dim=2)[0]
+        return out
 
     if attention._attention_impl is None:
         attention._set_attention_backend(
@@ -1260,6 +1280,7 @@ class MiniMaxH3Attention(nn.Module):
         cu_seqlens_host: tuple[int, ...] | None = None,
         max_seqlen: int,
         subblock_sparse_query_block_mask: torch.Tensor | None = None,
+        world_control_attention: MiniMaxH3WorldControlAttention | None = None,
         ulysses_active: bool = False,
         ring_active: bool = False,
     ) -> torch.Tensor:
@@ -1345,6 +1366,7 @@ class MiniMaxH3Attention(nn.Module):
             cu_seqlens_host=cu_seqlens_host,
             max_seqlen=max_seqlen,
             subblock_sparse_query_block_mask=subblock_sparse_query_block_mask,
+            world_control_attention=world_control_attention,
             ulysses_active=ulysses_active,
             ring_active=ring_active,
             gate_compress=gate_compress,
@@ -1593,6 +1615,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         cu_seqlens_host: tuple[int, ...] | None = None,
         max_seqlen: int,
         subblock_sparse_query_block_mask: torch.Tensor | None = None,
+        world_control_attention: MiniMaxH3WorldControlAttention | None = None,
         ulysses_active: bool = False,
         ring_active: bool = False,
         adaln_params: tuple[torch.Tensor, ...] | None = None,
@@ -1624,6 +1647,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             cu_seqlens_host=cu_seqlens_host,
             max_seqlen=max_seqlen,
             subblock_sparse_query_block_mask=subblock_sparse_query_block_mask,
+            world_control_attention=world_control_attention,
             ulysses_active=ulysses_active,
             ring_active=ring_active,
         )
@@ -2777,32 +2801,36 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         prompt_embeds: torch.Tensor,
         refiner_cu_seqlens: torch.Tensor,
         *,
+        refiner_cu_seqlens_host: tuple[int, ...] | None = None,
+        refiner_max_seqlen: int | None = None,
         device: torch.device,
     ) -> torch.Tensor:
         """Project and refine request-static text conditioning once."""
         self.materialize_mps_non_layer_weights(
             "condition_proj", "token_refiner.final_norm"
         )
-        text_len = int(refiner_cu_seqlens[1].item())
+        cu_host = (
+            tuple(int(value) for value in refiner_cu_seqlens.tolist())
+            if refiner_cu_seqlens_host is None
+            else refiner_cu_seqlens_host
+        )
+        text_len = int(cu_host[-1])
         if text_len <= 0 or text_len > int(prompt_embeds.shape[0]):
             raise ValueError(
                 "refiner cu_seqlens live text length must be in "
                 f"[1, {int(prompt_embeds.shape[0])}], got {text_len}"
             )
         text_rows = prompt_embeds[:text_len].to(device=device, dtype=_BF16_DTYPE)
-        true_refiner_cu = torch.stack(
-            (
-                refiner_cu_seqlens[0],
-                refiner_cu_seqlens[1],
-                refiner_cu_seqlens[1],
+        if refiner_max_seqlen is None:
+            refiner_max_seqlen = max(
+                stop - start for start, stop in zip(cu_host[:-1], cu_host[1:])
             )
-        )
         text_embed, _ = self.condition_proj(text_rows)
         refined = self.token_refiner(
             text_embed,
-            cu_seqlens=true_refiner_cu,
-            cu_seqlens_host=(0, text_len, text_len),
-            max_seqlen=text_len,
+            cu_seqlens=refiner_cu_seqlens,
+            cu_seqlens_host=cu_host,
+            max_seqlen=refiner_max_seqlen,
         )
         self.release_mps_non_layer_weights("condition_proj", "token_refiner.final_norm")
         return refined
@@ -2882,7 +2910,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # per-step device scalar read. Running the refiner at the bucketed M
         # dimension changes GEMM selection and is not bitwise equivalent.
         if refined_prompt_embeds_length is None:
-            text_len = int(refiner_cu_seqlens[1].item())
+            text_len = int(refiner_cu_seqlens[-1].item())
         elif torch.is_tensor(refined_prompt_embeds_length):
             # BCG turns this request-varying host constant into a scalar input
             # so different live lengths can replay one padded-text signature.
@@ -2910,6 +2938,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             text_embed = self.refine_prompt_embeds(
                 text_embeddings_selected,
                 refiner_cu_seqlens,
+                refiner_max_seqlen=refiner_max_seqlen,
                 device=device,
             )
 
@@ -3032,6 +3061,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         subblock_sparse_query_block_mask = kwargs.get(
             "subblock_sparse_query_block_mask"
         )
+        world_control_attention = kwargs.get("world_control_attention")
         block_token_tags = kwargs.get("block_token_tags")
         token_tags = kwargs.get("token_tags")
         if block_token_tags is None:
@@ -3098,6 +3128,12 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             subblock_sparse_query_block_mask, torch.Tensor
         ):
             raise ValueError("subblock_sparse_query_block_mask must be a tensor")
+        if world_control_attention is not None and not isinstance(
+            world_control_attention, MiniMaxH3WorldControlAttention
+        ):
+            raise ValueError(
+                "world_control_attention must be MiniMaxH3WorldControlAttention"
+            )
         self._resolve_attention_backend_once()
 
         # Row split is 2D: ring first (an outer, contiguous ring_chunk_len
@@ -3234,6 +3270,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 cu_seqlens_host=cu_seqlens_host,
                 max_seqlen=max_seqlen,
                 subblock_sparse_query_block_mask=subblock_sparse_query_block_mask,
+                world_control_attention=world_control_attention,
                 ulysses_active=ulysses_ws > 1,
                 ring_active=ring_ws > 1,
                 adaln_params=(

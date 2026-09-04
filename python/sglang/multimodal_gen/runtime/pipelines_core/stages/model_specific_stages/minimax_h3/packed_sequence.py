@@ -127,6 +127,7 @@ def minimax_h3_packed_sequence(
     keyframe_frame_indices: list[int] | tuple[int, ...] | None = None,
     frame_count: int | None = None,
     include_video_pos: bool = False,
+    action_text_spans: Sequence[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Build the packed-sequence structural fields for one CFG branch.
 
@@ -202,6 +203,39 @@ def minimax_h3_packed_sequence(
     g[audio_sl.start : audio_sl.start + audio_t, 2] = float(w_grid[0])
     g[audio_sl.start + audio_t : audio_sl.stop, 2] = float(w_grid[-1])
 
+    action_text_rows = None
+    if action_text_spans is not None:
+        if len(action_text_spans) != latent_t:
+            raise ValueError(
+                "action_text_spans must contain one span per video latent "
+                f"({latent_t}), got {len(action_text_spans)}"
+            )
+        previous_stop = 0
+        for index, (start, stop) in enumerate(action_text_spans):
+            if not 0 <= start < stop <= text_len:
+                raise ValueError(
+                    f"action_text_spans[{index}]={(start, stop)!r} is outside "
+                    f"the text segment [0, {text_len})"
+                )
+            if start < previous_stop:
+                raise ValueError(
+                    f"action_text_spans[{index}] overlaps the preceding span"
+                )
+            previous_stop = stop
+        action_t = _video_t_grid(latent_t, 0.0)
+        action_origin = float(text_len) - float(action_t[-1]) - 1.0
+        head_stop = int(action_text_spans[0][0])
+        if action_origin < head_stop:
+            raise ValueError(
+                "action text positions overlap the base presentation; shorten "
+                "the action instructions or target duration"
+            )
+        rows = []
+        for index, (start, stop) in enumerate(action_text_spans):
+            g[start:stop, 0] = action_origin + float(action_t[index])
+            rows.append((int(start), int(stop)))
+        action_text_rows = torch.tensor(rows, dtype=torch.long)
+
     token_tags = torch.full((seq_len,), -1, dtype=torch.long)  # PADDING
     token_tags[text_sl] = 1  # TEXT (fl2va image-segment override happens upstream)
     token_tags[audio_sl] = 2  # AUDIO
@@ -236,6 +270,15 @@ def minimax_h3_packed_sequence(
         # Conditioning keyframes are images. Only generated video rows are
         # eligible for SubBlock sparsity.
         packed["video_pos"] = target_img_pos
+    if action_text_rows is not None:
+        packed.update(
+            {
+                "action_text_rows": action_text_rows,
+                "action_text_spans_local": tuple(action_text_spans),
+                "action_video_start": video_sl.start,
+                "action_frame_rows": frame_rows,
+            }
+        )
     return packed
 
 

@@ -26,6 +26,9 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
 from sglang.multimodal_gen.runtime.managers.forward_context import (
     set_forward_context,
 )
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3_world import (
+    build_minimax_h3_world_control_attention,
+)
 
 MINIMAX_H3_IMGVID_COND_TIMESTEP = 0.999
 # ref2va audio reference anchor timestep
@@ -172,7 +175,7 @@ class MiniMaxH3DenoiseBranch:
     def __init__(
         self,
         *,
-        packed: dict[str, torch.Tensor],
+        packed: dict[str, Any],
         text_embeddings: torch.Tensor,
         token_tags: torch.Tensor,
         device: torch.device,
@@ -246,6 +249,8 @@ class MiniMaxH3DenoiseBranch:
         text_pos_dev = text_pos.to(device)
         ulysses_world_size, ulysses_rank = get_ulysses_ctx()
         ring_world_size, ring_rank = get_ring_ctx()
+        if "action_text_rows" in packed and ring_world_size > 1:
+            raise ValueError("H3-World action routing does not support Ring parallelism")
         # Combined SP-local rank/world size: the group coordinator lays out
         # ring as the outer (slower-varying) dimension and Ulysses as the
         # inner one (see set_seq_parallel_pg_by_sp_groups), so this matches
@@ -270,6 +275,33 @@ class MiniMaxH3DenoiseBranch:
         self.block_token_tags = (
             token_tags_host[local_row_start:local_row_stop].clamp(min=0).to(device)
         )
+        refiner_cu_host = (0, text_len, text_len)
+        world_control_attention = None
+        action_text_spans = packed.get("action_text_spans_local")
+        if action_text_spans is not None:
+            if device.type != "cuda":
+                raise ValueError("H3-World action routing requires CUDA FlexAttention")
+            bounds = [0, int(action_text_spans[0][0])]
+            previous_stop = bounds[-1]
+            for index, (start, stop) in enumerate(action_text_spans):
+                if int(start) != previous_stop or int(stop) <= int(start):
+                    raise ValueError(
+                        f"action text span {index} does not continuously tile "
+                        "the action annotation suffix"
+                    )
+                bounds.append(int(stop))
+                previous_stop = int(stop)
+            if bounds[-1] != text_len:
+                raise ValueError("action text spans do not reach the text segment end")
+            refiner_cu_host = tuple(bounds)
+            world_control_attention = build_minimax_h3_world_control_attention(
+                action_text_rows=packed["action_text_rows"],
+                video_start=int(packed["action_video_start"]),
+                frame_rows=int(packed["action_frame_rows"]),
+                used=int(cu[1]),
+                device=device,
+            )
+
         self.static_kwargs: dict[str, Any] = {
             # Cast the fp64 position grid on the host. MiniMaxH3Rope casts it to
             # fp32 as its first op anyway, so the values are identical; doing the
@@ -302,16 +334,23 @@ class MiniMaxH3DenoiseBranch:
             },
             "refiner_packed_seq_params": {
                 "cu_seqlens_q": torch.tensor(
-                    [0, text_len, text_len], dtype=torch.int32, device=device
+                    refiner_cu_host, dtype=torch.int32, device=device
                 ),
-                "cu_seqlens_q_host": (0, text_len, text_len),
-                "max_seqlen_q": text_len,
+                "cu_seqlens_q_host": refiner_cu_host,
+                "max_seqlen_q": max(
+                    stop - start
+                    for start, stop in zip(
+                        refiner_cu_host[:-1], refiner_cu_host[1:]
+                    )
+                ),
             },
         }
         if subblock_sparse_query_block_mask is not None:
             self.static_kwargs["subblock_sparse_query_block_mask"] = (
                 subblock_sparse_query_block_mask
             )
+        if world_control_attention is not None:
+            self.static_kwargs["world_control_attention"] = world_control_attention
 
     def forward_kwargs(
         self,

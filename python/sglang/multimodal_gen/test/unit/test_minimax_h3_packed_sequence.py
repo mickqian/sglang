@@ -131,6 +131,32 @@ class TestMiniMaxH3PackedSequence(unittest.TestCase):
                     keyframe_frame_indices=frame_indices,
                 )
 
+    def test_world_control_positions_mirror_each_video_latent(self):
+        action_spans = ((20, 25), (25, 30), (30, 35))
+        built = minimax_h3_packed_sequence(
+            text_len=35,
+            latent_t=3,
+            latent_h=4,
+            latent_w=4,
+            audio_t=4,
+            include_keyframe_cond=True,
+            keyframe_frame_indices=[0],
+            frame_count=5,
+            action_text_spans=action_spans,
+        )
+
+        action_t = [
+            float(built["img_position_ids"][start:stop, 0].unique().item())
+            for start, stop in action_spans
+        ]
+        frame_rescale = 5.0 / 3.0
+        self.assertAlmostEqual(action_t[1] - action_t[0], frame_rescale)
+        self.assertAlmostEqual(action_t[2] - action_t[1], 4 * frame_rescale)
+        self.assertEqual(built["action_text_rows"].tolist(), list(action_spans))
+        self.assertEqual(built["action_text_spans_local"], action_spans)
+        self.assertEqual(built["action_frame_rows"], 4)
+        self.assertEqual(built["action_video_start"], 35 + 4 + 8)
+
     def test_ref2va_structure(self):
         built = minimax_h3_packed_sequence_ref2va_blocks(
             text_len=97,

@@ -183,6 +183,46 @@ def test_ref2va_rejects_keyframes_without_a_reference():
         )
 
 
+def test_world_control_script_resolves_one_instruction_per_video_latent():
+    conditions = [
+        {
+            "type": "image",
+            "uri": "file:///first.png",
+            "role": "keyframe",
+            "frame_index": 0,
+        }
+    ]
+    action_script = ["the man walks forward, camera follows him"] * 37
+    canonical = minimax_h3_validate_canonical_request(
+        task="fl2va",
+        prompt="A man stands in a concrete parking garage.",
+        conditions=conditions,
+        target=TARGET,
+        action_script=action_script,
+    )
+    plan = minimax_h3_resolve_plan(canonical)
+
+    assert plan.action_script == tuple(action_script)
+
+    with pytest.raises(ValueError, match="one instruction per video latent"):
+        minimax_h3_validate_canonical_request(
+            task="fl2va",
+            prompt="contract",
+            conditions=conditions,
+            target=TARGET,
+            action_script=action_script[:-1],
+        )
+
+    with pytest.raises(ValueError, match="exactly one first-frame keyframe"):
+        minimax_h3_validate_canonical_request(
+            task="fl2va",
+            prompt="contract",
+            conditions=[{**conditions[0], "frame_index": -1}],
+            target=TARGET,
+            action_script=action_script,
+        )
+
+
 @pytest.mark.parametrize(
     ("partition", "tasks"),
     [("fl2va", ["t2va", "fl2va"]), ("ref2va", ["ref2va"])],

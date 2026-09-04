@@ -34,6 +34,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.time_request import (
     minimax_h3_align_frame_count,
+    minimax_h3_video_latent_t,
 )
 
 MINIMAX_H3_REQUEST_SCHEMA = "minimax_h3.request/v1"
@@ -275,6 +276,48 @@ def _validate_keyframe_conditions(
         )
 
 
+def _validate_action_script(
+    action_script: Any,
+    *,
+    task: str,
+    conditions: Sequence[Mapping[str, Any]],
+    requested_frame_count: int | None,
+) -> list[str] | None:
+    if action_script is None:
+        return None
+    if not isinstance(action_script, Sequence) or isinstance(
+        action_script, (str, bytes)
+    ):
+        raise ValueError("action_script must be a list of non-empty strings")
+    if task != MINIMAX_H3_TASK_FL2VA:
+        raise ValueError("action_script requires task='fl2va'")
+    keyframe_indices = tuple(
+        condition.get("frame_index")
+        for condition in conditions
+        if condition["role"] == MINIMAX_H3_CONDITION_ROLE_KEYFRAME
+    )
+    if keyframe_indices != (0,):
+        raise ValueError(
+            "action_script requires exactly one first-frame keyframe at "
+            "conditions[].frame_index=0"
+        )
+    if requested_frame_count is None:
+        raise ValueError("action_script requires target.duration_seconds")
+    normalized = [
+        _require_str(value, f"action_script[{index}]")
+        for index, value in enumerate(action_script)
+    ]
+    latent_t = minimax_h3_video_latent_t(
+        minimax_h3_align_frame_count(requested_frame_count)
+    )
+    if len(normalized) != latent_t:
+        raise ValueError(
+            f"action_script must contain one instruction per video latent "
+            f"({latent_t} for this target), got {len(normalized)}"
+        )
+    return normalized
+
+
 def minimax_h3_validate_canonical_request(
     *,
     task: Any,
@@ -283,6 +326,7 @@ def minimax_h3_validate_canonical_request(
     target: Any,
     flow_shift: Any = None,
     audio_flow_shift: Any = None,
+    action_script: Any = None,
     seed: Any = None,
     **_extra_kwargs: Any,
 ) -> dict[str, Any]:
@@ -313,6 +357,12 @@ def minimax_h3_validate_canonical_request(
         conditions,
         profile=profile,
         frame_count=requested_frame_count,
+    )
+    normalized_action_script = _validate_action_script(
+        action_script,
+        task=profile.task,
+        conditions=normalized_conditions,
+        requested_frame_count=requested_frame_count,
     )
     if profile.task == MINIMAX_H3_TASK_FL2VA:
         _validate_keyframe_conditions(normalized_conditions, task=profile.task)
@@ -366,6 +416,8 @@ def minimax_h3_validate_canonical_request(
         canonical["flow_shift"] = normalized_flow_shift
     if normalized_audio_flow_shift is not None:
         canonical["audio_flow_shift"] = normalized_audio_flow_shift
+    if normalized_action_script is not None:
+        canonical["action_script"] = normalized_action_script
     if seed is not None:
         normalized_seed = _require_int(seed, "seed")
         if normalized_seed < 0:

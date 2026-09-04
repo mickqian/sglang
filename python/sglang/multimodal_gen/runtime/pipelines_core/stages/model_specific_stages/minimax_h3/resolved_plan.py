@@ -72,6 +72,7 @@ class MiniMaxH3ResolvedPlan(msgspec.Struct, frozen=True):
     default_audio_flow_shift: float
     flow_shift: float | None
     audio_flow_shift: float | None
+    action_script: tuple[str, ...] | None
     shape: dict
     condition_mask: dict
 
@@ -268,6 +269,7 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         "seed",
         "flow_shift",
         "audio_flow_shift",
+        "action_script",
     }
     unknown = set(canonical) - allowed_keys
     if unknown:
@@ -413,6 +415,11 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         audio_flow_shift=(
             float(canonical["audio_flow_shift"])
             if canonical.get("audio_flow_shift") is not None
+            else None
+        ),
+        action_script=(
+            tuple(str(value) for value in canonical["action_script"])
+            if canonical.get("action_script") is not None
             else None
         ),
         shape=shape,

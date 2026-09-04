@@ -108,6 +108,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         return (
             plan.task,
             plan.prompt,
+            plan.action_script,
             materials,
             self.freeze_for_dedup(plan.shape),
         )
@@ -312,7 +313,54 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                         ),
                     }
                 }
+        if plan.action_script is not None:
+            self._append_action_script(
+                embeddings["positive"],
+                plan.action_script,
+                encode_ids,
+            )
         batch.extra[MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY] = embeddings
+
+    def _append_action_script(
+        self,
+        positive: dict,
+        action_script: tuple[str, ...],
+        encode_ids,
+    ) -> None:
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.presentation import (
+            minimax_h3_text_only_ids,
+        )
+
+        hidden_states = positive["hidden_states"]
+        cursor = int(hidden_states.shape[0])
+        cache: dict[str, torch.Tensor] = {}
+        rows = []
+        spans = []
+        for instruction in action_script:
+            encoded = cache.get(instruction)
+            if encoded is None:
+                encoded = encode_ids(
+                    minimax_h3_text_only_ids(self.tokenizer, instruction)
+                )
+                cache[instruction] = encoded
+            stop = cursor + int(encoded.shape[0])
+            rows.append(encoded)
+            spans.append((cursor, stop))
+            cursor = stop
+
+        positive["hidden_states"] = torch.cat([hidden_states, *rows], dim=0)
+        positive["text_len"] = cursor
+        positive["text_token_tags"] = torch.cat(
+            [
+                positive["text_token_tags"],
+                torch.ones(
+                    cursor - int(hidden_states.shape[0]),
+                    dtype=torch.long,
+                    device=positive["text_token_tags"].device,
+                ),
+            ]
+        )
+        positive["action_text_spans"] = tuple(spans)
 
     def _encode_fl2va_keyframes(
         self,

@@ -405,10 +405,20 @@ def _precompute_refined_prompt_embeds(
         refiner_params = static_kwargs["refiner_packed_seq_params"]
         if isinstance(refiner_params, dict):
             refiner_cu = refiner_params["cu_seqlens_q"]
+            refiner_cu_host = refiner_params["cu_seqlens_q_host"]
+            refiner_max = refiner_params["max_seqlen_q"]
         else:
             refiner_cu = refiner_params.cu_seqlens_q
+            refiner_cu_host = refiner_params.cu_seqlens_q_host
+            refiner_max = refiner_params.max_seqlen_q
         with torch.inference_mode():
-            refined = refine(prompt_embeds, refiner_cu, device=device)
+            refined = refine(
+                prompt_embeds,
+                refiner_cu,
+                refiner_cu_seqlens_host=tuple(refiner_cu_host),
+                refiner_max_seqlen=int(refiner_max),
+                device=device,
+            )
     if not torch.is_tensor(refined):
         raise TypeError("MiniMax H3 refine_prompt_embeds must return a torch.Tensor")
     if int(refined.shape[0]) != int(prompt_embeds.shape[0]):
@@ -853,6 +863,8 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
             forward_batch=batch,
         ):
             runner = self._maybe_get_bcg_runner(model)
+            if call_kwargs.get("world_control_attention") is not None:
+                runner = None
             if runner is None:
                 return model(**call_kwargs)
             return self._bcg_run(runner, call_kwargs, model)
@@ -1088,6 +1100,7 @@ def _build_packed_layout(
             ),
             frame_count=ctx.keyframe_frame_count,
             include_video_pos=include_video_pos,
+            action_text_spans=emb.get("action_text_spans"),
         )
     return packed
 
