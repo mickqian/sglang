@@ -359,6 +359,47 @@ class TestMiniMaxH3ConditioningProjection(unittest.TestCase):
 
             torch.testing.assert_close(projection(hidden), expected)
 
+    def test_unnormalized_sequential_mlp_projection(self):
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            tensors = {
+                "net.0.weight": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+                "net.0.bias": torch.tensor([0.25, -0.25]),
+                "net.2.weight": torch.tensor([[2.0, -1.0]]),
+                "net.2.bias": torch.tensor([0.75]),
+            }
+            save_file(tensors, checkpoint.name)
+            projection = MiniMaxH3ConditioningProjection(
+                checkpoint.name, fallback_tap=36
+            )
+            hidden = torch.tensor([[1.0, 2.0]])
+            expected = torch.nn.functional.linear(
+                hidden, tensors["net.0.weight"], tensors["net.0.bias"]
+            )
+            expected = torch.nn.functional.gelu(expected)
+            expected = torch.nn.functional.linear(
+                expected, tensors["net.2.weight"], tensors["net.2.bias"]
+            )
+
+            torch.testing.assert_close(projection(hidden), expected)
+            self.assertEqual(projection.tap, 36)
+            self.assertEqual(projection.input_dim, 2)
+            self.assertEqual(projection.output_dim, 1)
+
+            arch = SimpleNamespace(
+                hidden_size=2,
+                checkpoint_num_hidden_layers=36,
+                conditioning_projection_path=None,
+                num_hidden_layers=36,
+                text_config=SimpleNamespace(num_hidden_layers=36),
+            )
+            MiniMaxH3Qwen3VLEncoder.configure_component_paths(
+                SimpleNamespace(arch_config=arch),
+                {"conditioning_projection": checkpoint.name},
+            )
+            self.assertEqual(arch.conditioning_projection_path, checkpoint.name)
+            self.assertEqual(arch.num_hidden_layers, 36)
+            self.assertEqual(arch.text_config.num_hidden_layers, 36)
+
     def test_small_encoder_requires_matching_projection(self):
         config = SimpleNamespace(
             arch_config=SimpleNamespace(

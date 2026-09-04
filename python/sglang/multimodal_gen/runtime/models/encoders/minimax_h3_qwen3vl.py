@@ -63,38 +63,60 @@ class _FrozenLinear(nn.Module):
 
 
 class MiniMaxH3ConditioningProjection(nn.Module):
-    """Apply the safe ClipProj conditioning format without a custom runtime."""
+    """Apply a self-describing H3 conditioning projection."""
 
-    _REQUIRED_TENSORS = ("mean_in", "std_in", "mean_out", "std_out")
+    _NORMALIZATION_TENSORS = ("mean_in", "std_in", "mean_out", "std_out")
 
     @staticmethod
-    def inspect(path: str) -> tuple[int, int, int]:
+    def inspect(path: str) -> tuple[int | None, int, int]:
         if not path.endswith(".safetensors"):
             raise ValueError("H3 conditioning projections must use safetensors")
         with safe_open(path, framework="pt", device="cpu") as handle:
             metadata = handle.metadata() or {}
             try:
-                tap = int(metadata["tap"])
-                input_dim = int(handle.get_slice("mean_in").get_shape()[0])
-                output_dim = int(handle.get_slice("mean_out").get_shape()[0])
+                tap = int(metadata["tap"]) if "tap" in metadata else None
+                names = set(handle.keys())
+                if {"mean_in", "mean_out"}.issubset(names):
+                    input_dim = int(handle.get_slice("mean_in").get_shape()[0])
+                    output_dim = int(handle.get_slice("mean_out").get_shape()[0])
+                else:
+                    layer_names = sorted(
+                        (
+                            name
+                            for name in names
+                            if re.fullmatch(r"(?:mlp|net)\.\d+\.weight", name)
+                        ),
+                        key=lambda name: int(name.split(".")[1]),
+                    )
+                    first_shape = handle.get_slice(layer_names[0]).get_shape()
+                    last_shape = handle.get_slice(layer_names[-1]).get_shape()
+                    input_dim = int(first_shape[1])
+                    output_dim = int(last_shape[0])
             except (IndexError, KeyError, TypeError, ValueError) as error:
                 raise ValueError(
                     f"Invalid H3 conditioning projection metadata in {path!r}"
                 ) from error
         return tap, input_dim, output_dim
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, fallback_tap: int | None = None) -> None:
         super().__init__()
         self.tap, self.input_dim, self.output_dim = self.inspect(path)
+        if self.tap is None:
+            self.tap = fallback_tap
         tensors = load_file(path, device="cpu")
-        missing = set(self._REQUIRED_TENSORS) - set(tensors)
-        if missing:
+        normalization_names = set(self._NORMALIZATION_TENSORS)
+        present_normalization = normalization_names.intersection(tensors)
+        if present_normalization and present_normalization != normalization_names:
             raise ValueError(
-                f"H3 conditioning projection is missing tensors: {sorted(missing)}"
+                "H3 conditioning projection has incomplete normalization tensors: "
+                f"{sorted(present_normalization)}"
             )
 
-        for name in self._REQUIRED_TENSORS:
-            self.register_buffer(name, tensors.pop(name).float())
+        for name in self._NORMALIZATION_TENSORS:
+            self.register_buffer(
+                name,
+                tensors.pop(name).float() if name in tensors else None,
+            )
         expected_shapes = {
             "mean_in": (self.input_dim,),
             "std_in": (self.input_dim,),
@@ -102,7 +124,10 @@ class MiniMaxH3ConditioningProjection(nn.Module):
             "std_out": (self.output_dim,),
         }
         for name, expected_shape in expected_shapes.items():
-            actual_shape = tuple(self.get_buffer(name).shape)
+            value = self.get_buffer(name)
+            if value is None:
+                continue
+            actual_shape = tuple(value.shape)
             if actual_shape != expected_shape:
                 raise ValueError(
                     f"H3 conditioning projection {name} has shape "
@@ -116,6 +141,16 @@ class MiniMaxH3ConditioningProjection(nn.Module):
             "sink_out",
             tensors.pop("sink_out").float() if "sink_out" in tensors else None,
         )
+
+        for name in tuple(tensors):
+            if not re.fullmatch(r"net\.\d+\.(?:weight|bias)", name):
+                continue
+            mapped_name = name.replace("net.", "mlp.", 1)
+            if mapped_name in tensors:
+                raise ValueError(
+                    f"H3 conditioning projection contains both {name} and {mapped_name}"
+                )
+            tensors[mapped_name] = tensors.pop(name)
 
         layer_indices = sorted(
             {
@@ -172,7 +207,9 @@ class MiniMaxH3ConditioningProjection(nn.Module):
                 f"H3 conditioning projection expects width {self.input_dim}, "
                 f"got {int(hidden_states.shape[-1])}"
             )
-        normalized = (hidden_states.float() - self.mean_in) / self.std_in
+        normalized = hidden_states.float()
+        if self.mean_in is not None:
+            normalized = (normalized - self.mean_in) / self.std_in
         projected = normalized @ self.weight if self.weight is not None else None
         if self.layers:
             residual = normalized.to(self.layers[0].weight.dtype)
@@ -184,7 +221,9 @@ class MiniMaxH3ConditioningProjection(nn.Module):
             projected = residual if projected is None else projected + residual
         if projected is None:
             raise RuntimeError("H3 conditioning projection produced no output")
-        output = projected * self.std_out + self.mean_out
+        output = projected
+        if self.mean_out is not None:
+            output = output * self.std_out + self.mean_out
         if self.sink_out is not None and int(output.shape[-2]) > 0:
             output[..., 0, :] = self.sink_out
         return output
@@ -236,6 +275,8 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
         tap, input_dim, output_dim = MiniMaxH3ConditioningProjection.inspect(
             projection_path
         )
+        if tap is None:
+            tap = int(arch.checkpoint_num_hidden_layers)
         if input_dim != int(arch.hidden_size):
             raise ValueError(
                 f"H3 conditioning projection expects encoder width {input_dim}, "
@@ -284,7 +325,10 @@ class MiniMaxH3Qwen3VLEncoder(TextEncoder):
         self.selected_lm_layer = selected_layer
         self.hidden_dim = MINIMAX_H3_QWEN3VL_HIDDEN_DIM
         self.conditioning_projection = (
-            MiniMaxH3ConditioningProjection(arch.conditioning_projection_path)
+            MiniMaxH3ConditioningProjection(
+                arch.conditioning_projection_path,
+                fallback_tap=self.selected_lm_layer,
+            )
             if arch.conditioning_projection_path is not None
             else None
         )
