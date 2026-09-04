@@ -104,12 +104,10 @@ def read_gguf_tensor_meta(gguf_file: str) -> dict[str, GGUFTensorMeta]:
                 f"elements instead of {tensor.n_elements}"
             )
         is_quantized = int(weight_type) not in _UNQUANTIZED_TYPES
-        dequantize_on_load = int(weight_type) == _GGML_NVFP4
+        dequantize_on_load = False
         if is_quantized:
             block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
-            if dequantize_on_load:
-                stored_shape = logical_shape
-            elif len(logical_shape) != 2 or not tensor.name.endswith(".weight"):
+            if len(logical_shape) != 2 or not tensor.name.endswith(".weight"):
                 dequantize_on_load = True
                 stored_shape = logical_shape
             elif logical_shape[-1] % block_size:
