@@ -55,6 +55,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "GPTQLinearMethod",
     "ModelOptFp8LinearMethod",
     "ModelOptFp4LinearMethod",
+    "DynamicNvfp4LinearMethod",
     "ComfyUIFp4LinearMethod",
     "IPEXAWQLinearMethod",
     "IPEXGPTQLinearMethod",
