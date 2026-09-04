@@ -927,7 +927,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             bias=False,
             params_dtype=torch.bfloat16,
             quant_config=config,
-            prefix="blocks.0.mlp.fc1",
+            prefix="blocks.0.mlp.fc2",
         )
         self.assertIsInstance(layer.quant_method, W8A8Int8LinearMethod)
         self.assertEqual(layer.weight.dtype, torch.int8)
