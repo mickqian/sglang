@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -92,6 +93,25 @@ def _swizzled_nvfp4_scales_to_linear(scales: torch.Tensor) -> torch.Tensor:
     linear = linear.permute(0, 1, 4, 3, 2, 5).contiguous()
     linear = linear.reshape(B, M_padded, K_padded)[:, :M, :K]
     return linear.squeeze(0) if scale_ndim == 2 else linear
+
+
+def _linear_nvfp4_scale_weight_loader(
+    weight_loader: Callable[..., None],
+) -> Callable[..., None]:
+    """Normalize checkpoint scales before a layer loader applies TP sharding."""
+
+    def _weight_loader(
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: int | str | None = None,
+    ) -> None:
+        loaded_weight = _swizzled_nvfp4_scales_to_linear(loaded_weight)
+        if loaded_shard_id is None:
+            weight_loader(param, loaded_weight)
+        else:
+            weight_loader(param, loaded_weight, loaded_shard_id)
+
+    return _weight_loader
 
 
 def _prepare_nvfp4_swiglu_fusion_weights(
@@ -643,8 +663,14 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
 
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
+        if weight_loader is None:
+            raise ValueError("NVFP4 weights require a layer weight loader")
+        weight_scale_loader = weight_loader
+        if self.quant_config.checkpoint_weight_scale_layout == "swizzled":
+            weight_scale_loader = _linear_nvfp4_scale_weight_loader(weight_loader)
 
         layer.logical_widths = output_partition_sizes
+        layer._interleave_for_swiglu_fusion = False
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
@@ -689,7 +715,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=weight_loader,
+            weight_loader=weight_scale_loader,
         )
         set_weight_attrs(weight_scale, {"missing_param_init": "ones"})
         layer.register_parameter("weight_scale", weight_scale)
@@ -715,18 +741,11 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         w = layer.weight.data
         w_swapped = _prepare_nvfp4_weight_bytes(
             w,
-            swap_weight_nibbles=getattr(
-                self.quant_config, "swap_weight_nibbles", False
-            ),
+            swap_weight_nibbles=self.quant_config.swap_weight_nibbles,
         )
         scales = layer.weight_scale
-        if (
-            getattr(self.quant_config, "checkpoint_weight_scale_layout", "linear")
-            == "swizzled"
-        ):
-            scales = _swizzled_nvfp4_scales_to_linear(scales)
 
-        if getattr(layer, "_interleave_for_swiglu_fusion", False):
+        if layer._interleave_for_swiglu_fusion:
             # The regular GEMM path swizzles this tensor below.  The fused
             # GEMM+SwiGLU epilogue needs the logical row order so gate/up rows
             # can first be paired and then swizzled as one matrix.

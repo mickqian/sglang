@@ -3,9 +3,12 @@
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptFp4LinearMethod,
+    _linear_nvfp4_scale_weight_loader,
 )
 from sglang.multimodal_gen.runtime.platforms.interface import DeviceCapability
 
@@ -17,6 +20,16 @@ CAPABILITY_PATH = (
 
 def _config() -> ModelOptFp4Config:
     return ModelOptFp4Config(is_checkpoint_nvfp4_serialized=True, group_size=16)
+
+
+def _swizzle_scales(scales: torch.Tensor) -> torch.Tensor:
+    rows, columns = scales.shape
+    return (
+        scales.reshape(1, rows // 128, 4, 32, columns // 4, 4)
+        .permute(0, 1, 4, 3, 2, 5)
+        .contiguous()
+        .reshape(rows, columns)
+    )
 
 
 class TestModelOptFp4CapabilityGate(unittest.TestCase):
@@ -48,6 +61,26 @@ class TestModelOptFp4CapabilityGate(unittest.TestCase):
         # gaining a new way to fail
         with patch(CAPABILITY_PATH, return_value=None):
             ModelOptFp4LinearMethod(_config())
+
+    def test_swizzled_scales_are_normalized_before_tp_sharding(self):
+        linear = torch.arange(256 * 8).reshape(256, 8)
+        checkpoint = _swizzle_scales(linear)
+
+        for dimension, start, expected in (
+            (0, 128, linear[128:, :]),
+            (1, 4, linear[:, 4:]),
+        ):
+            with self.subTest(dimension=dimension):
+                target = torch.empty_like(expected)
+
+                def load_tp_shard(param, loaded_weight):
+                    shard = loaded_weight.narrow(
+                        dimension, start, param.shape[dimension]
+                    )
+                    param.copy_(shard)
+
+                _linear_nvfp4_scale_weight_loader(load_tp_shard)(target, checkpoint)
+                torch.testing.assert_close(target, expected)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,6 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptFp4LinearMethod,
     _get_fp4_quantize_op,
-    _swizzled_nvfp4_scales_to_linear,
 )
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
@@ -155,10 +154,9 @@ class ComfyFullPrecisionNvfp4LinearMethod(ModelOptFp4LinearMethod):
     ) -> torch.Tensor:
         if self.has_pre_quant_scale:
             x = x * layer.pre_quant_scale
-        weight_scale = _swizzled_nvfp4_scales_to_linear(layer.weight_scale)
         weight = dequantize_nvfp4(
             layer.weight,
-            weight_scale,
+            layer.weight_scale,
             layer.weight_scale_2,
             out_dtype=x.dtype,
             high_nibble_first=True,
