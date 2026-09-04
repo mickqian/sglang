@@ -296,6 +296,7 @@ def test_cube_metadata_is_updated_per_step():
         model=SimpleNamespace(
             prepare_adaln_plans=lambda _: None,
             prepare_pdd_plans=lambda *_args, **_kwargs: None,
+            retime_pdd_schedules=lambda video, audio, **_kwargs: (video, audio),
         ),
         model_forward=model_forward,
         positive=branch,
