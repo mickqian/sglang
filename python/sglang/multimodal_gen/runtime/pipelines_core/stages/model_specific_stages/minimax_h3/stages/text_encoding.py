@@ -9,6 +9,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MINIMAX_H3_PREPARED_REFERENCE_VIDEO_EXTRA_KEY,
     MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.presentation import (
+    minimax_h3_text_only_ids,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.replica_broadcast import (
     minimax_h3_replica_ctx,
 )
@@ -250,10 +253,6 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         residency/offload, while every folded-TP rank enters the encoder
         collectives and receives the same replicated hidden states.
         """
-        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.presentation import (
-            minimax_h3_text_only_ids,
-        )
-
         prompt = plan.prompt
         keyframes = [
             m for m in plan.materials if m.material_chain == "image.target_canvas"
@@ -327,10 +326,6 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         action_script: tuple[str, ...],
         encode_ids,
     ) -> None:
-        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.presentation import (
-            minimax_h3_text_only_ids,
-        )
-
         hidden_states = positive["hidden_states"]
         cursor = int(hidden_states.shape[0])
         cache: dict[str, torch.Tensor] = {}
