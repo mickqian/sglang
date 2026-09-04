@@ -23,12 +23,13 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
     deduplicated_tensor_tree_output_fields = ("timesteps", "sigmas")
     deduplicated_extra_tensor_tree_output_keys = (MINIMAX_H3_SIGMAS_EXTRA_KEY,)
 
-    def __init__(self, sigma_shift_scales=None) -> None:
+    def __init__(self, sigma_shift_scales=None, transformer=None) -> None:
         super().__init__()
         # Per-model sigma shift override (model_index.json "_minimax_h3" release
         # block, sigma_shift_scales): the schedule constants are a MODEL
         # serving contract — fl2va and ref2va use video 12 / audio 3 by default.
         self.sigma_shift_scales = sigma_shift_scales
+        self.transformer = transformer
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.resolved_plan import (
@@ -68,6 +69,12 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
             self.freeze_for_dedup(
                 self._denoising_steps_for_request(batch, server_args)
             ),
+            self.freeze_for_dedup(
+                self.transformer.get_lora_denoise_schedule()
+                if self.transformer is not None
+                else None
+            ),
+            "num_inference_steps" in batch.extra.get("explicit_fields", ()),
         )
 
     @staticmethod
@@ -129,6 +136,32 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 f"{requested_num_steps!r}"
             )
 
+        base_schedule = None
+        if self.transformer is not None and not batch.is_warmup:
+            base_schedule, tasks = self.transformer.get_lora_denoise_schedule()
+            if base_schedule is not None:
+                if plan.task not in tasks:
+                    raise ValueError(
+                        "Active MiniMax H3 LoRA supports tasks "
+                        f"{sorted(tasks)}, not {plan.task!r}"
+                    )
+                if dmd_denoising_steps is not None:
+                    raise ValueError(
+                        "An adapter-declared MiniMax H3 base_schedule cannot be "
+                        "combined with checkpoint dmd_denoising_steps"
+                    )
+                expected_steps = len(base_schedule) - 1
+                explicit_fields = batch.extra.get("explicit_fields", ())
+                if (
+                    "num_inference_steps" in explicit_fields
+                    and requested_num_steps != expected_steps
+                ):
+                    raise ValueError(
+                        "Active MiniMax H3 LoRA requires "
+                        f"num_inference_steps={expected_steps} or omission, got "
+                        f"{requested_num_steps}"
+                    )
+
         model_scales = self.sigma_shift_scales
         if model_scales is not None and not isinstance(model_scales, Mapping):
             raise ValueError("model sigma_shift_scales must be an object")
@@ -174,6 +207,7 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 num_steps=requested_num_steps,
                 shift_scale=scales[modality],
                 denoising_steps=dmd_denoising_steps,
+                base_schedule=base_schedule,
             )
         batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY] = sigmas
 

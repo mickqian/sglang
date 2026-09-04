@@ -1,6 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
+
+
+def _validated_base_schedule(base_schedule: Sequence[float]) -> list[float]:
+    try:
+        schedule = [float(value) for value in base_schedule]
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax H3 base_schedule must contain finite numbers"
+        ) from error
+    if (
+        len(schedule) < 2
+        or any(not math.isfinite(value) for value in schedule)
+        or schedule[0] != 1.0
+        or schedule[-1] != 0.0
+        or any(left <= right for left, right in zip(schedule, schedule[1:]))
+    ):
+        raise ValueError(
+            "MiniMax H3 base_schedule must start at 1, end at 0, and be "
+            "strictly decreasing"
+        )
+    return schedule
+
 
 def minimax_h3_align_frame_count(frame_count: int) -> int:
     """Snap ``frame_count`` up to the MiniMax H3 17n+5 frame boundary."""
@@ -34,15 +58,26 @@ def minimax_h3_time_shift_sigmas(
     num_steps: int = 50,
     shift_scale: float = 6.0,
     denoising_steps: list[int] | None = None,
+    base_schedule: Sequence[float] | None = None,
 ) -> list[float]:
     if shift_scale <= 0:
         raise ValueError("MiniMax H3 shift_scale must be > 0")
-    if num_steps <= 0:
-        raise ValueError("MiniMax H3 num_steps must be > 0")
-
     import torch
 
-    if denoising_steps is None:
+    if base_schedule is not None:
+        if denoising_steps is not None:
+            raise ValueError(
+                "MiniMax H3 base_schedule and dmd_denoising_steps are mutually "
+                "exclusive"
+            )
+        base = torch.tensor(
+            _validated_base_schedule(base_schedule),
+            device="cpu",
+            dtype=torch.float32,
+        )
+    elif denoising_steps is None:
+        if num_steps <= 0:
+            raise ValueError("MiniMax H3 num_steps must be > 0")
         # The rectified-flow sigma range is fixed at [1.0, 0.0].
         base = torch.linspace(
             1.0,
@@ -52,6 +87,8 @@ def minimax_h3_time_shift_sigmas(
             dtype=torch.float32,
         )
     else:
+        if num_steps <= 0:
+            raise ValueError("MiniMax H3 num_steps must be > 0")
         if len(denoising_steps) + 1 != num_steps:
             raise ValueError(
                 "MiniMax H3 dmd_denoising_steps must contain one entry per "

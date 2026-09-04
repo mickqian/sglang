@@ -171,6 +171,91 @@ def test_fasth3_pipeline_config_gates_and_rejections() -> None:
         config.validate_quality_deployment(server_args=None)
 
 
+def test_h3_native_lora_declares_schedule_and_reorders_grouped_qkv() -> None:
+    model = SimpleNamespace(
+        arch=SimpleNamespace(num_attention_heads=2, attention_head_dim=2)
+    )
+    grouped = torch.arange(12, dtype=torch.float32).reshape(12, 1)
+    adapter = {
+        "transformer.blocks.0.attn.qkv_proj.lora_A.weight": torch.ones(1, 4),
+        "transformer.blocks.0.attn.qkv_proj.lora_B.weight": grouped,
+    }
+    ordinary, state = MiniMaxH3DiTModel.split_lora_runtime_state(
+        model,
+        adapter,
+        {
+            "key_format": "minimax-h3-native",
+            "qkv_layout": "grouped",
+            "base_schedule": "1.0,0.7,0.4,0.15,0.0",
+            "tasks": "t2va",
+        },
+    )
+
+    assert state == {
+        "base_schedule": (1.0, 0.7, 0.4, 0.15, 0.0),
+        "tasks": frozenset({"t2va"}),
+    }
+    torch.testing.assert_close(
+        ordinary["transformer.blocks.0.attn.qkv_proj.lora_B.weight"],
+        torch.tensor(
+            [0, 1, 6, 7, 2, 3, 8, 9, 4, 5, 10, 11], dtype=torch.float32
+        ).reshape(12, 1),
+    )
+    unannotated, unannotated_state = MiniMaxH3DiTModel.split_lora_runtime_state(
+        model, adapter, {}
+    )
+    assert not unannotated_state
+    torch.testing.assert_close(
+        unannotated["transformer.blocks.0.attn.qkv_proj.lora_B.weight"],
+        ordinary["transformer.blocks.0.attn.qkv_proj.lora_B.weight"],
+    )
+
+    with pytest.raises(ValueError, match="requires qkv_layout"):
+        MiniMaxH3DiTModel.split_lora_runtime_state(
+            model,
+            adapter,
+            {
+                "key_format": "minimax-h3-native",
+                "base_schedule": "1.0,0.0",
+                "tasks": "t2va",
+            },
+        )
+
+
+def test_h3_native_lora_schedule_drives_timestep_preparation() -> None:
+    transformer = SimpleNamespace(
+        get_lora_denoise_schedule=lambda: (
+            (1.0, 0.7, 0.4, 0.15, 0.0),
+            frozenset({"t2va"}),
+        )
+    )
+    stage = MiniMaxH3TimestepPreparationStage(transformer=transformer)
+    plan = SimpleNamespace(
+        task="t2va",
+        flow_shift=None,
+        audio_flow_shift=None,
+        default_flow_shift=12.0,
+        default_audio_flow_shift=3.0,
+    )
+    batch = SimpleNamespace(
+        extra={"explicit_fields": []},
+        num_inference_steps=50,
+        sampling_params=None,
+        is_warmup=False,
+    )
+
+    stage._generate_sigmas_from_plan(batch, plan, None)
+    assert len(batch.extra["minimax_h3_sigmas"]["video"]) == 5
+    assert batch.extra["minimax_h3_sigmas"]["video"][1] == pytest.approx(
+        12.0 * 0.7 / (1.0 + 11.0 * 0.7)
+    )
+
+    batch.extra = {"explicit_fields": ["num_inference_steps"]}
+    batch.num_inference_steps = 5
+    with pytest.raises(ValueError, match="requires num_inference_steps=4"):
+        stage._generate_sigmas_from_plan(batch, plan, None)
+
+
 def test_fasth3_lora_adapter_accepts_normalized_tensors() -> None:
     model = SimpleNamespace(
         arch=SimpleNamespace(adaln_affine_input_dim=None),
@@ -304,7 +389,12 @@ def test_h3_pdd_comfy_sidecar_is_normalized_without_ignored_tensors(
     video = SimpleNamespace(weight=torch.arange(2 * 3).view(2, 3).float() + 6)
     audio = SimpleNamespace(weight=torch.empty(1, 3))
     model = SimpleNamespace(
-        arch=SimpleNamespace(hidden_size=3, time_embed_dim=3),
+        arch=SimpleNamespace(
+            hidden_size=3,
+            time_embed_dim=3,
+            num_attention_heads=1,
+            attention_head_dim=1,
+        ),
         device=torch.device("cpu"),
         final_layer=SimpleNamespace(video_out=video, audio_out=audio),
     )
