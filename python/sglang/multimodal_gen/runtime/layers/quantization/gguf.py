@@ -52,9 +52,6 @@ class GGUFConfig(QuantizationConfig):
                 is_checkpoint_nvfp4_serialized=True,
                 group_size=16,
                 exclude_modules=[],
-                # GGML stores the even element in the low nibble; the native
-                # ModelOpt GEMM consumes the opposite byte convention.
-                swap_weight_nibbles=True,
             )
             if any(metadata.is_native_nvfp4 for metadata in tensor_meta.values())
             else None
