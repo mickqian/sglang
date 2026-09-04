@@ -855,6 +855,7 @@ def test_world_control_attention_binds_each_action_to_one_video_latent():
         video_start=4,
         frame_rows=2,
         used=8,
+        seq_len=10,
         device=torch.device("cpu"),
     )
     score = torch.tensor(0.0)
@@ -865,6 +866,9 @@ def test_world_control_attention_binds_each_action_to_one_video_latent():
     assert torch.isneginf(control.score_mod(score, 0, 0, 0, 6))
     assert torch.isfinite(control.score_mod(score, 0, 0, 0, 1))
     assert torch.isneginf(control.score_mod(score, 0, 0, 0, 2))
+    assert torch.isfinite(control.score_mod(score, 0, 0, 8, 8))
+    assert torch.isneginf(control.score_mod(score, 0, 0, 8, 0))
+    assert torch.isneginf(control.score_mod(score, 0, 0, 0, 8))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

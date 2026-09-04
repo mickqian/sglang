@@ -301,6 +301,7 @@ class MiniMaxH3DenoiseBranch:
                 video_start=int(packed["action_video_start"]),
                 frame_rows=int(packed["action_frame_rows"]),
                 used=int(cu[1]),
+                seq_len=seq_len,
                 device=device,
             )
 
