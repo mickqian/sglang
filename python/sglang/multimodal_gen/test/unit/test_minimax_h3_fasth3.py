@@ -40,6 +40,9 @@ from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
     FastH3Pipeline,
     MiniMaxH3Pipeline,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
+    ComposedPipelineBase,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.stages.timestep_preparation import (
     MiniMaxH3TimestepPreparationStage,
 )
@@ -113,6 +116,30 @@ def test_modular_h3_component_names_and_release_defaults() -> None:
     audio_vae_cls, _ = ModelRegistry.resolve_model_cls("AutoencoderKLMiniMaxH3Audio")
     assert video_vae_cls.__name__ == "MiniMaxH3VideoVAE"
     assert audio_vae_cls.__name__ == "MiniMaxH3AudioVAE"
+
+
+def test_root_modular_h3_ref2va_routing() -> None:
+    modular_index = {
+        "_class_name": "MiniMaxH3ModularPipeline",
+        "transformer_ref": ["diffusers", "MiniMaxH3Transformer3DModel", {}],
+    }
+    pipeline = MiniMaxH3Pipeline.__new__(MiniMaxH3Pipeline)
+    pipeline.model_path = "org/root-ref2va-bundle"
+    pipeline._extra_config_module_map = {}
+    pipeline.server_args = SimpleNamespace(
+        model_variant="ref2va",
+        model_subfolder=None,
+        revision=None,
+    )
+
+    with patch.object(ComposedPipelineBase, "_load_config", return_value=modular_index):
+        assert pipeline._load_config() is modular_index
+
+    assert pipeline.server_args.model_subfolder is None
+    assert pipeline.default_model_subfolder == "Ref2VA"
+    assert pipeline._extra_config_module_map == {"transformer": "transformer_ref"}
+    assert pipeline.release_metadata.partition == "ref2va"
+    assert pipeline.release_metadata.tasks == ("ref2va",)
 
 
 def test_fasth3_sampling_defaults_and_task_rejection() -> None:

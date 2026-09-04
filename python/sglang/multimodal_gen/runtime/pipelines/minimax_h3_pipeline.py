@@ -91,8 +91,10 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
 
     def _load_config(self):
         model_variant = self.server_args.model_variant
+        selected_partition = None
         if model_variant is not None:
             semantic_subfolder = self.model_subfolder_for_variant(model_variant)
+            selected_partition = model_variant.strip().lower()
             explicit_subfolder = self.server_args.model_subfolder
             if (
                 explicit_subfolder is not None
@@ -104,13 +106,18 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
                     f"{semantic_subfolder!r}, model_subfolder="
                     f"{explicit_subfolder!r}"
                 )
-            self.server_args.model_subfolder = semantic_subfolder
+            if explicit_subfolder is None:
+                # Let the generic loader prefer a root pipeline index and use the
+                # legacy partition directory only when the root has no index.
+                self.default_model_subfolder = semantic_subfolder
         model_index = super()._load_config()
-        self._configure_component_names(model_index)
-        self.release_metadata = self._release_metadata_from_model_index(model_index)
+        self._configure_component_names(model_index, selected_partition)
+        self.release_metadata = self._release_metadata_from_model_index(
+            model_index, selected_partition
+        )
         if (
-            model_variant is not None
-            and self.release_metadata.partition != model_variant.strip().lower()
+            selected_partition is not None
+            and self.release_metadata.partition != selected_partition
         ):
             raise ValueError(
                 "MiniMax H3 loaded checkpoint partition does not match "
@@ -118,23 +125,29 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
             )
         return model_index
 
-    def _configure_component_names(self, model_index: dict) -> None:
+    def _configure_component_names(
+        self, model_index: dict, selected_partition: str | None = None
+    ) -> None:
         if "video_vae" not in model_index and "vae" in model_index:
             # Modular Diffusers H3 releases use the conventional ``vae`` key
             # for the video VAE exposed as ``video_vae`` by the original repo.
             self._extra_config_module_map["video_vae"] = "vae"
+        if selected_partition == "ref2va" and "transformer_ref" in model_index:
+            self._extra_config_module_map["transformer"] = "transformer_ref"
 
     def _release_metadata_from_model_index(
-        self, model_index: dict
+        self, model_index: dict, selected_partition: str | None = None
     ) -> MiniMaxH3ReleaseMetadata:
         if "_minimax_h3" in model_index:
             return MiniMaxH3ReleaseMetadata.from_model_index(model_index)
         if model_index.get("_class_name") != "MiniMaxH3ModularPipeline":
             return MiniMaxH3ReleaseMetadata.from_model_index(model_index)
+        partition = selected_partition or "fl2va"
+        tasks = ("ref2va",) if partition == "ref2va" else self._modular_release_tasks
         return MiniMaxH3ReleaseMetadata(
             schema_version=1,
-            partition="fl2va",
-            tasks=self._modular_release_tasks,
+            partition=partition,
+            tasks=tasks,
             task_aliases={},
             video_sigma_shift=12.0,
             audio_sigma_shift=3.0,
