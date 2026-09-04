@@ -306,6 +306,7 @@ def _pdd_retime_sigmas(
 
 def _diffusers_h3_checkpoint(
     iterator: Iterable[tuple[str, torch.Tensor]],
+    valid_target_names: set[str] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Map Diffusers H3 names/layout to the fused native checkpoint layout."""
     mapping = get_param_names_mapping(_ARCH_DEFAULTS.param_names_mapping)
@@ -313,11 +314,11 @@ def _diffusers_h3_checkpoint(
 
     for source_name, tensor in iterator:
         # A weights-only override can use the native H3 namespace even when the
-        # base component config names the Diffusers class.  Native per-layer
-        # quantization scales are already named for their runtime method; the
-        # broad Diffusers FP8 alias below would otherwise turn weight_scale into
-        # weight_scale_inv and leave every serialized INT8/FP4 scale unloaded.
-        if source_name.startswith(("blocks.", "token_refiner.blocks.")):
+        # base component config names the Diffusers class. Preserve any tensor
+        # that the constructed runtime model already owns; this covers both
+        # ordinary parameters and backend-specific quantization companions
+        # without maintaining a list of H3 module prefixes or scale suffixes.
+        if valid_target_names is not None and source_name in valid_target_names:
             yield source_name, tensor
             continue
 
@@ -2544,7 +2545,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         )
         self.arch = arch
         if arch.checkpoint_uses_diffusers_layout:
-            self.preprocess_loaded_state_dict = _diffusers_h3_checkpoint
+            self.preprocess_loaded_state_dict = self._preprocess_diffusers_checkpoint
         self.hidden_size = arch.hidden_size
         self.num_attention_heads = arch.num_attention_heads
         self.num_channels_latents = arch.latents_dim
@@ -2673,6 +2674,17 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         )
         self._resolved_attention_backend: AttentionBackendEnum | None = None
         self._mark_missing_params_required()
+
+    def _preprocess_diffusers_checkpoint(
+        self,
+        iterator: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        valid_target_names = {name for name, _ in self.named_parameters()}
+        valid_target_names.update(name for name, _ in self.named_buffers())
+        return _diffusers_h3_checkpoint(
+            iterator,
+            valid_target_names=valid_target_names,
+        )
 
     def set_cache_dit_input_preservation(self, enabled: bool) -> None:
         """Stop the blocks from overwriting the input Cache-DiT holds by reference.

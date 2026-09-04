@@ -165,13 +165,24 @@ def test_native_weight_names_and_grouped_qkv_reorder():
     native_scale = torch.tensor([[0.25], [0.5]])
     native_weights = dict(
         _diffusers_h3_checkpoint(
-            [("blocks.39.attn.out_proj.weight_scale", native_scale)]
+            [
+                ("blocks.39.attn.out_proj.weight_scale", native_scale),
+                ("condition_proj.weight_scale", native_scale),
+            ],
+            valid_target_names={
+                "blocks.39.attn.out_proj.weight_scale",
+                "condition_proj.weight_scale",
+            },
         )
     )
-    assert set(native_weights) == {"blocks.39.attn.out_proj.weight_scale"}
+    assert set(native_weights) == {
+        "blocks.39.attn.out_proj.weight_scale",
+        "condition_proj.weight_scale",
+    }
     assert torch.equal(
         native_weights["blocks.39.attn.out_proj.weight_scale"], native_scale
     )
+    assert torch.equal(native_weights["condition_proj.weight_scale"], native_scale)
 
     pruned_config = MiniMaxH3DiTConfig()
     pruned_config.update_model_arch(
