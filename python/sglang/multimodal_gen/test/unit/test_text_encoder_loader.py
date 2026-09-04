@@ -364,8 +364,8 @@ class TestMiniMaxH3ConditioningProjection(unittest.TestCase):
             tensors = {
                 "net.0.weight": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
                 "net.0.bias": torch.tensor([0.25, -0.25]),
-                "net.2.weight": torch.tensor([[2.0, -1.0]]),
-                "net.2.bias": torch.tensor([0.75]),
+                "net.2.weight": torch.tensor([[2.0, -1.0]]).repeat(5120, 1),
+                "net.2.bias": torch.full((5120,), 0.75),
             }
             save_file(tensors, checkpoint.name)
             projection = MiniMaxH3ConditioningProjection(
@@ -383,7 +383,7 @@ class TestMiniMaxH3ConditioningProjection(unittest.TestCase):
             torch.testing.assert_close(projection(hidden), expected)
             self.assertEqual(projection.tap, 36)
             self.assertEqual(projection.input_dim, 2)
-            self.assertEqual(projection.output_dim, 1)
+            self.assertEqual(projection.output_dim, 5120)
 
             arch = SimpleNamespace(
                 hidden_size=2,
