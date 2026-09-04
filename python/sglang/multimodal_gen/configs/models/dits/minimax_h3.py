@@ -92,6 +92,9 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     time_embed_dim: int = 2688
     # Pruned checkpoints replace the timestep MLP with a sampled AdaLN curve.
     adaln_curve_grid: int | None = None
+    # Dynamic-time checkpoints retain the timestep MLP, then project its
+    # full-width output into this checkpoint-defined AdaLN basis.
+    adaln_curve_basis_dim: int | None = None
     adaln_out_features: int = 18 * 5376
     final_adaln_out_features: int = 2 * 5376
     rope_inv_freq_len: int = 16
@@ -100,6 +103,7 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
     checkpoint_uses_diffusers_layout: bool = False
+    checkpoint_uses_separate_qkv_layout: bool = False
     adaln_affine_input_dim: int | None = None
     has_gate_compress: bool = False
 

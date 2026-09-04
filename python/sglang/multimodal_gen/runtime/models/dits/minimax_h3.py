@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from typing import Any, Callable
@@ -113,6 +114,11 @@ _PDD_SIDECAR_HEAD_KEYS = {
 _PDDHeadPlan = tuple[int, torch.Tensor]
 _PDD_PARTITION_TOLERANCE = 0.015
 _NATIVE_LORA_KEY_FORMAT = "minimax-h3-native"
+_SEPARATE_QKV_PARAM_RE = re.compile(
+    r"^((?:token_refiner\.)?blocks\.\d+\.attn)\.([qkv])_proj\."
+    r"(weight|weight_scale)$"
+)
+_QKV_MERGE_INDEX = {"q": 0, "k": 1, "v": 2}
 
 
 def _native_lora_runtime_state(metadata: dict[str, str]) -> dict[str, Any]:
@@ -322,7 +328,14 @@ def _diffusers_h3_checkpoint(
             yield source_name, tensor
             continue
 
-        target_name, merge_index, merge_count = mapping(source_name)
+        separate_qkv_match = _SEPARATE_QKV_PARAM_RE.fullmatch(source_name)
+        if separate_qkv_match is None:
+            target_name, merge_index, merge_count = mapping(source_name)
+        else:
+            attention_prefix, projection, suffix = separate_qkv_match.groups()
+            target_name = f"{attention_prefix}.qkv_proj.{suffix}"
+            merge_index = _QKV_MERGE_INDEX[projection]
+            merge_count = 3
 
         # Diffusers SwiGLU stores [value, gate]; the native fused MLP consumes
         # [gate, value]. Packed GPTQ tensors carry output channels on dim 1.
@@ -370,6 +383,8 @@ _MPS_EMBED_WEIGHT_PREFIXES = (
     "video_patch_proj",
     "audio_patch_proj",
     "time_embedder",
+    "adaln_curve_basis",
+    "adaln_curve_mean",
     "token_refiner.final_norm",
 )
 
@@ -1465,9 +1480,12 @@ class MiniMaxH3AdalnProj(nn.Module):
         # AdaLN projections in FP32. Preserve that precision island to match
         # the published pruned implementation; these outputs intentionally do
         # not enter the BF16-only fused modulation kernels.
-        params_dtype = _FP32_DTYPE if arch.adaln_curve_grid is not None else _BF16_DTYPE
+        uses_compact_adaln = (
+            arch.adaln_curve_grid is not None or arch.adaln_curve_basis_dim is not None
+        )
+        params_dtype = _FP32_DTYPE if uses_compact_adaln else _BF16_DTYPE
         self.linear = ColumnParallelLinear(
-            arch.time_embed_dim,
+            arch.adaln_curve_basis_dim or arch.time_embed_dim,
             out_features,
             bias=True,
             gather_output=False,
@@ -2534,17 +2552,20 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             raise ValueError(
                 "MiniMax H3 AdaLN cache is only compatible with unquantized weights"
             )
-        if arch.adaln_curve_grid is not None and (
-            adaln_cache_path is not None or adaln_weight_files is not None
-        ):
+        if (
+            arch.adaln_curve_grid is not None or arch.adaln_curve_basis_dim is not None
+        ) and (adaln_cache_path is not None or adaln_weight_files is not None):
             raise ValueError(
-                "MiniMax H3 pruned curve checkpoints cannot use a separate AdaLN cache"
+                "MiniMax H3 compact AdaLN checkpoints cannot use a separate AdaLN cache"
             )
         self._adaln_precomputed = (
             adaln_cache_path is not None or adaln_weight_files is not None
         )
         self.arch = arch
-        if arch.checkpoint_uses_diffusers_layout:
+        if (
+            arch.checkpoint_uses_diffusers_layout
+            or arch.checkpoint_uses_separate_qkv_layout
+        ):
             self.preprocess_loaded_state_dict = self._preprocess_diffusers_checkpoint
         self.hidden_size = arch.hidden_size
         self.num_attention_heads = arch.num_attention_heads
@@ -2603,6 +2624,22 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     arch.time_embed_dim,
                     dtype=_FP32_DTYPE,
                 ),
+                requires_grad=False,
+            )
+        if arch.adaln_curve_basis_dim is None:
+            self.register_parameter("adaln_curve_basis", None)
+            self.register_parameter("adaln_curve_mean", None)
+        else:
+            self.adaln_curve_basis = nn.Parameter(
+                torch.empty(
+                    arch.time_embed_dim,
+                    arch.adaln_curve_basis_dim,
+                    dtype=_FP32_DTYPE,
+                ),
+                requires_grad=False,
+            )
+            self.adaln_curve_mean = nn.Parameter(
+                torch.empty(arch.time_embed_dim, dtype=_FP32_DTYPE),
                 requires_grad=False,
             )
         if arch.adaln_affine_input_dim is None:
@@ -2749,17 +2786,19 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
             fp32_param_names.append("adaln_t_table")
             if self.adaln_basis is not None:
                 fp32_param_names.extend(("adaln_basis", "adaln_mean"))
+        if self.adaln_curve_basis is not None:
+            fp32_param_names.extend(("adaln_curve_basis", "adaln_curve_mean"))
         for name in fp32_param_names:
             param = self.get_parameter(name)
             if param.dtype != _FP32_DTYPE:
                 raise ValueError(
                     f"{name} must stay fp32 after load, got {param.dtype}."
                 )
-        if self.adaln_t_table is not None:
+        if self.adaln_t_table is not None or self.adaln_curve_basis is not None:
             for name, param in self.named_parameters():
                 if ".adaln_proj.linear." in name and param.dtype != _FP32_DTYPE:
                     raise ValueError(
-                        f"{name} must stay fp32 with curve AdaLN, got {param.dtype}."
+                        f"{name} must stay fp32 with compact AdaLN, got {param.dtype}."
                     )
         if self.rope.inv_freq.is_meta:
             self.rope.materialize(self.video_patch_proj.weight.device)
@@ -2774,7 +2813,13 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
     def _time_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         if self.adaln_t_table is None:
             assert self.time_embedder is not None
-            return self.time_embedder(timesteps)
+            embedding = self.time_embedder(timesteps)
+            if self.adaln_curve_basis is None:
+                return embedding
+            assert self.adaln_curve_mean is not None
+            return (
+                nn.functional.silu(embedding) - self.adaln_curve_mean
+            ) @ self.adaln_curve_basis
 
         grid = self.adaln_t_table.shape[0]
         position = timesteps.to(_FP32_DTYPE).clamp(0, 1) * (grid - 1)
@@ -3220,7 +3265,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # request-step AdaLN input shared by all blocks
         adaln_input = (
             t_emb
-            if self.adaln_t_table is not None
+            if self.adaln_t_table is not None or self.adaln_curve_basis is not None
             else nn.functional.silu(t_emb).to(_BF16_DTYPE)
         )
         inverse_indices = inverse_indices.to(device)

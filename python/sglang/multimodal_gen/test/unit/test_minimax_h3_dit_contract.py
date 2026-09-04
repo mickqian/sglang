@@ -184,6 +184,30 @@ def test_native_weight_names_and_grouped_qkv_reorder():
     )
     assert torch.equal(native_weights["condition_proj.weight_scale"], native_scale)
 
+    split_weights = []
+    for index, projection in enumerate(("q", "k", "v"), start=1):
+        split_weights.extend(
+            [
+                (
+                    f"blocks.0.attn.{projection}_proj.weight",
+                    torch.full((2, 3), index, dtype=torch.int8),
+                ),
+                (
+                    f"blocks.0.attn.{projection}_proj.weight_scale",
+                    torch.full((2, 1), float(index)),
+                ),
+            ]
+        )
+    converted_split = dict(_diffusers_h3_checkpoint(split_weights))
+    assert torch.equal(
+        converted_split["blocks.0.attn.qkv_proj.weight"],
+        torch.cat([split_weights[index][1] for index in (0, 2, 4)]),
+    )
+    assert torch.equal(
+        converted_split["blocks.0.attn.qkv_proj.weight_scale"],
+        torch.cat([split_weights[index][1] for index in (1, 3, 5)]),
+    )
+
     pruned_config = MiniMaxH3DiTConfig()
     pruned_config.update_model_arch(
         {
@@ -622,6 +646,38 @@ def test_pruned_meta_model_preserves_curve_adaln_fp32_island():
     assert model.adaln_t_table.dtype == torch.float32
     assert model.blocks[0].adaln_proj.linear.weight.dtype == torch.float32
     assert model.final_layer.adaln_proj.linear.weight.dtype == torch.float32
+
+
+def test_dynamic_time_basis_preserves_fp32_compact_adaln_path():
+    _ensure_single_process_parallel_runtime()
+    config = MiniMaxH3DiTConfig(
+        arch_config=MiniMaxH3DiTArchConfig(adaln_curve_basis_dim=16)
+    )
+    with torch.device("meta"):
+        model = MiniMaxH3DiTModel(
+            config=config,
+            hf_config={},
+            quant_config=None,
+        )
+
+    assert model.time_embedder is not None
+    assert model.adaln_t_table is None
+    assert model.adaln_curve_basis.shape == (2688, 16)
+    assert model.adaln_curve_mean.shape == (2688,)
+    assert model.blocks[0].adaln_proj.linear.weight.shape[-1] == 16
+    assert model.blocks[0].adaln_proj.linear.weight.dtype == torch.float32
+
+    embedding = torch.tensor([[1.0, -1.0, 0.5]], dtype=torch.float32)
+    basis = torch.tensor([[1.0, 0.0], [0.0, 2.0], [1.0, -1.0]], dtype=torch.float32)
+    stub = SimpleNamespace(
+        adaln_t_table=None,
+        time_embedder=lambda _: embedding,
+        adaln_curve_basis=basis,
+        adaln_curve_mean=torch.tensor([0.1, 0.2, 0.3]),
+    )
+    actual = MiniMaxH3DiTModel._time_embedding(stub, torch.tensor([0.5]))
+    expected = (torch.nn.functional.silu(embedding) - stub.adaln_curve_mean) @ basis
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_online_fp8_keeps_fp32_boundaries_and_ignored_layers_unquantized():

@@ -742,10 +742,57 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 f.name,
             )
 
-            curve_shape, comfy_quant = inspect_minimax_h3_safetensors([f.name])
+            layout = inspect_minimax_h3_safetensors([f.name])
 
-        self.assertEqual(curve_shape, (1025, 8))
-        self.assertEqual(comfy_quant["blocks.0.mlp.fc1"]["format"], "int8_tensorwise")
+        self.assertEqual(layout.adaln_curve_shape, (1025, 8))
+        self.assertEqual(
+            layout.layer_markers["blocks.0.mlp.fc1"]["format"],
+            "int8_tensorwise",
+        )
+
+    def test_inspect_minimax_h3_detects_dynamic_time_and_fuses_qkv_markers(self):
+        marker = torch.tensor(
+            list(
+                b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}'
+            ),
+            dtype=torch.uint8,
+        )
+        tensors = {
+            "adaln_curve_basis": torch.zeros((8, 2)),
+            "adaln_curve_mean": torch.zeros(8),
+        }
+        for projection in ("q", "k", "v"):
+            prefix = f"blocks.0.attn.{projection}_proj"
+            tensors[f"{prefix}.weight"] = torch.ones((2, 256), dtype=torch.int8)
+            tensors[f"{prefix}.weight_scale"] = torch.ones((2, 1))
+            tensors[f"{prefix}.comfy_quant"] = marker
+
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(tensors, checkpoint.name)
+            layout = inspect_minimax_h3_safetensors([checkpoint.name])
+
+        self.assertEqual(layout.adaln_curve_basis_shape, (8, 2))
+        self.assertTrue(layout.uses_separate_qkv)
+        self.assertEqual(set(layout.layer_markers), {"blocks.0.attn.qkv_proj"})
+
+    def test_inspect_minimax_h3_rejects_conflicting_fused_qkv_markers(self):
+        tensors = {}
+        for projection, group_size in (("q", 256), ("k", 256), ("v", 64)):
+            prefix = f"blocks.0.attn.{projection}_proj"
+            marker = (
+                '{"format":"int8_tensorwise","convrot":true,'
+                f'"convrot_groupsize":{group_size}' + "}"
+            ).encode()
+            tensors[f"{prefix}.weight"] = torch.ones((2, 256), dtype=torch.int8)
+            tensors[f"{prefix}.weight_scale"] = torch.ones((2, 1))
+            tensors[f"{prefix}.comfy_quant"] = torch.tensor(
+                list(marker), dtype=torch.uint8
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(tensors, checkpoint.name)
+            with self.assertRaisesRegex(ValueError, "Conflicting Comfy markers"):
+                inspect_minimax_h3_safetensors([checkpoint.name])
 
     def test_inspect_minimax_h3_fp8_detects_static_activation_scale(self):
         marker = torch.tensor(list(b'{"format":"float8_e4m3fn"}'), dtype=torch.uint8)
@@ -762,7 +809,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 f.name,
             )
 
-            _, layer_markers = inspect_minimax_h3_safetensors([f.name])
+            layer_markers = inspect_minimax_h3_safetensors([f.name]).layer_markers
 
         self.assertEqual(
             layer_markers["blocks.0.mlp.fc1"],
@@ -783,7 +830,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 f.name,
             )
 
-            _, layer_markers = inspect_minimax_h3_safetensors([f.name])
+            layer_markers = inspect_minimax_h3_safetensors([f.name]).layer_markers
 
         self.assertEqual(
             layer_markers["blocks.0.mlp.fc1"],
@@ -801,7 +848,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint.name,
             )
 
-            _, markers = inspect_minimax_h3_safetensors([checkpoint.name])
+            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
 
         marker = markers["blocks.0.mlp.fc1"]
         self.assertEqual(marker["format"], "float8_e4m3fn")
@@ -892,7 +939,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 metadata=metadata,
             )
 
-            _, markers = inspect_minimax_h3_safetensors([checkpoint.name])
+            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
 
         config = resolve_minimax_h3_checkpoint_quantization(markers)
         self.assertIsInstance(config, KitchenW4A8Config)
@@ -955,7 +1002,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint.name,
             )
 
-            _, markers = inspect_minimax_h3_safetensors([checkpoint.name])
+            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
 
         config = resolve_minimax_h3_checkpoint_quantization(markers)
         self.assertIsInstance(config, KitchenW4A4Config)
@@ -1125,7 +1172,9 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint.name,
                 metadata={"quant_format": "mxfp8"},
             )
-            _, layer_markers = inspect_minimax_h3_safetensors([checkpoint.name])
+            layer_markers = inspect_minimax_h3_safetensors(
+                [checkpoint.name]
+            ).layer_markers
             config = resolve_minimax_h3_checkpoint_quantization(layer_markers)
 
         self.assertIsInstance(config, MXFP8Config)
@@ -1667,7 +1716,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 fallback.name,
             )
             checkpoint_files = [quantized.name, fallback.name]
-            _, markers = inspect_minimax_h3_safetensors(checkpoint_files)
+            markers = inspect_minimax_h3_safetensors(checkpoint_files).layer_markers
             config = resolve_minimax_h3_checkpoint_quantization(
                 markers,
                 checkpoint_files,
@@ -1726,7 +1775,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                 checkpoint.name,
                 metadata=metadata,
             )
-            _, markers = inspect_minimax_h3_safetensors([checkpoint.name])
+            markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
             config = resolve_minimax_h3_checkpoint_quantization(
                 markers,
                 [checkpoint.name],

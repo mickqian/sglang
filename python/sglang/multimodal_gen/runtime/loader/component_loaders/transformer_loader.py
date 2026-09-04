@@ -317,26 +317,40 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 validate_minimax_h3_checkpoint_variant(
                     safetensors_list, selected_variant
                 )
-                adaln_curve_shape, layer_markers = inspect_minimax_h3_safetensors(
-                    safetensors_list
+                checkpoint_layout = inspect_minimax_h3_safetensors(safetensors_list)
+                dit_config.arch_config.checkpoint_uses_separate_qkv_layout = (
+                    checkpoint_layout.uses_separate_qkv
                 )
                 checkpoint_quant_config = resolve_minimax_h3_checkpoint_quantization(
-                    layer_markers,
+                    checkpoint_layout.layer_markers,
                     safetensors_list,
                     dit_config.arch_config.param_names_mapping,
                     dit_config.arch_config.reverse_param_names_mapping,
                 )
-                if adaln_curve_shape is not None:
+                if checkpoint_layout.adaln_curve_shape is not None:
                     (
                         dit_config.arch_config.adaln_curve_grid,
                         dit_config.arch_config.time_embed_dim,
-                    ) = adaln_curve_shape
+                    ) = checkpoint_layout.adaln_curve_shape
+                if checkpoint_layout.adaln_curve_basis_shape is not None:
+                    full_dim, basis_dim = checkpoint_layout.adaln_curve_basis_shape
+                    if full_dim != dit_config.arch_config.time_embed_dim:
+                        raise ValueError(
+                            "MiniMax-H3 adaln_curve_basis width does not match "
+                            f"time_embed_dim: {full_dim} != "
+                            f"{dit_config.arch_config.time_embed_dim}"
+                        )
+                    dit_config.arch_config.adaln_curve_basis_dim = basis_dim
+                if (
+                    checkpoint_layout.adaln_curve_shape is not None
+                    or checkpoint_layout.adaln_curve_basis_shape is not None
+                ):
                     if (
                         component_server_args.minimax_h3_adaln_cache_path is not None
                         or component_server_args.minimax_h3_adaln_online
                     ):
                         raise ValueError(
-                            "MiniMax-H3 pruned curve checkpoints cannot use a "
+                            "MiniMax-H3 compact AdaLN checkpoints cannot use a "
                             "separate AdaLN cache or online AdaLN rebuild"
                         )
 

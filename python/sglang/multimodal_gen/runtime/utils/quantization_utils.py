@@ -363,9 +363,11 @@ def inspect_comfy_quant_markers(
     mapped_markers: dict[str, dict[str, Any]] = {}
     for prefix, marker in raw_markers.items():
         mapped_prefix = param_name_mapper(prefix) if param_name_mapper else prefix
-        if mapped_prefix in mapped_markers:
+        previous = mapped_markers.get(mapped_prefix)
+        if previous is not None and previous != marker:
             raise ValueError(
-                f"Comfy markers collide after parameter mapping at {mapped_prefix!r}"
+                "Conflicting Comfy markers after parameter mapping at "
+                f"{mapped_prefix!r}"
             )
         mapped_markers[mapped_prefix] = marker
     return mapped_markers
