@@ -1676,7 +1676,10 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                             "convrot": True,
                             "convrot_groupsize": 256,
                         },
-                        "blocks.0.mlp.fc1": {"format": "float8_e4m3fn"},
+                        "blocks.0.mlp.fc1": {
+                            "format": "float8_e4m3fn",
+                            "scaling_mode": "tensor",
+                        },
                     },
                 }
             )
@@ -1699,6 +1702,9 @@ class TestTransformerQuantHelpers(unittest.TestCase):
                         (32, 64), dtype=torch.float8_e4m3fn
                     ),
                     "blocks.0.mlp.fc1.weight_scale": torch.tensor(1.0),
+                    "blocks.0.mlp.fc1.comfy_quant": torch.tensor(
+                        list(b'{"format":"float8_e4m3fn"}'), dtype=torch.uint8
+                    ),
                 },
                 checkpoint.name,
                 metadata=metadata,
@@ -1710,6 +1716,9 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             )
 
         self.assertIsInstance(config, ModelOptFp4Config)
+        self.assertEqual(
+            markers["blocks.0.mlp.fc1"]["scaling_mode"], "tensor"
+        )
         with patch(
             "sglang.multimodal_gen.runtime.layers.quantization."
             "modelopt_quant.current_platform.get_device_capability",

@@ -55,6 +55,26 @@ def comfy_quant_key_filter(name: str) -> bool:
     return not name.endswith(".comfy_quant")
 
 
+def _record_comfy_quant_marker(
+    markers: dict[str, dict[str, Any]], prefix: str, marker: dict[str, Any]
+) -> None:
+    previous = markers.get(prefix)
+    if previous is None:
+        markers[prefix] = marker
+        return
+    conflicts = {
+        key
+        for key in previous.keys() & marker.keys()
+        if previous[key] != marker[key]
+    }
+    if conflicts:
+        raise ValueError(
+            f"Conflicting Comfy quantization markers for {prefix!r}: "
+            + ", ".join(sorted(conflicts))
+        )
+    markers[prefix] = previous | marker
+
+
 def inspect_comfy_quant_markers(
     safetensors_list: list[str],
     param_name_mapper: Callable[[str], str] | None = None,
@@ -92,12 +112,7 @@ def inspect_comfy_quant_markers(
                         raise ValueError(
                             f"Comfy quantization metadata for {prefix!r} must be an object"
                         )
-                    previous = raw_markers.get(prefix)
-                    if previous is not None and previous != marker:
-                        raise ValueError(
-                            f"Conflicting Comfy quantization markers for {prefix!r}"
-                        )
-                    raw_markers[prefix] = marker
+                    _record_comfy_quant_marker(raw_markers, prefix, marker)
             for key in checkpoint.keys():
                 tensor_slice = checkpoint.get_slice(key)
                 checkpoint_meta[key] = (
@@ -123,12 +138,7 @@ def inspect_comfy_quant_markers(
                         f"Comfy quantization marker {key!r} must contain a JSON object"
                     )
                 prefix = key.removesuffix(".comfy_quant")
-                previous = raw_markers.get(prefix)
-                if previous is not None and previous != marker:
-                    raise ValueError(
-                        f"Conflicting Comfy quantization markers for {prefix!r}"
-                    )
-                raw_markers[prefix] = marker
+                _record_comfy_quant_marker(raw_markers, prefix, marker)
 
     if global_quant_formats == {"mxfp8"}:
         for prefix in marked_dtype_weight_prefixes:
