@@ -269,6 +269,22 @@ def _is_metadata_only_pipeline_snapshot(model_path: str) -> bool:
     return len(_get_missing_declared_weight_components(model_path)) == len(declared)
 
 
+def _has_metadata_only_requested_pipeline(
+    model_path: str, allow_patterns: list[str] | None
+) -> bool:
+    """Detect metadata-only pipeline roots selected by an allow pattern."""
+    if _is_metadata_only_pipeline_snapshot(model_path):
+        return True
+
+    for pattern in allow_patterns or ():
+        static_prefix = pattern.rstrip("*").rstrip("/")
+        if not static_prefix or glob.has_magic(static_prefix):
+            continue
+        if _is_metadata_only_pipeline_snapshot(os.path.join(model_path, static_prefix)):
+            return True
+    return False
+
+
 def _check_index_files_for_missing_shards(
     model_path: str,
 ) -> tuple[bool, list[str], list[str]]:
@@ -809,9 +825,7 @@ def _resolve_remote_repo_pipeline_index_path(
     """Return the classic or modular pipeline index from a remote repo."""
     missing_error: EntryNotFoundError | None = None
     for filename in _PIPELINE_INDEX_FILENAMES:
-        repo_filename = (
-            f"{subfolder.rstrip('/')}/{filename}" if subfolder else filename
-        )
+        repo_filename = f"{subfolder.rstrip('/')}/{filename}" if subfolder else filename
         try:
             # Cache-aware: no local_dir, so the selected Hub reuses its cache and
             # revalidates the remote file when online.
@@ -1063,7 +1077,9 @@ def maybe_download_model(
             # maybe_download_model_index's model_index.json fetch materializes a full
             # cache entry, so this resolve reports that stub as a hit; returning it
             # would skip the download. LoRA repos declare no components.
-            if not is_lora and _is_metadata_only_pipeline_snapshot(local_path):
+            if not is_lora and _has_metadata_only_requested_pipeline(
+                local_path, allow_patterns
+            ):
                 if not download:
                     raise ValueError(
                         f"Model {model_name_or_path} found in cache but only contains "

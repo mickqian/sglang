@@ -223,9 +223,7 @@ def test_remote_pipeline_index_in_subfolder(monkeypatch, tmp_path):
         revision="release",
         subfolder="FL2VA",
     )
-    assert calls == [
-        ("org/partitioned-pipeline", "FL2VA/model_index.json", "release")
-    ]
+    assert calls == [("org/partitioned-pipeline", "FL2VA/model_index.json", "release")]
 
 
 def test_diffusers_cache_validation_rejects_declared_component_without_weights(
@@ -388,6 +386,39 @@ def test_metadata_only_cached_snapshot_falls_through_to_one_download(
 
     assert maybe_download_model("org/repo") == str(tmp_path)
     assert calls == ["probe", "download"]
+
+
+def test_metadata_only_cached_pipeline_subfolder_falls_through_to_download(
+    recording_snapshot_download, tmp_path
+):
+    """A partition allow pattern must inspect its pipeline root, not the repo root."""
+    partition = tmp_path / "Ref2VA"
+    partition.mkdir()
+    _write_model_index(partition)
+    calls = recording_snapshot_download(tmp_path)
+
+    assert maybe_download_model("org/repo", allow_patterns=["Ref2VA/**"]) == str(
+        tmp_path
+    )
+    assert calls == ["probe", "download"]
+
+
+def test_metadata_only_cached_pipeline_subfolder_is_not_an_offline_hit(
+    recording_snapshot_download, tmp_path
+):
+    partition = tmp_path / "Ref2VA"
+    partition.mkdir()
+    _write_model_index(partition)
+    calls = recording_snapshot_download(tmp_path)
+
+    with pytest.raises(ValueError, match="only contains pipeline metadata"):
+        maybe_download_model(
+            "org/repo",
+            allow_patterns=["Ref2VA/**"],
+            download=False,
+        )
+
+    assert calls == ["probe"]
 
 
 def test_complete_cached_snapshot_is_served_without_download(
