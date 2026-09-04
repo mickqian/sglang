@@ -765,7 +765,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             prefix = f"blocks.0.attn.{projection}_proj"
             tensors[f"{prefix}.weight"] = torch.ones((2, 256), dtype=torch.int8)
             tensors[f"{prefix}.weight_scale"] = torch.ones((2, 1))
-            tensors[f"{prefix}.comfy_quant"] = marker
+            tensors[f"{prefix}.comfy_quant"] = marker.clone()
 
         with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
             save_file(tensors, checkpoint.name)
