@@ -419,6 +419,7 @@ class TestGGUFQuantMethodSelection(unittest.TestCase):
         self.assertEqual(tuple(layer.weight.shape), (4, 32))
         self.assertEqual(tuple(layer.weight_scale.shape), (4, 4))
         self.assertIsNone(layer.input_scale)
+        self.assertTrue(config.native_nvfp4_config.swap_weight_nibbles)
 
     def test_unquantized_layer_falls_back(self):
         """H3 keeps its FP32 projections unquantized inside the same file."""
