@@ -17,18 +17,15 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
     QuantizeMethodBase,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+    DynamicNvfp4LinearMethod,
     ModelOptFp4Config,
     ModelOptFp4LinearMethod,
-    _get_fp4_quantize_op,
 )
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.multimodal_gen.runtime.utils.weight_attrs import set_weight_attrs
 from sglang.srt.layers.quantization.dequantization import dequantize_nvfp4
-from sglang.srt.layers.utils.common import copy_or_rebind_param
-
-_NVFP4_GLOBAL_SCALE_RANGE = 448.0 * 6.0
 
 
 def _register_parameter(
@@ -164,95 +161,8 @@ class ComfyFullPrecisionNvfp4LinearMethod(ModelOptFp4LinearMethod):
         return F.linear(x, weight, bias)
 
 
-class ComfyNativeNvfp4LinearMethod(ModelOptFp4LinearMethod):
+class ComfyNativeNvfp4LinearMethod(DynamicNvfp4LinearMethod):
     """Run Comfy NVFP4 weights with static or dynamic activation scales."""
-
-    def __init__(
-        self, quant_config: ComfyNvfp4Config, *, has_input_scale: bool
-    ) -> None:
-        self.quant_config = quant_config
-        self.has_input_scale = has_input_scale
-
-    def create_weights(
-        self,
-        layer: nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs: Any,
-    ) -> None:
-        super().create_weights(
-            layer,
-            input_size_per_partition,
-            output_partition_sizes,
-            input_size,
-            output_size,
-            params_dtype,
-            **extra_weight_attrs,
-        )
-        if not self.has_input_scale:
-            layer.register_parameter("input_scale", None)
-
-    def process_weights_after_loading(self, layer: nn.Module) -> None:
-        weight_scale = (
-            layer.weight_scale_2.max()
-            .to(torch.float32)
-            .clamp_min(torch.finfo(torch.float32).tiny)
-        )
-        partition_scales = layer.weight_scale_2.to(torch.float32) / weight_scale
-        widths = torch.tensor(
-            layer.logical_widths,
-            device=partition_scales.device,
-            dtype=torch.long,
-        )
-        output_scale = torch.repeat_interleave(partition_scales, widths).to(
-            layer.params_dtype
-        )
-        copy_or_rebind_param(layer, "comfy_weight_scale", weight_scale)
-        copy_or_rebind_param(layer, "comfy_output_scale", output_scale)
-        if self.has_input_scale:
-            input_scale = layer.input_scale.max().to(torch.float32)
-            copy_or_rebind_param(layer, "input_scale_inv", input_scale.reciprocal())
-            copy_or_rebind_param(layer, "alpha", input_scale * weight_scale)
-        self._process_weight_storage_after_loading(layer)
-
-    def apply(
-        self,
-        layer: nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        input_shape = x.shape
-        x = x.view(-1, input_shape[-1])
-        if self.has_input_scale:
-            input_scale_inv = layer.input_scale_inv
-            alpha = layer.alpha
-        else:
-            input_scale = (
-                x.abs().amax().to(torch.float32) / _NVFP4_GLOBAL_SCALE_RANGE
-            ).clamp_min(torch.finfo(torch.float32).tiny)
-            input_scale_inv = input_scale.reciprocal()
-            alpha = input_scale * layer.comfy_weight_scale
-
-        fp4_quantize = _get_fp4_quantize_op()
-        if fp4_quantize is None:
-            raise RuntimeError(
-                "No FP4 quantization kernel available. Install flashinfer."
-            )
-        x_fp4, x_scale_interleaved = fp4_quantize(x, input_scale_inv)
-        output = self._apply_quantized_input(
-            layer,
-            x_fp4,
-            x_scale_interleaved,
-            alpha=alpha,
-            output_dtype=x.dtype,
-            output_shape=list(input_shape[:-1]) + [layer.output_size_per_partition],
-            bias=None,
-        )
-        output = output * layer.comfy_output_scale
-        return output + bias if bias is not None else output
 
 
 class ComfyNvfp4Config(ModelOptFp4Config):

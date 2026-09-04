@@ -19,6 +19,10 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
+    DynamicNvfp4LinearMethod,
+    ModelOptFp4Config,
+)
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -43,6 +47,15 @@ class GGUFConfig(QuantizationConfig):
         self.tensor_meta = tensor_meta
         self._refresh_quantized_prefixes()
         self.selected: set[str] = set()
+        self.native_nvfp4_config: ModelOptFp4Config | None = (
+            ModelOptFp4Config(
+                is_checkpoint_nvfp4_serialized=True,
+                group_size=16,
+                exclude_modules=[],
+            )
+            if any(metadata.is_native_nvfp4 for metadata in tensor_meta.values())
+            else None
+        )
 
     def retain_tensor_meta(self, key_filter: Callable[[str], bool]) -> None:
         self.tensor_meta = {
@@ -54,7 +67,7 @@ class GGUFConfig(QuantizationConfig):
 
     def _refresh_quantized_prefixes(self) -> None:
         self.quantized_prefixes = {
-            metadata.param_name.removesuffix(".qweight")
+            metadata.param_name.removesuffix(".qweight").removesuffix(".weight")
             for metadata in self.tensor_meta.values()
             if metadata.is_packed
         }
@@ -100,6 +113,18 @@ class GGUFConfig(QuantizationConfig):
             if unquantized_method is None:
                 return None
             return unquantized_method()
+        if metadata.is_native_nvfp4:
+            if not isinstance(layer, LinearBase):
+                raise ValueError(
+                    f"GGUF NVFP4 tensor {prefix}.weight is supported only for "
+                    "linear layers"
+                )
+            assert self.native_nvfp4_config is not None
+            self.selected.add(prefix)
+            return DynamicNvfp4LinearMethod(
+                self.native_nvfp4_config,
+                has_input_scale=False,
+            )
         if weight_type not in DEQUANT_TYPES:
             raise ValueError(
                 f"GGUF tensor {prefix}.weight uses unsupported type {weight_type}"

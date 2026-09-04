@@ -18,11 +18,12 @@ if TYPE_CHECKING:
     import gguf
     from gguf import GGMLQuantizationType as WeightType
 
-_GGML_F32, _GGML_F16, _GGML_BF16 = 0, 1, 30
+_GGML_F32, _GGML_F16, _GGML_BF16, _GGML_NVFP4 = 0, 1, 30, 40
 _UNQUANTIZED_TYPES = {_GGML_F32, _GGML_F16, _GGML_BF16}
 # SRT has no batched MMQ kernel for I-matrix types and may dequantize them.
 _SUPER_BLOCK_DEQUANT_TYPES = {16, 17, 18, 19, 20, 21, 22, 23, 29}
 _GGML_SUPER_BLOCK = 256
+_GGML_NVFP4_BLOCK, _GGML_NVFP4_TYPE_SIZE = 64, 36
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,10 @@ class GGUFTensorMeta:
     @property
     def is_packed(self) -> bool:
         return self.is_quantized and not self.dequantize_on_load
+
+    @property
+    def is_native_nvfp4(self) -> bool:
+        return self.ggml_type == _GGML_NVFP4 and self.is_packed
 
 
 def _gguf_module() -> Any:
@@ -101,18 +106,15 @@ def read_gguf_tensor_meta(gguf_file: str) -> dict[str, GGUFTensorMeta]:
         is_quantized = int(weight_type) not in _UNQUANTIZED_TYPES
         dequantize_on_load = False
         if is_quantized:
-            if len(logical_shape) != 2 or not tensor.name.endswith(".weight"):
-                raise ValueError(
-                    f"GGUF tensor {tensor.name} is quantized, but diffusion GGUF "
-                    "currently supports packed data only for 2D linear .weight "
-                    "tensors"
-                )
             block_size, type_size = gguf.GGML_QUANT_SIZES[weight_type]
-            inner_dim = logical_shape[-1]
-            if inner_dim % block_size:
+            if len(logical_shape) != 2 or not tensor.name.endswith(".weight"):
+                dequantize_on_load = True
+                stored_shape = logical_shape
+            elif logical_shape[-1] % block_size:
                 if shape_field is None:
                     raise ValueError(
-                        f"GGUF tensor {tensor.name} has inner dimension {inner_dim}, "
+                        f"GGUF tensor {tensor.name} has inner dimension "
+                        f"{logical_shape[-1]}, "
                         f"which is not a multiple of block size {block_size}"
                     )
                 dequantize_on_load = True
@@ -120,7 +122,7 @@ def read_gguf_tensor_meta(gguf_file: str) -> dict[str, GGUFTensorMeta]:
             else:
                 stored_shape = (
                     *logical_shape[:-1],
-                    inner_dim // block_size * type_size,
+                    logical_shape[-1] // block_size * type_size,
                 )
             if (
                 int(weight_type) in _SUPER_BLOCK_DEQUANT_TYPES
@@ -139,11 +141,10 @@ def read_gguf_tensor_meta(gguf_file: str) -> dict[str, GGUFTensorMeta]:
                 _GGML_BF16: torch.bfloat16,
             }[int(weight_type)]
 
-        param_name = (
-            f"{tensor.name.removesuffix('.weight')}.qweight"
-            if is_quantized and not dequantize_on_load
-            else tensor.name
-        )
+        keeps_weight_name = int(weight_type) == _GGML_NVFP4
+        param_name = tensor.name
+        if is_quantized and not dequantize_on_load and not keeps_weight_name:
+            param_name = f"{tensor.name.removesuffix('.weight')}.qweight"
         metadata[tensor.name] = GGUFTensorMeta(
             ggml_type=int(weight_type),
             logical_shape=logical_shape,
@@ -172,11 +173,9 @@ def remap_gguf_tensor_meta(
                 dequantize_on_load=True,
             )
         parameter_name = name_mapper(checkpoint_name)
-        mapped_param_name = (
-            f"{parameter_name.removesuffix('.weight')}.qweight"
-            if metadata.is_packed
-            else parameter_name
-        )
+        mapped_param_name = parameter_name
+        if metadata.is_packed and not metadata.is_native_nvfp4:
+            mapped_param_name = f"{parameter_name.removesuffix('.weight')}.qweight"
         mapped_metadata = replace(metadata, param_name=mapped_param_name)
         for alias in (checkpoint_name, parameter_name):
             previous = remapped.get(alias)
@@ -208,6 +207,35 @@ def _tensor_to_torch(tensor, metadata: GGUFTensorMeta) -> torch.Tensor:
     return value.clone() if not metadata.is_packed else value
 
 
+def _unpack_native_nvfp4(
+    value: torch.Tensor, metadata: GGUFTensorMeta
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split GGML's interleaved NVFP4 blocks into standard weight and scales."""
+    if metadata.logical_shape[-1] % _GGML_NVFP4_BLOCK:
+        raise ValueError(
+            f"GGUF NVFP4 tensor {metadata.param_name} is not block aligned"
+        )
+    blocks = value.reshape(
+        *metadata.logical_shape[:-1],
+        metadata.logical_shape[-1] // _GGML_NVFP4_BLOCK,
+        _GGML_NVFP4_TYPE_SIZE,
+    )
+    scales = (
+        blocks[..., :4]
+        .reshape(*metadata.logical_shape[:-1], metadata.logical_shape[-1] // 16)
+        .contiguous()
+        .view(torch.float8_e4m3fn)
+    )
+    block_values = blocks[..., 4:].reshape(
+        *metadata.logical_shape[:-1], -1, 4, 8
+    )
+    unpacked = torch.cat((block_values & 0x0F, block_values >> 4), dim=-1)
+    packed = (unpacked[..., 0::2] | (unpacked[..., 1::2] << 4)).reshape(
+        *metadata.logical_shape[:-1], metadata.logical_shape[-1] // 2
+    )
+    return packed.contiguous(), scales
+
+
 def gguf_weights_iterator(
     gguf_file: str,
     tensor_meta: dict[str, GGUFTensorMeta],
@@ -219,7 +247,16 @@ def gguf_weights_iterator(
         if key_filter is not None and not key_filter(tensor.name):
             continue
         metadata = tensor_meta[tensor.name]
-        yield metadata.param_name, _tensor_to_torch(tensor, metadata)
+        value = _tensor_to_torch(tensor, metadata)
+        if metadata.is_native_nvfp4:
+            weight, weight_scale = _unpack_native_nvfp4(value, metadata)
+            yield metadata.param_name, weight
+            yield (
+                f"{metadata.param_name.removesuffix('.weight')}.weight_scale",
+                weight_scale,
+            )
+        else:
+            yield metadata.param_name, value
 
 
 def names_gguf_checkpoint(reference: str) -> bool:
