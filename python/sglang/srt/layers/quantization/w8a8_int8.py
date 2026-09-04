@@ -26,6 +26,7 @@ from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import (
     cpu_has_amx_support,
+    get_device_sm,
     is_cpu,
     is_cuda,
     is_host_cpu_arm64,
@@ -41,6 +42,7 @@ _is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_cpu_arm64 = is_host_cpu_arm64()
+_use_int_mm_fallback = _is_cuda and get_device_sm() >= 100
 
 if _is_cuda:
     from sgl_kernel import int8_scaled_mm
@@ -60,6 +62,22 @@ if _is_cuda:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _int8_scaled_mm_fallback(
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+    scales_a: torch.Tensor,
+    scales_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    output = torch._int_mm(mat_a, mat_b).to(torch.float32)
+    output.mul_(scales_a.reshape(-1, 1))
+    output.mul_(scales_b.reshape(1, -1))
+    if bias is not None:
+        output.add_(bias)
+    return output.to(out_dtype)
 
 
 class W8A8Int8Config(QuantizationConfig):
@@ -222,14 +240,24 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         x_scale_2d = x_scale.view(-1, x_scale.shape[-1])
         output_shape = [*x_q.shape[:-1], layer.weight.shape[1]]
 
-        output = int8_scaled_mm(
-            x_q_2d,
-            layer.weight,
-            x_scale_2d,
-            layer.weight_scale,
-            out_dtype=x.dtype,
-            bias=bias,
-        )
+        if _use_int_mm_fallback:
+            output = _int8_scaled_mm_fallback(
+                x_q_2d,
+                layer.weight,
+                x_scale_2d,
+                layer.weight_scale,
+                x.dtype,
+                bias,
+            )
+        else:
+            output = int8_scaled_mm(
+                x_q_2d,
+                layer.weight,
+                x_scale_2d,
+                layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=bias,
+            )
 
         return output.view(output_shape)
 

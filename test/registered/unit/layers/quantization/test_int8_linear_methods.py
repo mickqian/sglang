@@ -13,7 +13,6 @@ import torch
 from sglang.srt.layers.quantization.blockwise_int8 import BlockInt8Config
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import get_device_sm
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.layer_ut_utils import (
     assert_output_close,
@@ -89,9 +88,6 @@ class _Int8LinearCheck(CustomTestCase):
                 assert_output_close(self, out, ref, rtol=5e-2, atol=1e-1)
 
 
-@unittest.skipIf(
-    get_device_sm() >= 100, "sgl-kernel int8_scaled_mm has no SM100+ kernel"
-)
 class TestW8A8Int8Linear(_Int8LinearCheck):
     @staticmethod
     def _build_layer(n: int, k: int):
