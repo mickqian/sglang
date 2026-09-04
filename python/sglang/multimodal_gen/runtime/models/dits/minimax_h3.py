@@ -1733,7 +1733,12 @@ class MiniMaxH3FinalLayer(nn.Module):
             bias=True,
             gather_output=False,
             params_dtype=_FP32_DTYPE,
-            quant_config=None,
+            quant_config=(
+                quant_config
+                if quant_config is not None
+                and quant_config.has_packed_weight(f"{prefix}.video_out")
+                else None
+            ),
             prefix=f"{prefix}.video_out",
         )
         self.audio_out = ColumnParallelLinear(
@@ -1742,7 +1747,12 @@ class MiniMaxH3FinalLayer(nn.Module):
             bias=True,
             gather_output=False,
             params_dtype=_FP32_DTYPE,
-            quant_config=None,
+            quant_config=(
+                quant_config
+                if quant_config is not None
+                and quant_config.has_packed_weight(f"{prefix}.audio_out")
+                else None
+            ),
             prefix=f"{prefix}.audio_out",
         )
         self.pdd_video_weight: torch.Tensor | None = None
@@ -1877,7 +1887,7 @@ class MiniMaxH3FinalLayer(nn.Module):
                     self.pdd_audio_bias,
                 ),
             )
-        # Preserve full precision through both final output projections.
+        # Keep head activations and unpacked head weights in fp32.
         h = h.to(_FP32_DTYPE)
         video, _ = self.video_out(h)
         audio, _ = self.audio_out(h)
@@ -2788,8 +2798,14 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                 fp32_param_names.extend(("adaln_basis", "adaln_mean"))
         if self.adaln_curve_basis is not None:
             fp32_param_names.extend(("adaln_curve_basis", "adaln_curve_mean"))
+        parameters = dict(self.named_parameters())
         for name in fp32_param_names:
-            param = self.get_parameter(name)
+            param = parameters.get(name)
+            if param is None:
+                packed_name = f"{name.removesuffix('.weight')}.qweight"
+                if name.endswith(".weight") and packed_name in parameters:
+                    continue
+                param = self.get_parameter(name)
             if param.dtype != _FP32_DTYPE:
                 raise ValueError(
                     f"{name} must stay fp32 after load, got {param.dtype}."
