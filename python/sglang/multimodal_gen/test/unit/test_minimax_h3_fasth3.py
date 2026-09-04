@@ -132,7 +132,14 @@ def test_root_modular_h3_ref2va_routing() -> None:
         revision=None,
     )
 
-    with patch.object(ComposedPipelineBase, "_load_config", return_value=modular_index):
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline."
+            "has_diffusers_pipeline_index",
+            return_value=False,
+        ),
+        patch.object(ComposedPipelineBase, "_load_config", return_value=modular_index),
+    ):
         assert pipeline._load_config() is modular_index
 
     assert pipeline.server_args.model_subfolder is None
@@ -140,6 +147,41 @@ def test_root_modular_h3_ref2va_routing() -> None:
     assert pipeline._extra_config_module_map == {"transformer": "transformer_ref"}
     assert pipeline.release_metadata.partition == "ref2va"
     assert pipeline.release_metadata.tasks == ("ref2va",)
+
+
+def test_partitioned_h3_prefers_selected_subfolder() -> None:
+    pipeline = MiniMaxH3Pipeline.__new__(MiniMaxH3Pipeline)
+    pipeline.model_path = "org/partitioned-h3"
+    pipeline._extra_config_module_map = {}
+    pipeline.server_args = SimpleNamespace(
+        model_variant="fl2va",
+        model_subfolder=None,
+        revision=None,
+    )
+
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline."
+            "has_diffusers_pipeline_index",
+            return_value=True,
+        ),
+        patch.object(
+            ComposedPipelineBase,
+            "_load_config",
+            return_value={
+                "_minimax_h3": {
+                    "schema_version": 1,
+                    "partition": "fl2va",
+                    "tasks": ["t2va", "fl2va"],
+                    "task_aliases": {},
+                    "sigma_shift_scales": {"video": 12.0, "audio": 3.0},
+                }
+            },
+        ),
+    ):
+        pipeline._load_config()
+
+    assert pipeline.server_args.model_subfolder == "FL2VA"
 
 
 def test_fasth3_sampling_defaults_and_task_rejection() -> None:

@@ -208,6 +208,26 @@ def test_remote_modular_pipeline_index_prevents_default_subfolder(
     ]
 
 
+def test_remote_pipeline_index_in_subfolder(monkeypatch, tmp_path):
+    _write_model_index(tmp_path)
+    calls = []
+
+    def fake_hf_hub_download(*, repo_id, filename, revision=None):
+        calls.append((repo_id, filename, revision))
+        return str(tmp_path / "model_index.json")
+
+    monkeypatch.setattr(hf_diffusers_utils, "hf_hub_download", fake_hf_hub_download)
+
+    assert has_diffusers_pipeline_index(
+        "org/partitioned-pipeline",
+        revision="release",
+        subfolder="FL2VA",
+    )
+    assert calls == [
+        ("org/partitioned-pipeline", "FL2VA/model_index.json", "release")
+    ]
+
+
 def test_diffusers_cache_validation_rejects_declared_component_without_weights(
     tmp_path,
 ):

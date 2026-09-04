@@ -157,12 +157,23 @@ def _find_local_pipeline_index_path(model_path: str) -> str | None:
     return None
 
 
-def has_diffusers_pipeline_index(model_path: str, revision: str | None = None) -> bool:
-    local_index = _find_local_pipeline_index_path(model_path)
+def has_diffusers_pipeline_index(
+    model_path: str,
+    revision: str | None = None,
+    subfolder: str | None = None,
+) -> bool:
+    local_model_path = (
+        os.path.join(model_path, subfolder) if subfolder is not None else model_path
+    )
+    local_index = _find_local_pipeline_index_path(local_model_path)
     if local_index is not None or os.path.exists(model_path):
         return local_index is not None
     try:
-        _resolve_remote_repo_pipeline_index_path(model_path, revision=revision)
+        _resolve_remote_repo_pipeline_index_path(
+            model_path,
+            revision=revision,
+            subfolder=subfolder,
+        )
     except EntryNotFoundError:
         return False
     return True
@@ -791,15 +802,23 @@ def verify_model_config_and_directory(model_path: str) -> dict[str, Any]:
 
 
 def _resolve_remote_repo_pipeline_index_path(
-    model_name_or_path: str, revision: str | None = None
+    model_name_or_path: str,
+    revision: str | None = None,
+    subfolder: str | None = None,
 ) -> str:
     """Return the classic or modular pipeline index from a remote repo."""
     missing_error: EntryNotFoundError | None = None
     for filename in _PIPELINE_INDEX_FILENAMES:
+        repo_filename = (
+            f"{subfolder.rstrip('/')}/{filename}" if subfolder else filename
+        )
         try:
             # Cache-aware: no local_dir, so the selected Hub reuses its cache and
             # revalidates the remote file when online.
-            download_kwargs = {"repo_id": model_name_or_path, "filename": filename}
+            download_kwargs = {
+                "repo_id": model_name_or_path,
+                "filename": repo_filename,
+            }
             if revision is not None:
                 download_kwargs["revision"] = revision
             return hf_hub_download(**download_kwargs)
@@ -812,7 +831,7 @@ def _resolve_remote_repo_pipeline_index_path(
 
                 cache_kwargs = {
                     "repo_id": model_name_or_path,
-                    "filename": filename,
+                    "filename": repo_filename,
                 }
                 if revision is not None:
                     cache_kwargs["revision"] = revision
@@ -826,7 +845,7 @@ def _resolve_remote_repo_pipeline_index_path(
                 "using the locally cached copy at '%s'. The cached copy may be "
                 "out of date — provide an HF token or clear the cache to force "
                 "a refresh.",
-                filename,
+                repo_filename,
                 model_name_or_path,
                 online_error,
                 cached_path,

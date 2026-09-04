@@ -32,6 +32,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
+    has_diffusers_pipeline_index,
+)
 
 
 class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
@@ -107,9 +110,19 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
                     f"{explicit_subfolder!r}"
                 )
             if explicit_subfolder is None:
-                # Let the generic loader prefer a root pipeline index and use the
-                # legacy partition directory only when the root has no index.
-                self.default_model_subfolder = semantic_subfolder
+                if has_diffusers_pipeline_index(
+                    self.model_path,
+                    revision=self.server_args.revision,
+                    subfolder=semantic_subfolder,
+                ):
+                    # Prefer an explicitly selected legacy partition when it is
+                    # available. Its native component ABI may differ from a
+                    # newer root Diffusers index in the same repository.
+                    self.server_args.model_subfolder = semantic_subfolder
+                else:
+                    # Root-only modular releases can still route FL2VA/Ref2VA
+                    # through their declared transformer entries.
+                    self.default_model_subfolder = semantic_subfolder
         model_index = super()._load_config()
         self._configure_component_names(model_index, selected_partition)
         self.release_metadata = self._release_metadata_from_model_index(
