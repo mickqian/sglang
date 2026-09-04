@@ -718,11 +718,43 @@ class TestTextEncoderQuantization(unittest.TestCase):
         with mock.patch.object(method, "_process_weight_storage_after_loading"):
             method.process_weights_after_loading(layer)
 
-        torch.testing.assert_close(layer.comfy_weight_scale, torch.tensor(4.0))
+        torch.testing.assert_close(layer.dynamic_weight_scale, torch.tensor(4.0))
         torch.testing.assert_close(
-            layer.comfy_output_scale,
+            layer.dynamic_output_scale,
             torch.tensor([0.25, 0.25, 1.0, 0.5, 0.5, 0.5], dtype=torch.bfloat16),
         )
+
+    def test_nvfp4_native_quantizes_contiguous_activations(self):
+        method = ComfyNativeNvfp4LinearMethod(
+            ComfyNvfp4Config({"proj": {"format": "nvfp4"}}),
+            has_input_scale=False,
+        )
+        layer = nn.Module()
+        layer.dynamic_weight_scale = torch.tensor(1.0)
+        layer.dynamic_output_scale = torch.ones(4)
+        layer.output_size_per_partition = 4
+        inputs = torch.randn(2, 3, 8)[:, :, ::2]
+        self.assertFalse(inputs.is_contiguous())
+
+        def quantize(x, _):
+            self.assertTrue(x.is_contiguous())
+            return torch.empty(6, 2), torch.empty(6, 1)
+
+        with (
+            mock.patch(
+                "sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant."
+                "_get_fp4_quantize_op",
+                return_value=quantize,
+            ),
+            mock.patch.object(
+                method,
+                "_apply_quantized_input",
+                return_value=torch.ones(2, 3, 4),
+            ),
+        ):
+            output = method.apply(layer, inputs)
+
+        self.assertEqual(tuple(output.shape), (2, 3, 4))
 
     def test_gguf_maps_h3_names_and_drops_unused_language_layers(self):
         self.get_quant_config.return_value = None
