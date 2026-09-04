@@ -31,7 +31,9 @@ from sglang.multimodal_gen.runtime.loader.gguf_weights import GGUFTensorMeta
 from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MiniMaxH3DiTModel,
     MiniMaxH3FinalLayer,
+    _pdd_partition_widths,
     _pdd_plan_from_sigmas,
+    _pdd_retime_sigmas,
 )
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
@@ -264,6 +266,78 @@ def test_h3_pdd_plan_matches_released_shifted_fine_grid() -> None:
             num_steps=32,
             block_size=4,
         )
+
+
+def test_h3_pdd_retimes_nonuniform_trained_envelope() -> None:
+    sigmas = minimax_h3_time_shift_sigmas(num_steps=6, shift_scale=12.0)
+    retimed = _pdd_retime_sigmas(sigmas, num_steps=32, block_size=4)
+    plans = _pdd_plan_from_sigmas(retimed, num_steps=32, block_size=4)
+
+    assert _pdd_partition_widths(32, 5, 4) == [8, 8, 8, 4, 4]
+    assert [start for start, _ in plans] == [0, 8, 16, 24, 28]
+    assert [coefficients.numel() for _, coefficients in plans] == [8, 8, 8, 4, 4]
+    assert retimed != sigmas
+
+    with pytest.raises(ValueError, match="cannot tile"):
+        _pdd_retime_sigmas(
+            minimax_h3_time_shift_sigmas(num_steps=4, shift_scale=12.0),
+            num_steps=32,
+            block_size=4,
+        )
+
+
+def test_h3_pdd_comfy_sidecar_is_normalized_without_ignored_tensors(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "sglang.multimodal_gen.runtime.models.dits.minimax_h3.get_tp_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        "sglang.multimodal_gen.runtime.models.dits.minimax_h3.get_tp_rank", lambda: 1
+    )
+    video = SimpleNamespace(weight=torch.arange(2 * 3).view(2, 3).float() + 6)
+    audio = SimpleNamespace(weight=torch.empty(1, 3))
+    model = SimpleNamespace(
+        arch=SimpleNamespace(hidden_size=3, time_embed_dim=3),
+        device=torch.device("cpu"),
+        final_layer=SimpleNamespace(video_out=video, audio_out=audio),
+    )
+    adapter = {
+        "diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight": torch.ones(1, 3),
+        "diffusion_model.blocks.0.attn.qkv_proj.lora_B.weight": torch.ones(3, 1),
+        "diffusion_model.blocks.0.attn.qkv_proj.alpha": torch.tensor(1.0),
+        "h3_pdd.adaln.blocks.0.lora_A": torch.ones(1, 3),
+        "h3_pdd.adaln.blocks.0.lora_B": torch.ones(6, 1),
+        "h3_pdd.adaln.blocks.0.alpha": torch.tensor(1.0),
+        "h3_pdd.bank.video.weight": torch.ones(4, 4, 3),
+        "h3_pdd.bank.video.bias": torch.ones(4, 4),
+        "h3_pdd.bank.audio.weight": torch.ones(4, 2, 3),
+        "h3_pdd.bank.audio.bias": torch.ones(4, 2),
+        "h3_pdd.base_video_out": torch.arange(4 * 3).view(4, 3).float(),
+        "h3_pdd.silu_temb_grid": torch.ones(2, 3),
+        "h3_pdd.backbone_probe": torch.ones(1, 3, dtype=torch.int8),
+        "h3_pdd.backbone_probe_scale": torch.ones(1, 1),
+    }
+    metadata = {
+        "pdd_num_steps": "4",
+        "pdd_block_size": "2",
+        "pdd_grid_rows": "2",
+        "adaln_modules": "1",
+        "backbone_modules": "1",
+        "h3_pdd_backbone": "full",
+    }
+
+    ordinary, state = MiniMaxH3DiTModel.split_lora_runtime_state(
+        model, adapter, metadata
+    )
+
+    assert not any(name.startswith("h3_pdd.") for name in ordinary)
+    assert "diffusion_model.blocks.0.adaln_proj.linear.lora_A.weight" in ordinary
+    torch.testing.assert_close(
+        state["video_weight"], adapter["h3_pdd.bank.video.weight"][:, 2:]
+    )
+    assert (state["num_steps"], state["block_size"]) == (4, 2)
 
 
 def test_h3_pdd_synthetic_warmup_keeps_runtime_head_shape() -> None:
