@@ -22,7 +22,7 @@ class MiniMaxH3WorldControlAttention:
 
 _WORLD_CONTROL_MASKS: dict[
     tuple[str, int],
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, _ScoreMod],
+    tuple[torch.Tensor, torch.Tensor, MiniMaxH3WorldControlAttention],
 ] = {}
 
 
@@ -42,20 +42,18 @@ def build_minimax_h3_world_control_attention(
     video_start: int,
     frame_rows: int,
     used: int,
-    seq_len: int,
     device: torch.device,
 ) -> MiniMaxH3WorldControlAttention:
     if action_text_rows.ndim != 2 or action_text_rows.shape[1] != 2:
         raise ValueError("action_text_rows must have shape [video_latents, 2]")
-    if video_start <= 0 or frame_rows <= 0 or used <= video_start or seq_len < used:
+    if video_start <= 0 or frame_rows <= 0 or used <= video_start:
         raise ValueError("invalid H3-World packed-sequence boundaries")
 
-    key = (str(device), seq_len)
+    key = (str(device), used)
     cached = _WORLD_CONTROL_MASKS.get(key)
     if cached is None:
-        action_ids = torch.full((seq_len,), -1, dtype=torch.int32, device=device)
-        frame_ids = torch.full((seq_len,), -1, dtype=torch.int32, device=device)
-        live_rows = torch.zeros((), dtype=torch.int32, device=device)
+        action_ids = torch.full((used,), -1, dtype=torch.int32, device=device)
+        frame_ids = torch.full((used,), -1, dtype=torch.int32, device=device)
 
         def score_mod(score, _batch, _head, query, key_value):
             query_action = action_ids[query]
@@ -72,23 +70,19 @@ def build_minimax_h3_world_control_attention(
                 (query_action >= 0) & (key_frame >= 0) & (query_action != key_frame)
             )
             action_leaks = (key_action >= 0) & ~same_action & ~frame_reads_action
-            is_live = (query < live_rows) & (key_value < live_rows)
-            is_allowed = (query == key_value) | (
-                is_live & ~(action_leaks | action_reads_other_frame)
-            )
             return torch.where(
-                is_allowed,
-                score,
+                action_leaks | action_reads_other_frame,
                 float("-inf"),
+                score,
             )
 
-        cached = (action_ids, frame_ids, live_rows, score_mod)
+        attention = MiniMaxH3WorldControlAttention(used=used, score_mod=score_mod)
+        cached = (action_ids, frame_ids, attention)
         _WORLD_CONTROL_MASKS[key] = cached
 
-    action_ids, frame_ids, live_rows, score_mod = cached
+    action_ids, frame_ids, attention = cached
     action_ids.fill_(-1)
     frame_ids.fill_(-1)
-    live_rows.fill_(used)
     rows = action_text_rows.to(device="cpu", dtype=torch.long).tolist()
     for index, (start, stop) in enumerate(rows):
         if not 0 <= start < stop <= video_start:
@@ -104,7 +98,7 @@ def build_minimax_h3_world_control_attention(
     frame_ids[video_start:video_stop] = ((target_rows - video_start) // frame_rows).to(
         torch.int32
     )
-    return MiniMaxH3WorldControlAttention(used=used, score_mod=score_mod)
+    return attention
 
 
 def minimax_h3_world_control_attention(
@@ -116,18 +110,15 @@ def minimax_h3_world_control_attention(
     softmax_scale: float,
 ) -> torch.Tensor:
     used = control.used
-    output = (
-        _compiled_flex_attention()(
-            query.permute(1, 0, 2)[None],
-            key.permute(1, 0, 2)[None],
-            value.permute(1, 0, 2)[None],
-            score_mod=control.score_mod,
-            scale=softmax_scale,
-        )[0]
-        .permute(1, 0, 2)
-        .contiguous()
+    output = torch.zeros_like(query)
+    live = _compiled_flex_attention()(
+        query[:used].permute(1, 0, 2)[None],
+        key[:used].permute(1, 0, 2)[None],
+        value[:used].permute(1, 0, 2)[None],
+        score_mod=control.score_mod,
+        scale=softmax_scale,
     )
-    output[used:].zero_()
+    output[:used] = live[0].permute(1, 0, 2)
     return output
 
 
