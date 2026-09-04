@@ -312,12 +312,12 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                         ),
                     }
                 }
-        if plan.action_script is not None:
-            self._append_action_script(
-                embeddings["positive"],
-                plan.action_script,
-                encode_ids,
-            )
+            if plan.action_script is not None:
+                self._append_action_script(
+                    embeddings["positive"],
+                    plan.action_script,
+                    encode_ids,
+                )
         batch.extra[MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY] = embeddings
 
     def _append_action_script(
