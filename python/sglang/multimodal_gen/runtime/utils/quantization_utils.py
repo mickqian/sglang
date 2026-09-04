@@ -25,7 +25,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.comfy_nvfp4 import (
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
     Int8WeightOnlyConfig,
-    SglW8A8Int8Config,
+    W8A8Int8Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
@@ -415,7 +415,7 @@ def resolve_comfy_checkpoint_quantization(
     if formats == ["int8_tensorwise"]:
         return KitchenInt8Config(layer_markers=layer_markers)
     if formats == ["w8a8_int8"]:
-        return SglW8A8Int8Config(set(layer_markers))
+        return W8A8Int8Config(set(layer_markers))
     if formats == ["asym_w4a8_int8"]:
         return KitchenW4A8Config(layer_markers)
     if formats == ["asym_w4a8_int8", "int8_tensorwise"]:
@@ -539,7 +539,7 @@ def require_quantized_linear_layers(
     ):
         expected = set(quant_config.layer_markers)
         selected = set(quant_config.selected)
-    elif isinstance(quant_config, (Int8WeightOnlyConfig, SglW8A8Int8Config)):
+    elif isinstance(quant_config, (Int8WeightOnlyConfig, W8A8Int8Config)):
         expected = quant_config.layer_prefixes
         selected = quant_config.selected
     elif isinstance(quant_config, GGUFConfig):

@@ -45,6 +45,9 @@ sys.modules.setdefault(
 )
 sys.modules.setdefault("partial_json_parser.core.options", partial_json_parser_options)
 
+from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
+    MiniMaxH3DiTArchConfig,
+)
 from sglang.multimodal_gen.runtime.layers.linear import (
     LinearBase,
     ReplicatedLinear,
@@ -58,7 +61,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.comfy_fp8 import (
     ComfyFullPrecisionFp8LinearMethod,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.int8_weight_only_config import (
-    SglW8A8Int8Config,
+    W8A8Int8Config,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
     KitchenInt8Config,
@@ -899,8 +902,10 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
             save_file(
                 {
-                    "blocks.0.mlp.fc1.weight": torch.ones((2, 4), dtype=torch.int8),
-                    "blocks.0.mlp.fc1.weight_scale": torch.ones(
+                    "transformer_blocks.0.ff.net.2.weight": torch.ones(
+                        (2, 4), dtype=torch.int8
+                    ),
+                    "transformer_blocks.0.ff.net.2.weight_scale": torch.ones(
                         (2, 1), dtype=torch.bfloat16
                     ),
                 },
@@ -909,9 +914,13 @@ class TestTransformerQuantHelpers(unittest.TestCase):
 
             markers = inspect_minimax_h3_safetensors([checkpoint.name]).layer_markers
 
-        self.assertEqual(markers, {"blocks.0.mlp.fc1": {"format": "w8a8_int8"}})
+        self.assertEqual(
+            markers,
+            {"transformer_blocks.0.ff.net.2": {"format": "w8a8_int8"}},
+        )
         config = resolve_minimax_h3_checkpoint_quantization(markers)
-        self.assertIsInstance(config, SglW8A8Int8Config)
+        self.assertIsInstance(config, W8A8Int8Config)
+        config.remap_checkpoint_prefixes(MiniMaxH3DiTArchConfig().param_names_mapping)
         layer = ReplicatedLinear(
             4,
             2,
@@ -923,6 +932,13 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         self.assertIsInstance(layer.quant_method, W8A8Int8LinearMethod)
         self.assertEqual(layer.weight.dtype, torch.int8)
         self.assertEqual(layer.weight_scale.dtype, torch.float32)
+
+        normalized = dict(
+            config.normalize_checkpoint_weights(
+                [("blocks.0.mlp.fc2.weight_scale_inv", torch.ones(2, 1))]
+            )
+        )
+        self.assertEqual(set(normalized), {"blocks.0.mlp.fc2.weight_scale"})
 
     def test_unmarked_f32_rowwise_int8_remains_ambiguous(self):
         with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:

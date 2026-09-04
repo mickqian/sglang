@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -21,6 +21,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
 from sglang.multimodal_gen.runtime.layers.quantization.int8_weight_only import (
     Int8WeightOnlyLinearMethod,
 )
+from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.srt.layers.linear import LinearBase as SrtLinearBase
 from sglang.srt.layers.quantization.unquant import (
     UnquantizedLinearMethod as SrtUnquantizedLinearMethod,
@@ -90,8 +91,10 @@ class Int8WeightOnlyConfig(QuantizationConfig):
         return True
 
 
-class SglW8A8Int8Config(QuantizationConfig):
+class W8A8Int8Config(QuantizationConfig):
     """Select serialized W8A8 INT8 linears and reuse SRT's fused kernel."""
+
+    normalizes_checkpoint_weights = True
 
     def __init__(self, layer_prefixes: set[str]) -> None:
         super().__init__()
@@ -118,7 +121,7 @@ class SglW8A8Int8Config(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> SglW8A8Int8Config:
+    def from_config(cls, config: dict[str, Any]) -> W8A8Int8Config:
         raise ValueError(
             f"{cls.__name__} must be constructed from checkpoint tensor metadata"
         )
@@ -133,8 +136,23 @@ class SglW8A8Int8Config(QuantizationConfig):
         self.selected.add(prefix)
         return W8A8Int8LinearMethod(self._srt_config)
 
+    def remap_checkpoint_prefixes(self, param_names_mapping: dict) -> None:
+        map_name = get_param_names_mapping(param_names_mapping)
+        self.layer_prefixes = {
+            map_name(f"{prefix}.weight")[0].removesuffix(".weight")
+            for prefix in self.layer_prefixes
+        }
+
+    def normalize_checkpoint_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            if name.endswith(".weight_scale_inv"):
+                name = name.removesuffix("_inv")
+            yield name, weight
+
     def supports_cpu_weight_loading(self) -> bool:
         return True
 
 
-__all__ = ["Int8WeightOnlyConfig", "SglW8A8Int8Config"]
+__all__ = ["Int8WeightOnlyConfig", "W8A8Int8Config"]
