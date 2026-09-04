@@ -718,9 +718,9 @@ class TestTextEncoderQuantization(unittest.TestCase):
         with mock.patch.object(method, "_process_weight_storage_after_loading"):
             method.process_weights_after_loading(layer)
 
-        torch.testing.assert_close(layer.comfy_weight_scale, torch.tensor(4.0))
+        torch.testing.assert_close(layer.dynamic_weight_scale, torch.tensor(4.0))
         torch.testing.assert_close(
-            layer.comfy_output_scale,
+            layer.dynamic_output_scale,
             torch.tensor([0.25, 0.25, 1.0, 0.5, 0.5, 0.5], dtype=torch.bfloat16),
         )
 
