@@ -308,6 +308,15 @@ def _diffusers_h3_checkpoint(
     pending: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
 
     for source_name, tensor in iterator:
+        # A weights-only override can use the native H3 namespace even when the
+        # base component config names the Diffusers class.  Native per-layer
+        # quantization scales are already named for their runtime method; the
+        # broad Diffusers FP8 alias below would otherwise turn weight_scale into
+        # weight_scale_inv and leave every serialized INT8/FP4 scale unloaded.
+        if source_name.startswith(("blocks.", "token_refiner.blocks.")):
+            yield source_name, tensor
+            continue
+
         target_name, merge_index, merge_count = mapping(source_name)
 
         # Diffusers SwiGLU stores [value, gate]; the native fused MLP consumes
