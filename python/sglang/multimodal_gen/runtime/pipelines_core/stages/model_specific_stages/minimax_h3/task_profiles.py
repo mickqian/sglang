@@ -62,6 +62,7 @@ MINIMAX_H3_FINITE_ASPECT_RATIOS = (
     "4:3",
     "1:1",
     "3:4",
+    "2:3",
     "9:16",
 )
 

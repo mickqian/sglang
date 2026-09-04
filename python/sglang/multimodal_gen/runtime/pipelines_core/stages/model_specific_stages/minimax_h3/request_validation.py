@@ -40,7 +40,15 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 MINIMAX_H3_REQUEST_SCHEMA = "minimax_h3.request/v1"
 MINIMAX_H3_MAX_SIGNED_SEED = (1 << 63) - 1
 _ALLOWED_CONDITION_KEYS = frozenset(
-    {"type", "uri", "role", "frame_index", "start_time_seconds"}
+    {
+        "type",
+        "uri",
+        "role",
+        "frame_index",
+        "start_time_seconds",
+        "short_edge",
+        "include_audio",
+    }
 )
 
 
@@ -54,6 +62,15 @@ def _require_int(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{path} must be an integer")
     return value
+
+
+def _optional_positive_int(value: Any, path: str) -> int | None:
+    if value is None:
+        return None
+    normalized = _require_int(value, path)
+    if normalized <= 0:
+        raise ValueError(f"{path} must be positive, got {normalized}")
+    return normalized
 
 
 def _optional_positive_finite_float(value: Any, path: str) -> float | None:
@@ -245,6 +262,31 @@ def _validate_conditions(
                     "or video_audio references"
                 )
             entry["start_time_seconds"] = start_time_seconds
+        short_edge = _optional_positive_int(
+            cond.get("short_edge"), f"{cpath}.short_edge"
+        )
+        if short_edge is not None:
+            if role != MINIMAX_H3_CONDITION_ROLE_REFERENCE or cond_type not in {
+                "image",
+                "video",
+                "video_audio",
+            }:
+                raise ValueError(
+                    f"{cpath}.short_edge is only allowed for image or video references"
+                )
+            entry["short_edge"] = short_edge
+        include_audio = cond.get("include_audio")
+        if include_audio is not None:
+            if not isinstance(include_audio, bool):
+                raise ValueError(f"{cpath}.include_audio must be a boolean")
+            if role != MINIMAX_H3_CONDITION_ROLE_REFERENCE or cond_type not in {
+                "video",
+                "video_audio",
+            }:
+                raise ValueError(
+                    f"{cpath}.include_audio is only allowed for video references"
+                )
+            entry["include_audio"] = include_audio
         normalized.append(entry)
     return normalized
 

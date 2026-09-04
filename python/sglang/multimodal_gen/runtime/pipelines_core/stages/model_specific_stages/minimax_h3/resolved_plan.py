@@ -59,6 +59,12 @@ class MiniMaxH3MaterialPlanItem(msgspec.Struct, frozen=True):
     resolved_frame_index: int | None = None
     # Per-reference seek applied identically to the visual and audio streams.
     start_time_seconds: float = 0.0
+    # Optional reference-local canvas override. The released H3 defaults remain
+    # unchanged when this is absent.
+    short_edge: int | None = None
+    # Video references normally contribute their soundtrack; editing variants
+    # can explicitly retain only their visual stream.
+    include_audio: bool = True
 
 
 class MiniMaxH3ResolvedPlan(msgspec.Struct, frozen=True):
@@ -367,11 +373,13 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
                 frame_index=frame_index,
                 resolved_frame_index=resolved_frame_index,
                 start_time_seconds=float(cond.get("start_time_seconds", 0.0)),
+                short_edge=cond.get("short_edge"),
+                include_audio=bool(cond.get("include_audio", True)),
             )
         )
         if rule.visual_tokenizer_encode:
             visual_encode.append(index)
-        if rule.audio_tokenizer_encode:
+        if rule.audio_tokenizer_encode and bool(cond.get("include_audio", True)):
             audio_encode.append(index)
 
     qwen_condition_indices = [

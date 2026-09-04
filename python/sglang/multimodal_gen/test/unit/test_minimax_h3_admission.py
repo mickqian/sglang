@@ -92,6 +92,8 @@ TARGET = {
                     "uri": "file:///video.mp4",
                     "role": "reference",
                     "start_time_seconds": 12.5,
+                    "short_edge": 512,
+                    "include_audio": False,
                 },
                 {
                     "type": "audio",
@@ -106,7 +108,7 @@ TARGET = {
             ],
             "ref2va",
             [0, 1, 3],
-            [1, 2, 3],
+            [2, 3],
             [
                 "image.reference_preserve",
                 "video.reference_preserve",
@@ -162,6 +164,10 @@ def test_public_tasks_resolve_to_exact_partition_and_encoder_plan(
     for index, condition in enumerate(conditions):
         if condition.get("start_time_seconds") is not None:
             assert plan.materials[index].start_time_seconds == 12.5
+        if condition.get("short_edge") is not None:
+            assert plan.materials[index].short_edge == 512
+        if condition.get("include_audio") is not None:
+            assert plan.materials[index].include_audio is False
     assert plan.shape["frame_count"] == 124
     assert plan.shape["video_latent_t"] == 37
 

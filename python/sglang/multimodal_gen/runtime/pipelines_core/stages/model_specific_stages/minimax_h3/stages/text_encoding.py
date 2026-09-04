@@ -492,7 +492,9 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                 # probed source actually has a soundtrack. ``video_audio`` is
                 # an explicit caller promise and remains fail-closed in the
                 # audio stage if its stream is missing.
-                if material.material_chain == "video_audio.reference_preserve":
+                if not material.include_audio:
+                    contributes_audio = False
+                elif material.material_chain == "video_audio.reference_preserve":
                     contributes_audio = True
                 else:
                     condition_index = int(material.condition_index)

@@ -124,6 +124,7 @@ def _resolve_deferred_temporal_shape(
         material
         for material in plan.materials
         if material.condition_type in {"audio", "video", "video_audio"}
+        and material.include_audio
         and bool(probe_facts[int(material.condition_index)].get("has_audio"))
     ]
     if len(sources) != 1:
@@ -188,7 +189,7 @@ def _validate_reference_start_times(
                 f"than the video duration {video_duration_seconds:g}, got "
                 f"{start_time_seconds:g}"
             )
-        if bool(facts.get("has_audio")):
+        if material.include_audio and bool(facts.get("has_audio")):
             try:
                 audio_duration_seconds = float(facts["audio_duration_seconds"])
             except (KeyError, TypeError, ValueError) as exc:
@@ -287,7 +288,11 @@ def minimax_h3_prepare_for_queue(batch: Any) -> MiniMaxH3ResolvedPlan:
                 resolved = minimax_h3_resolve_spatial_shape(
                     width=width,
                     height=height,
-                    base_short_edge=MINIMAX_H3_BASE_SHORT_EDGE,
+                    base_short_edge=(
+                        int(material.short_edge)
+                        if material.short_edge is not None
+                        else MINIMAX_H3_BASE_SHORT_EDGE
+                    ),
                 )
             elif material.material_chain == "image.reference_preserve":
                 width, height = _display_shape(
@@ -301,6 +306,7 @@ def minimax_h3_prepare_for_queue(batch: Any) -> MiniMaxH3ResolvedPlan:
                 resolved = minimax_h3_resolve_reference_image_shape(
                     width=width,
                     height=height,
+                    base_short_edge=material.short_edge,
                 )
             else:
                 continue

@@ -3,9 +3,10 @@
 
 Encoding recipes for user-provided reference materials:
 
-- image reference: independent 2048px short-edge resize with upscale enabled,
-  LANCZOS, and nearest-32 dimensions, then the SAME keyframe tokenizer recipe
-  as fl2va (seed-42 sampled encode, normalize, [1,2,2] patchify);
+- image reference: independent short-edge resize (2048px by default) with
+  upscale enabled, LANCZOS, and nearest-32 dimensions, then the SAME keyframe
+  tokenizer recipe as fl2va (seed-42 sampled encode, normalize, [1,2,2]
+  patchify);
 - audio reference: the audio material chain (pure
   audio is losslessly normalized
   to stereo; video soundtracks are extracted as 44.1 kHz stereo), then a
@@ -126,13 +127,14 @@ def minimax_h3_resolve_reference_image_shape(
     *,
     width: int | float,
     height: int | float,
+    base_short_edge: int | None = None,
 ) -> dict[str, Any]:
     """Resolve a ref2va image independently from the target canvas.
 
-    The image keeps its display ratio, always targets a 2048px short edge (even
-    when that requires upscaling), and rounds both dimensions independently to
-    the nearest 32px grid. Unlike target/video ``adapt_shape_v1``, reference
-    images have no area-cap branch.
+    The image keeps its display ratio, targets a 2048px short edge by default
+    (even when that requires upscaling), and rounds both dimensions
+    independently to the nearest 32px grid. Unlike target/video
+    ``adapt_shape_v1``, reference images have no area-cap branch.
     """
 
     try:
@@ -157,7 +159,14 @@ def minimax_h3_resolve_reference_image_shape(
             f"1:4 to 4:1, got {source_width:g}x{source_height:g}"
         )
 
-    scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(source_width, source_height)
+    resolved_short_edge = (
+        MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE
+        if base_short_edge is None
+        else int(base_short_edge)
+    )
+    if resolved_short_edge <= 0:
+        raise ValueError("reference image short edge must be positive")
+    scale = resolved_short_edge / min(source_width, source_height)
     target_width = _nearest_multiple(
         source_width * scale, MINIMAX_H3_REFERENCE_IMAGE_MULTIPLE
     )
@@ -167,7 +176,7 @@ def minimax_h3_resolve_reference_image_shape(
     return {
         "geometry": "reference_image_resolved",
         "shape_policy_version": "reference_image_short_edge_v1",
-        "base_short_edge": MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE,
+        "base_short_edge": resolved_short_edge,
         "effective_short_edge": min(target_width, target_height),
         "size_mode": "short_edge",
         "multiple": MINIMAX_H3_REFERENCE_IMAGE_MULTIPLE,
@@ -808,7 +817,7 @@ def minimax_h3_prepared_reference_videos(
                 "reference-video preparation requires cached pre-queue probe "
                 f"and shape facts for conditions[{condition_index}]"
             )
-        input_has_audio = bool(source_facts.get("has_audio"))
+        input_has_audio = material.include_audio and bool(source_facts.get("has_audio"))
         target_frames = _reference_video_target_frame_count(plan=plan)
         frames = minimax_h3_decode_reference_video_frames(
             video_path,

@@ -19,6 +19,17 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 )
 
 
+def test_reference_image_short_edge_can_match_variant_canvas():
+    shape = reference_encoding.minimax_h3_resolve_reference_image_shape(
+        width=512,
+        height=768,
+        base_short_edge=512,
+    )
+
+    assert shape["base_short_edge"] == 512
+    assert (shape["width"], shape["height"]) == (512, 768)
+
+
 def test_keyframe_rng_supports_cpu_and_default_device():
     initial_state = torch.random.get_rng_state()
 
