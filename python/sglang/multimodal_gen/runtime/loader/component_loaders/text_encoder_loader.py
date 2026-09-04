@@ -682,9 +682,14 @@ class TextEncoderLoader(OnlineQuantizationComponentLoader):
             server_args.component_quantization_ignored_layers.get(component_name),
         )
         if issubclass(model_cls, EncoderTensorParallelMixin):
+            # Explicit files passed through --component-paths are normalized into
+            # component_weights_paths by ServerArgs. Model-owned auxiliary
+            # components need the complete source map, regardless of spelling.
+            component_sources = dict(server_args.component_weights_paths)
+            component_sources.update(server_args.component_paths)
             model_cls.configure_component_paths(
                 encoder_config,
-                server_args.component_paths,
+                component_sources,
             )
         encoder_dp_group = get_encoder_data_parallel_group()
         prefer_dp = (
