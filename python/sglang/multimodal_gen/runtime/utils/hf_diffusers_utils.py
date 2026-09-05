@@ -90,8 +90,9 @@ def component_weight_ignore_patterns(
     pipeline_subfolder: str, component_names: Iterable[str]
 ) -> list[str]:
     """Keep base component configs while skipping weights replaced by an override."""
+    prefix = f"{pipeline_subfolder}/" if pipeline_subfolder else ""
     return [
-        f"{pipeline_subfolder}/{component}/{recursive}{pattern}"
+        f"{prefix}{component}/{recursive}{pattern}"
         for component in sorted(set(component_names))
         for recursive in ("", "**/")
         for pattern in _WEIGHT_FILE_PATTERNS

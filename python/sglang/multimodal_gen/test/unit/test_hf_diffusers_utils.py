@@ -443,20 +443,21 @@ def test_cached_probe_preserves_additional_ignore_patterns(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize(
-    "component_paths,component_weights_paths",
+    "model_subfolder,component_paths,component_weights_paths",
     [
-        ({"transformer": "org/variant/transformer"}, {}),
-        ({}, {"transformer": "org/variant/model.safetensors"}),
+        ("Ref2VA", {"transformer": "org/variant/transformer"}, {}),
+        ("Ref2VA", {}, {"transformer": "org/variant/model.safetensors"}),
+        (None, {"transformer": "org/variant/transformer"}, {}),
     ],
 )
-def test_partition_download_skips_overridden_component_weights(
-    tmp_path, component_paths, component_weights_paths
+def test_download_skips_overridden_component_weights(
+    tmp_path, model_subfolder, component_paths, component_weights_paths
 ):
     pipeline = SimpleNamespace(
         model_path="org/repo",
         default_model_subfolder=None,
         server_args=SimpleNamespace(
-            model_subfolder="Ref2VA",
+            model_subfolder=model_subfolder,
             revision=None,
             component_paths=component_paths,
             component_weights_paths=component_weights_paths,
@@ -478,10 +479,11 @@ def test_partition_download_skips_overridden_component_weights(
         ComposedPipelineBase._load_config(pipeline)
 
     ignore_patterns = download.call_args.kwargs["ignore_patterns"]
-    assert "Ref2VA/transformer/*.safetensors" in ignore_patterns
-    assert "Ref2VA/transformer/**/*.safetensors" in ignore_patterns
-    assert "Ref2VA/transformer/*.gguf" in ignore_patterns
-    assert "Ref2VA/transformer/**/*.gguf" in ignore_patterns
+    prefix = "Ref2VA/" if model_subfolder else ""
+    assert f"{prefix}transformer/*.safetensors" in ignore_patterns
+    assert f"{prefix}transformer/**/*.safetensors" in ignore_patterns
+    assert f"{prefix}transformer/*.gguf" in ignore_patterns
+    assert f"{prefix}transformer/**/*.gguf" in ignore_patterns
 
 
 def test_complete_cached_snapshot_is_served_without_download(

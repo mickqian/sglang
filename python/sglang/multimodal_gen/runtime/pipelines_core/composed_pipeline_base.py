@@ -188,6 +188,11 @@ class ComposedPipelineBase(ABC):
             model_path = maybe_download_model(
                 self.model_path,
                 force_diffusers_model=True,
+                ignore_patterns=component_weight_ignore_patterns(
+                    "",
+                    self.server_args.component_paths.keys()
+                    | self.server_args.component_weights_paths.keys(),
+                ),
                 revision=self.server_args.revision,
             )
         else:
