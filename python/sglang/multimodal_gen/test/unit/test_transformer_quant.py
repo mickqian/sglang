@@ -47,6 +47,7 @@ sys.modules.setdefault("partial_json_parser.core.options", partial_json_parser_o
 
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MiniMaxH3DiTArchConfig,
+    MiniMaxH3DiTConfig,
 )
 from sglang.multimodal_gen.runtime.layers.linear import (
     LinearBase,
@@ -90,6 +91,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.modelopt_quant import (
     _prepare_nvfp4_weight_bytes,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.mxfp8 import MXFP8Config
+from sglang.multimodal_gen.runtime.layers.quantization.nunchaku_linear import (
+    NunchakuSVDQLinearMethod,
+)
 from sglang.multimodal_gen.runtime.loader.component_loaders import transformer_loader
 from sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader import (
     TransformerLoader,
@@ -174,6 +178,144 @@ def _make_quant_config(name: str, **attrs):
 
 
 class TestTransformerQuantHelpers(unittest.TestCase):
+    def test_nunchaku_lite_remaps_h3_targets_without_fusing_qkv(self):
+        source_config = {
+            "quant_method": "nunchaku_lite",
+            "compute_dtype": "bfloat16",
+            "svdq_w4a4": {
+                "precision": "nvfp4",
+                "group_size": 16,
+                "rank": 32,
+                "targets": [
+                    "transformer_blocks.0.attn.to_q",
+                    "transformer_blocks.0.attn.to_k",
+                    "transformer_blocks.0.attn.to_v",
+                    "token_refiner.refiner_blocks.0.ff.net.2",
+                ],
+            },
+            "awq_w4a16": None,
+        }
+        h3_config = MiniMaxH3DiTConfig()
+        h3_config.update_model_arch({"quantization_config": source_config})
+        quant_config = NunchakuConfig.from_config(source_config)
+
+        quant_config.remap_checkpoint_prefixes(
+            h3_config.arch_config.param_names_mapping
+        )
+
+        self.assertTrue(h3_config.arch_config.uses_separate_quantized_qkv)
+        self.assertEqual(
+            set(quant_config.compact_targets),
+            {
+                "blocks.0.attn.q_proj",
+                "blocks.0.attn.k_proj",
+                "blocks.0.attn.v_proj",
+                "token_refiner.blocks.0.mlp.fc2",
+            },
+        )
+
+    def test_nunchaku_lite_rejects_target_fusion(self):
+        quant_config = NunchakuConfig.from_config(
+            {
+                "quant_method": "nunchaku_lite",
+                "svdq_w4a4": {
+                    "precision": "nvfp4",
+                    "group_size": 16,
+                    "rank": 32,
+                    "targets": [
+                        "transformer_blocks.0.attn.to_q",
+                        "transformer_blocks.0.attn.to_k",
+                    ],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot be fused"):
+            quant_config.remap_checkpoint_prefixes(
+                MiniMaxH3DiTArchConfig().param_names_mapping
+            )
+
+    def test_nunchaku_lite_uses_compact_parameter_layout(self):
+        method = NunchakuSVDQLinearMethod(
+            precision="nvfp4",
+            rank=4,
+            compact_checkpoint=True,
+        )
+        layer = torch.nn.Module()
+
+        method.create_weights(
+            layer,
+            input_size_per_partition=32,
+            output_partition_sizes=[64],
+            input_size=32,
+            output_size=64,
+            params_dtype=torch.bfloat16,
+        )
+
+        self.assertIsNone(layer.smooth_factor_orig)
+        self.assertEqual(tuple(layer.qweight.shape), (64, 16))
+        self.assertEqual(tuple(layer.wscales.shape), (2, 64))
+        self.assertEqual(tuple(layer.proj_down.shape), (32, 4))
+        self.assertEqual(tuple(layer.proj_up.shape), (64, 4))
+        self.assertEqual(tuple(layer.wcscales.shape), (64,))
+        self.assertEqual(tuple(layer.wtscale.shape), (1,))
+
+    def test_nunchaku_lite_h3_preprocessor_preserves_split_qkv_factors(self):
+        source_config = {
+            "quant_method": "nunchaku_lite",
+            "svdq_w4a4": {
+                "precision": "nvfp4",
+                "group_size": 16,
+                "rank": 32,
+                "targets": ["transformer_blocks.0.attn.to_q"],
+            },
+        }
+        h3_config = MiniMaxH3DiTConfig()
+        h3_config.update_model_arch({"quantization_config": source_config})
+        fc1_prefix = "transformer_blocks.0.ff.net.0.proj"
+        weights = [
+            (
+                "transformer_blocks.0.attn.to_q.qweight",
+                torch.arange(8, dtype=torch.int8).reshape(2, 4),
+            ),
+            (f"{fc1_prefix}.qweight", torch.arange(16).reshape(8, 2).to(torch.int8)),
+            (f"{fc1_prefix}.wscales", torch.arange(8).reshape(1, 8)),
+            (f"{fc1_prefix}.smooth_factor", torch.arange(2)),
+            (f"{fc1_prefix}.proj_down", torch.arange(4).reshape(2, 2)),
+            (f"{fc1_prefix}.proj_up", torch.arange(16).reshape(8, 2)),
+            (f"{fc1_prefix}.wtscale", torch.ones(1)),
+        ]
+
+        converted = dict(
+            _diffusers_h3_checkpoint(
+                weights,
+                param_names_mapping=h3_config.arch_config.param_names_mapping,
+            )
+        )
+
+        self.assertIn("blocks.0.attn.q_proj.qweight", converted)
+        self.assertNotIn("blocks.0.attn.qkv_proj.qweight", converted)
+        torch.testing.assert_close(
+            converted["blocks.0.mlp.fc1.qweight"],
+            torch.cat((weights[1][1][4:], weights[1][1][:4])),
+        )
+        torch.testing.assert_close(
+            converted["blocks.0.mlp.fc1.wscales"],
+            torch.cat((weights[2][1][:, 4:], weights[2][1][:, :4]), dim=1),
+        )
+        for suffix, index in (
+            ("smooth_factor", 3),
+            ("proj_down", 4),
+            ("wtscale", 6),
+        ):
+            torch.testing.assert_close(
+                converted[f"blocks.0.mlp.fc1.{suffix}"], weights[index][1]
+            )
+        torch.testing.assert_close(
+            converted["blocks.0.mlp.fc1.proj_up"],
+            torch.cat((weights[5][1][4:], weights[5][1][:4])),
+        )
+
     def test_modelopt_fp8_packed_cutlass_preserves_checkpoint_shard_scales(self):
         method = ModelOptFp8LinearMethod(
             ModelOptFp8Config(is_checkpoint_fp8_serialized=True)

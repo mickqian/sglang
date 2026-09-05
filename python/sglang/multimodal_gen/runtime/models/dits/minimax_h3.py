@@ -317,9 +317,14 @@ def _pdd_retime_sigmas(
 def _diffusers_h3_checkpoint(
     iterator: Iterable[tuple[str, torch.Tensor]],
     valid_target_names: set[str] | None = None,
+    param_names_mapping: dict | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Map Diffusers H3 names/layout to the fused native checkpoint layout."""
-    mapping = get_param_names_mapping(_ARCH_DEFAULTS.param_names_mapping)
+    """Map Diffusers H3 names and tensors to the selected native layout."""
+    mapping = get_param_names_mapping(
+        _ARCH_DEFAULTS.param_names_mapping
+        if param_names_mapping is None
+        else param_names_mapping
+    )
     pending: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
 
     for source_name, tensor in iterator:
@@ -343,10 +348,20 @@ def _diffusers_h3_checkpoint(
             merge_count = 3
 
         # Diffusers SwiGLU stores [value, gate]; the native fused MLP consumes
-        # [gate, value]. Packed GPTQ tensors carry output channels on dim 1.
-        if ".ff.net.0.proj." in source_name:
+        # [gate, value]. Quantized tensors may store output channels on dim 1,
+        # while input-side smoothing and low-rank factors must not be swapped.
+        if ".ff.net.0.proj." in source_name and not source_name.endswith(
+            (".smooth_factor", ".proj_down", ".wtscale")
+        ):
+            packed_qweight_output_dim = (
+                0 if tensor.dtype in (torch.int8, torch.uint8) else 1
+            )
             output_dim = (
-                1 if source_name.endswith((".qweight", ".qzeros", ".scales")) else 0
+                packed_qweight_output_dim
+                if source_name.endswith(".qweight")
+                else (
+                    1 if source_name.endswith((".wscales", ".qzeros", ".scales")) else 0
+                )
             )
             value, gate = tensor.chunk(2, dim=output_dim)
             tensor = torch.cat((gate, value), dim=output_dim)
@@ -1033,30 +1048,61 @@ class MiniMaxH3Attention(nn.Module):
         # Cube metadata describes only the packed multimodal sequence. The
         # text-only token refiner must preserve the exact dense FA baseline.
         self._cube_sparse_capable = cube_sparse_capable
-        # The checkpoint stores one fused qkv tensor. Each logical Q/K/V
-        # matrix must be sharded independently; a plain ColumnParallelLinear
-        # would instead slice across the concatenated tensor and is incorrect
-        # for TP > 1.
-        self.qkv_proj = MergedColumnParallelLinear(
-            arch.hidden_size,
-            [self.inner_dim] * 3,
-            bias=False,
-            gather_output=False,
-            params_dtype=_BF16_DTYPE,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        # Official safetensors interleave Q/K/V by head. Comfy and GGUF
-        # checkpoints already store [q_all, k_all, v_all].
-        checkpoint_qkv_is_native = quant_config is not None and (
-            quant_config.get_name() == "gguf"
-            or quant_config.checkpoint_uses_native_qkv_layout
-        )
-        checkpoint_qkv_is_native = (
-            checkpoint_qkv_is_native or arch.checkpoint_uses_diffusers_layout
-        )
-        if not checkpoint_qkv_is_native:
-            self._install_qkv_weight_loader(arch)
+        self.qkv_proj: MergedColumnParallelLinear | None = None
+        self.q_proj: ColumnParallelLinear | None = None
+        self.k_proj: ColumnParallelLinear | None = None
+        self.v_proj: ColumnParallelLinear | None = None
+        if arch.uses_separate_quantized_qkv:
+            self.q_proj = ColumnParallelLinear(
+                arch.hidden_size,
+                self.inner_dim,
+                bias=False,
+                gather_output=False,
+                params_dtype=_BF16_DTYPE,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+            self.k_proj = ColumnParallelLinear(
+                arch.hidden_size,
+                self.inner_dim,
+                bias=False,
+                gather_output=False,
+                params_dtype=_BF16_DTYPE,
+                quant_config=quant_config,
+                prefix=f"{prefix}.k_proj",
+            )
+            self.v_proj = ColumnParallelLinear(
+                arch.hidden_size,
+                self.inner_dim,
+                bias=False,
+                gather_output=False,
+                params_dtype=_BF16_DTYPE,
+                quant_config=quant_config,
+                prefix=f"{prefix}.v_proj",
+            )
+        else:
+            # Native checkpoints store one fused qkv tensor. Each logical Q/K/V
+            # matrix is still sharded independently by MergedColumnParallelLinear.
+            self.qkv_proj = MergedColumnParallelLinear(
+                arch.hidden_size,
+                [self.inner_dim] * 3,
+                bias=False,
+                gather_output=False,
+                params_dtype=_BF16_DTYPE,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            # Official safetensors interleave Q/K/V by head. Comfy and GGUF
+            # checkpoints already store [q_all, k_all, v_all].
+            checkpoint_qkv_is_native = quant_config is not None and (
+                quant_config.get_name() == "gguf"
+                or quant_config.checkpoint_uses_native_qkv_layout
+            )
+            checkpoint_qkv_is_native = (
+                checkpoint_qkv_is_native or arch.checkpoint_uses_diffusers_layout
+            )
+            if not checkpoint_qkv_is_native:
+                self._install_qkv_weight_loader(arch)
         self.q_norm = _norm(arch.attention_head_dim, eps=arch.qk_norm_eps)
         self.k_norm = _norm(arch.attention_head_dim, eps=arch.qk_norm_eps)
         # cache width covers cos/sin for temporal, height, and width frequencies
@@ -1128,6 +1174,7 @@ class MiniMaxH3Attention(nn.Module):
         self._attention_backend_enum = backend.get_enum()
 
     def _install_qkv_weight_loader(self, arch: MiniMaxH3DiTArchConfig) -> None:
+        assert self.qkv_proj is not None
         weight = self.qkv_proj.weight
         # h3 checkpoints interleave each attention head's Q, K, and V rows
         # this parameter needs reordering before the native QKV projection
@@ -1194,6 +1241,21 @@ class MiniMaxH3Attention(nn.Module):
                 qkv_rows // rows_per_scale_row,
             )
 
+    def _project_qkv(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.qkv_proj is not None:
+            qkv, _ = self.qkv_proj(x)
+            return qkv.split(self.local_inner_dim, dim=-1)
+
+        assert self.q_proj is not None
+        assert self.k_proj is not None
+        assert self.v_proj is not None
+        q, _ = self.q_proj(x)
+        k, _ = self.k_proj(x)
+        v, _ = self.v_proj(x)
+        return q, k, v
+
     def _forward_mps_streamed_attention(
         self,
         x: torch.Tensor,
@@ -1224,15 +1286,14 @@ class MiniMaxH3Attention(nn.Module):
         # before the next transfer keeps only two full-width attention tensors.
         for start in range(0, total, _MPS_QKV_PROJECTION_TOKEN_CHUNK_SIZE):
             stop = min(start + _MPS_QKV_PROJECTION_TOKEN_CHUNK_SIZE, total)
-            qkv, _ = self.qkv_proj(x[start:stop])
-            q_chunk, k_chunk, v_chunk = qkv.split(self.local_inner_dim, dim=-1)
+            q_chunk, k_chunk, v_chunk = self._project_qkv(x[start:stop])
             del q_chunk
             k_chunk = self.k_norm(k_chunk.view(-1, self.num_heads, self.head_dim))
             if cos_sin_cache is not None:
                 k_chunk = _apply_rope(k_chunk, cos_sin_cache[start:stop])
             key[start:stop].copy_(k_chunk)
             value[start:stop].copy_(v_chunk.view(-1, self.num_heads, self.head_dim))
-            del qkv, k_chunk, v_chunk
+            del k_chunk, v_chunk
             torch.mps.synchronize()
             torch.mps.empty_cache()
 
@@ -1261,8 +1322,7 @@ class MiniMaxH3Attention(nn.Module):
                 _MPS_QKV_PROJECTION_TOKEN_CHUNK_SIZE,
             ):
                 stop = min(start + _MPS_QKV_PROJECTION_TOKEN_CHUNK_SIZE, sequence_stop)
-                qkv, _ = self.qkv_proj(x[start:stop])
-                q_chunk, k_chunk, v_chunk = qkv.split(self.local_inner_dim, dim=-1)
+                q_chunk, k_chunk, v_chunk = self._project_qkv(x[start:stop])
                 del k_chunk, v_chunk
                 for query_start in range(
                     start, stop, _MPS_ATTENTION_QUERY_TOKEN_CHUNK_SIZE
@@ -1287,7 +1347,7 @@ class MiniMaxH3Attention(nn.Module):
                     )
                     out[query_start:query_stop].copy_(projected)
                     del q, attention_out, projected
-                del qkv, q_chunk
+                del q_chunk
                 torch.mps.synchronize()
                 torch.mps.empty_cache()
 
@@ -1329,8 +1389,7 @@ class MiniMaxH3Attention(nn.Module):
             )
 
         total = x.shape[0]
-        qkv, _ = self.qkv_proj(x)
-        q, k, v = qkv.split(self.local_inner_dim, dim=-1)
+        q, k, v = self._project_qkv(x)
         q = q.view(total, self.num_heads, self.head_dim)
         k = k.view(total, self.num_heads, self.head_dim)
         v = v.view(total, self.num_heads, self.head_dim)
@@ -2737,6 +2796,7 @@ class MiniMaxH3DiTModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         return _diffusers_h3_checkpoint(
             iterator,
             valid_target_names=valid_target_names,
+            param_names_mapping=self.arch.param_names_mapping,
         )
 
     def set_cache_dit_input_preservation(self, enabled: bool) -> None:

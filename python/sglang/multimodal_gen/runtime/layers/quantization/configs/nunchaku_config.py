@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import os
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
 from safetensors.torch import load_file as safetensors_load_file
 from torch import nn
 
-from sglang.multimodal_gen.runtime.layers.linear import LinearBase
+from sglang.multimodal_gen.runtime.layers.linear import (
+    LinearBase,
+    UnquantizedLinearMethod,
+)
+from sglang.multimodal_gen.runtime.layers.quantization.nunchaku_linear import (
+    NunchakuAWQLinearMethod,
+    NunchakuSVDQLinearMethod,
+    is_legacy_nunchaku_available,
+)
+from sglang.multimodal_gen.runtime.loader.utils import get_param_names_mapping
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 from .base_config import QuantizationConfig, QuantizeMethodBase
@@ -17,15 +25,8 @@ from .base_config import QuantizationConfig, QuantizeMethodBase
 logger = init_logger(__name__)
 
 
-@lru_cache(maxsize=1)
 def is_nunchaku_available() -> bool:
-    try:
-        import nunchaku  # noqa
-
-        logger.debug("Nunchaku package detected")
-        return True
-    except Exception:
-        return False
+    return is_legacy_nunchaku_available()
 
 
 @dataclass
@@ -50,6 +51,9 @@ class NunchakuConfig(QuantizationConfig):
     act_unsigned: bool = False
     transformer_weights_path: Optional[str] = None
     model_cls: Optional[type] = None
+    compact_targets: dict[str, str] = field(default_factory=dict)
+    compact_checkpoint: bool = False
+    awq_group_size: int = 64
 
     @classmethod
     def get_name(cls) -> str:
@@ -69,13 +73,49 @@ class NunchakuConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "NunchakuConfig":
+        svdq = config.get("svdq_w4a4")
+        awq = config.get("awq_w4a16")
+        if svdq is None and awq is None:
+            return cls(
+                precision=config.get("precision", "int4"),
+                rank=int(config.get("rank", 32)),
+                group_size=config.get("group_size"),
+                act_unsigned=bool(config.get("act_unsigned", False)),
+                transformer_weights_path=config.get("transformer_weights_path"),
+            )
 
+        compact_targets: dict[str, str] = {}
+        for method, method_config in (
+            ("svdq_w4a4", svdq),
+            ("awq_w4a16", awq),
+        ):
+            if method_config is None:
+                continue
+            targets = method_config.get("targets")
+            if (
+                not isinstance(targets, list)
+                or not targets
+                or not all(isinstance(target, str) and target for target in targets)
+            ):
+                raise ValueError(
+                    f"Nunchaku Lite {method}.targets must be a non-empty string list"
+                )
+            for target in targets:
+                if target in compact_targets:
+                    raise ValueError(f"Duplicate Nunchaku Lite target {target!r}")
+                compact_targets[target] = method
+
+        svdq_config = svdq or {}
+        awq_config = awq or {}
         return cls(
-            precision=config.get("precision", "int4"),
-            rank=int(config.get("rank", 32)),
-            group_size=config.get("group_size"),
+            precision=svdq_config.get("precision", "int4"),
+            rank=int(svdq_config.get("rank", 32)),
+            group_size=svdq_config.get("group_size"),
             act_unsigned=bool(config.get("act_unsigned", False)),
             transformer_weights_path=config.get("transformer_weights_path"),
+            compact_targets=compact_targets,
+            compact_checkpoint=True,
+            awq_group_size=int(awq_config.get("group_size", 64)),
         )
 
     def get_quant_method(
@@ -83,6 +123,22 @@ class NunchakuConfig(QuantizationConfig):
     ) -> Optional[QuantizeMethodBase]:
         if not isinstance(layer, LinearBase):
             return None
+
+        if self.compact_checkpoint:
+            method = self.compact_targets.get(prefix)
+            if method == "svdq_w4a4":
+                return NunchakuSVDQLinearMethod(
+                    precision=self.precision,
+                    rank=self.rank,
+                    act_unsigned=self.act_unsigned,
+                    compact_checkpoint=True,
+                )
+            if method == "awq_w4a16":
+                return NunchakuAWQLinearMethod(
+                    group_size=self.awq_group_size,
+                    compact_checkpoint=True,
+                )
+            return UnquantizedLinearMethod()
 
         # get quantization rules from model class
         quant_rules = self._get_quant_rules()
@@ -96,15 +152,11 @@ class NunchakuConfig(QuantizationConfig):
         awq_patterns = quant_rules.get("awq_w4a16", [])
         for pattern in awq_patterns:
             if pattern in prefix:
-                from ..nunchaku_linear import NunchakuAWQLinearMethod
-
                 return NunchakuAWQLinearMethod(group_size=64)
 
         svdq_patterns = quant_rules.get("svdq_w4a4", [])
         for pattern in svdq_patterns:
             if pattern in prefix:
-                from ..nunchaku_linear import NunchakuSVDQLinearMethod
-
                 return NunchakuSVDQLinearMethod(
                     precision=self.precision,
                     rank=self.rank,
@@ -112,20 +164,39 @@ class NunchakuConfig(QuantizationConfig):
                 )
 
         # default: apply svdq_w4a4 to all remaining linear layers
-        from ..nunchaku_linear import NunchakuSVDQLinearMethod
-
         return NunchakuSVDQLinearMethod(
             precision=self.precision,
             rank=self.rank,
             act_unsigned=self.act_unsigned,
         )
 
+    def remap_checkpoint_prefixes(self, param_names_mapping: dict) -> None:
+        if not self.compact_checkpoint:
+            return
+        mapping = get_param_names_mapping(param_names_mapping)
+        remapped: dict[str, str] = {}
+        sources: dict[str, str] = {}
+        for source, method in self.compact_targets.items():
+            target, merge_index, _ = mapping(f"{source}.weight")
+            target = target.removesuffix(".weight")
+            if merge_index is not None or target in remapped:
+                previous = sources.get(target)
+                raise ValueError(
+                    "Nunchaku Lite targets cannot be fused because each target "
+                    "owns independent smoothing and low-rank factors: "
+                    f"{previous!r} and {source!r} map to {target!r}"
+                )
+            remapped[target] = method
+            sources[target] = source
+        self.compact_targets = remapped
+
+    def has_packed_weight(self, prefix: str) -> bool:
+        return self.compact_checkpoint and prefix in self.compact_targets
+
     def _get_quant_rules(self) -> dict[str, list[str]]:
-        if self.model_cls is not None and hasattr(
-            self.model_cls, "get_nunchaku_quant_rules"
-        ):
-            return self.model_cls.get_nunchaku_quant_rules()
-        return {}
+        if self.model_cls is None:
+            return {}
+        return self.model_cls.get_nunchaku_quant_rules()
 
     def __post_init__(self):
         if self.group_size is None:
@@ -168,7 +239,10 @@ class NunchakuConfig(QuantizationConfig):
             if os.path.exists(config_path):
                 with open(config_path, "r") as f:
                     config_dict = json.load(f)
-                if config_dict.get("quant_method") == cls.get_name():
+                if config_dict.get("quant_method") in {
+                    cls.get_name(),
+                    "nunchaku_lite",
+                }:
                     return cls.from_config(config_dict)
         return None
 
@@ -252,8 +326,6 @@ def _patch_nunchaku_scales(
 
     num_wtscale = 0
     num_wcscales = 0
-
-    from ..nunchaku_linear import NunchakuSVDQLinearMethod
 
     for name, module in model.named_modules():
         wt = state_dict.get(f"{name}.wtscale")

@@ -32,9 +32,13 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_w4a8_conf
 from sglang.multimodal_gen.runtime.layers.quantization.configs.nunchaku_config import (
     NunchakuConfig,
     _patch_nunchaku_scales,
+    is_nunchaku_available,
 )
 from sglang.multimodal_gen.runtime.layers.quantization.configs.torchao_int8_config import (
     inspect_torchao_int8_checkpoint,
+)
+from sglang.multimodal_gen.runtime.layers.quantization.nunchaku_linear import (
+    initialize_nunchaku_lite_runtime,
 )
 from sglang.multimodal_gen.runtime.loader.gguf_weights import (
     names_gguf_checkpoint,
@@ -759,9 +763,24 @@ def resolve_transformer_quant_load_spec(
         packed = getattr(model_cls, "packed_modules_mapping", None)
         if packed and hasattr(quant_config, "packed_modules_mapping"):
             quant_config.packed_modules_mapping = packed
-        quant_config.remap_checkpoint_prefixes(
-            vars(model_cls).get("param_names_mapping", {})
+        param_names_mapping = (
+            arch_config.param_names_mapping
+            if arch_config is not None
+            else vars(model_cls).get("param_names_mapping", {})
         )
+        quant_config.remap_checkpoint_prefixes(param_names_mapping)
+        if isinstance(quant_config, NunchakuConfig):
+            if quant_config.compact_checkpoint:
+                initialize_nunchaku_lite_runtime(
+                    trust_remote_code=server_args.trust_remote_code,
+                    precision=quant_config.precision,
+                    needs_awq="awq_w4a16" in quant_config.compact_targets.values(),
+                )
+            elif not is_nunchaku_available():
+                raise ValueError(
+                    "This checkpoint requires the optional Nunchaku runtime; "
+                    "install a compatible wheel from the official Nunchaku releases"
+                )
 
     nunchaku_config = server_args.nunchaku_config
     if quant_config is not None and nunchaku_config is not None:

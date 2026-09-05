@@ -106,6 +106,7 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     final_norm_eps: float = 1e-5
     checkpoint_uses_diffusers_layout: bool = False
     checkpoint_uses_separate_qkv_layout: bool = False
+    uses_separate_quantized_qkv: bool = False
     adaln_affine_input_dim: int | None = None
     has_gate_compress: bool = False
 
@@ -140,6 +141,24 @@ class MiniMaxH3DiTConfig(DiTConfig):
             model_dict["time_embed_dim"] = source_model_dict["adaln_rank"]
             model_dict["adaln_curve_grid"] = source_model_dict["time_table_size"]
         super().update_model_arch(model_dict)
+
+        quantization_config = source_model_dict.get("quantization_config")
+        if not isinstance(quantization_config, dict):
+            return
+        if quantization_config.get("quant_method") != "nunchaku_lite":
+            return
+
+        self.arch_config.uses_separate_quantized_qkv = True
+        mapping = dict(self.arch_config.param_names_mapping)
+        for source_blocks, target_blocks in (
+            ("transformer_blocks", "blocks"),
+            ("token_refiner\\.refiner_blocks", "token_refiner.blocks"),
+        ):
+            for projection in ("q", "k", "v"):
+                mapping[rf"^{source_blocks}\.(\d+)\.attn\.to_{projection}\.(.*)$"] = (
+                    rf"{target_blocks}.\1.attn.{projection}_proj.\2"
+                )
+        self.arch_config.param_names_mapping = mapping
 
 
 __all__ = [
