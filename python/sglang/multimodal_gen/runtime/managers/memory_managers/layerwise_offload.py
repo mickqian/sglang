@@ -4,6 +4,7 @@ import re
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -106,6 +107,14 @@ HOST_RESIDENT_TABLE_MIN_BYTES = 256 * 1024**2
 PARK_SIGNIFICANCE = 0.1
 
 
+@dataclass
+class _DetachedHostTable:
+    module: torch.nn.Module
+    parameters: list[tuple[torch.nn.Module, str, torch.nn.Parameter, torch.Tensor]]
+    buffers: list[tuple[torch.nn.Module, str, torch.Tensor]]
+    nbytes: int
+
+
 def _resolve_submodule(root: torch.nn.Module, path: str) -> torch.nn.Module | None:
     current: Any = root
     for part in path.split("."):
@@ -149,28 +158,45 @@ def _host_resident_tables(model: torch.nn.Module) -> List[torch.nn.Module]:
 
 def detach_host_resident_tables(
     model: torch.nn.Module,
-) -> List[Tuple[torch.nn.Module, torch.Tensor]]:
-    """Swap large vocab tables for placeholders so a `.to(device)` skips them."""
+) -> list[_DetachedHostTable]:
+    """Swap declared host-table state for placeholders before `.to(device)`."""
     detached = []
     for module in _host_resident_tables(model):
-        weight = module.weight
-        detached.append((module, weight.data))
-        weight.data = torch.empty(0, dtype=weight.dtype, device=weight.device)
+        parameters = []
+        buffers = []
+        nbytes = 0
+        for owner in module.modules():
+            for name, parameter in owner.named_parameters(recurse=False):
+                data = parameter.data
+                parameters.append((owner, name, parameter, data))
+                nbytes += data.numel() * data.element_size()
+                parameter.data = torch.empty(0, dtype=data.dtype, device=data.device)
+            for name, buffer in owner.named_buffers(recurse=False):
+                buffers.append((owner, name, buffer))
+                nbytes += buffer.numel() * buffer.element_size()
+                owner._buffers[name] = torch.empty(
+                    0, dtype=buffer.dtype, device=buffer.device
+                )
+        detached.append(_DetachedHostTable(module, parameters, buffers, nbytes))
     return detached
 
 
 def restore_host_resident_tables(
-    detached: List[Tuple[torch.nn.Module, torch.Tensor]],
+    detached: list[_DetachedHostTable],
     device: torch.device | str,
 ) -> None:
-    for module, data in detached:
-        module.weight.data = data
-        _install_host_gather_hooks(module, device)
+    for table in detached:
+        for owner, name, parameter, data in table.parameters:
+            parameter.data = data
+            owner._parameters[name] = parameter
+        for owner, name, buffer in table.buffers:
+            owner._buffers[name] = buffer
+        _install_host_gather_hooks(table.module, device)
         logger.info(
             "Keeping %s (%.2f GiB) in host memory: a gather reads one row per "
             "token, so residency buys almost nothing.",
-            type(module).__name__,
-            data.numel() * data.element_size() / (1024**3),
+            type(table.module).__name__,
+            table.nbytes / (1024**3),
         )
 
 

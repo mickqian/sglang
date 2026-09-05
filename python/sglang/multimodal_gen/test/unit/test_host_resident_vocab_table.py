@@ -37,6 +37,24 @@ class _Nested(torch.nn.Module):
         self.language_model = _Undeclared()
 
 
+class _ScaledEmbedding(torch.nn.Embedding):
+    def __init__(self):
+        super().__init__(4096, 64)
+        self.weight_scale = torch.nn.Parameter(torch.tensor(0.5))
+        self.register_buffer("offset", torch.tensor(1.0))
+
+    def forward(self, input):
+        return super().forward(input) * self.weight_scale + self.offset
+
+
+class _QuantizedDeclared(torch.nn.Module):
+    host_resident_table_names = ["embed"]
+
+    def __init__(self):
+        super().__init__()
+        self.embed = _ScaledEmbedding()
+
+
 class TestSelection:
     def test_a_declared_table_is_selected(self):
         model = _Declared()
@@ -97,3 +115,16 @@ class TestDetachAndRestore:
             restore_host_resident_tables(detached, "cpu")
         assert detached == []
         assert not model.embed._forward_pre_hooks
+
+    def test_quantization_state_stays_with_the_host_table(self):
+        model = _QuantizedDeclared()
+        ids = torch.tensor([[1, 2, 3]])
+        expected = model.embed(ids)
+        with patch(THRESHOLD_PATH, 1024):
+            detached = detach_host_resident_tables(model)
+            model.to("meta")
+            restore_host_resident_tables(detached, "cpu")
+        assert model.embed.weight.device.type == "cpu"
+        assert model.embed.weight_scale.device.type == "cpu"
+        assert model.embed.offset.device.type == "cpu"
+        assert torch.equal(model.embed(ids), expected)
