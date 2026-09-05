@@ -15,6 +15,9 @@ from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config impor
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.configs.kitchen_int8_config import (
+    KitchenInt8Config,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.kitchen_w4a8 import (
     KitchenInt8EmbeddingMethod,
     KitchenW4A8LinearMethod,
@@ -46,12 +49,21 @@ class KitchenW4A8Config(QuantizationConfig):
         self.layer_markers = layer_markers
         self.checkpoint_uses_native_qkv_layout = True
         self.selected: list[str] = []
+        int8_linear_markers = {
+            prefix: marker
+            for prefix, marker in layer_markers.items()
+            if marker.get("format") == "int8_tensorwise"
+            and not marker.get("_is_tensorwise_scalar")
+        }
+        self._int8_config = (
+            KitchenInt8Config(layer_markers=int8_linear_markers)
+            if int8_linear_markers
+            else None
+        )
 
         for prefix, marker in layer_markers.items():
             marker_format = marker.get("format")
-            if marker_format == "int8_tensorwise" and marker.get(
-                "_is_tensorwise_scalar"
-            ):
+            if marker_format == "int8_tensorwise":
                 continue
             if marker_format != "asym_w4a8_int8":
                 raise ValueError(
@@ -104,6 +116,16 @@ class KitchenW4A8Config(QuantizationConfig):
             return None
         if marker is None:
             return UnquantizedLinearMethod()
+        if marker.get("format") == "int8_tensorwise":
+            if marker.get("_is_tensorwise_scalar"):
+                raise ValueError(
+                    f"Scalar INT8 marker {prefix!r} belongs to an embedding, "
+                    "not a linear"
+                )
+            assert self._int8_config is not None
+            method = self._int8_config.get_quant_method(layer, prefix)
+            self.selected.append(prefix)
+            return method
         if marker.get("format") != "asym_w4a8_int8":
             raise ValueError(f"Unsupported quantized linear marker for {prefix!r}")
 
@@ -141,7 +163,16 @@ class KitchenW4A8Config(QuantizationConfig):
         self, prefix: str, input_size_per_partition: int
     ) -> bool:
         marker = self.layer_markers.get(prefix)
-        if marker is None or marker.get("format") != "asym_w4a8_int8":
+        if marker is None:
+            return True
+        if marker.get("format") == "int8_tensorwise":
+            if marker.get("_is_tensorwise_scalar"):
+                return True
+            assert self._int8_config is not None
+            return self._int8_config.supports_input_partition(
+                prefix, input_size_per_partition
+            )
+        if marker.get("format") != "asym_w4a8_int8":
             return True
         return self._supports_input_size(
             input_size_per_partition,

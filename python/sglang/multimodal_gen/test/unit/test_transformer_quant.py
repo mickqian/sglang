@@ -1050,6 +1050,56 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         self.assertEqual(layer.weight_codebook.shape, (16,))
         self.assertIsNone(layer.weight_correction)
 
+    def test_mixed_w4a8_int8_dispatches_each_serialized_layer(self):
+        markers = {
+            "w4a8": {
+                "format": "asym_w4a8_int8",
+                "convrot": True,
+                "group_size": 16,
+                "convrot_groupsize": 256,
+            },
+            "int8": {
+                "format": "int8_tensorwise",
+                "convrot": True,
+                "convrot_groupsize": 256,
+            },
+        }
+        with (
+            patch(
+                "sglang.multimodal_gen.runtime.layers.quantization.kitchen_w4a8."
+                "w4a8_int8_linear",
+                new=object(),
+            ),
+            patch(
+                "sglang.multimodal_gen.runtime.layers.quantization.kitchen_int8."
+                "_load_comfy_kitchen"
+            ),
+        ):
+            config = resolve_minimax_h3_checkpoint_quantization(markers)
+            w4a8 = ReplicatedLinear(
+                256,
+                3,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                quant_config=config,
+                prefix="w4a8",
+            )
+            int8 = ReplicatedLinear(
+                256,
+                3,
+                bias=False,
+                params_dtype=torch.bfloat16,
+                quant_config=config,
+                prefix="int8",
+            )
+
+        self.assertIsInstance(config, KitchenW4A8Config)
+        self.assertEqual(w4a8.weight.shape, (3, 128))
+        self.assertEqual(int8.weight.shape, (3, 256))
+        self.assertEqual(set(config.selected), {"w4a8", "int8"})
+        self.assertTrue(config.supports_input_partition("int8", 256))
+        self.assertFalse(config.supports_input_partition("int8", 128))
+
     def test_minimax_h3_w4a4_marker_resolves_packed_kitchen(self):
         marker = json.dumps(
             {
