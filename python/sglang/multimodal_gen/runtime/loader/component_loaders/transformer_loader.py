@@ -308,16 +308,26 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 cls_name != model_cls.__name__
             )
 
+        checkpoint_layout = None
         checkpoint_quant_config = None
         if is_minimax_h3:
             selected_variant = str(component_server_args.model_variant or "fl2va")
             if gguf_file is not None:
                 validate_minimax_h3_checkpoint_variant([gguf_file], selected_variant)
-            elif component_server_args.transformer_weights_path is not None:
+            else:
+                checkpoint_layout = inspect_minimax_h3_safetensors(safetensors_list)
+                if safetensors_list:
+                    dit_config.arch_config.has_gate_compress = (
+                        checkpoint_layout.has_gate_compress
+                    )
+            if (
+                gguf_file is None
+                and component_server_args.transformer_weights_path is not None
+            ):
+                assert checkpoint_layout is not None
                 validate_minimax_h3_checkpoint_variant(
                     safetensors_list, selected_variant
                 )
-                checkpoint_layout = inspect_minimax_h3_safetensors(safetensors_list)
                 dit_config.arch_config.checkpoint_uses_diffusers_layout |= (
                     checkpoint_layout.uses_diffusers_layout
                 )

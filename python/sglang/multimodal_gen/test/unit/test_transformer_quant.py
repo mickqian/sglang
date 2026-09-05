@@ -740,6 +740,9 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             save_file(
                 {
                     "adaln_t_table": torch.zeros((1025, 8)),
+                    "transformer_blocks.0.attn.to_gate_compress.weight": torch.ones(
+                        (2, 2)
+                    ),
                     "blocks.0.mlp.fc1.weight": torch.ones((2, 256), dtype=torch.int8),
                     "blocks.0.mlp.fc1.weight_scale": torch.ones((2, 1)),
                     "blocks.0.mlp.fc1.comfy_quant": torch.tensor(
@@ -752,6 +755,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             layout = inspect_minimax_h3_safetensors([f.name])
 
         self.assertEqual(layout.adaln_curve_shape, (1025, 8))
+        self.assertTrue(layout.has_gate_compress)
         self.assertEqual(
             layout.layer_markers["blocks.0.mlp.fc1"]["format"],
             "int8_tensorwise",
@@ -779,6 +783,7 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             layout = inspect_minimax_h3_safetensors([checkpoint.name])
 
         self.assertEqual(layout.adaln_curve_basis_shape, (8, 2))
+        self.assertFalse(layout.has_gate_compress)
         self.assertTrue(layout.uses_separate_qkv)
         self.assertEqual(set(layout.layer_markers), {"blocks.0.attn.qkv_proj"})
 
