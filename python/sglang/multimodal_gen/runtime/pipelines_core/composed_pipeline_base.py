@@ -179,6 +179,14 @@ class ComposedPipelineBase(ABC):
 
     def _load_config(self) -> dict[str, Any]:
         model_subfolder = self.server_args.model_subfolder
+        replaced_components = (
+            self.server_args.component_paths.keys()
+            | self.server_args.component_weights_paths.keys()
+        )
+        replaced_config_components = {
+            self._extra_config_module_map.get(name, name)
+            for name in replaced_components
+        }
         if model_subfolder is None and not has_diffusers_pipeline_index(
             self.model_path, revision=self.server_args.revision
         ):
@@ -189,10 +197,9 @@ class ComposedPipelineBase(ABC):
                 self.model_path,
                 force_diffusers_model=True,
                 ignore_patterns=component_weight_ignore_patterns(
-                    "",
-                    self.server_args.component_paths.keys()
-                    | self.server_args.component_weights_paths.keys(),
+                    "", replaced_config_components
                 ),
+                ignored_weight_components=replaced_config_components,
                 revision=self.server_args.revision,
             )
         else:
@@ -209,9 +216,7 @@ class ComposedPipelineBase(ABC):
                 self.model_path,
                 allow_patterns=[f"{model_subfolder}/**"],
                 ignore_patterns=component_weight_ignore_patterns(
-                    model_subfolder,
-                    self.server_args.component_paths.keys()
-                    | self.server_args.component_weights_paths.keys(),
+                    model_subfolder, replaced_config_components
                 ),
                 revision=self.server_args.revision,
             )

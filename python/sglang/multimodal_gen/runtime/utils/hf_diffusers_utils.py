@@ -256,9 +256,14 @@ def _has_local_weight_files(component_path: str) -> bool:
     )
 
 
-def _get_missing_declared_weight_components(model_path: str) -> list[str]:
+def _get_missing_declared_weight_components(
+    model_path: str, ignored_weight_components: Iterable[str] = ()
+) -> list[str]:
+    ignored = set(ignored_weight_components)
     missing_files = []
     for component_dir in _get_declared_weight_component_dirs(model_path):
+        if component_dir in ignored:
+            continue
         component_path = os.path.join(model_path, component_dir)
         if not os.path.isdir(component_path):
             missing_files.append(f"{component_dir}/")
@@ -303,6 +308,7 @@ def _has_metadata_only_requested_pipeline(
 
 def _check_index_files_for_missing_shards(
     model_path: str,
+    ignored_weight_components: Iterable[str] = (),
 ) -> tuple[bool, list[str], list[str]]:
     """
     Check all subdirectories for missing shards based on index files.
@@ -316,6 +322,7 @@ def _check_index_files_for_missing_shards(
     Returns:
         Tuple of (all_valid, missing_files, checked_subdirs)
     """
+    ignored = set(ignored_weight_components)
     missing_files = []
     checked_subdirs = []
     checked_subdir_set = set()
@@ -339,10 +346,14 @@ def _check_index_files_for_missing_shards(
     dirs_to_check = [model_path]
 
     for component_dir in _get_declared_weight_component_dirs(model_path):
+        if component_dir in ignored:
+            continue
         _record_checked_subdir(os.path.join(model_path, component_dir))
-    missing_files.extend(_get_missing_declared_weight_components(model_path))
+    missing_files.extend(_get_missing_declared_weight_components(model_path, ignored))
 
     for subdir in subdirs:
+        if subdir in ignored:
+            continue
         subdir_path = os.path.join(model_path, subdir)
         if os.path.isdir(subdir_path):
             dirs_to_check.append(subdir_path)
@@ -421,7 +432,9 @@ def _cleanup_model_cache(model_path: str, reason: str) -> bool:
         return False
 
 
-def _ci_validate_diffusers_model(model_path: str) -> tuple[bool, bool]:
+def _ci_validate_diffusers_model(
+    model_path: str, ignored_weight_components: Iterable[str] = ()
+) -> tuple[bool, bool]:
     """
     CI-specific validation for diffusers models.
 
@@ -440,7 +453,7 @@ def _ci_validate_diffusers_model(model_path: str) -> tuple[bool, bool]:
     if not is_in_ci():
         return True, False
     is_valid, missing_files, checked_subdirs = _check_index_files_for_missing_shards(
-        model_path
+        model_path, ignored_weight_components
     )
 
     if not is_valid:
@@ -468,17 +481,24 @@ def _ci_validate_diffusers_model(model_path: str) -> tuple[bool, bool]:
     return True, False
 
 
-def _verify_diffusers_model_complete(path: str) -> bool:
+def _verify_diffusers_model_complete(
+    path: str, ignored_weight_components: Iterable[str] = ()
+) -> bool:
     """Check if a diffusers model directory has all required component subdirectories."""
     config_path = _find_local_pipeline_index_path(path)
     if config_path is None:
         return False
 
-    component_keys = _get_declared_weight_component_dirs(path)
+    ignored = set(ignored_weight_components)
+    declared_component_keys = _get_declared_weight_component_dirs(path)
+    component_keys = [key for key in declared_component_keys if key not in ignored]
     if component_keys:
         return all(
             os.path.exists(os.path.join(path, key)) for key in component_keys
-        ) and not _get_missing_declared_weight_components(path)
+        ) and not _get_missing_declared_weight_components(path, ignored)
+
+    if ignored.intersection(declared_component_keys):
+        return True
 
     return os.path.exists(os.path.join(path, "transformer")) and os.path.exists(
         os.path.join(path, "vae")
@@ -978,6 +998,7 @@ def maybe_download_model(
     is_lora: bool = False,
     allow_patterns: list[str] | None = None,
     ignore_patterns: list[str] | None = None,
+    ignored_weight_components: Iterable[str] = (),
     force_diffusers_model: bool = False,
     revision: str | None = None,
     skip_overlay_resolution: bool = False,
@@ -991,11 +1012,14 @@ def maybe_download_model(
         download: Whether to download the model from Hugging Face Hub
         is_lora: If True, skip model completeness verification (LoRA models don't have transformer/vae directories)
         ignore_patterns: Additional Hub snapshot patterns to exclude
+        ignored_weight_components: Declared component directories whose weights are
+            intentionally omitted because another checkpoint replaces them
         force_diffusers_model: If True, apply diffusers model check. Otherwise it should be a component model
         revision: Specific Hugging Face Hub revision to resolve
     Returns:
         Local path to the model
     """
+    ignored_weight_components = tuple(ignored_weight_components)
     snapshot_ignore_patterns = list(
         dict.fromkeys((*_DEFAULT_MODEL_IGNORE_PATTERNS, *(ignore_patterns or ())))
     )
@@ -1018,10 +1042,12 @@ def maybe_download_model(
     if os.path.exists(model_name_or_path):
         if not force_diffusers_model:
             return model_name_or_path
-        if is_lora or _verify_diffusers_model_complete(model_name_or_path):
+        if is_lora or _verify_diffusers_model_complete(
+            model_name_or_path, ignored_weight_components
+        ):
             if not is_lora:
                 is_valid, cleanup_performed = _ci_validate_diffusers_model(
-                    model_name_or_path
+                    model_name_or_path, ignored_weight_components
                 )
                 if not is_valid:
                     if cleanup_performed:
@@ -1114,9 +1140,13 @@ def maybe_download_model(
                 )
             else:
                 return str(local_path)
-        elif is_lora or _verify_diffusers_model_complete(local_path):
+        elif is_lora or _verify_diffusers_model_complete(
+            local_path, ignored_weight_components
+        ):
             if not is_lora:
-                is_valid, cleanup_performed = _ci_validate_diffusers_model(local_path)
+                is_valid, cleanup_performed = _ci_validate_diffusers_model(
+                    local_path, ignored_weight_components
+                )
                 if not is_valid:
                     logger.warning(
                         "CI validation failed for cached model at %s, "
@@ -1187,7 +1217,9 @@ def maybe_download_model(
             if not force_diffusers_model:
                 return str(local_path)
             # Verify downloaded model is complete (skip for LoRA)
-            elif not is_lora and not _verify_diffusers_model_complete(local_path):
+            elif not is_lora and not _verify_diffusers_model_complete(
+                local_path, ignored_weight_components
+            ):
                 logger.warning(
                     "Downloaded model at %s is incomplete, retrying with force_download=True",
                     local_path,
@@ -1202,7 +1234,9 @@ def maybe_download_model(
                         force_download=True,
                         revision=revision,
                     )
-                if not _verify_diffusers_model_complete(local_path):
+                if not _verify_diffusers_model_complete(
+                    local_path, ignored_weight_components
+                ):
                     raise ValueError(
                         f"Downloaded model at {local_path} is still incomplete after forced re-download. "
                         "The model repository may be missing required components (model_index.json, transformer/, or vae/)."
@@ -1210,7 +1244,9 @@ def maybe_download_model(
 
             # CI validation: check all subdirectories for missing shards after download
             if not is_lora:
-                is_valid, cleanup_performed = _ci_validate_diffusers_model(local_path)
+                is_valid, cleanup_performed = _ci_validate_diffusers_model(
+                    local_path, ignored_weight_components
+                )
                 if not is_valid:
                     # In CI, if validation fails after download, we have a serious issue
                     # If cleanup was performed, the next retry should get a fresh download

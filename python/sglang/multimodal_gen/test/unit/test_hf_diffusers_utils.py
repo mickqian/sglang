@@ -245,6 +245,21 @@ def test_diffusers_cache_validation_rejects_declared_component_without_weights(
     assert "transformer" in checked_subdirs
 
 
+def test_diffusers_cache_validation_allows_replaced_component_weights(tmp_path):
+    _write_model_index(tmp_path)
+    _populate_components(tmp_path, ("transformer",))
+    replaced = {"text_encoder", "vae"}
+
+    assert _verify_diffusers_model_complete(str(tmp_path), replaced)
+
+    is_valid, missing_files, checked_subdirs = _check_index_files_for_missing_shards(
+        str(tmp_path), replaced
+    )
+    assert is_valid
+    assert missing_files == []
+    assert checked_subdirs == ["transformer"]
+
+
 def test_diffusers_cache_validation_checks_declared_component_shards(tmp_path):
     _write_model_index(tmp_path)
     for subdir in ("scheduler", "text_encoder", "tokenizer", "transformer", "vae"):
@@ -456,6 +471,7 @@ def test_download_skips_overridden_component_weights(
     pipeline = SimpleNamespace(
         model_path="org/repo",
         default_model_subfolder=None,
+        _extra_config_module_map={},
         server_args=SimpleNamespace(
             model_subfolder=model_subfolder,
             revision=None,
@@ -484,11 +500,54 @@ def test_download_skips_overridden_component_weights(
         ComposedPipelineBase._load_config(pipeline)
 
     ignore_patterns = download.call_args.kwargs["ignore_patterns"]
+    ignored_weight_components = download.call_args.kwargs.get(
+        "ignored_weight_components", set()
+    )
     prefix = "Ref2VA/" if model_subfolder else ""
     assert f"{prefix}transformer/*.safetensors" in ignore_patterns
     assert f"{prefix}transformer/**/*.safetensors" in ignore_patterns
     assert f"{prefix}transformer/*.gguf" in ignore_patterns
     assert f"{prefix}transformer/**/*.gguf" in ignore_patterns
+    if model_subfolder is None:
+        assert ignored_weight_components == {"transformer"}
+
+
+def test_root_download_uses_structural_name_for_replaced_component(tmp_path):
+    pipeline = SimpleNamespace(
+        model_path="org/repo",
+        default_model_subfolder=None,
+        _extra_config_module_map={"video_vae": "vae"},
+        server_args=SimpleNamespace(
+            model_subfolder=None,
+            revision=None,
+            component_paths={"video_vae": "org/variant/vae"},
+            component_weights_paths={},
+        ),
+    )
+
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "maybe_download_model",
+            return_value=str(tmp_path),
+        ) as download,
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "verify_model_config_and_directory",
+            return_value={"_diffusers_version": "0.37.0"},
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "has_diffusers_pipeline_index",
+            return_value=True,
+        ),
+    ):
+        ComposedPipelineBase._load_config(pipeline)
+
+    kwargs = download.call_args.kwargs
+    assert kwargs["ignored_weight_components"] == {"vae"}
+    assert "vae/*.safetensors" in kwargs["ignore_patterns"]
+    assert not any("video_vae" in pattern for pattern in kwargs["ignore_patterns"])
 
 
 def test_complete_cached_snapshot_is_served_without_download(

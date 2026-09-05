@@ -34,6 +34,7 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     has_diffusers_pipeline_index,
+    maybe_download_model_index,
 )
 
 
@@ -123,6 +124,12 @@ class MiniMaxH3Pipeline(LoRAPipeline, ComposedPipelineBase):
                     # Root-only modular releases can still route FL2VA/Ref2VA
                     # through their declared transformer entries.
                     self.default_model_subfolder = semantic_subfolder
+        if self.server_args.model_subfolder is None and has_diffusers_pipeline_index(
+            self.model_path, revision=self.server_args.revision
+        ):
+            self._configure_component_names(
+                maybe_download_model_index(self.model_path), selected_partition
+            )
         model_index = super()._load_config()
         self._configure_component_names(model_index, selected_partition)
         self.release_metadata = self._release_metadata_from_model_index(
