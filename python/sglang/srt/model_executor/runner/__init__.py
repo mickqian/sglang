@@ -43,7 +43,6 @@ from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph impo
 )
 from sglang.srt.model_executor.runner_utils import (  # noqa: F401
     DecodeInputBuffers,
-    DeepEPCudaGraphRunnerAdapter,
     PrefillInputBuffers,
     _grouped_foreach_copy_,
     _set_capture_lora_variant,
@@ -53,4 +52,7 @@ from sglang.srt.model_executor.runner_utils import (  # noqa: F401
     get_is_capture_mode,
     model_capture_mode,
     set_global_graph_memory_pool,
+)
+from sglang.srt.model_executor.runner_utils.deepep_adapter import (  # noqa: F401
+    DeepEPCudaGraphRunnerAdapter,
 )
