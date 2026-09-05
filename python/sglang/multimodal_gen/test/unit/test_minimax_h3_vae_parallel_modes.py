@@ -136,15 +136,15 @@ def test_vit_rope_rebuilds_nonpersistent_buffer_after_meta_construction():
 
 
 def test_vit_decoder_rebuilds_inference_mask_buffer_after_meta_construction():
-    with torch.device("meta"):
-        decoder = ViT3DDecoder(
-            in_channels=2,
-            out_channels=2,
-            num_layers=0,
-            heads=1,
-            dim_head=6,
-            num_register_tokens=0,
-        )
+    decoder = ViT3DDecoder(
+        in_channels=2,
+        out_channels=2,
+        num_layers=0,
+        heads=1,
+        dim_head=6,
+        num_register_tokens=0,
+    )
+    decoder.mask_token = torch.empty_like(decoder.mask_token, device="meta")
 
     decoder.to("cpu")
 
