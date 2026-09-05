@@ -11,6 +11,9 @@ from safetensors.torch import save_file as safetensors_save_file
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_audio import (
     MiniMaxH3AudioVAEConfig,
 )
+from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
+    MiniMaxH3VideoVAEConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
     QwenImagePipelineConfig,
@@ -233,6 +236,56 @@ class TestDirectGPUVAEState(unittest.TestCase):
         self.assertTrue(torch.equal(vae.proj.weight, expected_weight))
         self.assertTrue(torch.equal(vae.scale, expected_scale))
         self.assertFalse(any(tensor.is_meta for tensor in vae.state_dict().values()))
+
+    def test_streams_mapped_and_merged_diffusers_state(self):
+        class _Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.to_qkv = nn.Linear(2, 6, bias=False)
+
+        class _Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = _Attention()
+
+        class _MappedVAE(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.decoder = nn.Module()
+                self.decoder.x_embedder = nn.Linear(2, 2, bias=False)
+                self.decoder.transformer_blocks = nn.ModuleList([_Block()])
+
+        q = torch.zeros(2, 2)
+        k = torch.ones(2, 2)
+        v = torch.full((2, 2), 2.0)
+        x_embedder = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        with TemporaryDirectory() as root:
+            checkpoint = pathlib.Path(root) / "model.safetensors"
+            safetensors_save_file(
+                {
+                    "decoder.mask_token": torch.zeros(1, 1, 2),
+                    "decoder.proj_in.weight": x_embedder,
+                    "decoder.transformer_blocks.0.attn.to_q.weight": q,
+                    "decoder.transformer_blocks.0.attn.to_k.weight": k,
+                    "decoder.transformer_blocks.0.attn.to_v.weight": v,
+                },
+                checkpoint,
+            )
+            with torch.device("meta"):
+                vae = _MappedVAE()
+            _assign_direct_gpu_vae_state(
+                vae,
+                [str(checkpoint)],
+                component_name="video_vae",
+                device=torch.device("cpu"),
+                vae_config=MiniMaxH3VideoVAEConfig(),
+            )
+
+        torch.testing.assert_close(vae.decoder.x_embedder.weight, x_embedder)
+        torch.testing.assert_close(
+            vae.decoder.transformer_blocks[0].attn.to_qkv.weight,
+            torch.cat((q, k, v)),
+        )
 
     def test_direct_load_adopts_folded_weight_norm_and_checkpoint_metadata(self):
         class _WeightNormVAE(nn.Module):

@@ -484,7 +484,10 @@ def _assign_direct_gpu_vae_state(
     )
     target_state, slots = _direct_gpu_vae_state_slots(vae, component_name)
     metadata_names = _vae_checkpoint_arch_metadata_names(vae_config, target_state)
+    mapping = vae_config.arch_config.param_names_mapping
+    map_name = get_param_names_mapping(mapping) if mapping else None
     loaded_names: set[str] = set()
+    merged_parts: dict[str, set[int]] = {}
     metadata: dict[str, torch.Tensor] = {}
     with torch.no_grad():
         for raw_name, tensor in safetensors_weights_iterator(
@@ -495,6 +498,14 @@ def _assign_direct_gpu_vae_state(
             name = raw_name
             if name in metadata_names:
                 metadata[name] = tensor
+                continue
+            merge_index = total_parts = None
+            if map_name is not None:
+                name, merge_index, total_parts = map_name(raw_name)
+                if raw_name in slots and name not in slots:
+                    name = raw_name
+                    merge_index = total_parts = None
+            if not name:
                 continue
             if name in loaded_names:
                 raise ComponentCheckpointUnsupportedError(
@@ -515,14 +526,62 @@ def _assign_direct_gpu_vae_state(
                 tensor = tensor.to(dtype=expected.dtype)
 
             module, local_name, is_parameter = slot
-            if is_parameter:
+            if merge_index is not None:
+                if total_parts is None or not 0 <= merge_index < total_parts:
+                    raise ComponentCheckpointUnsupportedError(
+                        f"Direct GPU VAE tensor {raw_name!r} has invalid merge "
+                        f"position {merge_index!r}/{total_parts!r}"
+                    )
+                expected_part_shape = (
+                    expected.shape[0] // total_parts,
+                    *expected.shape[1:],
+                )
+                if (
+                    expected.shape[0] % total_parts
+                    or tensor.shape != expected_part_shape
+                ):
+                    raise ComponentCheckpointUnsupportedError(
+                        f"Direct GPU VAE tensor {raw_name!r} cannot be merged into "
+                        f"{name!r}: source shape {tuple(tensor.shape)}, target shape "
+                        f"{tuple(expected.shape)}, parts={total_parts}"
+                    )
+                seen = merged_parts.setdefault(name, set())
+                if merge_index in seen:
+                    raise ComponentCheckpointUnsupportedError(
+                        f"Direct GPU VAE checkpoint maps multiple tensors to "
+                        f"part {merge_index} of {name!r}"
+                    )
+                if not seen:
+                    merged = torch.empty(
+                        expected.shape, dtype=expected.dtype, device=device
+                    )
+                    if is_parameter:
+                        previous = module._parameters[local_name]
+                        module._parameters[local_name] = nn.Parameter(
+                            merged, requires_grad=previous.requires_grad
+                        )
+                    else:
+                        module._buffers[local_name] = merged
+                destination = (
+                    module._parameters[local_name]
+                    if is_parameter
+                    else module._buffers[local_name]
+                )
+                destination.narrow(
+                    0, merge_index * expected_part_shape[0], expected_part_shape[0]
+                ).copy_(tensor)
+                seen.add(merge_index)
+                if len(seen) == total_parts:
+                    loaded_names.add(name)
+            elif is_parameter:
                 previous = module._parameters[local_name]
                 module._parameters[local_name] = nn.Parameter(
                     tensor, requires_grad=previous.requires_grad
                 )
+                loaded_names.add(name)
             else:
                 module._buffers[local_name] = tensor
-            loaded_names.add(name)
+                loaded_names.add(name)
 
     consumed_metadata = _consume_vae_checkpoint_arch_metadata(
         metadata, vae_config, target_state
