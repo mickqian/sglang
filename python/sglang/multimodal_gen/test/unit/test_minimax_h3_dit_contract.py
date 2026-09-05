@@ -48,6 +48,7 @@ from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
     MiniMaxH3DiTModel,
     MiniMaxH3FinalLayer,
     MiniMaxH3Rope,
+    _apply_qk_norm,
     _copy_grouped_qkv_tp_shard,
     _diffusers_h3_checkpoint,
     _modulate_gate,
@@ -68,6 +69,34 @@ def _ensure_single_process_parallel_runtime() -> None:
         return
     ensure_distributed_env_defaults()
     maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
+
+
+def test_qk_norm_falls_back_when_jit_kernel_is_unavailable():
+    head_dim = 128
+    q = Mock(is_cuda=True, dtype=torch.bfloat16)
+    k = Mock(dtype=torch.bfloat16)
+    q.stride.side_effect = lambda dim: 1 if dim == -1 else head_dim
+    k.stride.side_effect = lambda dim: 1 if dim == -1 else head_dim
+    q_norm = Mock(
+        eps=1e-6,
+        weight=SimpleNamespace(dtype=torch.bfloat16),
+        return_value="normalized-q",
+    )
+    k_norm = Mock(
+        eps=1e-6,
+        weight=SimpleNamespace(dtype=torch.bfloat16),
+        return_value="normalized-k",
+    )
+
+    with patch(
+        "sglang.multimodal_gen.runtime.models.dits.minimax_h3."
+        "can_use_fused_inplace_qknorm",
+        return_value=False,
+    ):
+        assert _apply_qk_norm(q, k, q_norm, k_norm, head_dim) == (
+            "normalized-q",
+            "normalized-k",
+        )
 
 
 def test_final_heads_keep_checkpoint_declared_packed_layout():
