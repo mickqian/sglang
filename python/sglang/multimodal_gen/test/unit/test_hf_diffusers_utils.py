@@ -475,6 +475,11 @@ def test_download_skips_overridden_component_weights(
             "verify_model_config_and_directory",
             return_value={"_diffusers_version": "0.37.0"},
         ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base."
+            "has_diffusers_pipeline_index",
+            return_value=True,
+        ),
     ):
         ComposedPipelineBase._load_config(pipeline)
 

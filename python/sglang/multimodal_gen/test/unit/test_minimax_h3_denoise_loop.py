@@ -379,8 +379,16 @@ def test_grouped_outputs_share_prompt_refinement():
     class Refiner:
         calls = 0
 
-        def refine_prompt_embeds(self, prompt_embeds, refiner_cu, *, device):
-            del refiner_cu
+        def refine_prompt_embeds(
+            self,
+            prompt_embeds,
+            refiner_cu,
+            *,
+            refiner_cu_seqlens_host,
+            refiner_max_seqlen,
+            device,
+        ):
+            del refiner_cu, refiner_cu_seqlens_host, refiner_max_seqlen
             self.calls += 1
             return torch.ones(
                 prompt_embeds.shape[0], 5376, dtype=prompt_embeds.dtype, device=device
