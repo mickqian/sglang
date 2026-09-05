@@ -295,13 +295,16 @@ def _ref2va_ordered_blocks_and_rows(
                 condition_index=condition_index,
                 path="batch.extra.minimax_h3_reference_video_rows",
             )
-            audio_entry = _ref2va_payload_entry(
-                ref_audio,
-                list_key="audios",
-                condition_index=condition_index,
-                path="batch.extra.minimax_h3_reference_audio_rows",
-            )
-            ref_audio_t = int(audio_entry["ref_audio_t"])
+            audio_entry = None
+            ref_audio_t = 0
+            if material.include_audio:
+                audio_entry = _ref2va_payload_entry(
+                    ref_audio,
+                    list_key="audios",
+                    condition_index=condition_index,
+                    path="batch.extra.minimax_h3_reference_audio_rows",
+                )
+                ref_audio_t = int(audio_entry["ref_audio_t"])
             blocks.append(
                 {
                     "kind": (
@@ -316,7 +319,7 @@ def _ref2va_ordered_blocks_and_rows(
                 }
             )
             visual_rows.append(video_entry["rows"])
-            if ref_audio_t > 0:
+            if audio_entry is not None and ref_audio_t > 0:
                 audio_rows.append(audio_entry["rows"])
         else:
             raise ValueError(f"unsupported ref2va material chain {chain!r}")

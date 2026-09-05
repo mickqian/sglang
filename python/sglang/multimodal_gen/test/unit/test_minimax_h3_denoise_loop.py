@@ -29,6 +29,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MiniMaxH3DenoisingStage,
     _build_cube_attn_metadata,
     _precompute_refined_prompt_embeds,
+    _ref2va_ordered_blocks_and_rows,
 )
 
 
@@ -62,6 +63,40 @@ def _branch(
         token_tags=packed["token_tags"] if token_tags is None else token_tags,
         device=torch.device("cpu"),
     )
+
+
+def test_ref2va_muted_video_does_not_require_audio_rows() -> None:
+    material = SimpleNamespace(
+        condition_index=3,
+        material_chain="video.reference_preserve",
+        include_audio=False,
+    )
+    video_rows = torch.ones(8, 32)
+
+    blocks, visual, audio = _ref2va_ordered_blocks_and_rows(
+        plan=SimpleNamespace(materials=[material]),
+        ref_image=None,
+        ref_audio=None,
+        ref_video={
+            "condition_index": 3,
+            "latent_t": 2,
+            "latent_h": 4,
+            "latent_w": 4,
+            "rows": video_rows,
+        },
+    )
+
+    assert blocks == [
+        {
+            "kind": "video",
+            "ref_audio_t": 0,
+            "latent_t": 2,
+            "latent_h": 4,
+            "latent_w": 4,
+        }
+    ]
+    assert visual is video_rows
+    assert audio is None
 
 
 def test_precomputed_timestep_plan_matches_full_unique_reference():
