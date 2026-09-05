@@ -69,9 +69,9 @@ class KitchenW4A8Config(QuantizationConfig):
                 raise ValueError(
                     f"Unsupported Comfy W4A8 format for {prefix!r}: {marker_format!r}"
                 )
-            if marker.get("convrot") is not True:
+            if marker.get("convrot") is False:
                 raise ValueError(
-                    f"Serialized W4A8 layer {prefix!r} must set convrot=true"
+                    f"Serialized W4A8 layer {prefix!r} cannot set convrot=false"
                 )
 
     @classmethod

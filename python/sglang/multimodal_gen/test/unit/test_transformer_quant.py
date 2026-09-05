@@ -1054,7 +1054,6 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         markers = {
             "w4a8": {
                 "format": "asym_w4a8_int8",
-                "convrot": True,
                 "group_size": 16,
                 "convrot_groupsize": 256,
             },
@@ -1099,6 +1098,19 @@ class TestTransformerQuantHelpers(unittest.TestCase):
         self.assertEqual(set(config.selected), {"w4a8", "int8"})
         self.assertTrue(config.supports_input_partition("int8", 256))
         self.assertFalse(config.supports_input_partition("int8", 128))
+
+    def test_w4a8_rejects_explicit_non_convrot_marker(self):
+        with self.assertRaisesRegex(ValueError, "cannot set convrot=false"):
+            KitchenW4A8Config(
+                {
+                    "proj": {
+                        "format": "asym_w4a8_int8",
+                        "convrot": False,
+                        "group_size": 16,
+                        "convrot_groupsize": 256,
+                    }
+                }
+            )
 
     def test_minimax_h3_w4a4_marker_resolves_packed_kitchen(self):
         marker = json.dumps(
