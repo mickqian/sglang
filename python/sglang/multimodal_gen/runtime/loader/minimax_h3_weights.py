@@ -26,6 +26,7 @@ _SEPARATE_QKV_WEIGHT_RE = re.compile(
 _GATE_COMPRESS_WEIGHT_RE = re.compile(
     r"^(?:transformer_blocks|blocks)\.\d+\.attn\.to_gate_compress\.weight$"
 )
+_COMFY_MODEL_PREFIX_RE = re.compile(r"^(?:model\.)?diffusion_model\.")
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,12 @@ class MiniMaxH3CheckpointLayout:
     uses_separate_qkv: bool
 
 
-def _map_separate_qkv_prefix(prefix: str) -> str:
+def _normalize_h3_checkpoint_name(name: str) -> str:
+    return _COMFY_MODEL_PREFIX_RE.sub("", name)
+
+
+def _map_checkpoint_layer_prefix(prefix: str) -> str:
+    prefix = _normalize_h3_checkpoint_name(prefix)
     match = re.fullmatch(r"((?:token_refiner\.)?blocks\.\d+\.attn)\.[qkv]_proj", prefix)
     return f"{match.group(1)}.qkv_proj" if match is not None else prefix
 
@@ -56,59 +62,61 @@ def inspect_minimax_h3_safetensors(
 
     for path in safetensors_list:
         with safe_open(path, framework="pt", device="cpu") as checkpoint:
-            keys = checkpoint.keys()
-            if "adaln_t_table" in keys:
-                shape = tuple(checkpoint.get_slice("adaln_t_table").get_shape())
-                if len(shape) != 2 or shape[0] < 2:
-                    raise ValueError(
-                        "MiniMax-H3 adaln_t_table must have shape [N, D] with "
-                        f"N >= 2, got {shape} in {path}"
-                    )
-                if adaln_curve_shape is not None and adaln_curve_shape != shape:
-                    raise ValueError(
-                        "MiniMax-H3 checkpoint shards disagree on adaln_t_table "
-                        f"shape: {adaln_curve_shape} vs {shape}"
-                    )
-                adaln_curve_shape = shape
-            if "adaln_curve_basis" in keys:
-                tensor_slice = checkpoint.get_slice("adaln_curve_basis")
-                shape = tuple(tensor_slice.get_shape())
-                if len(shape) != 2 or min(shape) <= 0:
-                    raise ValueError(
-                        "MiniMax-H3 adaln_curve_basis must have shape [D, R], "
-                        f"got {shape} in {path}"
-                    )
-                if (
-                    adaln_curve_basis_shape is not None
-                    and adaln_curve_basis_shape != shape
-                ):
-                    raise ValueError(
-                        "MiniMax-H3 checkpoint shards disagree on "
-                        f"adaln_curve_basis shape: {adaln_curve_basis_shape} vs {shape}"
-                    )
-                if tensor_slice.get_dtype() != "F32":
-                    raise ValueError("MiniMax-H3 adaln_curve_basis must be FP32")
-                adaln_curve_basis_shape = shape
-            if "adaln_curve_mean" in keys:
-                tensor_slice = checkpoint.get_slice("adaln_curve_mean")
-                shape = tuple(tensor_slice.get_shape())
-                if tensor_slice.get_dtype() != "F32":
-                    raise ValueError("MiniMax-H3 adaln_curve_mean must be FP32")
-                if (
-                    adaln_curve_mean_shape is not None
-                    and adaln_curve_mean_shape != shape
-                ):
-                    raise ValueError(
-                        "MiniMax-H3 checkpoint shards disagree on "
-                        f"adaln_curve_mean shape: {adaln_curve_mean_shape} vs {shape}"
-                    )
-                adaln_curve_mean_shape = shape
-            for key in keys:
-                has_gate_compress |= _GATE_COMPRESS_WEIGHT_RE.fullmatch(key) is not None
-                uses_diffusers_layout |= key.startswith(
+            for key in checkpoint.keys():
+                normalized_key = _normalize_h3_checkpoint_name(key)
+                if normalized_key == "adaln_t_table":
+                    shape = tuple(checkpoint.get_slice(key).get_shape())
+                    if len(shape) != 2 or shape[0] < 2:
+                        raise ValueError(
+                            "MiniMax-H3 adaln_t_table must have shape [N, D] with "
+                            f"N >= 2, got {shape} in {path}"
+                        )
+                    if adaln_curve_shape is not None and adaln_curve_shape != shape:
+                        raise ValueError(
+                            "MiniMax-H3 checkpoint shards disagree on adaln_t_table "
+                            f"shape: {adaln_curve_shape} vs {shape}"
+                        )
+                    adaln_curve_shape = shape
+                if normalized_key == "adaln_curve_basis":
+                    tensor_slice = checkpoint.get_slice(key)
+                    shape = tuple(tensor_slice.get_shape())
+                    if len(shape) != 2 or min(shape) <= 0:
+                        raise ValueError(
+                            "MiniMax-H3 adaln_curve_basis must have shape [D, R], "
+                            f"got {shape} in {path}"
+                        )
+                    if (
+                        adaln_curve_basis_shape is not None
+                        and adaln_curve_basis_shape != shape
+                    ):
+                        raise ValueError(
+                            "MiniMax-H3 checkpoint shards disagree on "
+                            f"adaln_curve_basis shape: {adaln_curve_basis_shape} vs {shape}"
+                        )
+                    if tensor_slice.get_dtype() != "F32":
+                        raise ValueError("MiniMax-H3 adaln_curve_basis must be FP32")
+                    adaln_curve_basis_shape = shape
+                if normalized_key == "adaln_curve_mean":
+                    tensor_slice = checkpoint.get_slice(key)
+                    shape = tuple(tensor_slice.get_shape())
+                    if tensor_slice.get_dtype() != "F32":
+                        raise ValueError("MiniMax-H3 adaln_curve_mean must be FP32")
+                    if (
+                        adaln_curve_mean_shape is not None
+                        and adaln_curve_mean_shape != shape
+                    ):
+                        raise ValueError(
+                            "MiniMax-H3 checkpoint shards disagree on "
+                            f"adaln_curve_mean shape: {adaln_curve_mean_shape} vs {shape}"
+                        )
+                    adaln_curve_mean_shape = shape
+                has_gate_compress |= (
+                    _GATE_COMPRESS_WEIGHT_RE.fullmatch(normalized_key) is not None
+                )
+                uses_diffusers_layout |= normalized_key.startswith(
                     ("transformer_blocks.", "token_refiner.refiner_blocks.")
                 )
-                match = _SEPARATE_QKV_WEIGHT_RE.fullmatch(key)
+                match = _SEPARATE_QKV_WEIGHT_RE.fullmatch(normalized_key)
                 if match is not None:
                     separate_qkv_parts.setdefault(match.group(1), set()).add(
                         match.group(2)
@@ -145,7 +153,7 @@ def inspect_minimax_h3_safetensors(
     uses_separate_qkv = bool(separate_qkv_parts)
     layer_markers = inspect_comfy_quant_markers(
         safetensors_list,
-        param_name_mapper=_map_separate_qkv_prefix if uses_separate_qkv else None,
+        param_name_mapper=_map_checkpoint_layer_prefix,
     )
 
     return MiniMaxH3CheckpointLayout(

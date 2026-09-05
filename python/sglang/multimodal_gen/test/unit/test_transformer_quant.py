@@ -761,6 +761,41 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             "int8_tensorwise",
         )
 
+    def test_inspect_minimax_h3_normalizes_comfy_model_wrapper(self):
+        marker = torch.tensor(
+            list(
+                b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}'
+            ),
+            dtype=torch.uint8,
+        )
+        prefix = "model.diffusion_model."
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as checkpoint:
+            save_file(
+                {
+                    f"{prefix}adaln_t_table": torch.zeros((1025, 8)),
+                    f"{prefix}blocks.0.attn.to_gate_compress.weight": torch.ones(
+                        (2, 2)
+                    ),
+                    f"{prefix}blocks.0.mlp.fc1.weight": torch.ones(
+                        (2, 256), dtype=torch.int8
+                    ),
+                    f"{prefix}blocks.0.mlp.fc1.weight_scale": torch.ones((2, 1)),
+                    f"{prefix}blocks.0.mlp.fc1.comfy_quant": marker,
+                },
+                checkpoint.name,
+            )
+            layout = inspect_minimax_h3_safetensors([checkpoint.name])
+
+        self.assertEqual(layout.adaln_curve_shape, (1025, 8))
+        self.assertTrue(layout.has_gate_compress)
+        self.assertFalse(layout.uses_diffusers_layout)
+        self.assertEqual(set(layout.layer_markers), {"blocks.0.mlp.fc1"})
+        map_name = get_param_names_mapping(MiniMaxH3DiTArchConfig().param_names_mapping)
+        self.assertEqual(
+            map_name(f"{prefix}blocks.0.mlp.fc1.weight_scale")[0],
+            "blocks.0.mlp.fc1.weight_scale_inv",
+        )
+
     def test_inspect_minimax_h3_detects_dynamic_time_and_fuses_qkv_markers(self):
         marker = torch.tensor(
             list(
