@@ -28,6 +28,9 @@ from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.attention im
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.base_module import (
     RotaryEmbeddingND,
 )
+from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.vae_vit import (
+    ViT3DDecoder,
+)
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
@@ -130,6 +133,23 @@ def test_vit_rope_rebuilds_nonpersistent_buffer_after_meta_construction():
         rope.inv_freq,
         1 / 100 ** torch.arange(0, 1, 1 / 16, dtype=torch.float32),
     )
+
+
+def test_vit_decoder_rebuilds_inference_mask_buffer_after_meta_construction():
+    with torch.device("meta"):
+        decoder = ViT3DDecoder(
+            in_channels=2,
+            out_channels=2,
+            num_layers=0,
+            heads=1,
+            dim_head=6,
+            num_register_tokens=0,
+        )
+
+    decoder.to("cpu")
+
+    assert not decoder.mask_token.is_meta
+    torch.testing.assert_close(decoder.mask_token, torch.zeros(1, 1, 6))
 
 
 def test_audio_vae_attention_defaults_to_local_sdpa_and_allows_fa():

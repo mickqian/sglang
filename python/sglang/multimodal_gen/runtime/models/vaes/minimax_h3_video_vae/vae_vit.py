@@ -74,6 +74,15 @@ class ViTBase(ModelMixin, ConfigMixin):
 
     _no_split_modules = ["TransformerBlock"]
 
+    def _apply(self, fn, recurse=True):
+        # The inference-only mask token is a derived, nonpersistent zero buffer.
+        # Recreate it when direct loading constructs the module on meta.
+        if "mask_token" in self._buffers and self.mask_token.is_meta:
+            self.mask_token = fn(
+                torch.zeros(self.mask_token.shape, dtype=self.mask_token.dtype)
+            )
+        return super()._apply(fn, recurse=recurse)
+
     def _init_weights(self):
         def basic_init(m):
             if isinstance(m, nn.Linear):
