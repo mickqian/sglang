@@ -35,6 +35,7 @@ from sglang.kernels.ops.layernorm.norm import (
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
     MINIMAX_H3_ADALN_MODALITY_NUM,
+    MINIMAX_H3_CHECKPOINT_WRAPPER_RE,
     MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
     MiniMaxH3DiTArchConfig,
     MiniMaxH3DiTConfig,
@@ -322,6 +323,7 @@ def _diffusers_h3_checkpoint(
     pending: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
 
     for source_name, tensor in iterator:
+        source_name = re.sub(MINIMAX_H3_CHECKPOINT_WRAPPER_RE, "", source_name)
         # A weights-only override can use the native H3 namespace even when the
         # base component config names the Diffusers class. Preserve any tensor
         # that the constructed runtime model already owns; this covers both

@@ -5,6 +5,7 @@ from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTCon
 
 MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT = 64
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
+MINIMAX_H3_CHECKPOINT_WRAPPER_RE = r"^(?:model\.)?diffusion_model\."
 
 
 @dataclass
@@ -13,7 +14,7 @@ class MiniMaxH3DiTArchConfig(DiTArchConfig):
     # H3 fuses Q/K/V, so split projections are stacked for the fused LoRA layer
     param_names_mapping: dict = field(
         default_factory=lambda: {
-            r"^(?:model\.)?diffusion_model\.(.*)$": r"\1",
+            rf"{MINIMAX_H3_CHECKPOINT_WRAPPER_RE}(.*)$": r"\1",
             r"^(.*)\.weight_scale$": r"\1.weight_scale_inv",
             r"^(.*\.lora_[AB])\.[^.]+$": r"\1",
             r"^base_model\.model\.(.*\.lora_[AB])$": r"\1",
@@ -143,6 +144,7 @@ class MiniMaxH3DiTConfig(DiTConfig):
 
 __all__ = [
     "MINIMAX_H3_ADALN_MODALITY_NUM",
+    "MINIMAX_H3_CHECKPOINT_WRAPPER_RE",
     "MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT",
     "MiniMaxH3DiTArchConfig",
     "MiniMaxH3DiTConfig",

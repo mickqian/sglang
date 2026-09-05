@@ -7,6 +7,9 @@ from typing import Any
 
 from safetensors import safe_open
 
+from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
+    MINIMAX_H3_CHECKPOINT_WRAPPER_RE,
+)
 from sglang.multimodal_gen.runtime.layers.quantization.configs.base_config import (
     QuantizationConfig,
 )
@@ -26,7 +29,7 @@ _SEPARATE_QKV_WEIGHT_RE = re.compile(
 _GATE_COMPRESS_WEIGHT_RE = re.compile(
     r"^(?:transformer_blocks|blocks)\.\d+\.attn\.to_gate_compress\.weight$"
 )
-_COMFY_MODEL_PREFIX_RE = re.compile(r"^(?:model\.)?diffusion_model\.")
+_COMFY_MODEL_PREFIX_RE = re.compile(MINIMAX_H3_CHECKPOINT_WRAPPER_RE)
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ def inspect_minimax_h3_safetensors(
         with safe_open(path, framework="pt", device="cpu") as checkpoint:
             for key in checkpoint.keys():
                 normalized_key = _normalize_h3_checkpoint_name(key)
+                uses_diffusers_layout |= normalized_key != key
                 if normalized_key == "adaln_t_table":
                     shape = tuple(checkpoint.get_slice(key).get_shape())
                     if len(shape) != 2 or shape[0] < 2:

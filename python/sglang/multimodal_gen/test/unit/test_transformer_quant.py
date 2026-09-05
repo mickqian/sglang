@@ -120,7 +120,10 @@ from sglang.multimodal_gen.runtime.models.dits.flux import FluxSingleTransformer
 from sglang.multimodal_gen.runtime.models.dits.flux_2 import (
     Flux2Transformer2DModel,
 )
-from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import MiniMaxH3DiTModel
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3 import (
+    MiniMaxH3DiTModel,
+    _diffusers_h3_checkpoint,
+)
 from sglang.multimodal_gen.runtime.models.dits.qwen_image import (
     QwenImageTransformer2DModel,
 )
@@ -788,13 +791,16 @@ class TestTransformerQuantHelpers(unittest.TestCase):
 
         self.assertEqual(layout.adaln_curve_shape, (1025, 8))
         self.assertTrue(layout.has_gate_compress)
-        self.assertFalse(layout.uses_diffusers_layout)
+        self.assertTrue(layout.uses_diffusers_layout)
         self.assertEqual(set(layout.layer_markers), {"blocks.0.mlp.fc1"})
-        map_name = get_param_names_mapping(MiniMaxH3DiTArchConfig().param_names_mapping)
-        self.assertEqual(
-            map_name(f"{prefix}blocks.0.mlp.fc1.weight_scale")[0],
-            "blocks.0.mlp.fc1.weight_scale_inv",
+        scale = torch.ones((2, 1))
+        converted = dict(
+            _diffusers_h3_checkpoint(
+                iter([(f"{prefix}blocks.0.mlp.fc1.weight_scale", scale)]),
+                valid_target_names={"blocks.0.mlp.fc1.weight_scale"},
+            )
         )
+        self.assertIs(converted["blocks.0.mlp.fc1.weight_scale"], scale)
 
     def test_inspect_minimax_h3_detects_dynamic_time_and_fuses_qkv_markers(self):
         marker = torch.tensor(
