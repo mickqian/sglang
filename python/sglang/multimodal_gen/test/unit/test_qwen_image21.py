@@ -24,6 +24,11 @@ from sglang.multimodal_gen.registry import _get_config_info
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ResidencyState,
 )
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
+    COMPONENT_OFFLOAD,
+    RESIDENT,
+    SNAPSHOT_OFFLOAD,
+)
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency_strategies import (
     ComponentOffloadStrategy,
 )
@@ -138,6 +143,46 @@ def test_encoder_component_offload_preserves_loaded_dtypes(monkeypatch):
         strategy.finish_use(encoder, use, state)
         torch.cuda.synchronize()
         assert encoder.embedding.device.type == "cpu"
+
+
+def _patch_cuda(monkeypatch, *, shared=False):
+    platform = "sglang.multimodal_gen.configs.pipeline_configs.qwen_image21.current_platform"
+    monkeypatch.setattr(f"{platform}.is_cuda", lambda: True)
+    monkeypatch.setattr(f"{platform}.device_shares_host_memory", lambda: shared)
+
+
+def test_cpu_offload_encoder_uses_snapshot_on_cuda(monkeypatch):
+    _patch_cuda(monkeypatch)
+    args = SimpleNamespace(
+        component_residency=None, residency_mode=lambda _: COMPONENT_OFFLOAD
+    )
+    QwenImage21PipelineConfig().validate_server_args(args)
+    assert args.component_residency["text_encoder"] == SNAPSHOT_OFFLOAD
+
+
+def test_encoder_snapshot_upgrade_is_opt_out(monkeypatch):
+    _patch_cuda(monkeypatch)
+    config = QwenImage21PipelineConfig()
+
+    explicit = SimpleNamespace(
+        component_residency={"text_encoder": COMPONENT_OFFLOAD},
+        residency_mode=lambda _: COMPONENT_OFFLOAD,
+    )
+    config.validate_server_args(explicit)
+    assert explicit.component_residency["text_encoder"] == COMPONENT_OFFLOAD
+
+    resident = SimpleNamespace(
+        component_residency=None, residency_mode=lambda _: RESIDENT
+    )
+    config.validate_server_args(resident)
+    assert resident.component_residency is None
+
+    _patch_cuda(monkeypatch, shared=True)
+    shared = SimpleNamespace(
+        component_residency=None, residency_mode=lambda _: COMPONENT_OFFLOAD
+    )
+    config.validate_server_args(shared)
+    assert shared.component_residency is None
 
 
 def test_condition_slots_expand_to_actual_latent_grid():
