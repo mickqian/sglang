@@ -124,6 +124,7 @@ def test_encoder_component_offload_preserves_loaded_dtypes(monkeypatch):
     processor.apply_chat_template.return_value = [[1]]
     stage = QwenImage21EncodingStage(encoder, processor, None, None)
     use = stage.component_uses(None, "conditioning")[0]
+    assert use.memory_intensive
     strategy = ComponentOffloadStrategy()
     state = ResidencyState(batch_is_warmup=False)
     weight_bytes = encoder.weight.view(torch.uint8).clone()
@@ -146,7 +147,9 @@ def test_encoder_component_offload_preserves_loaded_dtypes(monkeypatch):
 
 
 def _patch_cuda(monkeypatch, *, shared=False):
-    platform = "sglang.multimodal_gen.configs.pipeline_configs.qwen_image21.current_platform"
+    platform = (
+        "sglang.multimodal_gen.configs.pipeline_configs.qwen_image21.current_platform"
+    )
     monkeypatch.setattr(f"{platform}.is_cuda", lambda: True)
     monkeypatch.setattr(f"{platform}.device_shares_host_memory", lambda: shared)
 
