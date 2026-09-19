@@ -10,6 +10,13 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ImagePipelineConfig,
     ModelTaskType,
 )
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
+    COMPONENT_OFFLOAD,
+    SNAPSHOT_OFFLOAD,
+    normalize_component_residency,
+    resolve_component_residency_mode,
+)
+from sglang.multimodal_gen.runtime.platforms import current_platform
 
 
 @dataclass
@@ -26,6 +33,27 @@ class QwenImage21PipelineConfig(ImagePipelineConfig):
     vae_config: QwenImage21VAEConfig = field(default_factory=QwenImage21VAEConfig)
     text_encoder_configs: tuple = field(default_factory=lambda: (Qwen3VLConfig(),))
     text_encoder_precisions: tuple[str, ...] = ("bf16",)
+
+    def validate_server_args(self, server_args) -> None:
+        # Implicit whole-module encoder offload → snapshot-offload.
+        # --component-residency still wins.
+        if (
+            resolve_component_residency_mode(
+                "text_encoder", server_args.component_residency
+            )
+            is not None
+        ):
+            return
+        if server_args.residency_mode("text_encoder") != COMPONENT_OFFLOAD:
+            return
+        if (
+            not current_platform.is_cuda()
+            or current_platform.device_shares_host_memory()
+        ):
+            return
+        assignments = dict(server_args.component_residency or {})
+        assignments["text_encoder"] = SNAPSHOT_OFFLOAD
+        server_args.component_residency = normalize_component_residency(assignments)
 
     def prepare_sigmas(self, sigmas, num_inference_steps):
         return self._prepare_sigmas(sigmas, num_inference_steps)

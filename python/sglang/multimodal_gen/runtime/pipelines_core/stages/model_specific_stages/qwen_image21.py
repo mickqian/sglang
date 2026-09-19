@@ -78,7 +78,7 @@ class QwenImage21EncodingStage(PipelineStage):
         name = self._component_stage_name(stage_name)
         return [
             # preserve the loader's mixed weight and rotary buffer dtypes
-            ComponentUse(name, "text_encoder"),
+            ComponentUse(name, "text_encoder", memory_intensive=True),
             ComponentUse(name, "vae", target_dtype=torch.bfloat16),
         ]
 
