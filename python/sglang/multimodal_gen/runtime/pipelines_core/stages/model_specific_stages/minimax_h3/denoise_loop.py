@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MiniMax H3 cfg-distilled full denoise loop.
+"""MiniMax H3 full denoise loops.
 
-Per step, the positive presentation is forwarded exactly once. Video and audio
-target rows chain through the Euler-eta0 update while visual and audio condition
-rows stay pinned to their noised step-0 anchors.
+Video (cfg-distilled): per step, the positive presentation is forwarded exactly
+once. Video and audio target rows chain through the Euler-eta0 update while
+visual and audio condition rows stay pinned to their noised step-0 anchors.
+
+Image (t2i/edit, PDD checkpoints): one positive branch per step and a plain
+Euler update on the target rows; see ``minimax_h3_image_denoise_loop``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
@@ -424,6 +429,9 @@ class MiniMaxH3DenoiseBranch:
         audio_timesteps: list[float],
         imgvid_cond_noise_aug: float,
         audio_ref_cond_noise_aug: float,
+        # True: condition rows keep ``imgvid_cond_noise_aug`` on every step
+        # instead of ``max(t, imgvid_cond_noise_aug)``.
+        pin_imgvid_cond: bool = False,
     ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Stage every step's packed timestep state before denoising."""
         if len(video_timesteps) != len(audio_timesteps):
@@ -434,7 +442,9 @@ class MiniMaxH3DenoiseBranch:
             self._expand_step_timesteps(
                 t_video=t_video,
                 t_audio=t_audio,
-                imgvid_cond_timestep=max(t_video, imgvid_cond_noise_aug),
+                imgvid_cond_timestep=imgvid_cond_noise_aug
+                if pin_imgvid_cond
+                else max(t_video, imgvid_cond_noise_aug),
                 audio_ref_cond_timestep=max(t_audio, audio_ref_cond_noise_aug),
                 inverse_indices_by_pattern=inverse_indices_by_pattern,
                 block_combined_by_pattern=block_combined_by_pattern,
@@ -653,11 +663,96 @@ def minimax_h3_denoise_loop(
     return video_rows, audio_rows
 
 
+@dataclass(frozen=True)
+class PackedBranchInputs:
+    """One image branch: packed layout, text states and tags, attention metadata."""
+
+    packed: dict[str, Any]
+    text_embeddings: torch.Tensor
+    token_tags: torch.Tensor
+    attn_metadata: AttentionMetadata | None = None
+
+
+@torch.inference_mode()
+def minimax_h3_image_denoise_loop(
+    *,
+    model: Any,
+    positive: PackedBranchInputs,
+    initial_video_rows: torch.Tensor,
+    keyframe_cond_rows: torch.Tensor | None,
+    sigmas: Sequence[float],
+    device: torch.device,
+    imgvid_cond_noise_aug_for_inference: float = MINIMAX_H3_IMGVID_COND_TIMESTEP,
+) -> torch.Tensor:
+    """Return fp32 image rows after ``len(sigmas) - 1`` positive-branch steps.
+
+    Each step forwards the positive branch once and steps only the target
+    rows, with the plain Euler update the PDD heads were distilled with:
+    ``x + dt * v`` with the fp32 ``dt = sigma_k - sigma_{k+1}``. Reference rows
+    are restored from their noised anchors on every step, and their
+    conditioning timestep stays fixed at ``imgvid_cond_noise_aug_for_inference``.
+    """
+    sigmas = [float(sigma) for sigma in sigmas]
+    cond_t = float(imgvid_cond_noise_aug_for_inference)
+    n_cond = int((~positive.packed["update_mask"]).sum())
+    branch = MiniMaxH3DenoiseBranch(
+        packed=positive.packed,
+        text_embeddings=positive.text_embeddings,
+        token_tags=positive.token_tags,
+        device=device,
+    )
+    video_rows = initial_video_rows.to(device=device, dtype=torch.float32, copy=True)
+    anchors = None
+    if keyframe_cond_rows is not None:
+        anchors = keyframe_cond_rows.to(device=device, dtype=torch.float32, copy=True)
+        video_rows[:n_cond].copy_(anchors)
+    audio_rows = torch.empty(
+        (0, MINIMAX_H3_AUDIO_ROW_WIDTH), device=device, dtype=torch.float32
+    )
+    num_steps = len(sigmas) - 1
+    timesteps = [1.0 - sigma for sigma in sigmas[:-1]]
+    plan = branch.prepare_timestep_plan(
+        video_timesteps=timesteps,
+        audio_timesteps=timesteps,
+        imgvid_cond_noise_aug=cond_t,
+        audio_ref_cond_noise_aug=1.0,
+        pin_imgvid_cond=True,
+    )
+    slots = model.prepare_adaln_plans([entry[0] for entry in plan])
+    sigma_values = torch.tensor(sigmas, dtype=torch.float32, device=device)
+    sigma_deltas = sigma_values[:-1] - sigma_values[1:]
+
+    for step in range(num_steps):
+        if n_cond:
+            video_rows[:n_cond].copy_(anchors)
+        kwargs = branch.forward_kwargs(
+            video_rows=video_rows,
+            audio_rows=audio_rows,
+            step_timesteps=plan[step],
+            adaln_slot=None if slots is None else slots[step],
+        )
+        # The image loop forwards and returns every image row, references
+        # included; the video helper forwards target rows only.
+        kwargs["x"][0].index_copy_(0, branch.img_pos_dev, video_rows)
+        kwargs["img_pos_for_infer_output_info"] = {"position_ids": branch.img_pos_dev}
+        kwargs["skip_mask_out_condition"] = n_cond == 0
+        metadata = positive.attn_metadata
+        if metadata is not None:
+            metadata.current_timestep = step
+        with set_forward_context(current_timestep=step, attn_metadata=metadata):
+            video, _ = model(**kwargs)
+        target_rows = video_rows[n_cond:]
+        target_rows.copy_(target_rows + sigma_deltas[step] * video[n_cond:].float())
+    return video_rows
+
+
 __all__ = [
     "MINIMAX_H3_AUDIO_REF_COND_TIMESTEP",
     "MINIMAX_H3_AUDIO_ROW_WIDTH",
     "MINIMAX_H3_IMGVID_COND_TIMESTEP",
     "MINIMAX_H3_VIDEO_ROW_WIDTH",
     "MiniMaxH3DenoiseBranch",
+    "PackedBranchInputs",
     "minimax_h3_denoise_loop",
+    "minimax_h3_image_denoise_loop",
 ]

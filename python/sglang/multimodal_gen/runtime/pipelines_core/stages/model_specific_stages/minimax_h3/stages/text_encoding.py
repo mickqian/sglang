@@ -57,6 +57,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                 self._encode_from_plan(
                     batch,
                     plan,
+                    pipeline_config=server_args.pipeline_config,
                     include_video_token_mask=(
                         server_args.pipeline_config.uses_subblock_attention(server_args)
                     ),
@@ -240,6 +241,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         batch: Req,
         plan,
         *,
+        pipeline_config,
         include_video_token_mask: bool = False,
     ) -> None:
         """Encode the positive Qwen3VL presentation into layer-50 states.
@@ -286,6 +288,11 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             raise ValueError(
                 "MiniMaxH3TextEncodingStage direct encode requires a tokenizer component"
             )
+        if plan.output_modality == "image":
+            batch.extra[MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY] = self._encode_image(
+                batch, plan, pipeline_config
+            )
+            return
         self._begin_text_encoder_use(0)
         with set_forward_context(current_timestep=0, attn_metadata=None):
             if plan.task == "ref2va":
@@ -314,6 +321,63 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
                     }
                 }
         batch.extra[MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY] = embeddings
+
+    def _encode_image(self, batch: Req, plan, pipeline_config) -> dict:
+        """Encode the image release's positive branch.
+
+        Edit references go to Qwen resized to the configured short-edge bounds
+        (the processor then applies its own 32px rounding and pixel limits).
+        """
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.presentation import (
+            minimax_h3_image_presentation,
+        )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.reference_encoding import (
+            minimax_h3_bound_image_reference,
+            minimax_h3_prepared_reference_image,
+        )
+
+        vision, counts = {}, []
+        if plan.materials:
+            prepared = minimax_h3_prepared_reference_image(batch, plan)
+            low, high = pipeline_config.edit_reference_short_edge_bounds("qwen")
+            images = [
+                minimax_h3_bound_image_reference(
+                    item["image"], min_short_edge=low, max_short_edge=high
+                )
+                for item in prepared["images"]
+            ]
+            vision = self.processor.image_processor(images=images, return_tensors="pt")
+            vision = {key: vision[key] for key in ("pixel_values", "image_grid_thw")}
+            merge = int(self.processor.image_processor.merge_size) ** 2
+            counts = [int(row.prod()) // merge for row in vision["image_grid_thw"]]
+
+        def encode(encoder, prompt: str, counts: list[int], vision: dict) -> dict:
+            ids, tags, positions = minimax_h3_image_presentation(
+                self.tokenizer,
+                prompt=prompt,
+                image_token_counts=counts,
+                get_rope_index=encoder.model.get_rope_index,
+                image_grid_thw=vision.get("image_grid_thw"),
+            )
+            text_len = int(tags.shape[0])
+            hidden = encoder.encode_ids(ids, position_ids=positions, **vision)
+            # The image loop packs CPU-resident branch inputs.
+            hidden = hidden[:text_len].cpu()
+            return {
+                "hidden_states": hidden,
+                "text_len": text_len,
+                "text_token_tags": tags,
+            }
+
+        # The image release has no residency plan, so nothing else moves the
+        # host-offloaded encoder: hold it across the encode.
+        with (
+            self.use_declared_component(
+                component_name="text_encoder", module=self.text_encoder
+            ) as encoder,
+            set_forward_context(current_timestep=0, attn_metadata=None),
+        ):
+            return {"positive": encode(encoder, plan.prompt, counts, vision)}
 
     def _encode_fl2va_keyframes(
         self,

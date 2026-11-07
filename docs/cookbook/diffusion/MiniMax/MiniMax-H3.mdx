@@ -69,6 +69,57 @@ The same FL2VA / Ref2VA split applies in
 Review the license and usage terms in the MiniMax-H3 model card before production or commercial use. SGLang support does not grant additional model usage rights.
 </Warning>
 
+### Image checkpoints
+
+An image release uses `MiniMaxH3ImagePipeline` in `model_index.json` and declares
+its supported tasks (`t2i`, `edit`, or both) in `_minimax_h3.tasks`. It is separate
+from the video checkpoint partitions above. `sglang serve` warms up with a
+synthetic request by default, which image releases do not support, so turn it
+off:
+
+```bash
+sglang serve --model-path /path/to/image-release --warmup-mode off
+```
+
+Image requests run one positive branch per step: omit `guidance_scale` or set it
+to 1, and leave `negative_prompt` unset. Edit requests use multipart `image`
+fields in reference order and require `edit` in the release's declared tasks.
+`prompt` must not be empty. Image releases are PDD checkpoints (below); a model
+directory without PDD heads is rejected at startup.
+
+A request smaller than the generation area, 2048x2048 pixels by default, is
+generated on a larger canvas with the same aspect ratio: both sides scale by
+`sqrt(min_generation_area / (width * height))` and round to the nearest 32px
+multiple. After decoding, the image is resized back to the requested size with
+LANCZOS, so a `1024x1024` request runs the computation of a `2048x2048` one and
+returns 1024x1024 pixels. A request at or above the area is only aligned to the
+32px grid. With the canvas, `size` may be any positive width and height. A
+request may set its own area with the integer field `min_generation_area`
+(pixels, 1024 to 16777216; JSON for generations, a form field for edits);
+1024 keeps a 32px-aligned request at its own size. Set `min_generation_area` to
+`null` in the `--pipeline-config-path` file to turn the canvas off: requests then
+need sizes that are multiples of 32 and may not set the field. Edit references
+are read upright (their EXIF orientation is applied) and resized for Qwen3-VL
+and the VAE independently of the canvas.
+
+An image release is a PDD (Parallel Decoding Distillation, see
+[PDD acceleration LoRAs](#pdd-acceleration-loras)) checkpoint and keeps its fused
+per-step output heads outside `transformer/`, in the format of that recipe:
+`_minimax_h3.pdd_fused_heads` in `model_index.json` names
+`pdd_fused_heads.safetensors` (`video_out.weight` and `video_out.bias`, one row per
+step; an audio-free image DiT has no `audio_out` head), and `pdd_config.json`
+beside it lists `num_inference_steps` and the `sigmas` grid the heads were
+distilled on. Image heads are distilled on an explicit grid rather than the
+shifted video grid, so the config carries the grid itself instead of
+`video_shift`, `audio_shift` and `sigma_max`.
+
+A PDD release runs one step per head. A release with six heads, for example,
+runs six DiT evaluations for both `/v1/images/generations` and
+`/v1/images/edits`; omit `num_inference_steps` or set it to 6. Other values are
+rejected. Each PDD step updates only the target image rows: edit references keep
+their conditioning timestep for every step, and the schedule adds no step to
+release them.
+
 ## 3. Deployment details
 
 The builder accepts legal custom GPU counts and topologies, marking them

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import torch
+
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_audio import (
     MiniMaxH3AudioVAEConfig,
 )
@@ -49,19 +51,8 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
             causal_encoder=True,
             causal_decoder=False,
             use_vit_decoder=True,
-            vit_decoder_kwargs={
-                "dim_head": 64,
-                "ffn_activation_fn": "silu",
-                "ffn_use_gated": True,
-                "heads": 32,
-                "norm_affine": True,
-                "norm_type": "rms_norm",
-                "num_layers": 36,
-                "qk_norm_affine": False,
-                "qk_norm_type": "rms_norm",
-                "rope_dim_ratio": 0.75,
-                "rope_theta": 100.0,
-            },
+            vit_decoder_2d=arch.vit_decoder_2d,
+            vit_decoder_kwargs=arch.vit_decoder_kwargs,
             shift_factor=0.0,
             scaling_factor=1.0,
             pixel_norm_type="imagenet",
@@ -86,6 +77,31 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
 
     def prepare_decoder_autocast_weights(self, dtype) -> int:
         return self.decoder.prepare_autocast_linear_weights(dtype)
+
+
+class MiniMaxH3ImageVAE(MiniMaxH3VideoVAE):
+    """H3 CNN encoder with the 2D ViT image decoder (``vit_decoder_2d``)."""
+
+    def prepare_decoder_autocast_weights(self, dtype) -> int:
+        # Cast every decoder-side parameter and floating buffer to ``dtype``,
+        # as diffusers from_pretrained(torch_dtype=...) does.
+        stale = sum(
+            tensor.is_floating_point() and tensor.dtype != dtype
+            for module in (self.post_quant_conv, self.decoder)
+            for tensor in (*module.parameters(), *module.buffers())
+        )
+        if stale:
+            self.post_quant_conv.to(dtype)
+            self.decoder.to(dtype)
+        return stale
+
+    @torch.no_grad()
+    def decode_image_raw(self, raw_latents: torch.Tensor) -> torch.Tensor:
+        """Raw BC1HW latents to BCHW pixels: BF16 decoder under BF16 autocast."""
+        self.prepare_decoder_autocast_weights(torch.bfloat16)
+        with torch.autocast(device_type=raw_latents.device.type, dtype=torch.bfloat16):
+            decoded = self.decode_base(raw_latents, process_image=True, frame_num=1)
+        return self.processor.revert_tensor(decoded).squeeze(2)
 
 
 class MiniMaxH3AudioVAE(DacAudioVAE, LayerwiseOffloadableModuleMixin):
@@ -114,6 +130,6 @@ class MiniMaxH3AudioVAE(DacAudioVAE, LayerwiseOffloadableModuleMixin):
         self.config = config
 
 
-EntryClass = [MiniMaxH3VideoVAE, MiniMaxH3AudioVAE]
+EntryClass = [MiniMaxH3VideoVAE, MiniMaxH3ImageVAE, MiniMaxH3AudioVAE]
 
-__all__ = ["MiniMaxH3AudioVAE", "MiniMaxH3VideoVAE"]
+__all__ = ["MiniMaxH3AudioVAE", "MiniMaxH3ImageVAE", "MiniMaxH3VideoVAE"]

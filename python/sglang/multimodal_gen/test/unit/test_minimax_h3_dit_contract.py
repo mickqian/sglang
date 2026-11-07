@@ -283,6 +283,7 @@ def test_cache_dit_input_preservation_toggles_every_block():
     model = MiniMaxH3DiTModel.__new__(MiniMaxH3DiTModel)
     torch.nn.Module.__init__(model)
     model.blocks = torch.nn.ModuleList([torch.nn.Identity() for _ in range(5)])
+    model.arch = MiniMaxH3DiTArchConfig()
 
     model.set_cache_dit_input_preservation(True)
     assert all(block.preserve_input_for_cache_dit for block in model.blocks)
@@ -307,6 +308,7 @@ def test_lazy_attention_resolution_preserves_backend_precedence(
     model._component_attention_backend_override = (
         AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN
     )
+    model._required_component_attention_backend = None
     model._resolved_attention_backend = None
     backend = Mock()
     backend.get_enum.return_value = expected_backend
