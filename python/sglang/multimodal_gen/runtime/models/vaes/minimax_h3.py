@@ -86,6 +86,10 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
 class MiniMaxH3ImageVAE(MiniMaxH3VideoVAE):
     """H3 CNN encoder with the 2D ViT image decoder (``vit_decoder_2d``)."""
 
+    # encode() is only quant_conv(encoder(x)); tile assignment/gather and the
+    # seeded posterior sample happen outside this shared cache boundary.
+    conditioning_encode_is_rank_local = True
+
     def __init__(self, config: MiniMaxH3VideoVAEConfig) -> None:
         super().__init__(config)
         self.decode_fast_path_gate = VaeFastPathGate()
