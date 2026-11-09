@@ -29,7 +29,9 @@ Server warmup runs a valid prefix of the PDD schedule; real requests always
 run all six steps. With online AdaLN and enough cache slots, warmup prepares
 the full grids for both declared T2I and editing tasks without extra denoising
 steps. Smaller custom caches prepare only the warmup task. New shapes can
-still initialize kernels. `--warmup-mode off` skips this preparation. For CLI/API options, see the
+still initialize kernels. When every plan fits on the GPU, Auto omits the
+pinned host cache; an explicit `--minimax-h3-adaln-host-cache-gb` overrides this.
+`--warmup-mode off` skips this preparation. For CLI/API options, see the
 [CLI reference](/docs/sglang-diffusion/api/cli) and
 [OpenAI API guide](/docs/sglang-diffusion/api/openai_api).
 
@@ -142,17 +144,19 @@ Peak reserved CUDA memory was about 91 GiB on one B300. These results include
 native fusion, VAE batching and exact projection reuse, without reducing steps
 or generation area.
 
-One-step server warmup at `014b75c0ce04` prepares both task grids when the
-online cache holds at least 12 plans. Compared with `ea0cba698a08`, on the
+One-step server warmup at `f3c0a6f09c6b` prepares both task grids when the
+online cache holds at least 12 plans and omits the unnecessary host copy.
+Compared with `ea0cba698a08`, on the
 same cached checkpoints and one resident B300:
 
-| First-request measurement | Before | Both task grids |
+| First-request measurement | Before | Current default |
 | --- | --- | --- |
-| First editing request, pipeline | 4.114 s | 2.073 s |
-| Process start to first editing HTTP response | 38.9 s | 37.0 s |
-| Process start to first T2I HTTP response | 36.1 s | 36.7 s |
+| First editing request, pipeline | 4.041 s | 2.065 s |
+| Process start to first editing HTTP response | 38.3 s | 35.4 s |
+| Process start to first T2I HTTP response | 36.4 s | 34.0 s |
+| Worker CPU RSS after first editing request | 14.52 GiB | 6.52 GiB |
 
-Editing rows are medians from four fresh servers per path; the T2I row uses
-six per path. Precomputing shifts work into startup: first editing gets faster,
-while a T2I-only startup takes slightly longer. The warm-request table above
-uses a different timing boundary.
+Each first-request scenario uses four fresh servers per path. Both-task
+precomputation moves work into startup; avoiding the unused host tier saves
+about 8 GiB of worker RSS and removes its allocation cost. The warm-request
+table above uses a different timing boundary.
