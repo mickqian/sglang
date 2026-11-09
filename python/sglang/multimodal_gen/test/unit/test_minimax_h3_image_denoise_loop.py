@@ -131,6 +131,27 @@ def _run(model, positive, **overrides):
     return minimax_h3_image_denoise_loop(**args)
 
 
+def test_static_branch_preparation_is_request_local_and_runs_once():
+    prepared = []
+
+    def prepare(branch):
+        assert not model.calls
+        kwargs = branch.static_kwargs
+        prepared.append(kwargs["prompt_embeds"].clone())
+        kwargs["refined_prompt_embeds_length"] = kwargs["prompt_embeds"].shape[0]
+
+    for length, value in [(3, 2), (9, 7)]:
+        model = _BufferModel()
+        _run(model, _inputs(length, value), prepare_branch=prepare)
+        assert len(model.calls) == 2
+        assert all(
+            call["kwargs"]["refined_prompt_embeds_length"] == length
+            for call in model.calls
+        )
+    assert [tuple(x.shape) for x in prepared] == [(3, 8), (9, 8)]
+    assert prepared[0][0, 0] == 2 and prepared[1][0, 0] == 7
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_t2i_positive_velocity_and_forward_inputs(cached):
     positive = _inputs(3, 3)

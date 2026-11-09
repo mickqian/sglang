@@ -979,6 +979,13 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                     "MiniMax H3 image serves PDD releases only, but the "
                     "transformer has no fused PDD output heads"
                 )
+
+            def prepare_branch(branch):
+                _precompute_refined_prompt_embeds(
+                    transformer, branch, device=self.device
+                )
+                _precompute_rope_cache(transformer, branch, device=self.device)
+
             with self.progress_bar(
                 total=len(batch.sigmas) - 1,
                 batch=batch,
@@ -996,6 +1003,7 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                     initial_video_rows=initial_rows,
                     keyframe_cond_rows=anchors,
                     sigmas=batch.sigmas,
+                    prepare_branch=prepare_branch,
                     device=self.device,
                     on_step=on_step,
                     step_profiler=partial(self._profile_denoising_step, batch=batch),

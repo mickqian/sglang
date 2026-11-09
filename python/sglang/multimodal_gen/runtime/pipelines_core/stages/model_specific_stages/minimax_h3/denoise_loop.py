@@ -685,6 +685,7 @@ def minimax_h3_image_denoise_loop(
     imgvid_cond_noise_aug_for_inference: float = MINIMAX_H3_IMGVID_COND_TIMESTEP,
     on_step: Callable[[int], None] | None = None,
     step_profiler: Callable[[int], AbstractContextManager] | None = None,
+    prepare_branch: Callable[[MiniMaxH3DenoiseBranch], None] | None = None,
 ) -> torch.Tensor:
     """Return fp32 image rows after ``len(sigmas) - 1`` positive-branch steps.
 
@@ -703,6 +704,8 @@ def minimax_h3_image_denoise_loop(
         token_tags=positive.token_tags,
         device=device,
     )
+    if prepare_branch is not None:
+        prepare_branch(branch)
     video_rows = initial_video_rows.to(device=device, dtype=torch.float32, copy=True)
     anchors = None
     if keyframe_cond_rows is not None:
