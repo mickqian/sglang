@@ -11,6 +11,10 @@ from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
 from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
     LayerwiseOffloadableModuleMixin,
 )
+from sglang.multimodal_gen.runtime.models.vaes.fast_path_gate import (
+    VaeFastPathGate,
+    register_vae_fast_path_gate,
+)
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_audio_vae import (
     DacAudioVAE,
 )
@@ -81,6 +85,41 @@ class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
 
 class MiniMaxH3ImageVAE(MiniMaxH3VideoVAE):
     """H3 CNN encoder with the 2D ViT image decoder (``vit_decoder_2d``)."""
+
+    def __init__(self, config: MiniMaxH3VideoVAEConfig) -> None:
+        super().__init__(config)
+        self.decode_fast_path_gate = VaeFastPathGate()
+        register_vae_fast_path_gate(self, self.decode_fast_path_gate)
+
+    def _run_tile_tasks(
+        self, tiles, tile_indices, forward_fn, stack_tiling, cls_agg=None
+    ):
+        # Reuse native overlapping-tile assembly and batched ViT attention.
+        # Bound activation memory as the image canvas grows. Encoding and exact
+        # requests retain their original scheduling and numerical path.
+        if (
+            self.decode_fast_path_gate.enabled
+            and not self.training
+            and tile_indices
+            and tiles[0].is_cuda
+            and forward_fn == self.decode
+        ):
+            chunk_size = max(1, 128 // tiles[0].shape[0])
+            outputs = []
+            for start in range(0, len(tile_indices), chunk_size):
+                outputs.extend(
+                    super()._run_tile_tasks(
+                        tiles,
+                        tile_indices[start : start + chunk_size],
+                        forward_fn,
+                        stack_tiling=True,
+                        cls_agg=cls_agg,
+                    )
+                )
+            return outputs
+        return super()._run_tile_tasks(
+            tiles, tile_indices, forward_fn, stack_tiling, cls_agg
+        )
 
     def prepare_decoder_autocast_weights(self, dtype) -> int:
         # Cast every decoder-side parameter and floating buffer to ``dtype``,

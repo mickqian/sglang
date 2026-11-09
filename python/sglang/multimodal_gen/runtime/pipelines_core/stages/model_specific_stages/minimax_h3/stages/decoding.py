@@ -458,7 +458,10 @@ class MiniMaxH3DecodingStage(DecodingStage):
             )
             # The ViT decoder's attention layer reads the forward context on
             # CUDA, as in the video decode path.
-            with set_forward_context(current_timestep=0, attn_metadata=None):
+            with (
+                set_forward_context(current_timestep=0, attn_metadata=None),
+                use_vae_fast_path(video_vae, quality_allows(batch.quality, "lossless")),
+            ):
                 pixels = video_vae.decode_image_raw(raw)
         # decode_image_raw already applies the ImageNet inverse normalization.
         pixels = pixels.detach().float().cpu()
