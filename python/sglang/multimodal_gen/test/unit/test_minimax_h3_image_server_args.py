@@ -3,6 +3,9 @@
 
 import pytest
 
+from sglang.multimodal_gen.configs.pipeline_configs import (
+    minimax_h3_image as image_config,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
     MiniMaxH3PipelineConfig,
 )
@@ -12,6 +15,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3_image import (
 from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config import (
     ModelDeploymentConfig,
 )
+from sglang.multimodal_gen.configs.task_type import ModelTaskType
 from sglang.multimodal_gen.runtime.platforms.interface import Platform, PlatformEnum
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.server_args import auto_tune as auto_tune_module
@@ -38,10 +42,16 @@ class SimulatedCUDA(Platform):
 
 @pytest.fixture
 def make_server(monkeypatch, tmp_path):
-    def make(memory_gib=80, *, config=None, **kwargs):
+    def make(memory_gib=80, *, config=None, device_names=None, **kwargs):
         platform = SimulatedCUDA(memory_gib)
         monkeypatch.setattr(args_module, "current_platform", platform)
         monkeypatch.setattr(auto_tune_module, "current_platform", platform)
+        monkeypatch.setattr(image_config, "current_platform", platform)
+        monkeypatch.setattr(
+            image_config.torch.cuda,
+            "get_device_name",
+            lambda index: device_names[index] if device_names else "Simulated CUDA",
+        )
         return ServerArgs(
             model_path=str(tmp_path / "not-a-model-no-weights"),
             pipeline_config=MiniMaxH3ImagePipelineConfig()
@@ -54,6 +64,45 @@ def make_server(monkeypatch, tmp_path):
         )
 
     return make
+
+
+def test_b300_online_adaln_default_and_explicit_overrides(make_server):
+    hardware = {"memory_gib": 268, "device_names": ["NVIDIA B300 SXM6 AC"]}
+    args = make_server(**hardware)
+    assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
+    disabled = make_server(**hardware, minimax_h3_adaln_online=False)
+    assert not disabled.minimax_h3_adaln_online
+    wider = make_server(**hardware, minimax_h3_adaln_plan_width=4)
+    assert wider.minimax_h3_adaln_online and wider.minimax_h3_adaln_plan_width == 4
+    other = make_server(device_names=["NVIDIA H200"])
+    assert not other.minimax_h3_adaln_online
+    mixed = make_server(num_gpus=2, device_names=["NVIDIA B300 SXM6 AC", "NVIDIA H200"])
+    assert not mixed.minimax_h3_adaln_online
+
+
+def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
+    args = make_server(minimax_h3_adaln_online=True)
+    assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
+
+
+def test_edit_online_adaln_rejects_narrow_plan_and_fp32_rebuild(
+    make_server, monkeypatch
+):
+    config = MiniMaxH3ImagePipelineConfig()
+    monkeypatch.setattr(
+        config,
+        "get_supported_task_types",
+        lambda: (ModelTaskType.T2I, ModelTaskType.I2I),
+    )
+    with pytest.raises(ValueError, match="plan width >= 2"):
+        make_server(
+            config=config, minimax_h3_adaln_online=True, minimax_h3_adaln_plan_width=1
+        )
+    monkeypatch.setattr(
+        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32", True
+    )
+    with pytest.raises(ValueError, match="match precision"):
+        make_server(minimax_h3_adaln_online=True)
 
 
 @pytest.mark.parametrize("mode", ["auto", "manual", "speed", "memory"])

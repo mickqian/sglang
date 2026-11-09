@@ -34,6 +34,9 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_quant_load_spec,
 )
 from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+from sglang.multimodal_gen.runtime.models.dits.minimax_h3_adaln_cache import (
+    MINIMAX_H3_ADALN_MAX_PLAN_WIDTH,
+)
 from sglang.multimodal_gen.runtime.models.registry import ModelRegistry
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
@@ -466,6 +469,8 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             init_params["adaln_weight_files"] = safetensors_list
             init_params["adaln_plan_width"] = (
                 component_server_args.minimax_h3_adaln_plan_width
+                if component_server_args.minimax_h3_adaln_plan_width is not None
+                else MINIMAX_H3_ADALN_MAX_PLAN_WIDTH
             )
             init_params["adaln_max_plans"] = (
                 envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS

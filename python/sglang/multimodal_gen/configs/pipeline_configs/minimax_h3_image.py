@@ -7,6 +7,9 @@ import posixpath
 from dataclasses import dataclass
 from typing import ClassVar
 
+import torch
+
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
     MiniMaxH3PipelineConfig,
 )
@@ -14,7 +17,10 @@ from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config impo
     ModelDeploymentConfig,
 )
 from sglang.multimodal_gen.configs.task_type import DataType, ModelTaskType
-from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
+from sglang.multimodal_gen.runtime.platforms import (
+    AttentionBackendEnum,
+    current_platform,
+)
 
 # The assembled image VAE (CNN encoder + 2D ViT decoder) is one standard
 # diffusers component weight file, unlike the video VAE's source/ layout.
@@ -219,7 +225,6 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             "enable_torch_compile",
             "regional_compile",
             "enable_breakable_cuda_graph",
-            "minimax_h3_adaln_online",
             "comfyui_mode",
         ):
             if getattr(server_args, name):
@@ -259,6 +264,7 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
                 "decode, local VAE and the image schedule"
             )
         self.vae_config.post_init()
+        self._configure_online_adaln(server_args)
         component_backend, _ = server_args.resolve_component_attention_backend(
             "transformer"
         )
@@ -268,6 +274,39 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             # Explicit global/component/forced choices were checked above.
             server_args.component_attention_backends["transformer"] = "fa"
             server_args._requested_component_attention_backends["transformer"] = "fa"
+
+    def _configure_online_adaln(self, server_args) -> None:
+        # The measured B300 recipe avoids keeping 24.2 GiB of constant AdaLN
+        # projections resident. Explicit choices and custom weights win.
+        if (
+            server_args.minimax_h3_adaln_online is None
+            and server_args.performance_mode == "auto"
+            and server_args.transformer_weights_path is None
+            and not server_args.component_paths.get("transformer")
+            and not server_args.component_weights_paths.get("transformer")
+            and not envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32
+            and current_platform.is_cuda()
+        ):
+            gpu_ids = server_args.gpu_ids or range(
+                server_args.base_gpu_id, server_args.base_gpu_id + server_args.num_gpus
+            )
+            if all(
+                torch.cuda.get_device_name(i).startswith("NVIDIA B300") for i in gpu_ids
+            ):
+                server_args.minimax_h3_adaln_online = True
+        if server_args.minimax_h3_adaln_online is None:
+            server_args.minimax_h3_adaln_online = False
+        if not server_args.minimax_h3_adaln_online:
+            return
+        if envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32:
+            raise ValueError("MiniMax H3 image online AdaLN requires match precision")
+        if server_args.minimax_h3_adaln_plan_width is None:
+            server_args.minimax_h3_adaln_plan_width = 2
+        if (
+            server_args.minimax_h3_adaln_plan_width < 2
+            and ModelTaskType.I2I in self.get_supported_task_types()
+        ):
+            raise ValueError("MiniMax H3 image editing needs AdaLN plan width >= 2")
 
     def select_vae_weight_files(
         self, safetensors_list, component_model_path, component_name, vae_precision
