@@ -188,13 +188,14 @@ recipes remain unmeasured.
 H200 measurements use the same checkpoints, prompts, precision, six-step
 schedule and canvas. The single-GPU measurements at `851f8cb71469` use explicit
 resident placement and online AdaLN; these become Auto defaults at
-`9979ece836fb`. The two-GPU measurements use `9979ece836fb` with encoder fold.
+`9979ece836fb`. TP2 and Ring2 use `9979ece836fb`; Ulysses2 was remeasured
+at `be38e34be99d` with exact conditioning reuse. All two-GPU rows use encoder fold.
 
 | GPUs and layout | T2I pipeline | Editing pipeline |
 | --- | --- | --- |
 | 1 × H200, resident | 1.934 s | 3.137 s |
 | 2 × H200, TP2, encoder fold | 1.169 s | 2.041 s |
-| 2 × H200, Ulysses2, encoder fold | 1.151 s | 1.972 s |
+| 2 × H200, Ulysses2, encoder fold | 1.150 s | 1.800 s |
 | 2 × H200, Ring2, encoder fold | 1.224 s | 2.146 s |
 
 The single-GPU row uses 20 warm requests per task across four fresh servers;
@@ -208,8 +209,9 @@ single-GPU row above. These are latency measurements, not throughput results.
 
 ### H200 at 4K
 
-The following measurements use `f1af1685f6c3`, the same checkpoint revisions
-and dependencies above, native precision, lossless quality and all six steps.
+The Ulysses2 row uses `be38e34be99d` with exact conditioning reuse; the other
+rows use `f1af1685f6c3`. All use the same checkpoint revisions and dependencies
+above, native precision, lossless quality and all six steps.
 Auto placement and AdaLN precomputation are enabled; two-GPU rows use encoder
 fold. Each cell is the median of 10 warm requests across two fresh servers,
 excluding the first lossless request for each task in each server.
@@ -218,7 +220,7 @@ excluding the first lossless request for each task in each server.
 | --- | --- | --- | --- |
 | 1 × H200 | 10.133 s | 11.839 s | 9.948 s |
 | 2 × H200, TP2 | 5.850 s | 6.992 s | 5.730 s |
-| 2 × H200, Ulysses2 | 5.584 s | 6.678 s | 5.530 s |
+| 2 × H200, Ulysses2 | 5.583 s | 6.496 s | 5.525 s |
 | 2 × H200, Ring2 | 6.023 s | 7.145 s | 5.954 s |
 
 Conditioning caches are warm. T2I uses seed 42; editing uses seed 1234 and
