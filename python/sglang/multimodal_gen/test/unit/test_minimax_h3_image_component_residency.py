@@ -63,6 +63,7 @@ class Manager:
         self.server_args = server_args
         self.state = SimpleNamespace(stage_name=None)
         self.uses = []
+        self.finished_unused = []
 
     @contextmanager
     def use_component(self, use, module):
@@ -75,6 +76,11 @@ class Manager:
 
     def finish_active_use(self):
         pass
+
+    def finish_unused_component(self, use, module):
+        assert use.component_name == "text_encoder"
+        assert not getattr(module, "resident", False)
+        self.finished_unused.append(use.component_name)
 
 
 def _resident(module, name):
@@ -182,4 +188,5 @@ def test_every_component_runs_inside_its_declared_use(server, monkeypatch, task)
         assert REFS not in req.extra
         expected.pop(1)  # t2i has no reference to encode
     assert manager.uses == expected
+    assert manager.finished_unused == ["text_encoder"]
     assert not any(getattr(module, "resident", False) for module in modules.values())
