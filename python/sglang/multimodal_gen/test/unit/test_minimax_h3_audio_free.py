@@ -167,11 +167,10 @@ def test_only_the_audio_projections_are_removed(models):
         image.load_state_dict(video.state_dict(), strict=True)
 
 
-@pytest.mark.parametrize("positive", [False, True])
 @pytest.mark.parametrize("edit", [False, True])
-def test_image_prediction_matches_the_audio_model(models, positive, edit):
+def test_image_prediction_matches_the_audio_model(models, edit):
     video, image = models
-    inputs = _inputs(positive=positive, edit=edit)
+    inputs = _inputs(positive=True, edit=edit)
     with torch.inference_mode(), set_forward_context(0, AttentionMetadata(0)):
         expected, expected_audio = video(**inputs)
         with patch.object(image, "materialize_mps_non_layer_weights") as materialize:
@@ -183,6 +182,16 @@ def test_image_prediction_matches_the_audio_model(models, positive, edit):
     assert all(
         "audio_patch_proj" not in call.args for call in materialize.call_args_list
     )
+
+
+def test_empty_text_is_rejected(models):
+    for model in models:
+        with (
+            torch.inference_mode(),
+            set_forward_context(0, AttentionMetadata(0)),
+            pytest.raises(ValueError, match="refiner cu_seqlens live text length"),
+        ):
+            model(**_inputs(positive=False))
 
 
 def test_audio_rows_are_rejected(models):

@@ -11,6 +11,7 @@ import torch
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEConfig,
 )
+from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3 import MiniMaxH3ImageVAE
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae import (
     AutoencoderKLLegacy,
@@ -87,13 +88,14 @@ def test_local_tiling_decode_matches_untiled(tiny_image):
     moments = tiny_image.tiled_encode(tiny_image.transform(pixels).unsqueeze(2))
     latents = DiagonalGaussianDistribution(moments).mean
     assert latents.shape == (1, 24, 1, 3, 3)
-    torch.testing.assert_close(
-        tiny_image.decode_base(latents, frame_num=1, process_image=True),
-        tiny_image.tiled_decode(latents)[:, :, 0],
-        rtol=0,
-        atol=0,
-    )
-    assert tiny_image.decode_image_raw(latents).shape == (1, 3, 48, 48)
+    with torch.inference_mode(), set_forward_context(0, None):
+        torch.testing.assert_close(
+            tiny_image.decode_base(latents, frame_num=1, process_image=True),
+            tiny_image.tiled_decode(latents)[:, :, 0],
+            rtol=0,
+            atol=0,
+        )
+        assert tiny_image.decode_image_raw(latents).shape == (1, 3, 48, 48)
 
 
 def test_posterior_sample_without_generator_uses_global_cpu_rng():
