@@ -69,15 +69,20 @@ def make_server(monkeypatch, tmp_path):
     return make
 
 
-def test_b300_online_adaln_default_and_explicit_overrides(make_server):
-    hardware = {"memory_gib": 268, "device_names": ["NVIDIA B300 SXM6 AC"]}
+@pytest.mark.parametrize(
+    "device_name,memory_gib", [("NVIDIA B300 SXM6 AC", 268), ("NVIDIA H200", 140)]
+)
+def test_online_adaln_default_and_explicit_overrides(
+    make_server, device_name, memory_gib
+):
+    hardware = {"memory_gib": memory_gib, "device_names": [device_name]}
     args = make_server(**hardware)
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
     disabled = make_server(**hardware, minimax_h3_adaln_online=False)
     assert not disabled.minimax_h3_adaln_online
     wider = make_server(**hardware, minimax_h3_adaln_plan_width=4)
     assert wider.minimax_h3_adaln_online and wider.minimax_h3_adaln_plan_width == 4
-    other = make_server(device_names=["NVIDIA H200"])
+    other = make_server(device_names=["NVIDIA H100"])
     assert not other.minimax_h3_adaln_online
     mixed = make_server(num_gpus=2, device_names=["NVIDIA B300 SXM6 AC", "NVIDIA H200"])
     assert not mixed.minimax_h3_adaln_online
@@ -163,12 +168,17 @@ def _layout(args):
     }
 
 
-def test_large_memory_residency_keeps_explicit_offload_overrides(make_server):
-    resident = make_server(280)
+@pytest.mark.parametrize("memory_gib", [130, 140, 280])
+def test_large_memory_residency_keeps_explicit_offload_overrides(
+    make_server, memory_gib
+):
+    resident = make_server(memory_gib)
     assert not resident.text_encoder_cpu_offload
     assert not resident.vae_cpu_offload
-    offloaded = make_server(280, text_encoder_cpu_offload=True)
+    offloaded = make_server(memory_gib, text_encoder_cpu_offload=True)
     assert offloaded.text_encoder_cpu_offload
+    below_threshold = make_server(129)
+    assert below_threshold.text_encoder_cpu_offload
 
 
 @pytest.mark.parametrize("num_gpus", [2, 4, 8])

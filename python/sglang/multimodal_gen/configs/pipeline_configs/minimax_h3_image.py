@@ -81,8 +81,9 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         # parallel flag `--num-gpus N` runs Ulysses N over the packed sequence.
         return ModelDeploymentConfig(
             auto_auxiliary_layerwise_offload=False,
-            # the complete resident image path is validated on B300 with this headroom
-            keep_resident_min_available_gb=240,
+            # Full 2048² generation and multi-reference editing fit on H200
+            # even with AdaLN weights resident (about 115 GiB peak reserved).
+            keep_resident_min_available_gb=130,
             keep_resident_components=("dit", "text_encoder", "vae"),
             auto_enable_cfg_parallel=False,
             supports_cfg_parallel=False,
@@ -276,7 +277,7 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             server_args._requested_component_attention_backends["transformer"] = "fa"
 
     def _configure_online_adaln(self, server_args) -> None:
-        # The measured B300 recipe avoids keeping 24.2 GiB of constant AdaLN
+        # The measured H200/B300 recipes avoid keeping 24.2 GiB of constant AdaLN
         # projections resident. Explicit choices and custom weights win.
         if (
             server_args.minimax_h3_adaln_online is None
@@ -290,8 +291,10 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             gpu_ids = server_args.gpu_ids or range(
                 server_args.base_gpu_id, server_args.base_gpu_id + server_args.num_gpus
             )
-            if all(
-                torch.cuda.get_device_name(i).startswith("NVIDIA B300") for i in gpu_ids
+            device_names = [torch.cuda.get_device_name(i) for i in gpu_ids]
+            if any(
+                all(name.startswith(family) for name in device_names)
+                for family in ("NVIDIA B300", "NVIDIA H200")
             ):
                 server_args.minimax_h3_adaln_online = True
         if server_args.minimax_h3_adaln_online is None:
