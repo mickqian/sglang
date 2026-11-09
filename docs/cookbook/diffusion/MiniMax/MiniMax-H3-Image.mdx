@@ -26,8 +26,10 @@ saves the returned image as `generated.png`.
 <Deployment config={config} />
 
 Server warmup runs a valid prefix of the PDD schedule; real requests always
-run all six steps. New shapes can initialize kernels, and new AdaLN plans
-read the checkpoint before denoising. For CLI/API options, see the
+run all six steps. With online AdaLN and enough cache slots, warmup prepares
+the full grid for its task without extra denoising steps. New shapes can
+initialize kernels; a different task can still build new plans from the
+checkpoint. `--warmup-mode off` skips this preparation. For CLI/API options, see the
 [CLI reference](/docs/sglang-diffusion/api/cli) and
 [OpenAI API guide](/docs/sglang-diffusion/api/openai_api).
 
@@ -87,7 +89,7 @@ lowest measured server pipeline latency; TP2 is also close and uses less memory.
 On B300 with standard weights, Auto precomputes the native AdaLN timestep
 projections and releases their weights. This retains the original precision
 and outputs, reducing measured peak reserved memory by about 24.7 GiB on one
-B300. The first text-to-image and editing requests build separate plans;
+B300. Text-to-image and editing use separate plans;
 keep the checkpoint files available for uncached plans. The bounded GPU and
 host caches reuse these exact results. Select **Keep weights** in the picker,
 or pass `--minimax-h3-adaln-online false`, to avoid the rebuild cost. Other
@@ -139,3 +141,11 @@ recipes remain unmeasured.
 Peak reserved CUDA memory was about 91 GiB on one B300. These results include
 native fusion, VAE batching and exact projection reuse, without reducing steps
 or generation area.
+
+With one-step server warmup, preparing the full AdaLN grid at `e69f0063c1f0`
+reduced the first T2I pipeline median from 3.257 s to 1.047 s compared with
+`7ccff196eb3a`. This comparison used six fresh server processes per path and
+the same cached checkpoints. Precomputing shifts work into startup. Median
+time from process start to first HTTP response was 38.8 s before and 38.0 s
+after. These are startup
+measurements; the warm-request table above has a different timing boundary.
