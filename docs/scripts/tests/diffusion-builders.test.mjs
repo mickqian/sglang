@@ -247,6 +247,28 @@ test("H3-Image Spark stays a single-GB10 derived recipe at both resolutions", ()
   assert.ok(resolve(config, { ...recipe, gpus_per_node: 2 }).builder.errors.length);
 });
 
+test("H3-Image conditioning reuse is a server choice with separate coverage", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const dim = config.overlayDims.find((entry) => entry.id === "conditioning");
+  assert.equal(dim.scope, "serve");
+  assert.deepEqual(dim.options.find((option) => option.id === "off").flags, ["--disable-conditioning-cache"]);
+  const base = { hw: "h200", mode: "edit", size: "2048x2048" };
+  assert.equal(resolve(config, base).verified, true);
+  const off = resolve(config, { ...base, conditioning: "off" });
+  assert.deepEqual(off.builder.errors, []);
+  assert.deepEqual(off.builder.verification, { serve: "verified", request: "verified" });
+  for (const request of [{ mode: "t2i" }, { size: "4096x4096" }, { references: "two" }, { quality: "exact" }]) {
+    assert.deepEqual(resolve(config, { ...base, conditioning: "off", ...request }).builder.verification, { serve: "verified", request: "unverified" });
+  }
+  for (const server of [{ hw: "b300" }, { placement: "offload" }, { adaln: "online" }, { warmup: "off" }]) {
+    assert.equal(resolve(config, { ...base, conditioning: "off", ...server }).verified, false);
+  }
+  assert.equal(curl(config, { ...base, conditioning: "off" }), curl(config, base));
+  const recipe = config.commandBuilder.resource.recommendedRecipe(selection(config, { ...base, conditioning: "off" }));
+  assert.equal(recipe.conditioning, "on");
+  assert.equal(recipe.verifiedWhen(selection(config, { ...base, conditioning: "off" })), true);
+});
+
 test("Wan preserves standard, multi-GPU, Ascend and LoRA recipes", () => {
   for (const version of ["1", "2"]) {
     const config = get(`/Wan/Wan2.${version}.mdx`);

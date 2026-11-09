@@ -1,4 +1,9 @@
 export const config = (() => {
+  const uncachedServer = (s) => s.hw === "h200" && Number(s.nodes) === 1
+    && Number(s.gpus_per_node) === 1 && s.placement === "auto" && s.encoder === "auto"
+    && s.adaln === "auto" && s.warmup === "server";
+  const uncachedWorkload = (s) => uncachedServer(s) && s.mode === "edit"
+    && s.size === "2048x2048" && s.references === "one" && s.quality === "lossless";
   const guide4kWorkload = (s) => s.hw === "h200" && (
     (s.mode === "t2i" && ["4736x3552", "6272x2688"].includes(s.size))
     || (s.mode === "edit" && s.size === "4096x4096" && s.references === "one")
@@ -54,6 +59,14 @@ export const config = (() => {
       ],
     },
     {
+      id: "conditioning", title: "Conditioning reuse", scope: "serve", default: "on",
+      description: "Reuse exact text conditioning and VAE moments for matching inputs. Disable it to measure uncached requests; sampling still uses the request's generator.",
+      options: [
+        { id: "on", label: "Exact reuse", recommended: true },
+        { id: "off", label: "Disabled", flags: ["--disable-conditioning-cache"], soft: (s) => !uncachedWorkload(s), softReason: "This uncached server recipe has not been validated with the selected workload." },
+      ],
+    },
+    {
       id: "quality", title: "Quality", scope: "request", default: "lossless",
       description: "Lossless enables native fusion and batched VAE tiles. Exact retains the release arithmetic and tile scheduling; both use six steps.",
       options: [{ id: "lossless", label: "Lossless", recommended: true }, { id: "exact", label: "Exact" }],
@@ -98,9 +111,10 @@ export const config = (() => {
         ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `h200-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
       ].map((recipe) => ({
         adaln: "auto",
+        conditioning: "on",
         ...recipe,
         verifiedWhen: (s) => config.commandBuilder.resolveDeployment({
-          ...s, ...recipe, topology_mode: "manual", adaln: recipe.adaln || "auto", warmup: "server",
+          ...s, ...recipe, topology_mode: "manual", adaln: recipe.adaln || "auto", warmup: "server", conditioning: "on",
         }).verified,
       })),
       recommendedRecipe: (s) => {
@@ -133,8 +147,9 @@ export const config = (() => {
       const measured4k = guide4kWorkload(s) && s.placement === "auto"
         && s.adaln !== "resident" && s.warmup === "server";
       const serveVerified = !!recipe && !recipe.unverified && !errors.length
+        && (s.conditioning !== "off" || uncachedServer(s))
         && (s.warmup !== "off" || (s.hw === "h200" && Number(s.gpus_per_node) === 1));
-      const verified = serveVerified && (measured2k || measured4k);
+      const verified = serveVerified && (s.conditioning === "off" ? uncachedWorkload(s) : measured2k || measured4k);
       const flags = ["--model-path {{MODEL_NAME}}", "--backend sglang"];
       if (Number(s.gpus_per_node) > 1) flags.push(`--num-gpus ${s.gpus_per_node}`, `--tp-size ${topology.tp_size}`, `--ulysses-degree ${topology.ulysses_degree}`, `--ring-degree ${topology.ring_degree}`);
       flags.push("--host {{HOST_IP}}", "--port {{PORT}}");

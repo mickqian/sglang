@@ -186,26 +186,33 @@ recipes remain unmeasured.
 ### H200 at 2K
 
 H200 measurements use the same checkpoints, prompts, precision, six-step
-schedule and canvas. The single-GPU measurements at `851f8cb71469` use explicit
-resident placement and online AdaLN; these become Auto defaults at
-`9979ece836fb`. TP2 and Ring2 use `9979ece836fb`; Ulysses2 was remeasured
-at `be38e34be99d` with exact conditioning reuse. All two-GPU rows use encoder fold.
+schedule and canvas. Single-GPU T2I uses `851f8cb71469` with explicit resident
+placement and online AdaLN; these become Auto defaults at `9979ece836fb`.
+Single-GPU editing and Ulysses2 were remeasured at `be38e34be99d` with Auto
+placement and exact conditioning reuse. TP2 and Ring2 use `9979ece836fb`.
+All two-GPU rows use encoder fold.
 
 | GPUs and layout | T2I pipeline | Editing pipeline |
 | --- | --- | --- |
-| 1 × H200, resident | 1.934 s | 3.137 s |
+| 1 × H200, resident | 1.934 s | 3.116 s |
 | 2 × H200, TP2, encoder fold | 1.169 s | 2.041 s |
 | 2 × H200, Ulysses2, encoder fold | 1.150 s | 1.800 s |
 | 2 × H200, Ring2, encoder fold | 1.224 s | 2.146 s |
 
-The single-GPU row uses 20 warm requests per task across four fresh servers;
-each two-GPU row uses 10 across two servers. The first request per task in each
-server is excluded. Peak reserved memory was about 90 GiB on one H200 and,
-per GPU, 48 GiB for TP2 or 68 GiB for Ulysses2. In the matched single-H200
-ABBA comparison, component offload with resident AdaLN weights took 6.234 s
-for T2I and 7.425 s for editing. Keeping components resident with online AdaLN
-retained the corresponding PNG bytes and reduced pipeline latency to the
-single-GPU row above. These are latency measurements, not throughput results.
+Single-GPU T2I uses 20 warm requests across four fresh servers, excluding the
+first request in each. Single-GPU editing uses eight across two servers,
+excluding the first two in each. Each two-GPU row uses 10 across two servers,
+excluding the first request per task in each. Peak reserved memory was about
+90 GiB on one H200 and, per GPU, 48 GiB for TP2 or 68 GiB for Ulysses2.
+These are latency measurements, not throughput results.
+
+For the single-H200 editing workload, the picker defaults to exact conditioning
+reuse. Disabling it with `--disable-conditioning-cache` increased the warm
+pipeline median from 3.116 s to 3.446 s. Both settings use eight measured
+requests across two fresh servers in an ABBA comparison, with the first two
+requests excluded per server. All 24 output PNGs matched byte for byte.
+Changing the prompt or references can miss the cache; these are repeated-input
+measurements, not uncached editing latency.
 
 ### H200 at 4K
 
