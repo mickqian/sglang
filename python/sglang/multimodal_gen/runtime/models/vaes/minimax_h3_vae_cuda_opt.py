@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA fast path for the MiniMax-H3 video VAE decoder (ViT3DDecoder).
+"""CUDA fast path for the MiniMax-H3 image and video ViT VAE decoders.
 
 Fuses each decoder attention block's per-head QK RMSNorm + NeoX RoPE into one
 in-place launch over the strided Q/K views of the QKV buffer and runs the
@@ -147,13 +147,14 @@ def maybe_optimize_minimax_h3_vae(vae: nn.Module) -> nn.Module:
     """Install the quality-gated CUDA MiniMax-H3 VAE decoder fast path."""
     from sglang.multimodal_gen.runtime.models.vaes.minimax_h3 import MiniMaxH3VideoVAE
     from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.vae_vit import (
+        ViT2DDecoder,
         ViT3DDecoder,
     )
 
     if not isinstance(vae, MiniMaxH3VideoVAE):
         return vae
     decoder = vae.decoder
-    if type(decoder) is not ViT3DDecoder:
+    if type(decoder) not in (ViT2DDecoder, ViT3DDecoder):
         return vae
     if not envs.MINIMAX_H3_VAE_DECODER_VIT_FP32_NORM:
         logger.info("MiniMax-H3 VAE: fp32 QK norm disabled; skipping fast path.")
@@ -170,7 +171,7 @@ def maybe_optimize_minimax_h3_vae(vae: nn.Module) -> nn.Module:
         )
         return vae
 
-    gate = VaeFastPathGate()
+    gate = getattr(vae, "decode_fast_path_gate", None) or VaeFastPathGate()
     _install_fast_attention(eligible, gate)
     register_vae_fast_path_gate(vae, gate)
     logger.info(

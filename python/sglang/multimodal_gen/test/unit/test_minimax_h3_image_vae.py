@@ -14,6 +14,9 @@ from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.vaes.fast_path_gate import use_vae_fast_path
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3 import MiniMaxH3ImageVAE
+from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_vae_cuda_opt import (
+    maybe_optimize_minimax_h3_vae,
+)
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae import (
     AutoencoderKLLegacy,
     DiagonalGaussianDistribution,
@@ -108,6 +111,19 @@ def test_posterior_sample_without_generator_uses_global_cpu_rng():
         torch.manual_seed(812)
         actual = posterior.sample()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_attention_and_tile_batching_share_decode_gate(tiny_image):
+    gate = tiny_image.decode_fast_path_gate
+    assert maybe_optimize_minimax_h3_vae(tiny_image) is tiny_image
+    attention = [block.attn for block in tiny_image.decoder.transformer_blocks]
+    assert all(layer._sgl_gate is gate for layer in attention)
+    with use_vae_fast_path(tiny_image, True):
+        assert gate.enabled
+        with use_vae_fast_path(tiny_image, False):
+            assert not any(layer._sgl_gate.enabled for layer in attention)
+        assert all(layer._sgl_gate.enabled for layer in attention)
+    assert not gate.enabled
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
