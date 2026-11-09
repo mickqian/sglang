@@ -26,8 +26,8 @@ saves the returned image as `generated.png`.
 <Deployment config={config} />
 
 Server warmup runs a valid prefix of the PDD schedule; real requests always
-run all six steps. The first request with a new shape can still initialize
-kernels. For CLI/API options, see the
+run all six steps. New shapes can initialize kernels, and new AdaLN plans
+read the checkpoint before denoising. For CLI/API options, see the
 [CLI reference](/docs/sglang-diffusion/api/cli) and
 [OpenAI API guide](/docs/sglang-diffusion/api/openai_api).
 
@@ -84,6 +84,16 @@ The picker marks unmeasured hardware and option combinations as unverified.
 For two B300s, select resident placement and encoder fold. Ulysses2 has the
 lowest measured server pipeline latency; TP2 is also close and uses less memory.
 
+On B300 with standard weights, Auto precomputes the native AdaLN timestep
+projections and releases their weights. This retains the original precision
+and outputs, reducing measured peak reserved memory by about 24.7 GiB on one
+B300. The first text-to-image and editing requests build separate plans;
+keep the checkpoint files available for uncached plans. The bounded GPU and
+host caches reuse these exact results. Select **Keep weights** in the picker,
+or pass `--minimax-h3-adaln-online false`, to avoid the rebuild cost. Other
+GPUs keep projection weights by default; explicit online precomputation is
+available but unmeasured there. Prebuilt AdaLN sidecars remain unsupported.
+
 `quality=lossless` is the default. It enables shared DiT fusion and batches
 existing overlapping VAE decode tiles, with at most 128 samples per tile batch.
 `quality=exact` restores the release's fusion and sequential tile path. Neither
@@ -106,26 +116,26 @@ Full BF16 checkpoints, 2048 × 2048 generation canvas, six steps, seed 42 and a
 CPU generator; one node of B300 GPUs. The image revision is
 `7b3d20b4659f5d4b3ad7205daa008e47d6b1e868`, with H3 text encoder revision
 `42ed227ee7df40d41602854ae760620d6eb651fe`. Source installation was tested at
-`26b441a822c0`, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and Transformers 5.19.0.
+`2489f37d6d83`, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and Transformers 5.19.0.
 
 | GPUs and layout | T2I pipeline | Editing pipeline |
 | --- | --- | --- |
-| 1 × B300, Auto resident | 1.065 s | 1.632 s |
-| 2 × B300, TP2, encoder fold | 0.656 s | 1.119 s |
-| 2 × B300, Ulysses2, encoder fold | 0.645 s | 1.073 s |
-| 2 × B300, Ring2, encoder fold | 0.715 s | 1.223 s |
+| 1 × B300, Auto resident | 1.021 s | 1.592 s |
+| 2 × B300, TP2, encoder fold | 0.637 s | 1.093 s |
+| 2 × B300, Ulysses2, encoder fold | 0.634 s | 1.051 s |
+| 2 × B300, Ring2, encoder fold | 0.696 s | 1.197 s |
 
-All rows use lossless quality and resident placement. The single-GPU row is the
-median of six warm requests per task, interleaved with exact requests after
+All rows use lossless quality, resident placement and native online AdaLN
+precomputation. The single-GPU row is the median of six warm requests per
+task, interleaved with exact requests after
 warming both paths. The two-GPU rows are medians of three warm requests after
-one excluded request. All use the checkpoint's example prompts and one edit
-reference. They are server-reported pipeline latency,
+one excluded request. Cold plan construction is excluded. All use the
+checkpoint's example prompts and one edit reference. They are server-reported pipeline latency,
 excluding HTTP transport and client-side PNG saving. They are not throughput
 measurements or results for other GPUs. H100, H200, B200 and RTX PRO 6000
 recipes remain unmeasured.
 
-On one B300, the corresponding exact medians were 1.607 s for T2I and 2.142 s
-for editing. Client-side HTTP E2E medians were 1.396 s / 2.138 s for lossless
-and 2.052 s / 2.649 s for exact (T2I / editing). Peak reserved CUDA memory
-was about 115 GiB for the interleaved run. These results include
-native fusion and VAE batching, without reducing steps or generation area.
+On one B300, the corresponding exact medians were 1.521 s for T2I and 2.093 s
+for editing. Peak reserved CUDA memory was about 91 GiB for the interleaved run.
+These results include native fusion, VAE batching and exact projection reuse,
+without reducing steps or generation area.

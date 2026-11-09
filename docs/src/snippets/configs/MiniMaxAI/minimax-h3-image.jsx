@@ -30,6 +30,15 @@ export const config = {
       ],
     },
     {
+      id: "adaln", title: "AdaLN projections", scope: "serve", default: "auto",
+      description: "Auto precomputes timestep projections on B300, saving about 24.7 GiB on one GPU. New plans read the checkpoint; keep weights to avoid that cold-request cost.",
+      options: [
+        { id: "auto", label: "Auto", recommended: true },
+        { id: "online", label: "Precompute", flags: ["--minimax-h3-adaln-online true"] },
+        { id: "resident", label: "Keep weights", flags: ["--minimax-h3-adaln-online false"] },
+      ],
+    },
+    {
       id: "quality", title: "Quality", scope: "request", default: "lossless",
       description: "Lossless enables native fusion and batched VAE tiles. Exact retains the release arithmetic and tile scheduling; both use six steps.",
       options: [{ id: "lossless", label: "Lossless", recommended: true }, { id: "exact", label: "Exact" }],
@@ -79,6 +88,7 @@ export const config = {
         builder: {
           topology, errors: resource.validateTopology(s, topology),
           topologySummary: `TP ${topology.tp_size}, Ulysses ${topology.ulysses_degree}, Ring ${topology.ring_degree}`,
+          resolvedSettings: { adaln: s.adaln === "resident" || (s.adaln === "auto" && s.hw !== "b300") ? "Keep weights" : "Precompute" },
           warnings: verified ? [] : ["This exact hardware, topology, placement and workload recipe is not yet verified."],
           verification: { serve: verified ? "verified" : "unverified", request: verified ? "verified" : "unverified" },
         },
