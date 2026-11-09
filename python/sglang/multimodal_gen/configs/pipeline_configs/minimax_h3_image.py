@@ -75,7 +75,9 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         # parallel flag `--num-gpus N` runs Ulysses N over the packed sequence.
         return ModelDeploymentConfig(
             auto_auxiliary_layerwise_offload=False,
-            keep_resident_components=(),
+            # the complete resident image path is validated on B300 with this headroom
+            keep_resident_min_available_gb=240,
+            keep_resident_components=("dit", "text_encoder", "vae"),
             auto_enable_cfg_parallel=False,
             supports_cfg_parallel=False,
         )
@@ -273,8 +275,8 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         # The image VAE is one standard weight file, not the video source/ layout.
         return safetensors_list
 
-    def validate_quality_deployment(self, *, server_args) -> None:
-        raise ValueError("MiniMax H3 image supports only quality='lossless'")
+    def validate_quality_deployment(self, server_args) -> None:
+        raise ValueError("MiniMax H3 image does not support quality='high'")
 
     def edit_reference_short_edge_bounds(self, consumer: str) -> tuple[int, int]:
         """Validated ``(min, max)`` edit-reference short edge for ``consumer``

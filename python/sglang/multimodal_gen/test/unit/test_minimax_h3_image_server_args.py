@@ -89,6 +89,14 @@ def _layout(args):
     }
 
 
+def test_large_memory_residency_keeps_explicit_offload_overrides(make_server):
+    resident = make_server(280)
+    assert not resident.text_encoder_cpu_offload
+    assert not resident.vae_cpu_offload
+    offloaded = make_server(280, text_encoder_cpu_offload=True)
+    assert offloaded.text_encoder_cpu_offload
+
+
 @pytest.mark.parametrize("num_gpus", [2, 4, 8])
 def test_default_multi_gpu_layout_is_ulysses_over_all_gpus(make_server, num_gpus):
     # No CFG parallel: every GPU goes to sequence parallelism. sp_degree=2

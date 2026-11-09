@@ -69,7 +69,7 @@ def minimax_h3_resize_image_output(
         output = Image.fromarray(array).resize(
             (width, height), Image.Resampling.LANCZOS
         )
-        resized.append(torch.from_numpy(np.asarray(output)).permute(2, 0, 1))
+        resized.append(torch.from_numpy(np.array(output, copy=True)).permute(2, 0, 1))
     return torch.stack(resized).float().div_(255)
 
 
