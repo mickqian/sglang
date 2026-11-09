@@ -25,9 +25,9 @@ saves the returned image as `generated.png`.
 
 <Deployment config={config} />
 
-The startup command disables synthetic warmup because this image pipeline
-requires its complete six-step PDD schedule. The first real request can include
-kernel initialization. For CLI/API options, see the
+Server warmup runs a valid prefix of the PDD schedule; real requests always
+run all six steps. The first request with a new shape can still initialize
+kernels. For CLI/API options, see the
 [CLI reference](/docs/sglang-diffusion/api/cli) and
 [OpenAI API guide](/docs/sglang-diffusion/api/openai_api).
 
@@ -40,7 +40,7 @@ multiple references. The prompt refers to them as `<Picture 1>`, `<Picture 2>`,
 and so on. The root checkpoint selects the image pipeline automatically;
 `--model-variant` is not needed.
 
-The released checkpoint has six fused PDD output heads and an explicit sigma
+The checkpoint has six fused PDD output heads and an explicit sigma
 grid. Omit `num_inference_steps`, or set it to 6. It runs one positive branch:
 omit guidance parameters and `negative_prompt`. It returns one image per
 request. Audio and video inputs and outputs are not supported.
@@ -74,13 +74,57 @@ DiT and text-encoder weights use BF16. The VAE loads in FP32 and decodes under
 BF16 autocast. Dense FlashAttention is selected automatically. Keep these
 precision and attention settings when reproducing the release.
 
-Component offload uses the shared residency manager. Resident mode requires
+Auto keeps all components resident when each GPU has at least 240 GiB
+available at startup, as tested on B300. Otherwise it retains component
+offload. Explicit placement overrides take precedence. Resident mode requires
 space for all weights and request activations; sequence parallelism still
 replicates weights. TP shards the DiT projections. Ulysses and Ring split the
 packed sequence; choose degrees compatible with the 56 attention heads.
 The picker marks unmeasured hardware and option combinations as unverified.
+For two B300s, select resident placement and encoder fold. Ulysses2 has the
+lowest measured server pipeline latency; TP2 is also close and uses less memory.
+
+`quality=lossless` is the default. It enables shared DiT fusion and batches
+existing overlapping VAE decode tiles, with at most 128 samples per tile batch.
+`quality=exact` restores the release's fusion and sequential tile path. Neither
+changes the six-step schedule or canvas. Floating-point reordering can change
+pixels; lossless does not mean byte-identical output across paths or topologies.
+These recipes retain the release checkout's library numerics defaults, including
+cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
+`--allow-cudnn-tf32 false --allow-bf16-reduced-precision-reduction false` are
+available but are not covered by these measurements.
 
 The current image integration rejects BCG, torch.compile, FSDP, layerwise
 offload, CFG parallelism, quantization, LoRA, Cache-DiT and disaggregation.
 The image VAE decodes locally. Video-model feature and performance results do
 not establish image-model support for these paths.
+
+## 4. Measured recipes
+
+Full BF16 checkpoints, 2048 × 2048 generation canvas, six steps, seed 42 and a
+CPU generator; one node of B300 GPUs. The image revision is
+`7b3d20b4659f5d4b3ad7205daa008e47d6b1e868`, with H3 text encoder revision
+`42ed227ee7df40d41602854ae760620d6eb651fe`. Source installation was tested at
+`26b441a822c0`, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and Transformers 5.19.0.
+
+| GPUs and layout | T2I pipeline | Editing pipeline |
+| --- | --- | --- |
+| 1 × B300, Auto resident | 1.065 s | 1.632 s |
+| 2 × B300, TP2, encoder fold | 0.656 s | 1.119 s |
+| 2 × B300, Ulysses2, encoder fold | 0.645 s | 1.073 s |
+| 2 × B300, Ring2, encoder fold | 0.715 s | 1.223 s |
+
+All rows use lossless quality and resident placement. The single-GPU row is the
+median of six warm requests per task, interleaved with exact requests after
+warming both paths. The two-GPU rows are medians of three warm requests after
+one excluded request. All use the checkpoint's example prompts and one edit
+reference. They are server-reported pipeline latency,
+excluding HTTP transport and client-side PNG saving. They are not throughput
+measurements or results for other GPUs. H100, H200, B200 and RTX PRO 6000
+recipes remain unmeasured.
+
+On one B300, the corresponding exact medians were 1.607 s for T2I and 2.142 s
+for editing. Client-side HTTP E2E medians were 1.396 s / 2.138 s for lossless
+and 2.052 s / 2.649 s for exact (T2I / editing). Peak allocated memory reported
+by the server was about 117.6 GB for the interleaved run. These results include
+native fusion and VAE batching, without reducing steps or generation area.
