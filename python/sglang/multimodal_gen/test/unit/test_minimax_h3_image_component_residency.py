@@ -22,6 +22,7 @@ from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager im
 from sglang.multimodal_gen.runtime.pipelines.minimax_h3_pipeline import (
     MiniMaxH3ImagePipeline,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3 import (
     keyframe_encoding,
     presentation,
@@ -140,6 +141,10 @@ def _image_stages(server):
 
 @pytest.mark.parametrize("task", ["t2i", "edit"])
 def test_every_component_runs_inside_its_declared_use(server, monkeypatch, task):
+    # The component doubles use CPU tensors, including on CUDA test hosts.
+    monkeypatch.setattr(
+        PipelineStage, "device", property(lambda self: torch.device("cpu"))
+    )
     monkeypatch.setattr(
         presentation,
         "minimax_h3_image_presentation",
