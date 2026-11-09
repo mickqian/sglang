@@ -323,6 +323,42 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         batch.extra[MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY] = embeddings
 
     def _encode_image(self, batch: Req, plan, pipeline_config) -> dict:
+        from sglang.multimodal_gen.runtime.cache.conditioning import (
+            cached_encoder_call,
+        )
+        from sglang.multimodal_gen.runtime.distributed import (
+            get_tp_group,
+            model_parallel_is_initialized,
+        )
+        from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.reference_encoding import (
+            minimax_h3_prepared_reference_image,
+        )
+
+        images = []
+        if plan.materials:
+            prepared = minimax_h3_prepared_reference_image(batch, plan)
+            images = [item["image"] for item in prepared["images"]]
+        bounds = pipeline_config.edit_reference_short_edge_bounds("qwen")
+        group = getattr(self.text_encoder, "_encoder_tp_group", None)
+        if group is None and model_parallel_is_initialized():
+            group = get_tp_group()
+        # Cache the consumed CPU payload before image resizing/tokenization.
+        # Raw RGB content and reference order stay in the shared cache key;
+        # output canvas and sampling seed do not affect Qwen conditioning.
+        result = cached_encoder_call(
+            self.text_encoder,
+            (plan.prompt, images),
+            {"reference_bounds": bounds},
+            lambda: self._compute_image_conditioning(plan.prompt, images, bounds),
+            group,
+            namespace=self,
+        )
+        self.finish_unused_declared_component(
+            component_name="text_encoder", module=self.text_encoder
+        )
+        return result
+
+    def _compute_image_conditioning(self, prompt, images, bounds) -> dict:
         """Encode the image release's positive branch.
 
         Edit references go to Qwen resized to the configured short-edge bounds
@@ -333,18 +369,16 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
         )
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.reference_encoding import (
             minimax_h3_bound_image_reference,
-            minimax_h3_prepared_reference_image,
         )
 
         vision, counts = {}, []
-        if plan.materials:
-            prepared = minimax_h3_prepared_reference_image(batch, plan)
-            low, high = pipeline_config.edit_reference_short_edge_bounds("qwen")
+        if images:
+            low, high = bounds
             images = [
                 minimax_h3_bound_image_reference(
-                    item["image"], min_short_edge=low, max_short_edge=high
+                    image, min_short_edge=low, max_short_edge=high
                 )
-                for item in prepared["images"]
+                for image in images
             ]
             vision = self.processor.image_processor(images=images, return_tensors="pt")
             vision = {key: vision[key] for key in ("pixel_values", "image_grid_thw")}
@@ -377,7 +411,7 @@ class MiniMaxH3TextEncodingStage(TextEncodingStage):
             ) as encoder,
             set_forward_context(current_timestep=0, attn_metadata=None),
         ):
-            return {"positive": encode(encoder, plan.prompt, counts, vision)}
+            return {"positive": encode(encoder, prompt, counts, vision)}
 
     def _encode_fl2va_keyframes(
         self,

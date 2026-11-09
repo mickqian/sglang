@@ -10,6 +10,10 @@ from PIL import Image
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEArchConfig,
 )
+from sglang.multimodal_gen.runtime.cache.conditioning import (
+    ConditioningCache,
+    invalidate_conditioning_caches,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3 import (
     material_io,
     presentation,
@@ -263,3 +267,73 @@ def test_the_qwen_input_follows_the_qwen_bounds(server, monkeypatch):
         (1920, 1080),
         (512, 777),
     ]
+
+
+@torch.no_grad()
+def test_image_conditioning_reuses_preprocessing_with_content_invalidation(
+    server, monkeypatch
+):
+    class CountingEncoder(Encoder):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()))
+            self.calls = 0
+
+        def encode_ids(self, ids, **kwargs):
+            self.calls += 1
+            return torch.ones(ids.shape[0], 5120, dtype=torch.bfloat16) * self.weight
+
+    processed = []
+
+    def image_processor(images, return_tensors):
+        processed.append([image.size for image in images])
+        return {
+            "pixel_values": torch.zeros(len(images) * 4, 1536),
+            "image_grid_thw": torch.tensor([[1, 2, 2]] * len(images)),
+        }
+
+    image_processor.merge_size = 2
+    monkeypatch.setattr(
+        presentation,
+        "minimax_h3_image_presentation",
+        lambda tokenizer, **kwargs: (
+            torch.arange(4),
+            torch.ones(4, dtype=torch.long),
+            torch.zeros(3, 1, 4, dtype=torch.long),
+        ),
+    )
+    prepared = {
+        "images": [
+            {"image": Image.new("RGB", (32, 32), color)} for color in ("red", "blue")
+        ]
+    }
+    monkeypatch.setattr(
+        reference_encoding,
+        "minimax_h3_prepared_reference_image",
+        lambda batch, plan: prepared,
+    )
+    encoder = CountingEncoder().eval()
+    stage = MiniMaxH3TextEncodingStage(
+        encoder, object(), SimpleNamespace(image_processor=image_processor)
+    )
+    cache = ConditioningCache(256 * 1024)
+    plan = SimpleNamespace(prompt="first", materials=[object()])
+    with cache.scope():
+        stage._encode_image(None, plan, server.pipeline_config)["positive"][
+            "hidden_states"
+        ].zero_()
+        restored = stage._encode_image(None, plan, server.pipeline_config)
+        assert encoder.calls == len(processed) == 1
+        assert restored["positive"]["hidden_states"].eq(1).all()
+        plan.prompt = "changed"
+        stage._encode_image(None, plan, server.pipeline_config)
+        prepared["images"].reverse()
+        stage._encode_image(None, plan, server.pipeline_config)
+        prepared["images"][0]["image"].putpixel((0, 0), (1, 2, 3))
+        stage._encode_image(None, plan, server.pipeline_config)
+        _bound(server, monkeypatch, "qwen", 64, 64)
+        stage._encode_image(None, plan, server.pipeline_config)
+        assert encoder.calls == len(processed) == 5
+        invalidate_conditioning_caches([encoder])
+        stage._encode_image(None, plan, server.pipeline_config)
+        assert encoder.calls == len(processed) == 6
