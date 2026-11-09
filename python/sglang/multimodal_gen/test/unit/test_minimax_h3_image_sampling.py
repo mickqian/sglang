@@ -17,7 +17,7 @@ from sglang.multimodal_gen.configs.task_type import DataType, ModelTaskType
 from sglang.multimodal_gen.runtime.entrypoints.openai import image_api
 from sglang.multimodal_gen.runtime.entrypoints.openai import utils as api_utils
 from sglang.multimodal_gen.runtime.entrypoints.utils import prepare_request
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.resolved_plan import (
     MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY as PLAN,
 )
@@ -31,6 +31,47 @@ class ApiTestPipelineConfig(PipelineConfig):
     def release_pdd_steps(self):
         # A 6-step PDD release.
         return 6
+
+
+@pytest.mark.parametrize("images", [None, ["one.png", "two.png"]])
+def test_synthetic_warmup_builds_a_native_image_request(api_server, images):
+    params = MiniMaxH3ImageSamplingParams(
+        prompt="warmup",
+        width=64,
+        height=32,
+        image_path=images,
+        num_inference_steps=6,
+        task_type=ModelTaskType.T2I,
+    )
+    req = Req(sampling_params=params)
+    req.set_as_warmup(2)
+    params.prepare_synthetic_warmup_request_for_queue(req, api_server)
+    assert req.num_inference_steps == 2
+    assert req.is_warmup and not req.save_output
+    plan = req.extra[PLAN]
+    assert plan.task == ("edit" if images else "t2i")
+    assert req.task_type == (ModelTaskType.I2I if images else ModelTaskType.T2I)
+    assert (plan.shape["width"], plan.shape["height"]) == (64, 32)
+
+
+@pytest.mark.parametrize("quality", ["exact", "lossless"])
+def test_reference_and_lossless_quality_are_accepted(quality):
+    assert MiniMaxH3ImageSamplingParams(quality=quality).quality == quality
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"quality": "high"},
+        {"enable_teacache": True},
+        {"enable_cache_dit": True},
+        {"enable_spectrum": True},
+        {"skip_softmax_params": {"threshold_scale_factor": 0.1}},
+    ],
+)
+def test_unsupported_approximation_is_rejected(overrides):
+    with pytest.raises(ValueError, match="MiniMax H3 image"):
+        MiniMaxH3ImageSamplingParams(**overrides)
 
 
 @pytest.fixture

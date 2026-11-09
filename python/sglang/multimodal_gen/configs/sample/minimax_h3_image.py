@@ -112,6 +112,15 @@ class MiniMaxH3ImageSamplingParams(SamplingParams):
             if self.min_generation_area is not None:
                 self._canonical_request()
         super()._validate()
+        if self.quality not in ("exact", "lossless"):
+            raise ValueError("MiniMax H3 image supports quality='exact' or 'lossless'")
+        if (
+            self.enable_teacache
+            or self.enable_cache_dit
+            or self.enable_spectrum
+            or self.skip_softmax_params is not None
+        ):
+            raise ValueError("MiniMax H3 image does not support approximate caching")
 
     def _adjust(self, server_args) -> None:
         # Do not call the video/visual adjuster: it strips text and changes shape.
@@ -153,6 +162,17 @@ class MiniMaxH3ImageSamplingParams(SamplingParams):
         extra[MINIMAX_H3_CANONICAL_REQUEST_EXTRA_KEY] = canonical
         extra[MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY] = minimax_h3_resolve_plan(canonical)
         return extra
+
+    def prepare_synthetic_warmup_request_for_queue(
+        self, req: Any, server_args: Any
+    ) -> None:
+        warmup_steps = req.num_inference_steps
+        self.num_inference_steps = server_args.pipeline_config.release_pdd_steps()
+        self.task_type = None
+        self._adjust(server_args)
+        req.extra.update(self.build_request_extra())
+        # warmup follows a prefix of the release grid without changing real requests
+        req.num_inference_steps = min(warmup_steps, self.num_inference_steps)
 
     def apply_request_extra(self, req: Any) -> None:
         super().apply_request_extra(req)
