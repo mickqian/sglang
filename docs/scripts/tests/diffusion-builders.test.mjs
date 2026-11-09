@@ -147,6 +147,106 @@ test("legacy image hardware, precision and checkpoint choices remain available",
   assert.match(curl(edit), /image=@\{\{INPUT_IMAGE\}\}/);
 });
 
+test("H3-Image recommends the measured topology within the selected capacity", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const resource = config.commandBuilder.resource;
+  for (const [gpus, ulysses] of [[1, 1], [2, 2]]) {
+    const s = selection(config, { hw: "h200", gpus_per_node: gpus, size: "4736x3552" });
+    const recipe = resource.recommendedRecipe(s);
+    assert.equal(recipe.gpus_per_node, gpus);
+    assert.equal(recipe.ulysses_degree, ulysses);
+    assert.equal(recipe.verifiedWhen(s), true);
+    assert.equal(recipe.verifiedWhen({ ...s, size: "5472x3072" }), false);
+    assert.equal(recipe.verifiedWhen({ ...s, mode: "edit" }), false);
+  }
+  assert.equal(resource.recommendedRecipe(selection(config, { hw: "h200", gpus_per_node: 4 })), undefined);
+});
+
+test("H3-Image 4K verification stays within measured tasks and server settings", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  for (const topology of [
+    { gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, encoder: "auto" },
+    { gpus_per_node: 2, tp_size: 2, ulysses_degree: 1, ring_degree: 1, encoder: "fold" },
+    { gpus_per_node: 2, tp_size: 1, ulysses_degree: 2, ring_degree: 1, encoder: "fold" },
+    { gpus_per_node: 2, tp_size: 1, ulysses_degree: 1, ring_degree: 2, encoder: "fold" },
+  ]) {
+    const base = { hw: "h200", topology_mode: "manual", ...topology };
+    for (const quality of ["exact", "lossless"]) {
+      for (const task of [
+        { mode: "t2i", size: "4736x3552" },
+        { mode: "t2i", size: "6272x2688" },
+        { mode: "edit", size: "4096x4096" },
+      ]) {
+        assert.equal(resolve(config, { ...base, ...task, quality }).verified, true);
+        for (const override of [{ hw: "b300" }, { placement: "resident" }, { placement: "offload" }, { adaln: "resident" }, { warmup: "off" }]) {
+          const result = resolve(config, { ...base, ...task, quality, ...override });
+          assert.equal(result.verified, false, JSON.stringify({ ...base, ...task, ...override }));
+          assert.deepEqual(result.builder.errors, []);
+        }
+      }
+    }
+    assert.equal(resolve(config, { ...base, mode: "edit", size: "4096x4096", references: "two" }).verified, false);
+  }
+  const invalid = resolve(config, { hw: "h200", gpus_per_node: 3 });
+  assert.ok(invalid.builder.errors.length);
+  assert.equal(invalid.verified, false);
+  assert.equal(invalid.builder.verification.request, "error");
+});
+
+test("H3-Image request controls preserve reference order, seed and native canvas", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const command = curl(config, { mode: "edit", references: "two", size: "4096x4096", seed: 1234 });
+  assert.equal(command.match(/-F 'image=@/g).length, 2);
+  assert.ok(command.indexOf("{{IMAGE_PATH}}") < command.indexOf("{{IMAGE_PATH_2}}"));
+  assert.match(command, /seed=1234/);
+  assert.match(command, /<Picture 1>.*<Picture 2>/);
+  assert.equal(spawnSync("bash", ["-n"], { input: command }).status, 0);
+  const json = JSON.parse(curl(config, { seed: 1234, size: "4736x3552" }).match(/-d '([\s\S]+)' \|/)[1]);
+  assert.equal(json.seed, 1234);
+  assert.equal(json.size, "4736x3552");
+  assert.equal(json.generator_device, "cpu");
+  assert.equal(json.min_generation_area, undefined);
+  assert.deepEqual(resolve(config, { seed: 1234, size: "4736x3552" }).flags, resolve(config).flags);
+});
+
+test("H3-Image request coverage does not change measured server coverage", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const server = { hw: "h200", gpus_per_node: 2, encoder: "fold" };
+  const baseline = resolve(config, server);
+  assert.equal(baseline.verified, true);
+  for (const request of [
+    { size: "1024x1024" },
+    { size: "5472x3072" },
+    { quality: "exact" },
+    { mode: "edit", size: "4096x4096", references: "two" },
+  ]) {
+    const result = resolve(config, { ...server, ...request });
+    assert.deepEqual(result.flags, baseline.flags);
+    assert.deepEqual(result.builder.verification, { serve: "verified", request: "unverified" });
+  }
+  assert.equal(resolve(config, { ...server, warmup: "off" }).builder.verification.serve, "unverified");
+});
+
+test("H3-Image Spark stays a single-GB10 derived recipe at both resolutions", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const resource = config.commandBuilder.resource;
+  const s = selection(config, { hw: "dgx-spark" });
+  const recipe = resource.recommendedRecipe(s);
+  assert.equal(recipe.unverified, true);
+  assert.equal(recipe.adaln, "online");
+  assert.equal(recipe.encoder, "auto");
+  assert.equal(resource.limits.gpus_per_node.disabledWhen(s), true);
+  assert.equal(resource.limits.gpus_per_node.disabledValue, 1);
+  for (const size of ["2048x2048", "4096x4096"]) {
+    const result = resolve(config, { ...recipe, size });
+    assert.deepEqual(result.builder.errors, []);
+    assert.equal(result.builder.resolvedSettings.adaln, "Precompute");
+    assert.deepEqual(result.builder.verification, { serve: "unverified", request: "unverified" });
+    assert.equal(result.verified, false);
+  }
+  assert.ok(resolve(config, { ...recipe, gpus_per_node: 2 }).builder.errors.length);
+});
+
 test("Wan preserves standard, multi-GPU, Ascend and LoRA recipes", () => {
   for (const version of ["1", "2"]) {
     const config = get(`/Wan/Wan2.${version}.mdx`);
