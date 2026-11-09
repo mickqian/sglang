@@ -89,6 +89,7 @@ existing overlapping VAE decode tiles, with at most 128 samples per tile batch.
 `quality=exact` restores the release's fusion and sequential tile path. Neither
 changes the six-step schedule or canvas. Floating-point reordering can change
 pixels; lossless does not mean byte-identical output across paths or topologies.
+Text refinement and rotary tables are prepared once per request for both paths.
 These recipes retain the release checkout's library numerics defaults, including
 cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
 `--allow-cudnn-tf32 false --allow-bf16-reduced-precision-reduction false` are
@@ -125,6 +126,6 @@ recipes remain unmeasured.
 
 On one B300, the corresponding exact medians were 1.607 s for T2I and 2.142 s
 for editing. Client-side HTTP E2E medians were 1.396 s / 2.138 s for lossless
-and 2.052 s / 2.649 s for exact (T2I / editing). Peak allocated memory reported
-by the server was about 117.6 GB for the interleaved run. These results include
+and 2.052 s / 2.649 s for exact (T2I / editing). Peak reserved CUDA memory
+was about 115 GiB for the interleaved run. These results include
 native fusion and VAE batching, without reducing steps or generation area.
