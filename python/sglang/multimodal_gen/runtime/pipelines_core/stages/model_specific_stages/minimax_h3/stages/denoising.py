@@ -1007,6 +1007,9 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                     adaln_sigmas=batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY].get("full")
                     if batch.is_warmup
                     else None,
+                    prewarm_both_tasks=batch.is_warmup
+                    and len(server_args.pipeline_config.get_supported_task_types())
+                    == 2,
                     prepare_branch=prepare_branch,
                     device=self.device,
                     on_step=on_step,

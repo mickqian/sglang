@@ -155,8 +155,21 @@ def test_static_branch_preparation_is_request_local_and_runs_once():
 
 
 @pytest.mark.parametrize("mode", ["t2i", "reference"])
-@pytest.mark.parametrize("capacity", [None, 1, 3])
-def test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity(mode, capacity):
+@pytest.mark.parametrize(
+    "capacity,width,both",
+    [
+        (None, 2, True),
+        (1, 2, True),
+        (2, 2, True),
+        (3, 2, True),
+        (6, 1, True),
+        (6, 2, False),
+        (6, 2, True),
+    ],
+)
+def test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity(
+    mode, capacity, width, both
+):
     positive = _inputs(3, 2, mode)
     n_cond = int((~positive.packed["update_mask"]).sum())
     args = dict(
@@ -166,18 +179,39 @@ def test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity(mode, capaci
     baseline = _run(_BufferModel(), positive, **args)
     model = _BufferModel(cached=capacity is not None)
     if capacity is not None:
-        model.adaln_cache = SimpleNamespace(max_plans=capacity)
+        model.adaln_cache = SimpleNamespace(max_plans=capacity, max_plan_width=width)
     completed = []
+    grid = [1.0, 0.8, 0.3, 0.0]
     result = _run(
         model,
         positive,
         **args,
-        adaln_sigmas=[1.0, 0.8, 0.3, 0.0],
+        adaln_sigmas=grid,
+        prewarm_both_tasks=both,
         on_step=completed.append,
     )
-    assert len(model.plans) == (3 if capacity == 3 else 1)
+    expanded = capacity == 6 and width == 2 and both
+    expected_count = 3 if capacity is not None and capacity >= 3 else 1
+    if expanded:
+        expected_count *= 2
+    assert len(model.plans) == expected_count
     assert len(model.calls) == 1 and completed == [0]
     torch.testing.assert_close(result, baseline, rtol=0, atol=0)
+    if expanded:
+        other = _inputs(3, 2, "reference" if mode == "t2i" else "t2i")
+        n_other = int((~other.packed["update_mask"]).sum())
+        expected = _BufferModel()
+        _run(
+            expected,
+            other,
+            sigmas=grid,
+            keyframe_cond_rows=torch.zeros(n_other, 96) if n_other else None,
+        )
+        # The added plans must match a real request of the opposite task,
+        # including its FP32 timestep bits and one/two-row GEMM geometry.
+        assert all(
+            torch.equal(got, want) for got, want in zip(model.plans[3:], expected.plans)
+        )
 
 
 @pytest.mark.parametrize("grid", [[1.0], [1.0, 0.25, 0.0]])

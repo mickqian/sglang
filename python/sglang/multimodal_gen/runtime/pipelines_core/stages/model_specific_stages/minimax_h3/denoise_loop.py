@@ -687,6 +687,7 @@ def minimax_h3_image_denoise_loop(
     step_profiler: Callable[[int], AbstractContextManager] | None = None,
     prepare_branch: Callable[[MiniMaxH3DenoiseBranch], None] | None = None,
     adaln_sigmas: Sequence[float] | None = None,
+    prewarm_both_tasks: bool = False,
 ) -> torch.Tensor:
     """Return fp32 image rows after ``len(sigmas) - 1`` positive-branch steps.
 
@@ -697,6 +698,8 @@ def minimax_h3_image_denoise_loop(
     conditioning timestep stays fixed at ``imgvid_cond_noise_aug_for_inference``.
     ``adaln_sigmas`` may extend this prefix to prewarm a whole grid when the
     cache can hold it; the extra plans do not add model forwards or Euler steps.
+    ``prewarm_both_tasks`` also reserves the other image task's plans when
+    both tasks are declared and the cache can hold both grids.
     """
     sigmas = [float(sigma) for sigma in sigmas]
     cond_t = float(imgvid_cond_noise_aug_for_inference)
@@ -736,7 +739,25 @@ def minimax_h3_image_denoise_loop(
         audio_ref_cond_noise_aug=1.0,
         pin_imgvid_cond=True,
     )
-    slots = model.prepare_adaln_plans([entry[0] for entry in plan])
+    plan_timesteps = [entry[0] for entry in plan]
+    cache = getattr(model, "adaln_cache", None)
+    if (
+        prewarm_both_tasks
+        and adaln_sigmas is not None
+        and cache is not None
+        and cache.max_plan_width >= 2
+        and cache.max_plans >= 2 * (len(adaln_sigmas) - 1)
+    ):
+        # T2I has one timestep per plan; editing adds the fixed reference time.
+        # Keep each plan's original M in F.linear while sharing a weight pass.
+        plan_timesteps.extend(
+            torch.unique(
+                torch.tensor([t] if n_cond else [t, cond_t], dtype=torch.float32),
+                sorted=True,
+            ).to(device)
+            for t in timesteps
+        )
+    slots = model.prepare_adaln_plans(plan_timesteps)
     sigma_values = torch.tensor(sigmas, dtype=torch.float32, device=device)
     sigma_deltas = sigma_values[:-1] - sigma_values[1:]
 
