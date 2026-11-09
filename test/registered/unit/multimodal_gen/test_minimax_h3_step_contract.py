@@ -46,6 +46,10 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # noqa: F401
     test_pdd_schedule_pins_the_step_count_except_for_warmup,
 )
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import (  # noqa: F401
+    make_server,
+    test_host_tier_default_requires_capacity_for_the_whole_release,
+)
 from sglang.multimodal_gen.tools import (
     build_minimax_h3_adaln_cache,
     fuse_minimax_h3_pdd_heads,

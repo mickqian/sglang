@@ -476,7 +476,12 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                 envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS
             )
             init_params["adaln_host_cache_bytes"] = int(
-                component_server_args.minimax_h3_adaln_host_cache_gb * 1e9
+                (
+                    component_server_args.minimax_h3_adaln_host_cache_gb
+                    if component_server_args.minimax_h3_adaln_host_cache_gb is not None
+                    else 8.0
+                )
+                * 1e9
             )
             init_params["adaln_precision"] = (
                 "fp32" if envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32 else "match"

@@ -307,6 +307,15 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             and ModelTaskType.I2I in self.get_supported_task_types()
         ):
             raise ValueError("MiniMax H3 image editing needs AdaLN plan width >= 2")
+        if (
+            server_args.minimax_h3_adaln_host_cache_gb is None
+            and self.model_path
+            and envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS
+            >= self.release_pdd_steps() * len(self.get_supported_task_types())
+        ):
+            # Every request uses the fixed PDD grid. With all task plans
+            # resident, none can be evicted and a host copy is unnecessary.
+            server_args.minimax_h3_adaln_host_cache_gb = 0.0
 
     def select_vae_weight_files(
         self, safetensors_list, component_model_path, component_name, vae_precision

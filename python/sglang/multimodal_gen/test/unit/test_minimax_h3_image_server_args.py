@@ -20,6 +20,9 @@ from sglang.multimodal_gen.runtime.platforms.interface import Platform, Platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.server_args import auto_tune as auto_tune_module
 from sglang.multimodal_gen.runtime.server_args import server_args as args_module
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
+    write_model_dir,
+)
 
 
 class SimulatedCUDA(Platform):
@@ -83,6 +86,28 @@ def test_b300_online_adaln_default_and_explicit_overrides(make_server):
 def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
     args = make_server(minimax_h3_adaln_online=True)
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
+
+
+@pytest.mark.parametrize("tasks", [["t2i"], ["t2i", "edit"]])
+@pytest.mark.parametrize("spare_slots", [-1, 0, 1])
+@pytest.mark.parametrize("host_gb", [None, 0.0, 8.0])
+def test_host_tier_default_requires_capacity_for_the_whole_release(
+    make_server, monkeypatch, tmp_path, tasks, spare_slots, host_gb
+):
+    """A fixed grid has at most steps × tasks plans, independent of request shape."""
+    model_path = write_model_dir(tmp_path / "release", tasks)
+    config = MiniMaxH3ImagePipelineConfig(model_path=model_path)
+    capacity = config.release_pdd_steps() * len(tasks) + spare_slots
+    monkeypatch.setattr(
+        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS", capacity
+    )
+    args = make_server(
+        config=config,
+        minimax_h3_adaln_online=True,
+        minimax_h3_adaln_host_cache_gb=host_gb,
+    )
+    expected = 0.0 if host_gb is None and spare_slots >= 0 else host_gb
+    assert args.minimax_h3_adaln_host_cache_gb == expected
 
 
 def test_edit_online_adaln_rejects_narrow_plan_and_fp32_rebuild(

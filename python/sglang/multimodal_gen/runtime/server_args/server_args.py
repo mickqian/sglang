@@ -432,7 +432,7 @@ class ServerArgs(DisaggServerArgsMixin):
     # evicted from the GPU slab swap back in from here instead of re-reading
     # the 24.2 GiB checkpoint. Expert knobs (GPU slot count, fp32 rebuild)
     # live in envs.py as SGLANG_DIFFUSION_MINIMAX_H3_ADALN_*.
-    minimax_h3_adaln_host_cache_gb: float = 8.0
+    minimax_h3_adaln_host_cache_gb: float | None = None
     # Explicit quantization method override (e.g. "mxfp8", "fp8", "modelslim").
     # When set, the transformer loader uses it instead of auto-detection.
     quantization: str | None = None
@@ -2227,7 +2227,8 @@ class ServerArgs(DisaggServerArgsMixin):
                 "from the GPU slab swaps back in over PCIe instead of "
                 "re-reading the 24.2 GiB checkpoint (measured 5.8-6.7 s). One "
                 "50-step schedule needs ~0.9 (t2va) / 1.33 (fl2va) / 1.77 "
-                "(ref2va) GB; the default 8 holds several. Groups are evicted "
+                "(ref2va) GB. Auto uses 8 GB, or 0 for image releases whose "
+                "fixed timestep plans all fit on the GPU. Groups are evicted "
                 "LRU and over-cap groups just recompute. 0 disables the tier."
             ),
         )
