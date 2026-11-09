@@ -5,8 +5,11 @@ Tiled decode equals untiled decode, and posterior sampling without a generator
 draws from the global RNG.
 """
 
+import os
+
 import pytest
 import torch
+import torch.multiprocessing as mp
 
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEConfig,
@@ -62,6 +65,10 @@ def tiny_legacy(**overrides):
 @pytest.fixture
 def tiny_image(monkeypatch):
     monkeypatch.setenv("MINIMAX_H3_USE_FUSED_NORM", "false")
+    return _tiny_image()
+
+
+def _tiny_image():
     config = MiniMaxH3VideoVAEConfig(use_tiling=False)
     config.update_model_arch(
         {
@@ -156,3 +163,72 @@ def test_decode_tile_batching_bounds_order_and_exact_restoration(
     with use_vae_fast_path(tiny_image, True):
         tiny_image._run_tile_tasks(tiles, indices, lambda x: decode(x), False)
     assert calls == [2] * 130
+
+
+def _decode_tiles_distributed(rank, rendezvous):
+    from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        maybe_init_distributed_environment_and_model_parallel,
+    )
+    from sglang.multimodal_gen.runtime.server_args import set_global_server_args
+    from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
+        normalized_args,
+    )
+
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE="2")
+    torch.set_num_threads(1)
+    set_global_server_args(normalized_args())
+    maybe_init_distributed_environment_and_model_parallel(
+        tp_size=1,
+        sp_size=2,
+        ulysses_degree=2,
+        distributed_init_method=rendezvous,
+        dist_timeout=60,
+    )
+    try:
+        vae = _tiny_image()
+        calls = []
+
+        def decode(tiles):
+            calls.append(tiles.shape[0])
+            return tiles * 2
+
+        vae.decode = decode
+        for count in (1, 5, 129):
+            tiles = [
+                torch.full((2, 1, 1, 1), i, device=f"cuda:{rank}") for i in range(count)
+            ]
+            indices = list(range(count))
+            with use_vae_fast_path(vae, True):
+                outputs = vae._run_tile_tasks(tiles, indices, decode, False)
+            for actual, tile in zip(outputs, tiles, strict=True):
+                torch.testing.assert_close(actual, tile * 2, rtol=0, atol=0)
+            local_samples = 2 * len(range(rank, count, 2)) if count > 1 else 2
+            assert sum(calls) == local_samples
+            assert max(calls) <= 128
+            calls.clear()
+
+            vae.sglang_config.use_parallel_tiling = False
+            with use_vae_fast_path(vae, True):
+                vae._run_tile_tasks(tiles, indices, decode, False)
+            assert sum(calls) == 2 * count
+            vae.sglang_config.use_parallel_tiling = True
+            calls.clear()
+
+            vae._run_tile_tasks(tiles, indices, decode, False)
+            assert calls == [2] * count
+            calls.clear()
+    finally:
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+
+def test_lossless_decode_distributes_complete_tiles(tmp_path):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Tile decode needs two CUDA devices")
+    mp.spawn(
+        _decode_tiles_distributed,
+        args=((tmp_path / "rendezvous").as_uri(),),
+        nprocs=2,
+    )
