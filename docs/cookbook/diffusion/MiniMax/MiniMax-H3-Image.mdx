@@ -78,20 +78,20 @@ DiT and text-encoder weights use BF16. The VAE loads in FP32 and decodes under
 BF16 autocast. The DiT uses dense FlashAttention. Keep these
 precision and attention settings when reproducing the release.
 
-Auto keeps all components resident when each GPU has at least 240 GiB
-available at startup, as tested on B300. Otherwise it retains component
+Auto keeps all components resident when each GPU has at least 130 GiB
+available at startup, as tested on H200 and B300. Otherwise it retains component
 offload. Explicit placement overrides take precedence. Resident mode requires
 space for all weights and request activations; sequence parallelism still
 replicates weights. TP shards the DiT projections. Ulysses and Ring split the
 packed sequence; choose degrees compatible with the 56 attention heads.
 The picker marks unmeasured hardware and option combinations as unverified.
-For two B300s, select resident placement and encoder fold. Ulysses2 has the
+For two H200s or B300s, select encoder fold. Ulysses2 has the
 lowest measured server pipeline latency; TP2 is also close and uses less memory.
 
-On B300 with standard weights, Auto precomputes the native AdaLN timestep
+On H200 and B300 with standard weights, Auto precomputes the native AdaLN timestep
 projections and releases their weights. This retains the original precision
-and outputs, reducing measured peak reserved memory by about 24.7 GiB on one
-B300. Text-to-image and editing use separate plans;
+and outputs, reducing measured peak reserved memory by about 24.6–24.7 GiB on one
+GPU. Text-to-image and editing use separate plans;
 keep the checkpoint files available for uncached plans. The bounded GPU and
 host caches reuse these exact results. Select **Keep weights** in the picker,
 or pass `--minimax-h3-adaln-online false`, to avoid the rebuild cost. Other
@@ -137,8 +137,29 @@ The two-GPU rows are medians of three warm requests after
 one excluded request. Cold plan construction is excluded. All use the
 checkpoint's example prompts and one edit reference. They are server-reported pipeline latency,
 excluding HTTP transport and client-side PNG saving. They are not throughput
-measurements or results for other GPUs. H100, H200, B200 and RTX PRO 6000
+measurements or results for other GPUs. H100, B200 and RTX PRO 6000
 recipes remain unmeasured.
+
+H200 measurements use the same checkpoints, prompts, precision, six-step
+schedule and canvas. The single-GPU measurements at `851f8cb71469` use explicit
+resident placement and online AdaLN; these become Auto defaults at
+`9979ece836fb`. The two-GPU measurements use `9979ece836fb` with encoder fold.
+
+| GPUs and layout | T2I pipeline | Editing pipeline |
+| --- | --- | --- |
+| 1 × H200, resident | 1.934 s | 3.137 s |
+| 2 × H200, TP2, encoder fold | 1.169 s | 2.041 s |
+| 2 × H200, Ulysses2, encoder fold | 1.151 s | 1.972 s |
+| 2 × H200, Ring2, encoder fold | 1.224 s | 2.146 s |
+
+The single-GPU row uses 20 warm requests per task across four fresh servers;
+each two-GPU row uses 10 across two servers. The first request per task in each
+server is excluded. Peak reserved memory was about 90 GiB on one H200 and,
+per GPU, 48 GiB for TP2 or 68 GiB for Ulysses2. In the matched single-H200
+ABBA comparison, component offload with resident AdaLN weights took 6.234 s
+for T2I and 7.425 s for editing. Keeping components resident with online AdaLN
+retained the corresponding PNG bytes and reduced pipeline latency to the
+single-GPU row above. These are latency measurements, not throughput results.
 
 Peak reserved CUDA memory was about 91 GiB on one B300. These results include
 native fusion, VAE batching and exact projection reuse, without reducing steps

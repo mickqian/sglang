@@ -31,7 +31,7 @@ export const config = {
     },
     {
       id: "adaln", title: "AdaLN projections", scope: "serve", default: "auto",
-      description: "Auto precomputes timestep projections on B300, saving about 24.7 GiB on one GPU. New plans read the checkpoint; keep weights to avoid that cold-request cost.",
+      description: "Auto precomputes timestep projections on H200 and B300, saving about 24.6–24.7 GiB on one GPU. New plans read the checkpoint; keep weights to avoid that cold-request cost.",
       options: [
         { id: "auto", label: "Auto", recommended: true },
         { id: "online", label: "Precompute", flags: ["--minimax-h3-adaln-online true"] },
@@ -61,6 +61,8 @@ export const config = {
         { id: "b300-single", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto" },
         { id: "b300-single-resident", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "resident", encoder: "auto" },
         ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].map(([tp_size, ulysses_degree, ring_degree]) => ({ id: `b300-two-${tp_size}-${ulysses_degree}-${ring_degree}`, hw: "b300", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement: "resident", encoder: "fold" })),
+        ...["auto", "resident", "offload"].map((placement) => ({ id: `h200-single-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto" })),
+        ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `h200-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
       ],
       autoTopology: (s) => ({ tp_size: 1, ulysses_degree: Number(s.gpus_per_node), ring_degree: 1 }),
       validateTopology: (s, t) => {
@@ -88,7 +90,7 @@ export const config = {
         builder: {
           topology, errors: resource.validateTopology(s, topology),
           topologySummary: `TP ${topology.tp_size}, Ulysses ${topology.ulysses_degree}, Ring ${topology.ring_degree}`,
-          resolvedSettings: { adaln: s.adaln === "resident" || (s.adaln === "auto" && s.hw !== "b300") ? "Keep weights" : "Precompute" },
+          resolvedSettings: { adaln: s.adaln === "resident" || (s.adaln === "auto" && !["b300", "h200"].includes(s.hw)) ? "Keep weights" : "Precompute" },
           warnings: verified ? [] : ["This exact hardware, topology, placement and workload recipe is not yet verified."],
           verification: { serve: verified ? "verified" : "unverified", request: verified ? "verified" : "unverified" },
         },
