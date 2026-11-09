@@ -102,6 +102,15 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 "video": sigmas,
                 "audio": sigmas,
             }
+            if batch.is_warmup:
+                batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]["full"] = (
+                    minimax_h3_image_pdd_sigmas(
+                        self._pdd_image_sigmas,
+                        task=plan.task,
+                        num_steps=len(self._pdd_image_sigmas) - 1,
+                        is_warmup=False,
+                    )
+                )
         else:
             if self._pdd_config is not None and self._pdd_image_sigmas is not None:
                 raise NotImplementedError(

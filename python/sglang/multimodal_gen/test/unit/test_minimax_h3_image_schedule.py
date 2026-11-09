@@ -9,6 +9,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
+    MINIMAX_H3_SIGMAS_EXTRA_KEY,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.request_validation import (
     minimax_h3_validate_canonical_request,
 )
@@ -101,6 +104,7 @@ def test_pdd_schedule_rounds_sigmas_through_float32_timesteps(tmp_path, task):
     sigmas, timesteps = _float32_timestep_schedule(PDD_SIGMAS)
     assert _bits(batch.sigmas) == _bits(sigmas)
     assert _bits(batch.timesteps.numpy()) == _bits(timesteps)
+    assert "full" not in batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]
 
 
 @pytest.mark.parametrize("task", ["t2i", "edit"])
@@ -114,6 +118,13 @@ def test_pdd_schedule_pins_the_step_count_except_for_warmup(tmp_path, task):
     warmup.is_warmup = True
     stage.forward(warmup, SimpleNamespace())
     assert _bits(warmup.sigmas) == _bits(_float32_timestep_schedule(PDD_SIGMAS)[0][:3])
+    assert _bits(warmup.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]["full"]) == _bits(
+        _float32_timestep_schedule(PDD_SIGMAS)[0]
+    )
+    warmup.is_warmup = False
+    warmup.num_inference_steps = 6
+    stage.forward(warmup, SimpleNamespace())
+    assert "full" not in warmup.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]
 
 
 @pytest.mark.parametrize(

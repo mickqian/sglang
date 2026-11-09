@@ -937,6 +937,7 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.constants import (
             MINIMAX_H3_DENOISE_STATE_EXTRA_KEY,
             MINIMAX_H3_REFERENCE_IMAGE_ROWS_EXTRA_KEY,
+            MINIMAX_H3_SIGMAS_EXTRA_KEY,
             MINIMAX_H3_TEXT_EMBEDDINGS_EXTRA_KEY,
         )
         from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minimax_h3.denoise_loop import (
@@ -1003,6 +1004,9 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
                     initial_video_rows=initial_rows,
                     keyframe_cond_rows=anchors,
                     sigmas=batch.sigmas,
+                    adaln_sigmas=batch.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY].get("full")
+                    if batch.is_warmup
+                    else None,
                     prepare_branch=prepare_branch,
                     device=self.device,
                     on_step=on_step,

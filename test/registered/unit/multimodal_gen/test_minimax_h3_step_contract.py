@@ -37,6 +37,15 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
     MiniMaxH3TimestepPreparationStage,
 )
 from sglang.multimodal_gen.runtime.server_args import server_args as server_args_module
+
+# Reuse the image contracts in this registered CI entry point.
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (  # noqa: F401
+    test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity,
+    test_adaln_prewarm_requires_the_same_denoising_prefix,
+)
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # noqa: F401
+    test_pdd_schedule_pins_the_step_count_except_for_warmup,
+)
 from sglang.multimodal_gen.tools import (
     build_minimax_h3_adaln_cache,
     fuse_minimax_h3_pdd_heads,

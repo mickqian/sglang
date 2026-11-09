@@ -686,6 +686,7 @@ def minimax_h3_image_denoise_loop(
     on_step: Callable[[int], None] | None = None,
     step_profiler: Callable[[int], AbstractContextManager] | None = None,
     prepare_branch: Callable[[MiniMaxH3DenoiseBranch], None] | None = None,
+    adaln_sigmas: Sequence[float] | None = None,
 ) -> torch.Tensor:
     """Return fp32 image rows after ``len(sigmas) - 1`` positive-branch steps.
 
@@ -694,6 +695,8 @@ def minimax_h3_image_denoise_loop(
     ``x + dt * v`` with the fp32 ``dt = sigma_k - sigma_{k+1}``. Reference rows
     are restored from their noised anchors on every step, and their
     conditioning timestep stays fixed at ``imgvid_cond_noise_aug_for_inference``.
+    ``adaln_sigmas`` may extend this prefix to prewarm a whole grid when the
+    cache can hold it; the extra plans do not add model forwards or Euler steps.
     """
     sigmas = [float(sigma) for sigma in sigmas]
     cond_t = float(imgvid_cond_noise_aug_for_inference)
@@ -715,7 +718,17 @@ def minimax_h3_image_denoise_loop(
         (0, MINIMAX_H3_AUDIO_ROW_WIDTH), device=device, dtype=torch.float32
     )
     num_steps = len(sigmas) - 1
-    timesteps = [1.0 - sigma for sigma in sigmas[:-1]]
+    plan_sigmas = sigmas
+    if adaln_sigmas is not None:
+        adaln_sigmas = [float(sigma) for sigma in adaln_sigmas]
+        if adaln_sigmas[: len(sigmas)] != sigmas:
+            raise ValueError("AdaLN prewarm grid must extend the denoising prefix")
+        cache = getattr(model, "adaln_cache", None)
+        if cache is not None and cache.max_plans >= len(adaln_sigmas) - 1:
+            # A checkpoint pass costs the same for one or all missing plans.
+            # Prepare the whole grid while keeping the requested warmup work.
+            plan_sigmas = adaln_sigmas
+    timesteps = [1.0 - sigma for sigma in plan_sigmas[:-1]]
     plan = branch.prepare_timestep_plan(
         video_timesteps=timesteps,
         audio_timesteps=timesteps,

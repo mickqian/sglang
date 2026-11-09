@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU contracts for the full H3 image loop, using real packed layouts."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -150,6 +152,38 @@ def test_static_branch_preparation_is_request_local_and_runs_once():
         )
     assert [tuple(x.shape) for x in prepared] == [(3, 8), (9, 8)]
     assert prepared[0][0, 0] == 2 and prepared[1][0, 0] == 7
+
+
+@pytest.mark.parametrize("mode", ["t2i", "reference"])
+@pytest.mark.parametrize("capacity", [None, 1, 3])
+def test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity(mode, capacity):
+    positive = _inputs(3, 2, mode)
+    n_cond = int((~positive.packed["update_mask"]).sum())
+    args = dict(
+        sigmas=[1.0, 0.8],
+        keyframe_cond_rows=torch.zeros(n_cond, 96) if n_cond else None,
+    )
+    baseline = _run(_BufferModel(), positive, **args)
+    model = _BufferModel(cached=capacity is not None)
+    if capacity is not None:
+        model.adaln_cache = SimpleNamespace(max_plans=capacity)
+    completed = []
+    result = _run(
+        model,
+        positive,
+        **args,
+        adaln_sigmas=[1.0, 0.8, 0.3, 0.0],
+        on_step=completed.append,
+    )
+    assert len(model.plans) == (3 if capacity == 3 else 1)
+    assert len(model.calls) == 1 and completed == [0]
+    torch.testing.assert_close(result, baseline, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("grid", [[1.0], [1.0, 0.25, 0.0]])
+def test_adaln_prewarm_requires_the_same_denoising_prefix(grid):
+    with pytest.raises(ValueError, match="must extend the denoising prefix"):
+        _run(_BufferModel(), _inputs(3, 2), adaln_sigmas=grid)
 
 
 @pytest.mark.parametrize("cached", [False, True])
