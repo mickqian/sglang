@@ -12,6 +12,7 @@ from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEConfig,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
+from sglang.multimodal_gen.runtime.models.vaes.fast_path_gate import use_vae_fast_path
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3 import MiniMaxH3ImageVAE
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae import (
     AutoencoderKLLegacy,
@@ -107,3 +108,35 @@ def test_posterior_sample_without_generator_uses_global_cpu_rng():
         torch.manual_seed(812)
         actual = posterior.sample()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_decode_tile_batching_bounds_order_and_exact_restoration(
+    tiny_image, monkeypatch, device
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA tile batching requires a CUDA device")
+    calls = []
+
+    def decode(tiles):
+        calls.append(tiles.shape[0])
+        return tiles * 2
+
+    monkeypatch.setattr(tiny_image, "decode", decode)
+    tiles = [torch.full((2, 1, 1, 1), i, device=device) for i in range(130)]
+    indices = list(range(129, -1, -1))
+    expected = [tiles[i] * 2 for i in indices]
+    with use_vae_fast_path(tiny_image, True):
+        outputs = tiny_image._run_tile_tasks(tiles, indices, decode, False)
+    for actual, reference in zip(outputs, expected, strict=True):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    assert calls == ([128, 128, 4] if device == "cuda" else [2] * 130)
+    calls.clear()
+    tiny_image._run_tile_tasks(tiles, indices, decode, False)
+    assert calls == [2] * 130
+
+    # Encoder execution must never inherit decode batching.
+    calls.clear()
+    with use_vae_fast_path(tiny_image, True):
+        tiny_image._run_tile_tasks(tiles, indices, lambda x: decode(x), False)
+    assert calls == [2] * 130
