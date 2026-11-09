@@ -1876,6 +1876,8 @@ class MiniMaxH3FinalLayer(nn.Module):
         self._pdd_heads = heads
         logger.info("MiniMax-H3 PDD: %d fused output heads loaded from %s", steps, path)
 
+    # The PDD head follows the live denoising step in forward context.
+    @eager_on_graph(True)
     def _pdd_project(self, h: torch.Tensor, name: str) -> torch.Tensor:
         heads = self._pdd_heads
         step = int(get_forward_context().current_timestep)

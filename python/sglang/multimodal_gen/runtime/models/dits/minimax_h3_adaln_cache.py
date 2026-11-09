@@ -838,9 +838,11 @@ class MiniMaxH3AdalnCache(nn.Module):
         num_timesteps: int,
     ) -> tuple[tuple[torch.Tensor, ...], ...]:
         """Every block's AdaLN tuple via one layer-major slab gather."""
-        stacked = self.block_params.permute(2, 0, 1, 3)[
-            :, cache_plan_index, :num_timesteps
-        ]
+        # A device scalar used as a Python index synchronizes to the host and
+        # cannot be captured. Keep the plan selection live in the CUDA graph.
+        stacked = self.block_params.index_select(0, cache_plan_index.reshape(1))[
+            0, :num_timesteps
+        ].permute(1, 0, 2)
         stacked = stacked.reshape(self.num_layers, -1, 6, self.hidden_size)
         return tuple(tuple(layer.unbind(dim=1)) for layer in stacked)
 
@@ -849,5 +851,7 @@ class MiniMaxH3AdalnCache(nn.Module):
         cache_plan_index: torch.Tensor,
         num_timesteps: int,
     ) -> tuple[torch.Tensor, ...]:
-        params = self.final_params[cache_plan_index, :num_timesteps]
+        params = self.final_params.index_select(0, cache_plan_index.reshape(1))[
+            0, :num_timesteps
+        ]
         return tuple(params.reshape(-1, 2, self.hidden_size).unbind(dim=1))
