@@ -1,0 +1,86 @@
+---
+title: MiniMax-H3-Image
+description: "Run native six-step MiniMax-H3-Image generation and image editing with SGLang Diffusion."
+---
+
+import { DiffusionModelTags } from '/src/snippets/diffusion/model-tags.jsx';
+import { Deployment } from "/src/snippets/_deployment.jsx";
+import { config } from "/src/snippets/configs/MiniMaxAI/minimax-h3-image.jsx";
+
+<DiffusionModelTags tags={["text to image", "image editing", "multiple references", "6-step PDD", "BF16"]} />
+
+## 1. Quick start
+
+Follow the [diffusion installation guide](/docs/sglang-diffusion/installation)
+using the branch containing this integration and its diffusion dependencies:
+
+```bash
+python3 -m pip install -e 'python[diffusion]'
+```
+
+Use an authenticated Hugging Face environment with access to both
+`MiniMaxAI/MiniMax-H3-Image` and its `MiniMaxAI/MiniMax-H3` text encoder.
+Run the commands from the same checkout and Python environment. The picker
+saves the returned image as `generated.png`.
+
+<Deployment config={config} />
+
+The startup command disables synthetic warmup because this image pipeline
+requires its complete six-step PDD schedule. The first real request can include
+kernel initialization. For CLI/API options, see the
+[CLI reference](/docs/sglang-diffusion/api/cli) and
+[OpenAI API guide](/docs/sglang-diffusion/api/openai_api).
+
+## 2. Model capabilities
+
+[MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) uses one
+native checkpoint for text-to-image generation and image editing. An edit's
+multipart `image` fields preserve reference order; repeat the field to supply
+multiple references. The prompt refers to them as `<Picture 1>`, `<Picture 2>`,
+and so on. The root checkpoint selects the image pipeline automatically;
+`--model-variant` is not needed.
+
+The released checkpoint has six fused PDD output heads and an explicit sigma
+grid. Omit `num_inference_steps`, or set it to 6. It runs one positive branch:
+omit guidance parameters and `negative_prompt`. It returns one image per
+request. Audio and video inputs and outputs are not supported.
+
+| Task | Endpoint | Input |
+| --- | --- | --- |
+| Text to image | `/v1/images/generations` | JSON prompt |
+| Image editing | `/v1/images/edits` | Multipart prompt and ordered image files |
+
+### Resolution and references
+
+The default minimum generation area is 2048 × 2048 pixels. Smaller requests
+are generated on a larger canvas with the same aspect ratio, aligned to 32
+pixels, then resized to the requested output size with LANCZOS. A 1024 × 1024
+output therefore has the generation cost of a 2048 × 2048 canvas.
+
+`min_generation_area` is a request-level integer pixel area between 1024 and
+16777216. Reducing it changes the generation workload and potentially image
+quality; it is not a lossless acceleration of the default recipe. Set
+`min_generation_area` to `null` in a pipeline configuration file to disable
+canvas enlargement; output dimensions must then be multiples of 32.
+
+Edit references are oriented using EXIF and resized separately for each
+encoder. Qwen uses a 1024-pixel short edge; the VAE keeps the short edge within
+1024–2048 pixels. Reference order, dimensions, generator device, model revision
+and precision all matter when reproducing an edit.
+
+## 3. Deployment boundaries
+
+DiT and text-encoder weights use BF16. The VAE loads in FP32 and decodes under
+BF16 autocast. Dense FlashAttention is selected automatically. Keep these
+precision and attention settings when reproducing the release.
+
+Component offload uses the shared residency manager. Resident mode requires
+space for all weights and request activations; sequence parallelism still
+replicates weights. TP shards the DiT projections. Ulysses and Ring split the
+packed sequence; choose degrees compatible with the 56 attention heads.
+The picker marks unmeasured hardware and option combinations as unverified.
+
+The current image integration rejects BCG, torch.compile, FSDP, layerwise
+offload, CFG parallelism, quantization, LoRA, Cache-DiT and disaggregation.
+The image VAE decodes locally. Video-model feature and performance results do
+not establish image-model support for these paths.
