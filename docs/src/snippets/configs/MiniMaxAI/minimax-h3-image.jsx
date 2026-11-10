@@ -1,21 +1,72 @@
 export const config = (() => {
+  // Derived recipes estimate memory, not latency. Default multi-GPU recipes
+  // require NVLink; RTX 3090 supports a two-card NVLink pair only.
+  const hardware = [
+    ["b300", "B300", 288, 1], ["gb300", "GB300", 288, 1],
+    ["b200", "B200", 192, 1], ["gb200", "GB200", 192, 1],
+    ["h200", "H200", 141, 1], ["h20-3e", "H20-3e", 141, 1],
+    ["h100", "H100", 80, 1], ["h800", "H800", 80, 1],
+    ["dgx-spark", "DGX Spark", 128, 1],
+    ["rtxpro6000", "RTX PRO 6000 Blackwell", 96, 1],
+    ["rtx6000ada", "RTX 6000 Ada", 48, 1],
+    ["rtx5090", "RTX 5090", 32, 1],
+    ["rtx4090", "RTX 4090", 24, 1], ["rtx3090", "RTX 3090", 24, 2],
+    ["rtx5080", "RTX 5080", 16, 1], ["rtx5070ti", "RTX 5070 Ti", 16, 1],
+    ["rtx4080", "RTX 4080", 16, 1], ["rtx4060ti", "RTX 4060 Ti", 16, 1],
+    ["rtx5070", "RTX 5070", 12, 1], ["rtx4070", "RTX 4070", 12, 1],
+    ["rtx3060", "RTX 3060", 12, 1],
+  ];
+  const profile = (hw) => hardware.find(([id]) => id === hw);
+  const maxRecipeGpus = (hw) => hw === "rtx3090" ? 2 : hw === "dgx-spark" || hw.startsWith("rtx") ? 1 : 8;
+  // The native CUDA encoder loads 48.09 GiB of BF16 weights before activations.
+  // Whole-component offload cannot shrink that lower bound; no layerwise path
+  // or quantized image checkpoint is currently supported.
+  const encoderFits = (hw, gpus) => (profile(hw)?.[2] || 0) * gpus >= 48.1;
+  const derivedPlan = (hw, gpus) => {
+    const [, , vram, minimum] = profile(hw) || [hw, hw, 0, 1];
+    if (hw === "dgx-spark") return { tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto" };
+    // Conservative working-set estimate from the measured H200 load/runtime
+    // peaks: sharded DiT, folded encoder, VAE/activations and allocator margin.
+    const residentTp = [1, 2, 4, 8].find((tp) => tp >= minimum && gpus % tp === 0
+      && 42 / tp + 54 / gpus + 8 <= vram);
+    const tp = residentTp || gpus;
+    return { tp_size: tp, ulysses_degree: Math.max(1, gpus / tp), ring_degree: 1,
+      placement: vram >= 130 ? "auto" : residentTp ? "resident" : "offload" };
+  };
+  const derivedRecipes = hardware.flatMap(([hw, , , minimum]) => hw === "dgx-spark" ? []
+    : [1, 2, 4, 8].filter((gpus) => gpus <= maxRecipeGpus(hw) && encoderFits(hw, gpus)
+      && (["h200", "b300"].includes(hw) ? gpus > 2 : hw !== "rtxpro6000")).map((gpus) => ({
+        id: `${hw}-${gpus}-derived`, hw, nodes: 1, gpus_per_node: gpus,
+        ...derivedPlan(hw, gpus), encoder: gpus > 1 ? "fold" : "auto",
+        adaln: ["h200", "b300", "rtxpro6000"].includes(hw) ? "auto" : "online",
+        default: !["h200", "b300"].includes(hw) && gpus === minimum, unverified: true,
+      })));
   const uncachedServer = (s) => s.hw === "h200" && Number(s.nodes) === 1
     && Number(s.gpus_per_node) === 1 && s.placement === "auto" && s.encoder === "auto"
     && s.adaln === "auto" && s.warmup === "server";
   const uncachedWorkload = (s) => uncachedServer(s) && s.mode === "edit"
     && s.size === "2048x2048" && s.references === "one" && s.quality === "lossless";
-  const guide4kWorkload = (s) => s.hw === "h200" && (
+  const guide4kWorkload = (s) => ["h200", "b300", "rtxpro6000", "dgx-spark"].includes(s.hw) && (
     (s.mode === "t2i" && ["4736x3552", "6272x2688"].includes(s.size))
     || (s.mode === "edit" && s.size === "4096x4096" && s.references === "one")
   );
+  const localVaeServer = (s) => ["h200", "b300"].includes(s.hw) && Number(s.nodes) === 1
+    && Number(s.gpus_per_node) === 2 && s.encoder === "fold"
+    && s.placement === "auto" && s.adaln === "auto" && s.warmup === "server"
+    && s.conditioning === "on" && (s.topology_mode !== "manual"
+      || (Number(s.tp_size) === 1 && Number(s.ulysses_degree) === 2 && Number(s.ring_degree) === 1));
+  const localVaeWorkload = (s) => localVaeServer(s) && guide4kWorkload(s);
+  const uncompressedPngWorkload = (s) => localVaeWorkload(s)
+    && s.vae === "auto" && s.quality === "lossless";
+  const fileUrlServer = (s) => s.hw === "b300" && localVaeServer(s) && s.vae === "auto";
+  const fileUrlWorkload = (s) => fileUrlServer(s) && guide4kWorkload(s) && s.quality === "lossless";
   const config = {
   modelName: "MiniMax-H3-Image",
   runModes: ["python"],
-  supportedHardware: ["b300", "b200", "h200", "h100", "dgx-spark", "rtxpro6000"],
-  hardware: [
-    { id: "dgx-spark", label: "DGX Spark", vram: "128GB unified", vendor: "blackwell" },
-    { id: "rtxpro6000", label: "RTX PRO 6000 Blackwell", vram: "96GB", vendor: "consumer" },
-  ],
+  supportedHardware: hardware.map(([id]) => id),
+  hardware: hardware.map(([id, label, vram]) => ({ id, label,
+    vram: `${vram}GB${id === "dgx-spark" ? " unified" : ""}`,
+    vendor: id.startsWith("rtx") ? "consumer" : ["h200", "h100", "h800", "h20-3e"].includes(id) ? "hopper" : "blackwell" })),
   groupHardware: false,
   matchDims: [],
   overlayDims: [
@@ -23,6 +74,14 @@ export const config = (() => {
       id: "mode", title: "Task", scope: "base", default: "t2i",
       description: "One checkpoint serves text-to-image and ordered image-reference editing.",
       options: [{ id: "t2i", label: "Text to image" }, { id: "edit", label: "Image editing" }],
+    },
+    {
+      id: "delivery", title: "Image delivery", scope: "base", default: "b64_json",
+      description: "Base64 uses temporary files. File URL retains images in the server output directory and downloads them separately. Switching requires a server restart. URLs last for the server process; manage the retained files.",
+      options: [
+        { id: "b64_json", label: "Base64", recommended: true },
+        { id: "url", label: "File URL", soft: (s) => !fileUrlWorkload(s), softReason: "File URL delivery has been measured only with the documented B300 Ulysses2 lossless 4K workloads." },
+      ],
     },
     {
       id: "placement", title: "Placement", scope: "serve", default: "auto",
@@ -43,7 +102,7 @@ export const config = (() => {
     },
     {
       id: "adaln", title: "AdaLN projections", scope: "serve", default: "auto",
-      description: "Auto precomputes timestep projections on H200 and B300, saving about 24.6–24.7 GiB on one GPU. New plans read the checkpoint; keep weights to avoid that cold-request cost.",
+      description: "Auto precomputes timestep projections on H200, B300, GB10 and RTX PRO 6000 Blackwell. This releases about 24.6–24.7 GiB on one GPU. New plans read the checkpoint; resident GB10 requires precomputation.",
       options: [
         { id: "auto", label: "Auto", recommended: true },
         { id: "online", label: "Precompute", flags: ["--minimax-h3-adaln-online true"] },
@@ -67,8 +126,16 @@ export const config = (() => {
       ],
     },
     {
+      id: "vae", title: "VAE decode", scope: "serve", default: "auto",
+      description: "Auto shares complete decode tiles across GPUs for lossless requests. Local runs all tiles on each GPU. Exact retains the release scheduling.",
+      options: [
+        { id: "auto", label: "Auto", recommended: true },
+        { id: "local", label: "Local tiles", flags: ["--vae-config.use-parallel-tiling false"], soft: (s) => !localVaeWorkload(s), softReason: "Local decoding has not been validated with this server and workload combination." },
+      ],
+    },
+    {
       id: "quality", title: "Quality", scope: "request", default: "lossless",
-      description: "Lossless enables native fusion and batched VAE tiles. Exact retains the release arithmetic and tile scheduling; both use six steps.",
+      description: "Lossless enables native fusion and batched VAE tiles, shared across GPUs when available. Exact retains the release arithmetic and tile scheduling; both use six steps.",
       options: [{ id: "lossless", label: "Lossless", recommended: true }, { id: "exact", label: "Exact" }],
     },
     {
@@ -81,6 +148,14 @@ export const config = (() => {
           id, label: id.replace("x", " × "), soft: (s) => !guide4kWorkload({ ...s, size: id }),
           softReason: "This size has not been measured with the selected hardware, task and reference count.",
         })),
+      ],
+    },
+    {
+      id: "png", title: "PNG compression", scope: "request", default: "default",
+      description: "Default produces smaller PNGs. No compression can shorten encoding and saving on a fast connection, with larger responses; pixels are unchanged.",
+      options: [
+        { id: "default", label: "Default", recommended: true },
+        { id: "none", label: "No compression", soft: (s) => !uncompressedPngWorkload(s), softReason: "Uncompressed PNG has been measured only with the documented H200/B300 Ulysses2 4K workloads." },
       ],
     },
     {
@@ -100,35 +175,46 @@ export const config = (() => {
     resource: {
       limits: {
         nodes: { min: 1, max: 1 },
-        gpus_per_node: { min: 1, max: 8, disabledWhen: (s) => s.hw === "dgx-spark", disabledValue: 1 },
+        gpus_per_node: { min: 1, max: 8, disabledWhen: (s) => maxRecipeGpus(s.hw) === 1, disabledValue: 1 },
       },
       verifiedRecipes: [
-        { id: "spark-single-derived", hw: "dgx-spark", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto", adaln: "online", default: true, unverified: true },
+        { id: "spark-single", hw: "dgx-spark", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto", adaln: "auto", default: true },
         { id: "b300-single", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto" },
         { id: "b300-single-resident", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "resident", encoder: "auto" },
-        ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].map(([tp_size, ulysses_degree, ring_degree]) => ({ id: `b300-two-${tp_size}-${ulysses_degree}-${ring_degree}`, hw: "b300", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement: "resident", encoder: "fold" })),
+        ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `b300-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "b300", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
         ...["auto", "resident", "offload"].map((placement) => ({ id: `h200-single-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto" })),
         ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `h200-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
+        ...["resident", "offload"].map((placement) => ({ id: `rtxpro6000-single-${placement}`, hw: "rtxpro6000", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto", default: placement === "resident" })),
+        ...derivedRecipes,
       ].map((recipe) => ({
         adaln: "auto",
         conditioning: "on",
+        vae: "auto",
         ...recipe,
         verifiedWhen: (s) => config.commandBuilder.resolveDeployment({
-          ...s, ...recipe, topology_mode: "manual", adaln: recipe.adaln || "auto", warmup: "server", conditioning: "on",
+          ...s, ...recipe, topology_mode: "manual", adaln: recipe.adaln || "auto", warmup: "server", conditioning: "on", vae: "auto",
         }).verified,
       })),
       recommendedRecipe: (s) => {
         const t = config.commandBuilder.resource.autoTopology(s);
-        return config.commandBuilder.resource.verifiedRecipes.find((r) =>
+        const recipes = config.commandBuilder.resource.verifiedRecipes;
+        return recipes.find((r) =>
           r.hw === s.hw && r.nodes === Number(s.nodes) && r.gpus_per_node === Number(s.gpus_per_node)
           && r.tp_size === t.tp_size && r.ulysses_degree === t.ulysses_degree && r.ring_degree === t.ring_degree
         );
       },
-      autoTopology: (s) => ({ tp_size: 1, ulysses_degree: Number(s.gpus_per_node), ring_degree: 1 }),
+      autoTopology: (s) => {
+        const { tp_size, ulysses_degree, ring_degree } = derivedPlan(s.hw, Number(s.gpus_per_node));
+        return { tp_size, ulysses_degree, ring_degree };
+      },
       validateTopology: (s, t) => {
         const degrees = [t.tp_size, t.ulysses_degree, t.ring_degree];
         const errors = [];
+        if (!profile(s.hw)) errors.push("Choose a listed NVIDIA GPU.");
         if (s.hw === "dgx-spark" && Number(s.gpus_per_node) !== 1) errors.push("This DGX Spark recipe uses one node with one GB10 GPU.");
+        if (s.hw === "dgx-spark" && s.adaln === "resident" && s.placement !== "offload") errors.push("Resident GB10 requires native AdaLN precomputation. Choose Auto or Precompute.");
+        if (Number(s.gpus_per_node) > maxRecipeGpus(s.hw)) errors.push("Default multi-GPU recipes require NVLink. This GPU is limited to a single-card recipe, or a two-card NVLink pair for RTX 3090.");
+        if (profile(s.hw) && !encoderFits(s.hw, Number(s.gpus_per_node))) errors.push("No native-precision recipe fits this capacity: the text encoder alone loads about 48.1 GiB of GPU weights before activations. Whole-component offload cannot reduce it; image layerwise offload and quantization are unavailable.");
         if (!degrees.every((n) => Number.isInteger(n) && n > 0)) errors.push("Parallel degrees must be positive integers.");
         if (Number(s.nodes) !== 1 || Number(s.gpus_per_node) !== degrees.reduce((a, b) => a * b, 1)) errors.push("Use one node with GPU count equal to TP × Ulysses × Ring.");
         if (![1, 2, 4, 8].includes(t.tp_size)) errors.push("TP must divide both the DiT and text-encoder head counts: choose 1, 2, 4, or 8.");
@@ -142,29 +228,49 @@ export const config = (() => {
         ? { tp_size: Number(s.tp_size), ulysses_degree: Number(s.ulysses_degree), ring_degree: Number(s.ring_degree) }
         : resource.autoTopology(s);
       const recipe = resource.verifiedRecipes.find((r) => r.hw === s.hw && r.gpus_per_node === Number(s.gpus_per_node) && r.tp_size === topology.tp_size && r.ulysses_degree === topology.ulysses_degree && r.ring_degree === topology.ring_degree && r.placement === s.placement && r.encoder === s.encoder);
+      const suggestedRecipe = resource.recommendedRecipe(s);
+      const derivedRecipe = suggestedRecipe?.unverified ? suggestedRecipe : undefined;
       const errors = resource.validateTopology(s, topology);
-      const measured2k = s.size === "2048x2048" && (Number(s.gpus_per_node) === 1 || s.quality === "lossless");
-      const measured4k = guide4kWorkload(s) && s.placement === "auto"
-        && s.adaln !== "resident" && s.warmup === "server";
+      const measured2k = s.size === "2048x2048" && (Number(s.gpus_per_node) === 1 || s.quality === "lossless")
+        && !(s.mode === "edit" && s.references === "two" && s.quality === "exact");
+      const measured4k = guide4kWorkload(s) && s.adaln !== "resident" && s.warmup === "server"
+        && (s.hw === "h200" ? s.placement === "auto"
+          : s.hw === "b300" ? Number(s.gpus_per_node) <= 2
+          : Number(s.gpus_per_node) === 1);
       const serveVerified = !!recipe && !recipe.unverified && !errors.length
+        && (s.delivery !== "url" || fileUrlServer(s))
         && (s.conditioning !== "off" || uncachedServer(s))
+        && (s.vae !== "local" || localVaeServer(s))
+        && (s.hw !== "rtxpro6000" || s.adaln !== "resident")
         && (s.warmup !== "off" || (s.hw === "h200" && Number(s.gpus_per_node) === 1));
-      const verified = serveVerified && (s.conditioning === "off" ? uncachedWorkload(s) : measured2k || measured4k);
+      const verified = serveVerified && (s.conditioning === "off" ? uncachedWorkload(s)
+        : s.vae === "local" ? localVaeWorkload(s) : measured2k || measured4k)
+        && (s.png !== "none" || uncompressedPngWorkload(s))
+        && (s.delivery !== "url" || fileUrlWorkload(s));
       const flags = ["--model-path {{MODEL_NAME}}", "--backend sglang"];
       if (Number(s.gpus_per_node) > 1) flags.push(`--num-gpus ${s.gpus_per_node}`, `--tp-size ${topology.tp_size}`, `--ulysses-degree ${topology.ulysses_degree}`, `--ring-degree ${topology.ring_degree}`);
       flags.push("--host {{HOST_IP}}", "--port {{PORT}}");
+      if (s.delivery === "url") flags.push("--output-path {{OUTPUT_DIR}}");
       return {
         match: { hw: s.hw }, nnodes: 1, verified, flags,
         builder: {
           topology, errors,
           topologySummary: `TP ${topology.tp_size}, Ulysses ${topology.ulysses_degree}, Ring ${topology.ring_degree}`,
           resolvedSettings: {
-            placement: s.hw === "dgx-spark" && s.placement === "auto" ? "Component offload" : undefined,
-            adaln: s.adaln === "resident" || (s.adaln === "auto" && !["b300", "h200"].includes(s.hw)) ? "Keep weights" : "Precompute",
+            placement: s.placement === "auto" ? (s.hw === "dgx-spark" ? "Resident (≥106 GiB free)" : (profile(s.hw)?.[2] || 0) >= 130 ? "Resident" : "Component offload") : undefined,
+            adaln: s.adaln === "resident" || (s.adaln === "auto" && !["b300", "h200", "rtxpro6000", "dgx-spark"].includes(s.hw)) ? "Keep weights" : "Precompute",
+            vae: s.vae === "local" || Number(s.gpus_per_node) === 1 ? "Local tiles" : "Parallel tiles for lossless",
           },
           warnings: s.hw === "dgx-spark"
-            ? ["Derived for one 128 GB Spark. CPU and GPU share memory; component offload does not add capacity. GB10 memory use and latency are unmeasured; start with 2048 × 2048."]
-            : verified ? [] : ["This exact hardware, topology, placement and workload recipe is not yet verified."],
+            ? ["One GB10 shares its 128 GB pool with the CPU. The verified Auto recipe needs at least 106 GiB available before startup; component offload does not add capacity.",
+              ...(!verified ? ["This Spark option and workload combination has not been verified."] : []),
+            ]
+            : verified ? [] : [
+              "This exact hardware, topology, placement and workload recipe is not yet verified.",
+              ...(derivedRecipe ? ["Derived from checkpoint sizes, measured H200 memory and native TP/encoder fold. Start at 2048 × 2048; latency and capacity on this GPU are unmeasured.",
+                ...(derivedRecipe.placement === "offload" ? ["Component offload transfers whole modules. Plan for 256 GB host RAM and local NVMe; small-card PCIe transfer can dominate latency."] : []),
+              ] : []),
+            ],
           verification: { serve: errors.length ? "error" : serveVerified ? "verified" : "unverified", request: errors.length ? "error" : verified ? "verified" : "unverified" },
         },
       };
@@ -176,24 +282,28 @@ export const config = (() => {
     PORT: { target: "command", label: "Bind port", default: "30000" },
     CURL_HOST: { target: "curl", label: "Server host", default: "localhost" },
     CURL_PORT: { target: "curl", label: "Server port", default: "30000" },
+    OUTPUT_DIR: { target: "command", label: "Saved image directory", default: "./outputs/h3-image", showWhen: (s) => s.delivery === "url" },
     IMAGE_PATH: { target: "curl", label: "Reference image", default: "/path/to/reference.png", showWhen: (s) => s.mode === "edit" },
     IMAGE_PATH_2: { target: "curl", label: "Second reference image", default: "/path/to/reference-2.png", showWhen: (s) => s.mode === "edit" && s.references === "two" },
   },
   curl: (s) => {
-    const save = " | python3 -c 'import base64,json,sys; open(\"generated.png\",\"wb\").write(base64.b64decode(json.load(sys.stdin)[\"data\"][0][\"b64_json\"]))'";
+    const save = s.delivery === "url"
+      ? " | python3 -c 'import json,sys,urllib.parse,urllib.request; urllib.request.urlretrieve(urllib.parse.urljoin(\"http://{{CURL_HOST}}:{{CURL_PORT}}\",json.load(sys.stdin)[\"data\"][0][\"url\"]),\"generated.png\")'"
+      : " | python3 -c 'import base64,json,sys; open(\"generated.png\",\"wb\").write(base64.b64decode(json.load(sys.stdin)[\"data\"][0][\"b64_json\"]))'";
     const references = s.references === "two" ? " \\\n  -F 'image=@{{IMAGE_PATH_2}}'" : "";
     const prompt = s.references === "two"
       ? "Keep the scene from <Picture 1> and use the color palette of <Picture 2>."
       : "Keep the scene and change the sky to a warm sunset.";
+    const compression = s.png === "none" ? " -F 'output_compression=0'" : "";
     if (s.mode === "edit") return `curl --fail-with-body http://{{CURL_HOST}}:{{CURL_PORT}}/v1/images/edits \\
   -F 'model={{MODEL_NAME}}' \\
   -F 'image=@{{IMAGE_PATH}}'${references} \\
   -F 'prompt=${prompt}' \\
   -F 'size=${s.size}' -F 'quality=${s.quality}' -F 'seed=${s.seed}' -F 'generator_device=cpu' \\
-  -F 'response_format=b64_json' -F 'output_format=png'${save}`;
+  -F 'response_format=${s.delivery}' -F 'output_format=png'${compression}${save}`;
     return `curl --fail-with-body http://{{CURL_HOST}}:{{CURL_PORT}}/v1/images/generations \\
   -H 'Content-Type: application/json' \\
-  -d '${JSON.stringify({ model: "{{MODEL_NAME}}", prompt: "A quiet London street after rain, warm shop lights reflected on the pavement, detailed photograph", size: s.size, quality: s.quality, seed: Number(s.seed), generator_device: "cpu", response_format: "b64_json", output_format: "png" }, null, 2)}'${save}`;
+  -d '${JSON.stringify({ model: "{{MODEL_NAME}}", prompt: "A quiet London street after rain, warm shop lights reflected on the pavement, detailed photograph", size: s.size, quality: s.quality, seed: Number(s.seed), generator_device: "cpu", response_format: s.delivery, output_format: "png", output_compression: s.png === "none" ? 0 : undefined }, null, 2)}'${save}`;
   },
   cells: [],
   };

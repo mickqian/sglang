@@ -11,8 +11,9 @@ import { config } from "/src/snippets/configs/MiniMaxAI/minimax-h3-image.jsx";
 
 ## 1. Quick start
 
-Follow the [diffusion installation guide](/docs/sglang-diffusion/installation)
-using the branch containing this integration and its diffusion dependencies:
+Use the [integration branch](https://github.com/mickqian/sglang/tree/codex/h3-image-day0)
+with the [diffusion installation guide](/docs/sglang-diffusion/installation),
+then install its diffusion dependencies from the repository root:
 
 ```bash
 python3 -m pip install -e 'python[diffusion]'
@@ -23,6 +24,7 @@ Use an authenticated Hugging Face environment with access to both
 Run the commands from the same checkout and Python environment. The picker
 saves the returned image as `generated.png`. These recipes use a source
 installation; a stock container image has not been verified for this branch.
+These are Linux CUDA recipes.
 
 <Deployment config={config} />
 
@@ -99,9 +101,10 @@ decoder weights are prepared in BF16 for BF16 autocast. The DiT uses dense
 FlashAttention. Keep these precision and attention settings when reproducing
 the release.
 
-Auto keeps all components resident when each GPU has at least 130 GiB
-available at startup, as tested on H200 and B300. Otherwise it retains component
-offload. Explicit placement overrides take precedence. Resident mode requires
+On discrete GPUs, Auto keeps all components resident when each GPU has at least
+130 GiB available at startup, as tested on H200 and B300. Otherwise it retains
+component offload. GB10 uses the shared-memory policy in the Spark recipe below.
+Explicit placement overrides take precedence. Resident mode requires
 space for all weights and request activations; sequence parallelism still
 replicates weights. TP shards the DiT projections. Ulysses and Ring split the
 packed sequence; choose degrees compatible with the 56 attention heads.
@@ -109,7 +112,7 @@ The picker marks unmeasured hardware and option combinations as unverified.
 For two H200s or B300s, select encoder fold. Ulysses2 has the
 lowest measured server pipeline latency; TP2 is also close and uses less memory.
 
-On H200 and B300 with standard weights, Auto precomputes the native AdaLN timestep
+On H200, B300, GB10 and RTX PRO 6000 Blackwell with standard weights, Auto precomputes the native AdaLN timestep
 projections and releases their weights. This retains the original precision
 and outputs, reducing measured peak reserved memory by about 24.6–24.7 GiB on one
 GPU. Text-to-image and editing use separate plans;
@@ -122,6 +125,9 @@ available but unmeasured there. Prebuilt AdaLN sidecars remain unsupported.
 `quality=lossless` is the default. It enables shared DiT and VAE QK-norm/RoPE
 fusion, uses cuDNN SDPA in the VAE with a backend fallback, and batches existing
 overlapping VAE decode tiles, with at most 128 samples per tile batch.
+With multiple GPUs, complete tiles run across the decode group before assembly;
+tile geometry and overlap stay unchanged. Select **Local tiles** in the picker
+or pass `--vae-config.use-parallel-tiling false` to run all tiles on each GPU.
 `quality=exact` restores the release's fusion and sequential tile path. Neither
 changes the six-step schedule or canvas. Floating-point reordering can change
 pixels; lossless does not mean byte-identical output across paths or topologies.
@@ -138,25 +144,121 @@ available but are not covered by these measurements.
 
 The current image integration rejects BCG, torch.compile, FSDP, layerwise
 offload, CFG parallelism, quantization, LoRA, Cache-DiT and disaggregation.
-The image VAE decodes locally. Video-model feature and performance results do
-not establish image-model support for these paths.
+Video-model feature and performance results do not establish image-model support
+for these paths.
 
-### DGX Spark (128 GB, derived)
+### Hardware recommendations
 
-Select **DGX Spark** for a single-node, single-GB10 starting recipe. Use an
+The picker provides measured recipes for H200/B300, single-card RTX PRO 6000 and DGX Spark,
+and **Derived** recipes where the native checkpoint can fit. Other cards show
+the capacity limit. A derived recipe estimates the best placement and
+parallel layout for the selected GPU count from checkpoint sizes and measured
+H200 memory use. It has no hardware latency measurement or capacity guarantee.
+Apply **Use derived recipe** to set its placement, encoder fold and online
+AdaLN together. Start with 2048 × 2048.
+
+| GPU class | Default shape | Recommended placement and layout |
+| --- | --- | --- |
+| B200, GB200, GB300 | 1 GPU | Auto resident; Ulysses as GPU count grows |
+| H100 / H800, 80 GB | 1 GPU, or 2 for resident serving | Component offload on one; resident Ulysses2 with encoder fold on two |
+| RTX PRO 6000 Blackwell, 96 GB | 1 GPU | Measured resident recipe with AdaLN precomputation; component offload saves memory |
+| DGX Spark, 128 GB shared | 1 GB10 | Measured Auto resident recipe with native AdaLN precomputation; requires at least 106 GiB available |
+| RTX 6000 Ada, RTX 5090 / 4090 and listed 12–48 GB cards without NVLink | 1 GPU | No native-precision recipe fits the current whole-component encoder |
+| RTX 3090, 24 GB | At most a [two-card NVLink pair](https://www.nvidia.com/content/geforce-gtx/GEFORCE_RTX_3090_USER_GUIDE_v02.pdf) | Even two cards have less memory than the native encoder weights require |
+
+Multi-GPU recommendations assume an NVLink-connected machine. Cards without
+NVLink use single-card recipes by default. The native CUDA text encoder loads
+about 48.1 GiB of weights before activations; whole-component offload cannot
+reduce this floor. The image model has no layerwise-offload or quantization
+path, so its small-VRAM entries explain the limit and disable command copying.
+A smaller output does not make those encoder weights fit. Offload recipes
+assume a 256 GB-class host and local NVMe. None changes precision, the six steps
+or the minimum generation canvas.
+
+### DGX Spark (128 GB)
+
+Select **DGX Spark** for a verified single-node, single-GB10 recipe at 2K and the measured 4K sizes. Use an
 Arm64 CUDA environment with GB10 support before installing this checkout.
-The picker keeps Auto component placement and explicitly enables native
-AdaLN precomputation with `--minimax-h3-adaln-online true`; Auto does not enable
-that optimization on GB10 by itself. Start with a 2048 × 2048 output.
+At `539fea720b86` and later, Auto enables native AdaLN precomputation and keeps
+components resident when at least 106 GiB is available in the shared pool.
+The picker therefore needs no placement or AdaLN override. Resident GB10
+rejects **Keep weights**, which would retain the large projection tensors.
+Start with a 2048 × 2048 output.
 
 The [128 GB configuration](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
 has one [shared CPU/GPU memory pool](https://docs.nvidia.com/dgx/dgx-spark/known-issues.html#guidance-for-reporting-memory-resources-with-unified-memory-architecture).
-Component offload does not provide another 128 GB of memory. This model's
-capacity, kernels and latency have not been validated on Spark, at either
-2K or 4K; the picker marks the recipe **Unverified**. The 64 GB Spark variant
-and multi-node Spark deployments are outside this recipe.
+Component offload does not provide another 128 GB of memory. Whole-component transfers can temporarily hold both CPU and GPU copies in
+that pool; its image pipeline has no layerwise-offload fallback. Use a bounded
+container with swap disabled for the process, such as `--memory 104g
+--memory-swap 104g --shm-size 8g`, and download weights inside that container
+so its file cache can be reclaimed within the limit. The picker marks option
+combinations outside its measured scope **Unverified**.
+The container limit does not cap all CUDA allocations; keep at least 106 GiB
+available in the shared pool before starting the verified Auto recipe.
+
+The tested ARM64 base is `lmsysorg/sglang@sha256:d4a56f6f9356539957974bb4008161b4c08d14a712805ff63eae526f36dbda71`,
+with driver 580.173.02, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and FA4 4.0.0b38.
+Mount this checkout and a task-owned cache directory, then install the source
+and matching diffusion dependencies inside the container:
+
+```bash
+H3_IMAGE_CACHE="$HOME/.cache/h3-image-spark"
+umask 077
+mkdir -p "$H3_IMAGE_CACHE"
+docker run --platform linux/arm64 --gpus all \
+  --memory 104g --memory-swap 104g --shm-size 8g --cpus 12 \
+  -v "$PWD":/workspace/sglang -v "$H3_IMAGE_CACHE":/root/.cache/huggingface \
+  -e HF_TOKEN -it \
+  lmsysorg/sglang@sha256:d4a56f6f9356539957974bb4008161b4c08d14a712805ff63eae526f36dbda71 bash
+
+# Inside the container, from the integration checkout:
+cd /workspace/sglang
+export CARGO_TARGET_DIR=/tmp/h3-image-spark-build
+python3 -m pip install setuptools-rust setuptools-scm wheel
+python3 -m pip install --no-build-isolation -e 'python[diffusion]'
+python3 -m pip uninstall -y flashinfer-jit-cache-sm80 flashinfer-jit-cache-sm89 \
+  flashinfer-jit-cache-sm90a flashinfer-jit-cache-sm100a flashinfer-jit-cache-sm103a \
+  flashinfer-jit-cache-sm110a flashinfer-jit-cache-sm120f flashinfer-jit-cache-sm121a
+python3 -m pip install --no-deps flash-attn-4==4.0.0b38
+python3 -m pip install --no-deps flashinfer-cubin==0.7.2 \
+  --index-url https://flashinfer.ai/whl/
+python3 -m pip install --no-deps flashinfer-jit-cache==0.7.2+cu130 \
+  --index-url https://flashinfer.ai/whl/cu130
+```
+
+This replaces the base image's incompatible optional kernel providers while
+retaining FlashInfer's version checks. Download weights and run the picker's
+serving/request commands in this environment. The measured container uses 12
+CPU cores; the host's 128 GB is a shared pool, not 128 GB of additional VRAM.
 
 ## 4. Measured recipes
+
+### DGX Spark at 2K and 4K
+
+One GB10 with Auto resident placement and native AdaLN precomputation, at
+`539fea720b86`, using the pinned checkpoints and ARM64 environment above:
+
+| Workload | Pipeline median | Observed warm range |
+| --- | --- | --- |
+| T2I, 2048 × 2048 | 16.21 s | 15.65–16.80 s |
+| Editing, 2048 × 2048 | 25.05 s | 24.58–25.25 s |
+| T2I, 4736 × 3552 | 84.96 s | 81.51–87.97 s |
+| Editing, 4096 × 4096 | 98.83 s | 93.73–105.62 s |
+| T2I, 6272 × 2688 | 81.04 s | 79.36–85.95 s |
+
+Each cell uses 10 warm lossless requests across two fresh servers, excluding the
+first lossless request per task in each. All six steps run at native precision;
+conditioning is warm. T2I uses seed 42; 2K editing uses seed 42 and 4K editing
+uses seed 1234, with one reference. These are pipeline times, excluding HTTP,
+PNG encoding and client saving. Maximum CUDA reserved memory over the validated
+workflows was about 91 GiB; other runtime and host allocations also share the
+same pool. The native offline API also passed 2K generation and editing at
+exact and lossless quality with matching decoded pixels.
+
+With cached checkpoints, the two server starts took 281–282 seconds to become
+healthy in the 12-core container, including startup warmup. Weight downloads and
+installation are outside that boundary. Keep the server running to reuse this
+preparation; startup time is excluded from the warm-request table.
 
 ### B300 at 2K
 
@@ -164,46 +266,97 @@ Unquantized checkpoints at native precision, 2048 × 2048 generation canvas,
 six steps, seed 42 and a CPU generator; one node of B300 GPUs. The image revision is
 `7b3d20b4659f5d4b3ad7205daa008e47d6b1e868`, with H3 text encoder revision
 `42ed227ee7df40d41602854ae760620d6eb651fe`. Source installation was tested at
-`7ccff196eb3a`, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and Transformers 5.19.0.
+`7ccff196eb3a` for the single-GPU row and `539fea720b86` for all two-GPU rows,
+with PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and Transformers 5.19.0.
+The two-GPU comparison uses an NV18-connected pair, parallel VAE tiles and warm
+exact conditioning reuse.
 
 | GPUs and layout | T2I pipeline | Editing pipeline |
 | --- | --- | --- |
 | 1 × B300, Auto resident | 0.994 s | 1.570 s |
-| 2 × B300, TP2, encoder fold | 0.616 s | 1.080 s |
-| 2 × B300, Ulysses2, encoder fold | 0.605 s | 1.031 s |
-| 2 × B300, Ring2, encoder fold | 0.676 s | 1.185 s |
+| 2 × B300, TP2, encoder fold | 0.621 s | 0.978 s |
+| 2 × B300, Ulysses2, encoder fold | 0.604 s | 0.931 s |
+| 2 × B300, Ring2, encoder fold | 0.692 s | 1.093 s |
 
-All rows use lossless quality, resident placement and native online AdaLN
+All rows use lossless quality, resident placement and native AdaLN
 precomputation. The single-GPU row is the median of six warm requests per
 task across two server lifecycles, after two excluded requests per task in each.
-The two-GPU rows are medians of three warm requests after
-one excluded request. Cold plan construction is excluded. All use the
-checkpoint's example prompts and one edit reference. They are server-reported pipeline latency,
-excluding HTTP transport and client-side PNG saving. They are not throughput
-measurements or results for other GPUs. H100, B200 and RTX PRO 6000
-recipes remain unmeasured.
+Each two-GPU row uses 10 warm requests across two fresh servers, excluding the
+first lossless request per task in each. Layout order is balanced across the
+six server starts. Cold plan construction is excluded. All use the checkpoint's
+example prompts and one edit reference. These are server-reported pipeline
+latencies, excluding HTTP transport, PNG encoding and client saving. They are
+not throughput measurements or results for other GPUs. H100 and B200 recipes
+remain unmeasured.
+
+### B300 at 4K
+
+Two B300s at `539fea720b86`, with encoder fold, Auto resident placement and
+native AdaLN precomputation, using the same pinned checkpoints and dependencies:
+
+| Layout | T2I, 4736 × 3552 | Editing, 4096 × 4096 | T2I, 6272 × 2688 |
+| --- | --- | --- | --- |
+| TP2 | 2.790 s | 3.314 s | 2.795 s |
+| Ulysses2 | 2.654 s | 3.146 s | 2.662 s |
+| Ring2 | 3.032 s | 3.568 s | 3.026 s |
+
+Each cell uses 10 warm lossless requests across two fresh servers, excluding the
+first lossless request per task in each. The same balanced layout comparison
+covers 2K and 4K. All six steps run at native precision; conditioning is warm.
+T2I uses seed 42; editing uses seed 1234 and one reference. These are pipeline
+times, excluding HTTP, PNG encoding and client saving. Ulysses2 is the fastest
+measured layout for these workloads; TP2 lowers maximum reserved memory across
+ranks and workflow phases to about 49.6 GiB, versus 69.2 GiB for Ulysses2 and
+69.6 GiB for Ring2. These allocator measurements exclude additional CUDA process
+memory.
+
+### RTX PRO 6000 Blackwell, 96 GB
+
+On one RTX PRO 6000 Blackwell Server Edition, resident placement is faster than
+component offload for the tested workloads. Both use native precision, FA4,
+all six steps and AdaLN precomputation; select **Resident** in the picker.
+
+| Workload | Resident pipeline | Component-offload pipeline |
+| --- | --- | --- |
+| T2I, 2048 × 2048 | 3.434 s | 5.094 s |
+| Editing, 2048 × 2048 | 5.603 s | 7.259 s |
+| T2I, 4736 × 3552 | 18.544 s | 20.193 s |
+| Editing, 4096 × 4096 | 21.971 s | 23.615 s |
+| T2I, 6272 × 2688 | 18.634 s | 20.281 s |
+
+Source `a9d721f36e16`, PyTorch 2.14.1+cu130, FlashInfer 0.7.2 and FA4
+4.0.0b35; the same pinned checkpoints and example inputs as above. Each cell
+uses 10 warm requests across two fresh servers in a resident/offload ABBA
+comparison, excluding the first lossless request per task in each. Conditioning
+is warm; HTTP transport, PNG encoding and client saving are excluded.
+Maximum reserved memory over the 4K workflows was about 92.2 GiB resident or
+66.1 GiB with offload, before additional CUDA process memory. Resident has
+limited headroom for other workloads; Auto retains conservative component
+offload on this 96 GB device. The picker provides the single-card recipe for
+this GPU, which has no NVLink.
 
 ### H200 at 2K
 
 H200 measurements use the same checkpoints, prompts, precision, six-step
 schedule and canvas. Single-GPU T2I uses `851f8cb71469` with explicit resident
 placement and online AdaLN; these become Auto defaults at `9979ece836fb`.
-Single-GPU editing and Ulysses2 were remeasured at `be38e34be99d` with Auto
-placement and exact conditioning reuse. TP2 and Ring2 use `9979ece836fb`.
+Single-GPU editing uses `be38e34be99d`; Ulysses2 uses `862194eeaedb` with
+parallel VAE tiles. Both use Auto placement and exact conditioning reuse.
+TP2 and Ring2 use `9979ece836fb`.
 All two-GPU rows use encoder fold.
 
 | GPUs and layout | T2I pipeline | Editing pipeline |
 | --- | --- | --- |
 | 1 × H200, resident | 1.934 s | 3.116 s |
 | 2 × H200, TP2, encoder fold | 1.169 s | 2.041 s |
-| 2 × H200, Ulysses2, encoder fold | 1.150 s | 1.800 s |
+| 2 × H200, Ulysses2, encoder fold | 1.123 s | 1.774 s |
 | 2 × H200, Ring2, encoder fold | 1.224 s | 2.146 s |
 
 Single-GPU T2I uses 20 warm requests across four fresh servers, excluding the
 first request in each. Single-GPU editing uses eight across two servers,
 excluding the first two in each. Each two-GPU row uses 10 across two servers,
 excluding the first request per task in each. Peak reserved memory was about
-90 GiB on one H200 and, per GPU, 48 GiB for TP2 or 68 GiB for Ulysses2.
+90 GiB on one H200 and, per GPU, 48 GiB for TP2 or 67 GiB for Ulysses2.
 These are latency measurements, not throughput results.
 
 For the single-H200 editing workload, the picker defaults to exact conditioning
@@ -216,7 +369,7 @@ measurements, not uncached editing latency.
 
 ### H200 at 4K
 
-The Ulysses2 row uses `be38e34be99d` with exact conditioning reuse; the other
+The Ulysses2 row uses `862194eeaedb` with parallel VAE tiles and exact conditioning reuse; the other
 rows use `f1af1685f6c3`. All use the same checkpoint revisions and dependencies
 above, native precision, lossless quality and all six steps.
 Auto placement and AdaLN precomputation are enabled; two-GPU rows use encoder
@@ -227,7 +380,7 @@ excluding the first lossless request for each task in each server.
 | --- | --- | --- | --- |
 | 1 × H200 | 10.133 s | 11.839 s | 9.948 s |
 | 2 × H200, TP2 | 5.850 s | 6.992 s | 5.730 s |
-| 2 × H200, Ulysses2 | 5.583 s | 6.496 s | 5.525 s |
+| 2 × H200, Ulysses2 | 5.465 s | 6.379 s | 5.402 s |
 | 2 × H200, Ring2 | 6.023 s | 7.145 s | 5.954 s |
 
 Conditioning caches are warm. T2I uses seed 42; editing uses seed 1234 and
@@ -237,7 +390,56 @@ TP2 uses less memory. Measured peak reserved memory over these workflows was
 about 93 GiB on one H200, or a maximum across ranks of 50 GiB for TP2,
 70 GiB for Ulysses2 and 70 GiB for Ring2. These allocator measurements do not
 include all CUDA process memory. Other 4K sizes, multiple-reference 4K edits
-and 4K results on other GPUs remain unmeasured.
+remain unmeasured on H200.
+
+### PNG encoding at 4K
+
+Select **No compression** under Request options, or send `output_compression=0`,
+to trade response size for less PNG encoding and decoding work. The default
+compression stays unchanged. On two-H200 and two-B300 Ulysses2 recipes at
+`862194eeaedb`, all decoded pixels matched for both formats:
+
+| GPUs | Workload | Default PNG, saved-request time | Uncompressed PNG, saved-request time | PNG bytes, default → uncompressed |
+| --- | --- | --- | --- | --- |
+| 2 × H200 | T2I, 4736 × 3552 | 8.140 s | 7.211 s | 31.7 → 50.5 MB |
+| 2 × H200 | Editing, 4096 × 4096 | 8.838 s | 8.258 s | 22.7 → 50.4 MB |
+| 2 × H200 | T2I, 6272 × 2688 | 8.009 s | 7.159 s | 31.0 → 50.6 MB |
+| 2 × B300 | T2I, 4736 × 3552 | 5.259 s | 4.367 s | 31.7 → 50.5 MB |
+| 2 × B300 | Editing, 4096 × 4096 | 5.577 s | 5.012 s | 22.8 → 50.4 MB |
+| 2 × B300 | T2I, 6272 × 2688 | 5.225 s | 4.436 s | 31.1 → 50.6 MB |
+
+Each format uses eight measured requests per workload across two fresh servers,
+with balanced request order and one excluded warmup per format in each server.
+Timing runs from the loopback HTTP request through PNG saving and pixel validation.
+Pipeline time stayed approximately unchanged; these are codec/client-path savings.
+Larger payloads may take longer over a slower network. Both formats retain native
+precision, all six steps and the same generation canvas.
+
+### File URL delivery
+
+**Base64** remains the default and uses temporary output files. Select **File URL**
+under Setup to add `--output-path` to the server command and save each response
+through a separate image download. Restart the server after switching. Files
+remain in the selected output directory until you remove them; the URL records
+last only for that server process.
+
+On two NVLink-connected B300s with Ulysses2 at `539fea720b86`, File URL shortened
+the measured save path further when using **No compression**:
+
+| Workload | Base64, uncompressed PNG | File URL, uncompressed PNG |
+| --- | --- | --- |
+| T2I, 4736 × 3552 | 4.380 s | 3.990 s |
+| Editing, 4096 × 4096 | 4.982 s | 4.620 s |
+| T2I, 6272 × 2688 | 4.397 s | 4.028 s |
+
+Both columns use the same persistent output directory, native precision, six
+steps and warm conditioning. Each cell uses eight measured requests across two
+fresh servers, excluding the first request per format/server, with balanced
+format and compression order. Timing includes the POST, image download, PNG
+saving and pixel validation. Default and uncompressed PNG both retained identical
+decoded pixels across response formats. Pipeline latency stayed unchanged.
+The extra HTTP request and larger PNGs can cost more on a slower connection.
+Other hardware and workloads remain unverified for File URL delivery.
 
 ### B300 startup warmup
 
