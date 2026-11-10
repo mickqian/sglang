@@ -123,8 +123,6 @@ def test_image_config_rejects_unsupported_parallel_layouts(override, match):
     "override",
     [
         {"use_fsdp_inference": True},
-        {"enable_torch_compile": True},
-        {"enable_breakable_cuda_graph": True},
         {"quantization": "nvfp4"},
         {"component_quantizations": {"video_vae": "fp8"}},
         {"lora_path": "adapter.safetensors"},

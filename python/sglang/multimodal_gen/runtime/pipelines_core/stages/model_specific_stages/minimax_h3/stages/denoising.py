@@ -951,7 +951,7 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
             minimax_h3_unpatchify_video_tokens,
         )
 
-        self._maybe_toggle_quality_fusions(batch)
+        self._maybe_enable_cache_dit_and_torch_compile(len(batch.sigmas) - 1, batch)
         state = batch.extra[MINIMAX_H3_DENOISE_STATE_EXTRA_KEY]
         latent_h, latent_w = state["latent_h"], state["latent_w"]
         # Clean reference rows from visual encoding; absent for t2i.
@@ -1000,6 +1000,11 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
 
                 output = minimax_h3_image_denoise_loop(
                     model=transformer,
+                    model_forward=partial(
+                        self._forward_dit,
+                        batch=batch,
+                        attn_metadata=positive.attn_metadata,
+                    ),
                     positive=positive,
                     initial_video_rows=initial_rows,
                     keyframe_cond_rows=anchors,

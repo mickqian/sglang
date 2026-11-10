@@ -103,6 +103,20 @@ def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enable_breakable_cuda_graph": True},
+        {"enable_torch_compile": True},
+        {"enable_torch_compile": True, "regional_compile": True},
+    ],
+)
+def test_image_admits_native_graph_and_compile_runners(make_server, overrides):
+    args = make_server(component_residency="all=resident", **overrides)
+    for key, value in overrides.items():
+        assert getattr(args, key) == value
+
+
 @pytest.mark.parametrize("method", ["fp8", "mxfp8"])
 @pytest.mark.parametrize("component", [None, "transformer", "text_encoder"])
 def test_image_online_quantization_preserves_native_precision_defaults(

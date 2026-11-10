@@ -133,6 +133,25 @@ def _run(model, positive, **overrides):
     return minimax_h3_image_denoise_loop(**args)
 
 
+def test_image_loop_routes_each_step_through_native_runner():
+    calls = []
+
+    def forward(model, kwargs, step):
+        assert get_forward_context().current_timestep == step
+        calls.append(step)
+        return model(**kwargs)
+
+    positive = _inputs(3, 2)
+    expected = _run(_BufferModel(state_scale=0.5, time_scale=0.25), positive)
+    result = _run(
+        _BufferModel(state_scale=0.5, time_scale=0.25),
+        positive,
+        model_forward=forward,
+    )
+    assert calls == [0, 1]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
 def test_static_branch_preparation_is_request_local_and_runs_once():
     prepared = []
 

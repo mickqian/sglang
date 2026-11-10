@@ -237,9 +237,6 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             )
         for name in (
             "use_fsdp_inference",
-            "enable_torch_compile",
-            "regional_compile",
-            "enable_breakable_cuda_graph",
             "comfyui_mode",
         ):
             if getattr(server_args, name):
