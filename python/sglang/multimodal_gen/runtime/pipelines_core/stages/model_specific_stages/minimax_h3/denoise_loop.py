@@ -677,9 +677,6 @@ class PackedBranchInputs:
 def minimax_h3_image_denoise_loop(
     *,
     model: Any,
-    model_forward: (
-        Callable[[Any, dict[str, Any], int], tuple[torch.Tensor, torch.Tensor]] | None
-    ) = None,
     positive: PackedBranchInputs,
     initial_video_rows: torch.Tensor,
     keyframe_cond_rows: torch.Tensor | None,
@@ -783,11 +780,8 @@ def minimax_h3_image_denoise_loop(
             metadata.current_timestep = step
         step_cm = step_profiler(step) if step_profiler is not None else nullcontext()
         with step_cm:
-            if model_forward is not None:
-                video, _ = model_forward(model, kwargs, step)
-            else:
-                with set_forward_context(current_timestep=step, attn_metadata=metadata):
-                    video, _ = model(**kwargs)
+            with set_forward_context(current_timestep=step, attn_metadata=metadata):
+                video, _ = model(**kwargs)
             target_rows = video_rows[n_cond:]
             target_rows.copy_(target_rows + sigma_deltas[step] * video[n_cond:].float())
         if on_step is not None:

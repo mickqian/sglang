@@ -136,16 +136,13 @@ cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
 `--allow-cudnn-tf32 false --allow-bf16-reduced-precision-reduction false` are
 available but are not covered by these measurements.
 
-DiT layerwise offload, torch.compile and breakable CUDA graph (BCG) are
-supported. `--dit-layerwise-offload true` streams DiT layers from host memory
+DiT layerwise offload and torch.compile are supported. `--dit-layerwise-offload true` streams DiT layers from host memory
 and keeps outputs identical to resident serving; adding
 `--layerwise-offload-components dit,text_encoder,vae` also streams the encoder
 and VAE, with outputs within a few 8-bit levels of resident serving. At 2K on
-H200, `--enable-torch-compile` and `--enable-breakable-cuda-graph` did not
-reduce warm latency and raise peak memory, so they stay off by default.
-Compiled outputs follow a slightly different floating-point trajectory. BCG
-output is identical to eager; graphs replay only when the packed sequence
-matches a warmup capture, and other prompts run eager.
+H200, `--enable-torch-compile` did not reduce warm latency and raises peak
+memory, so it stays off by default. Compiled outputs follow a slightly
+different floating-point trajectory.
 
 | 1 × H200, 2048 × 2048 | T2I pipeline | Editing pipeline | Peak memory |
 | --- | --- | --- | --- |
@@ -153,17 +150,17 @@ matches a warmup capture, and other prompts run eager.
 | DiT layerwise offload | 4.33 s | 4.43 s | 56 GiB |
 | DiT, encoder and VAE layerwise offload | 4.33 s | 4.43 s | 8.6 GiB |
 | torch.compile | 1.80 s | 3.18 s | 126 GiB |
-| BCG, replayed short prompt | 1.85 s (eager 1.87 s) | — | 105 GiB |
 
 These rows use the checkpoint's example prompts and edit reference, seed 42,
 a CPU generator and server-reported pipeline latency after warmup; peak memory
-is the server-reported peak. First compiled requests at a new shape pay
-compilation time (about 19 s for T2I and 100 s for editing).
+is the server-reported peak. Without a warm compile cache, the first
+compiled request at a new shape pays compilation time (about 19 s for T2I and
+100 s for editing).
 
-The image integration rejects FSDP, CFG parallelism, quantization, LoRA,
-Cache-DiT and disaggregation. The image VAE decodes locally. Video-model
-feature and performance results do not establish image-model support for these
-paths.
+The image integration rejects breakable CUDA graph, FSDP, CFG parallelism,
+quantization, LoRA, Cache-DiT and disaggregation. The image VAE decodes
+locally. Video-model feature and performance results do not establish
+image-model support for these paths.
 
 ### DGX Spark (128 GB, derived)
 

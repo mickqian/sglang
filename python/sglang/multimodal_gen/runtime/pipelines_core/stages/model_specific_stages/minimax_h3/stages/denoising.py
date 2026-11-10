@@ -1001,11 +1001,6 @@ class MiniMaxH3DenoisingStage(DenoisingStage):
 
                 output = minimax_h3_image_denoise_loop(
                     model=transformer,
-                    model_forward=partial(
-                        self._forward_dit,
-                        batch=batch,
-                        attn_metadata=positive.attn_metadata,
-                    ),
                     positive=positive,
                     initial_video_rows=initial_rows,
                     keyframe_cond_rows=anchors,

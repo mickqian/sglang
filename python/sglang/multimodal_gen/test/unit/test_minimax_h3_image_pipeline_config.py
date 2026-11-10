@@ -121,6 +121,7 @@ def test_image_config_rejects_unsupported_parallel_layouts(override, match):
     "override",
     [
         {"use_fsdp_inference": True},
+        {"enable_breakable_cuda_graph": True},
         {"quantization": "fp8"},
         {"lora_path": "adapter.safetensors"},
         {"component_precisions": {"video_vae": "bf16"}},
@@ -137,10 +138,9 @@ def test_image_config_rejects_unsupported_server_args(override):
     [
         {"enable_torch_compile": True},
         {"dit_layerwise_offload": True},
-        {"enable_breakable_cuda_graph": True},
     ],
 )
-def test_image_config_accepts_compile_bcg_and_layerwise_offload(override):
+def test_image_config_accepts_compile_and_layerwise_offload(override):
     MiniMaxH3ImagePipelineConfig().validate_server_args(normalized_args(**override))
 
 
