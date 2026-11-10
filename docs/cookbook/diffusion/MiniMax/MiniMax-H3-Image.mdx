@@ -301,6 +301,31 @@ latencies, excluding HTTP transport, PNG encoding and client saving. They are
 not throughput measurements or results for other GPUs. H100 and B200 recipes
 remain unmeasured.
 
+### B300 with MXFP8
+
+Select **MXFP8 DiT + encoder**, **Resident**, two B300s and Ulysses2 with
+encoder fold. Online quantization changes numerics; native precision remains
+the default. At `ff5dede83b0f`, a balanced native → MXFP8 → MXFP8 → native
+comparison measured:
+
+| Workload | Native pipeline | MXFP8 pipeline | Reduction |
+| --- | --- | --- | --- |
+| T2I, 2048 × 2048 | 0.604 s | 0.451 s | 25.4% |
+| T2I, 4736 × 3552 | 2.653 s | 2.065 s | 22.2% |
+| Editing, 4096 × 4096 | 3.146 s | 2.490 s | 20.9% |
+
+Each cell has 10 warm requests across two fresh servers, excluding the first
+lossless request per task in each. Both paths use all six steps, warm exact
+conditioning reuse, native AdaLN precomputation and parallel VAE tiles on the
+same NV18 pair, checkpoints and dependencies. T2I uses seed 42; editing uses
+seed 1234 and one reference. Times exclude HTTP, PNG encoding and client saving.
+Maximum server-reported CUDA reserved memory across these workloads fell from
+69.2 GiB to 40.0 GiB; this is not total host or combined multi-GPU memory.
+
+MXFP8 DiT + encoder also passed 2K/4K generation, editing and ordered multi-image
+requests on one DGX Spark. Choose that weight option in the Spark picker;
+AdaLN and VAE keep native precision.
+
 ### B300 at 4K
 
 Two B300s at `539fea720b86`, with encoder fold, Auto resident placement and

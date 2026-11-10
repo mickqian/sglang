@@ -270,9 +270,14 @@ export const config = (() => {
           : s.hw === "b300" ? Number(s.gpus_per_node) <= 2
           : Number(s.gpus_per_node) === 1);
       const serveVerified = !!recipe && !recipe.unverified && !errors.length
-        && ((!s.quantization || s.quantization === "native") || (Number(s.gpus_per_node) === 1 && s.adaln !== "resident"
-          && ((s.hw === "b300" && (s.placement === "resident" || (s.placement === "layerwise" && s.quantization.endsWith("-all"))))
-            || (s.hw === "rtxpro6000" && s.placement === "resident" && s.quantization.endsWith("-all")))))
+        && ((!s.quantization || s.quantization === "native") || (s.adaln !== "resident" && (
+          (Number(s.gpus_per_node) === 1 && (
+            (s.hw === "b300" && (s.placement === "resident" || (s.placement === "layerwise" && s.quantization.endsWith("-all"))))
+            || (s.hw === "rtxpro6000" && s.placement === "resident" && s.quantization.endsWith("-all"))
+            || (s.hw === "dgx-spark" && s.placement === "auto" && s.quantization === "mxfp8-all")))
+          || (s.hw === "b300" && Number(s.gpus_per_node) === 2 && s.placement === "resident"
+            && s.encoder === "fold" && topology.tp_size === 1 && topology.ulysses_degree === 2
+            && topology.ring_degree === 1 && s.quantization === "mxfp8-all"))))
         && ((!s.execution || s.execution === "eager") || (["bcg", "compile"].includes(s.execution) && s.hw === "b300" && Number(s.gpus_per_node) === 1 && s.placement === "resident" && s.adaln !== "resident" && (!s.quantization || s.quantization === "native")))
         && (s.placement !== "layerwise" || s.adaln === "online")
         && (s.delivery !== "url" || fileUrlServer(s))
