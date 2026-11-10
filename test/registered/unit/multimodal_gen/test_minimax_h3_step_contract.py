@@ -48,6 +48,7 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # 
 )
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import (  # noqa: F401
     make_server,
+    test_explicit_image_layerwise_placement_loads_on_cpu,
     test_gb10_residency_requires_available_shared_memory_and_online_adaln,
     test_host_tier_default_requires_capacity_for_the_whole_release,
     test_large_memory_residency_keeps_explicit_offload_overrides,

@@ -17,6 +17,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config impo
     ModelDeploymentConfig,
 )
 from sglang.multimodal_gen.configs.task_type import DataType, ModelTaskType
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
+    RESIDENT,
+)
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
@@ -317,8 +320,8 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         if not server_args.minimax_h3_adaln_online:
             if (
                 self._uses_gb10_shared_memory()
-                and not server_args.dit_cpu_offload
-                and not server_args.text_encoder_cpu_offload
+                and server_args.residency_mode("transformer") == RESIDENT
+                and server_args.residency_mode("text_encoder") == RESIDENT
             ):
                 raise ValueError(
                     "MiniMax H3 image resident GB10 requires online AdaLN "

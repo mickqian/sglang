@@ -114,6 +114,13 @@ def test_gb10_residency_requires_available_shared_memory_and_online_adaln(make_s
         make_server(109, **hardware, minimax_h3_adaln_online=False)
     offload = make_server(109, **hardware, component_residency="all=component-offload")
     assert offload.dit_cpu_offload and offload.text_encoder_cpu_offload
+    layerwise = make_server(
+        109,
+        **hardware,
+        component_residency="all=layerwise-offload",
+        minimax_h3_adaln_online=False,
+    )
+    assert layerwise.residency_mode("transformer") == "layerwise-offload"
     discrete = make_server(109, device_names=["NVIDIA GB10"])
     assert discrete.text_encoder_cpu_offload
 
