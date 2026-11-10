@@ -39,6 +39,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 from sglang.multimodal_gen.runtime.server_args import server_args as server_args_module
 
 # Reuse the image contracts in this registered CI entry point.
+from sglang.multimodal_gen.test.unit.test_layerwise_offload import (  # noqa: F401
+    test_layerwise_breakable_graph_preserves_copies_and_event_lifetimes,
+)
 from sglang.multimodal_gen.test.unit.test_minimax_h3_dit_contract import (  # noqa: F401
     test_adaln_rebuild_rejects_serialized_quantized_weights,
     test_online_fp8_adaln_uses_native_checkpoint_projections,
