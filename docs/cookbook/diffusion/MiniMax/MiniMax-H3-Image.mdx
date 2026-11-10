@@ -150,7 +150,9 @@ smaller GPUs; resident serving remains faster when the model fits.
 **Online FP8 / MXFP8** quantizes the DiT, optionally with the text encoder, from
 the original checkpoint. Select it separately in the picker; native BF16 remains
 the default. These are approximate modes even with `quality=exact` or `lossless`:
-quality controls kernel execution within the selected precision. AdaLN
+quality controls kernel execution within the selected precision. Quantization
+can change composition and reference identity, so compare representative edits
+before choosing it. AdaLN
 precomputation and the VAE retain native precision. MXFP8 uses block scaling on
 Blackwell and the FP8 fallback on Hopper; use FP8 on older supported GPUs.
 

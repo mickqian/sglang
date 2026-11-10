@@ -100,7 +100,7 @@ export const config = (() => {
     },
     {
       id: "quantization", title: "Weight quantization", scope: "serve", default: "native",
-      description: "Native keeps release precision. Online FP8 and MXFP8 reduce memory and can accelerate inference; both change numerics. AdaLN projections and the VAE retain native precision. Restart to change this setting.",
+      description: "Native keeps release precision. Online FP8 and MXFP8 reduce memory and can accelerate inference; image details and reference identity can change. AdaLN projections and the VAE retain native precision. Restart to change this setting.",
       options: [
         { id: "native", label: "Native BF16", recommended: true },
         { id: "fp8-dit", label: "FP8 DiT", flags: ["--quantization fp8"] },
