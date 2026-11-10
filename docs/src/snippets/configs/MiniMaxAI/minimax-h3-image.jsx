@@ -278,7 +278,10 @@ export const config = (() => {
           || (s.hw === "b300" && Number(s.gpus_per_node) === 2 && s.placement === "resident"
             && s.encoder === "fold" && topology.tp_size === 1 && topology.ulysses_degree === 2
             && topology.ring_degree === 1 && s.quantization === "mxfp8-all"))))
-        && ((!s.execution || s.execution === "eager") || (["bcg", "compile"].includes(s.execution) && s.hw === "b300" && Number(s.gpus_per_node) === 1 && s.placement === "resident" && s.adaln !== "resident" && (!s.quantization || s.quantization === "native")))
+        && ((!s.execution || s.execution === "eager") || (s.hw === "b300" && Number(s.gpus_per_node) === 1 && s.adaln !== "resident" && (
+          (s.execution === "bcg" && ((s.placement === "resident" && (!s.quantization || ["native", "mxfp8-all"].includes(s.quantization)))
+            || (s.placement === "layerwise" && (!s.quantization || s.quantization === "native"))))
+          || (s.execution === "compile" && s.placement === "resident" && (!s.quantization || s.quantization === "native")))))
         && (s.placement !== "layerwise" || s.adaln === "online")
         && (s.delivery !== "url" || fileUrlServer(s))
         && (s.conditioning !== "off" || uncachedServer(s))

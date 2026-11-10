@@ -159,7 +159,9 @@ during startup. Its warmup prompt matches the generated request; editing also
 needs the reference files on the server. Matching signatures replay the graph,
 while other signatures run eager. **Regional compile** compiles repeated DiT
 blocks with PyTorch. Both keep all six steps; compile can change floating-point
-rounding and increases cold startup time. Eager remains the default.
+rounding and increases cold startup time. Graphs also work with layerwise
+offload; capture retains device buffers and needs more GPU memory than eager
+streaming. Eager remains the default.
 
 ### Hardware recommendations
 
@@ -371,6 +373,22 @@ Maximum reserved memory over the 4K workflows was about 92.2 GiB resident or
 limited headroom for other workloads; Auto retains conservative component
 offload on this 96 GB device. The picker provides the single-card recipe for
 this GPU, which has no NVLink.
+
+For a smaller working set, select **FP8 DiT + encoder** with **Resident**.
+At `5c7ce652b563`, a separate native → FP8 → FP8 → native comparison on the
+same single GPU measured:
+
+| Workload | Native pipeline | FP8 pipeline |
+| --- | --- | --- |
+| T2I, 2048 × 2048 | 3.432 s | 2.338 s |
+| T2I, 4736 × 3552 | 18.557 s | 14.445 s |
+| Editing, 4096 × 4096 | 21.988 s | 17.336 s |
+
+Each cell has 10 warm requests across two fresh servers, excluding the first
+lossless request per task in each. All six steps, warm conditioning, example
+inputs, seeds and the pipeline timing boundary match the B300 quantization
+comparison. Maximum CUDA reserved memory across these workloads fell from
+91.6 GiB to 50.4 GiB. FP8 is approximate and remains an explicit option.
 
 ### H200 at 2K
 
