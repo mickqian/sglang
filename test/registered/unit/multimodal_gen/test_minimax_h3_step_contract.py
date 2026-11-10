@@ -39,9 +39,14 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 from sglang.multimodal_gen.runtime.server_args import server_args as server_args_module
 
 # Reuse the image contracts in this registered CI entry point.
+from sglang.multimodal_gen.test.unit.test_minimax_h3_dit_contract import (  # noqa: F401
+    test_adaln_rebuild_rejects_serialized_quantized_weights,
+    test_online_fp8_adaln_uses_native_checkpoint_projections,
+)
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (  # noqa: F401
     test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity,
     test_adaln_prewarm_requires_the_same_denoising_prefix,
+    test_image_loop_routes_each_step_through_native_runner,
 )
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
     normalized_args,
@@ -54,6 +59,8 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import ( 
     test_explicit_image_layerwise_placement_loads_on_cpu,
     test_gb10_residency_requires_available_shared_memory_and_online_adaln,
     test_host_tier_default_requires_capacity_for_the_whole_release,
+    test_image_admits_native_graph_and_compile_runners,
+    test_image_online_quantization_preserves_native_precision_defaults,
     test_large_memory_residency_keeps_explicit_offload_overrides,
     test_online_adaln_default_and_explicit_overrides,
 )

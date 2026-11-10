@@ -500,6 +500,16 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             )
 
         local_torch_device = get_local_torch_device()
+        layerwise_postprocess_device = None
+        if (
+            component_starts_on_cpu
+            and not use_fsdp
+            and local_torch_device.type == "cuda"
+            and runtime_quant_config is not None
+            and runtime_quant_config.get_name() in ("fp8", "mxfp8")
+            and not runtime_quant_config.is_checkpoint_fp8_serialized
+        ):
+            layerwise_postprocess_device = local_torch_device
         checkpoint_load_device = (
             torch.device("cpu")
             if cpu_offload_flag
@@ -511,6 +521,7 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
                     quant_spec.gguf_file is not None
                     or quant_spec.is_convrot_int8
                     or quant_spec.is_serialized_kitchen_w4a8
+                    or layerwise_postprocess_device is not None
                 ),
             )
         )
@@ -525,6 +536,7 @@ class TransformerLoader(OnlineQuantizationComponentLoader):
             checkpoint_load_device=checkpoint_load_device,
             needs_device_weight_postprocess=quant_spec.needs_device_weight_postprocess,
             component_starts_on_cpu=component_starts_on_cpu,
+            layerwise_postprocess_device=layerwise_postprocess_device,
             load_full_state_dict_on_device=direct_gpu_weight_loading,
             mps_layerwise_cpu_staging=bool(
                 cpu_offload_flag and current_platform.is_mps()

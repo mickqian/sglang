@@ -123,8 +123,8 @@ def test_image_config_rejects_unsupported_parallel_layouts(override, match):
     "override",
     [
         {"use_fsdp_inference": True},
-        {"enable_breakable_cuda_graph": True},
-        {"quantization": "fp8"},
+        {"quantization": "nvfp4"},
+        {"component_quantizations": {"video_vae": "fp8"}},
         {"lora_path": "adapter.safetensors"},
         {"component_precisions": {"video_vae": "bf16"}},
         {"component_precisions": {"audio_vae": "fp32"}},
@@ -133,17 +133,6 @@ def test_image_config_rejects_unsupported_parallel_layouts(override, match):
 def test_image_config_rejects_unsupported_server_args(override):
     with pytest.raises(ValueError):
         MiniMaxH3ImagePipelineConfig().validate_server_args(normalized_args(**override))
-
-
-@pytest.mark.parametrize(
-    "override",
-    [
-        {"enable_torch_compile": True},
-        {"dit_layerwise_offload": True},
-    ],
-)
-def test_image_config_accepts_compile_and_layerwise_offload(override):
-    MiniMaxH3ImagePipelineConfig().validate_server_args(normalized_args(**override))
 
 
 @pytest.mark.parametrize(

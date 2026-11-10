@@ -30,6 +30,7 @@ from sglang.multimodal_gen.runtime.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
 )
+from sglang.multimodal_gen.runtime.layers.quantization.mxfp8 import MXFP8Config
 from sglang.multimodal_gen.runtime.layers.usp import _usp_input_all_to_all_packed_qkv
 from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     _needs_device_weight_postprocess,
@@ -606,6 +607,35 @@ def test_online_fp8_keeps_fp32_boundaries_and_ignored_layers_unquantized():
         model.final_layer.audio_out,
     ):
         assert isinstance(layer.quant_method, UnquantizedLinearMethod)
+
+
+@pytest.mark.parametrize("quant_config_cls", [Fp8Config, MXFP8Config])
+def test_online_fp8_adaln_uses_native_checkpoint_projections(quant_config_cls):
+    _ensure_single_process_parallel_runtime()
+    with torch.device("meta"):
+        model = MiniMaxH3DiTModel(
+            config=MiniMaxH3DiTConfig(),
+            hf_config={},
+            quant_config=quant_config_cls(),
+            adaln_weight_files=["native-bf16.safetensors"],
+        )
+    assert model.adaln_cache.weight_files == ["native-bf16.safetensors"]
+    assert model.blocks[0].adaln_proj is None
+    assert model.final_layer.adaln_proj is None
+    assert isinstance(model.blocks[0].attn.qkv_proj.quant_method, Fp8LinearMethod)
+    assert isinstance(model.time_embedder.proj_in.quant_method, UnquantizedLinearMethod)
+    assert isinstance(model.final_layer.video_out.quant_method, UnquantizedLinearMethod)
+
+
+@pytest.mark.parametrize("quant_config_cls", [Fp8Config, MXFP8Config])
+def test_adaln_rebuild_rejects_serialized_quantized_weights(quant_config_cls):
+    with pytest.raises(ValueError, match="native checkpoint weights"):
+        MiniMaxH3DiTModel(
+            config=MiniMaxH3DiTConfig(),
+            hf_config={},
+            quant_config=quant_config_cls(is_checkpoint_fp8_serialized=True),
+            adaln_weight_files=["quantized.safetensors"],
+        )
 
 
 def _block_fp8_quant_config(block: int = 128, **kwargs) -> Fp8Config:

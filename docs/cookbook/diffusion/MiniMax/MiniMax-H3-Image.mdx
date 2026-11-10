@@ -142,30 +142,10 @@ cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
 `--allow-cudnn-tf32 false --allow-bf16-reduced-precision-reduction false` are
 available but are not covered by these measurements.
 
-DiT layerwise offload and torch.compile are supported.
-`--dit-layerwise-offload true` streams DiT layers from host memory; adding
-`--layerwise-offload-components dit,text_encoder,vae` also streams the encoder
-and VAE. Both keep outputs identical to resident serving. At 2K on
-H200, `--enable-torch-compile` did not reduce warm latency and raises peak
-memory, so it stays off by default. Compiled outputs follow a slightly
-different floating-point trajectory.
-
-| 1 × H200, 2048 × 2048 | T2I pipeline | Editing pipeline | Peak memory |
-| --- | --- | --- | --- |
-| Auto resident | 1.85 s | 3.18 s | 90 GiB |
-| DiT layerwise offload | 4.33 s | 4.43 s | 56 GiB |
-| DiT, encoder and VAE layerwise offload | 4.33 s | 4.43 s | 8.7 GiB |
-| torch.compile | 1.80 s | 3.18 s | 126 GiB |
-
-These rows use the checkpoint's example prompts and edit reference, seed 42,
-a CPU generator and server-reported pipeline latency after warmup; peak memory
-is the server-reported peak. Without a warm compile cache, the first
-compiled request at a new shape pays compilation time (about 19 s for T2I and
-100 s for editing).
-
-The image integration rejects breakable CUDA graph, FSDP, CFG parallelism,
-quantization, LoRA, Cache-DiT and disaggregation. Video-model feature and
-performance results do not establish image-model support for these paths.
+The current image integration rejects BCG, torch.compile, FSDP, layerwise
+offload, CFG parallelism, quantization, LoRA, Cache-DiT and disaggregation.
+Video-model feature and performance results do not establish image-model support
+for these paths.
 
 ### Hardware recommendations
 
@@ -189,9 +169,8 @@ AdaLN together. Start with 2048 × 2048.
 Multi-GPU recommendations assume an NVLink-connected machine. Cards without
 NVLink use single-card recipes by default. The native CUDA text encoder loads
 about 48.1 GiB of weights before activations; whole-component offload cannot
-reduce this floor. The image model has no quantization path and the picker
-has no layerwise-offload recipe, so its small-VRAM entries explain the limit
-and disable command copying.
+reduce this floor. The image model has no layerwise-offload or quantization
+path, so its small-VRAM entries explain the limit and disable command copying.
 A smaller output does not make those encoder weights fit. Offload recipes
 assume a 256 GB-class host and local NVMe. None changes precision, the six steps
 or the minimum generation canvas.
@@ -209,7 +188,7 @@ Start with a 2048 × 2048 output.
 The [128 GB configuration](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
 has one [shared CPU/GPU memory pool](https://docs.nvidia.com/dgx/dgx-spark/known-issues.html#guidance-for-reporting-memory-resources-with-unified-memory-architecture).
 Component offload does not provide another 128 GB of memory. Whole-component transfers can temporarily hold both CPU and GPU copies in
-that pool; layerwise offload is not measured on GB10. Use a bounded
+that pool; its image pipeline has no layerwise-offload fallback. Use a bounded
 container with swap disabled for the process, such as `--memory 104g
 --memory-swap 104g --shm-size 8g`, and download weights inside that container
 so its file cache can be reclaimed within the limit. The picker marks option

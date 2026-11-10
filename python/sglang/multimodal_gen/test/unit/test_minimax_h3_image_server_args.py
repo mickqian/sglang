@@ -103,6 +103,40 @@ def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enable_breakable_cuda_graph": True},
+        {"enable_torch_compile": True},
+        {"enable_torch_compile": True, "regional_compile": True},
+    ],
+)
+def test_image_admits_native_graph_and_compile_runners(make_server, overrides):
+    args = make_server(component_residency="all=resident", **overrides)
+    for key, value in overrides.items():
+        assert getattr(args, key) == value
+
+
+@pytest.mark.parametrize("method", ["fp8", "mxfp8"])
+@pytest.mark.parametrize("component", [None, "transformer", "text_encoder"])
+def test_image_online_quantization_preserves_native_precision_defaults(
+    make_server, method, component
+):
+    override = (
+        {"quantization": method}
+        if component is None
+        else {"component_quantizations": {component: method}}
+    )
+    args = make_server(minimax_h3_adaln_online=True, **override)
+    assert args.minimax_h3_adaln_online
+    assert args.pipeline_config.vae_precision == "fp32"
+    assert args.pipeline_config.vae_decode_precision == "bf16"
+    assert args.quantization == (method if component is None else None)
+    assert args.component_quantizations == (
+        {} if component is None else {component: method}
+    )
+
+
 def test_gb10_residency_requires_available_shared_memory_and_online_adaln(make_server):
     hardware = dict(device_names=["NVIDIA GB10"], shared_memory=True)
     resident = make_server(109, **hardware)
