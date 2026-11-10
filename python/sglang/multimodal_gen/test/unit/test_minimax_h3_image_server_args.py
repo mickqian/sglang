@@ -30,8 +30,9 @@ class SimulatedCUDA(Platform):
     device_name = "CPU-test-simulated-CUDA"
     device_type = "cuda"
 
-    def __init__(self, memory_gib):
+    def __init__(self, memory_gib, shared_memory=False):
         self.memory_gib = memory_gib
+        self.shared_memory = shared_memory
 
     def get_device_total_memory(self):
         return int(self.memory_gib * 1024**3)
@@ -40,13 +41,15 @@ class SimulatedCUDA(Platform):
         return self.memory_gib
 
     def device_shares_host_memory(self):
-        return False
+        return self.shared_memory
 
 
 @pytest.fixture
 def make_server(monkeypatch, tmp_path):
-    def make(memory_gib=80, *, config=None, device_names=None, **kwargs):
-        platform = SimulatedCUDA(memory_gib)
+    def make(
+        memory_gib=80, *, config=None, device_names=None, shared_memory=False, **kwargs
+    ):
+        platform = SimulatedCUDA(memory_gib, shared_memory=shared_memory)
         monkeypatch.setattr(args_module, "current_platform", platform)
         monkeypatch.setattr(auto_tune_module, "current_platform", platform)
         monkeypatch.setattr(image_config, "current_platform", platform)
@@ -98,6 +101,21 @@ def test_online_adaln_default_and_explicit_overrides(
 def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
     args = make_server(minimax_h3_adaln_online=True)
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
+
+
+def test_gb10_residency_requires_available_shared_memory_and_online_adaln(make_server):
+    hardware = dict(device_names=["NVIDIA GB10"], shared_memory=True)
+    resident = make_server(109, **hardware)
+    assert resident.minimax_h3_adaln_online
+    assert not resident.dit_cpu_offload and not resident.text_encoder_cpu_offload
+    below_threshold = make_server(105, **hardware)
+    assert below_threshold.text_encoder_cpu_offload
+    with pytest.raises(ValueError, match="resident GB10 requires online AdaLN"):
+        make_server(109, **hardware, minimax_h3_adaln_online=False)
+    offload = make_server(109, **hardware, component_residency="all=component-offload")
+    assert offload.dit_cpu_offload and offload.text_encoder_cpu_offload
+    discrete = make_server(109, device_names=["NVIDIA GB10"])
+    assert discrete.text_encoder_cpu_offload
 
 
 @pytest.mark.parametrize("tasks", [["t2i"], ["t2i", "edit"]])
