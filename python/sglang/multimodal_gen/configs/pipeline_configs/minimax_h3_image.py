@@ -246,8 +246,16 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
                 raise ValueError(f"MiniMax H3 image does not support {name}")
         if server_args.minimax_h3_adaln_cache_path is not None:
             raise ValueError("MiniMax H3 image does not support an AdaLN cache")
-        if server_args.quantization is not None or server_args.component_quantizations:
-            raise ValueError("MiniMax H3 image requires unquantized components")
+        online_quantizations = (None, "fp8", "mxfp8")
+        if server_args.quantization not in online_quantizations or any(
+            name not in ("transformer", "text_encoder")
+            or value not in online_quantizations
+            for name, value in server_args.component_quantizations.items()
+        ):
+            raise ValueError(
+                "MiniMax H3 image supports online fp8/mxfp8 for the transformer "
+                "and text_encoder; the image VAE retains native precision"
+            )
         if server_args.lora_path is not None:
             raise ValueError("MiniMax H3 image does not support LoRA")
         if server_args.model_variant is not None:

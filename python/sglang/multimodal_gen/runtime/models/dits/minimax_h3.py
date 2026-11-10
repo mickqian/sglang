@@ -2242,10 +2242,17 @@ class MiniMaxH3DiTModel(SpectrumMixin, BaseDiT, LayerwiseOffloadableModuleMixin)
         super().__init__(config=config, hf_config=hf_config)
         arch = self.config
         if (
-            adaln_cache_path is not None or adaln_weight_files is not None
-        ) and quant_config is not None:
+            (adaln_cache_path is not None or adaln_weight_files is not None)
+            and quant_config is not None
+            and not (
+                adaln_cache_path is None
+                and quant_config.get_name() in ("fp8", "mxfp8")
+                and not getattr(quant_config, "is_checkpoint_fp8_serialized", True)
+            )
+        ):
             raise ValueError(
-                "MiniMax H3 AdaLN cache is only compatible with unquantized weights"
+                "MiniMax H3 AdaLN cache requires unquantized weights or online "
+                "FP8 with AdaLN rebuilt from native checkpoint weights"
             )
         if arch.adaln_curve_grid is not None and (
             adaln_cache_path is not None or adaln_weight_files is not None
