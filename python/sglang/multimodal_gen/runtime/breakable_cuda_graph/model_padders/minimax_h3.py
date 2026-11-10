@@ -9,9 +9,6 @@ from typing import Any
 
 import torch
 
-from sglang.multimodal_gen.configs.models.dits.minimax_h3 import (
-    MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT,
-)
 from sglang.multimodal_gen.runtime.breakable_cuda_graph import (
     prompt_padding as bcg_utils,
 )
@@ -50,8 +47,10 @@ def _replace_psp(
     max_seqlen_q: int,
 ) -> dict[str, Any]:
     if isinstance(psp, dict):
+        # The host copy carries prompt-dependent bounds that would key the BCG
+        # signature; consumers that need host bounds rebuild them eagerly.
         return {
-            **psp,
+            **{k: v for k, v in psp.items() if k != "cu_seqlens_q_host"},
             "cu_seqlens_q": cu_seqlens_q,
             "max_seqlen_q": max_seqlen_q,
         }
@@ -59,11 +58,6 @@ def _replace_psp(
         "cu_seqlens_q": cu_seqlens_q,
         "max_seqlen_q": max_seqlen_q,
     }
-
-
-def _aligned(value: int) -> int:
-    alignment = MINIMAX_H3_PACKED_SEQUENCE_ALIGNMENT
-    return (value + alignment - 1) // alignment * alignment
 
 
 def pad_minimax_h3_prompt_kwargs(
@@ -96,7 +90,9 @@ def pad_minimax_h3_prompt_kwargs(
     media_rows = int(img_pos.numel()) + int(audio_pos.numel())
     used = text_len + media_rows
     source_seq = int(x.shape[1])
-    if source_seq < _aligned(used):
+    # Video packs to 64 rows; image releases use their own shorter tail, so
+    # only require that every used row fits.
+    if source_seq < used:
         return call_kwargs
 
     out = dict(call_kwargs)

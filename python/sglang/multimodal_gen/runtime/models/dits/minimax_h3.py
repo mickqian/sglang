@@ -918,13 +918,13 @@ def _minimax_h3_attention_core_impl(
             is AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN
         ):
             impl = attention._attention_impl
-            sparse_will_run = (
-                cu_seqlens_host is not None
-                and impl._sparse_ready(q, k)
-                and any(
-                    stop - start >= impl.schedule.min_seq_len
-                    for start, stop in itertools.pairwise(cu_seqlens_host)
-                )
+            if cu_seqlens_host is None:
+                # This attention core is an eager BCG break, so reading the
+                # live bounds here is safe during capture and replay.
+                cu_seqlens_host = tuple(int(value) for value in cu_seqlens.tolist())
+            sparse_will_run = impl._sparse_ready(q, k) and any(
+                stop - start >= impl.schedule.min_seq_len
+                for start, stop in itertools.pairwise(cu_seqlens_host)
             )
             if sparse_will_run and subblock_sparse_query_block_mask is None:
                 raise ValueError(
@@ -2900,13 +2900,12 @@ class MiniMaxH3DiTModel(SpectrumMixin, BaseDiT, LayerwiseOffloadableModuleMixin)
             torch.int32
         )
         raw_cu_seqlens_host = self._psp_optional_field(psp, "cu_seqlens_q_host")
-        cu_seqlens_host = tuple(
-            int(value)
-            for value in (
-                cu_seqlens.tolist()
-                if raw_cu_seqlens_host is None
-                else raw_cu_seqlens_host
-            )
+        # BCG-padded calls omit the host copy. Keep None rather than syncing
+        # here, inside a captured segment; consumers derive bounds eagerly.
+        cu_seqlens_host = (
+            None
+            if raw_cu_seqlens_host is None
+            else tuple(int(value) for value in raw_cu_seqlens_host)
         )
         # max_seqlen_q is set to cu_seqlens[1] (`used`, the real/non-padding
         # row count) by construction -- already a plain host int here, so

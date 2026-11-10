@@ -223,15 +223,10 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             )
         for name in (
             "use_fsdp_inference",
-            "enable_torch_compile",
-            "regional_compile",
-            "enable_breakable_cuda_graph",
             "comfyui_mode",
         ):
             if getattr(server_args, name):
                 raise ValueError(f"MiniMax H3 image does not support {name}")
-        if server_args.has_layerwise_offload_components():
-            raise ValueError("MiniMax H3 image does not support layerwise offload")
         if server_args.minimax_h3_adaln_cache_path is not None:
             raise ValueError("MiniMax H3 image does not support an AdaLN cache")
         if server_args.quantization is not None or server_args.component_quantizations:
