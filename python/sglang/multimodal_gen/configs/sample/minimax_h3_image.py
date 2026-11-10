@@ -171,8 +171,10 @@ class MiniMaxH3ImageSamplingParams(SamplingParams):
         self.task_type = None
         self._adjust(server_args)
         req.extra.update(self.build_request_extra())
-        # warmup follows a prefix of the release grid without changing real requests
-        req.num_inference_steps = min(warmup_steps, self.num_inference_steps)
+        # Only synthetic warmup may use a prefix. Compile's serving-path
+        # prewarm is a real forward and must execute every fused PDD head.
+        if req.is_warmup:
+            req.num_inference_steps = min(warmup_steps, self.num_inference_steps)
 
     def apply_request_extra(self, req: Any) -> None:
         super().apply_request_extra(req)

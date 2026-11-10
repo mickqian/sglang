@@ -34,7 +34,8 @@ class ApiTestPipelineConfig(PipelineConfig):
 
 
 @pytest.mark.parametrize("images", [None, ["one.png", "two.png"]])
-def test_synthetic_warmup_builds_a_native_image_request(api_server, images):
+@pytest.mark.parametrize("is_warmup", [True, False])
+def test_synthetic_warmup_builds_a_native_image_request(api_server, images, is_warmup):
     params = MiniMaxH3ImageSamplingParams(
         prompt="warmup",
         width=64,
@@ -45,9 +46,12 @@ def test_synthetic_warmup_builds_a_native_image_request(api_server, images):
     )
     req = Req(sampling_params=params)
     req.set_as_warmup(2)
+    req.is_warmup = is_warmup
+    if not is_warmup:
+        req.extra["server_internal_prewarm"] = True
     params.prepare_synthetic_warmup_request_for_queue(req, api_server)
-    assert req.num_inference_steps == 2
-    assert req.is_warmup and not req.save_output
+    assert req.num_inference_steps == (2 if is_warmup else 6)
+    assert req.is_warmup == is_warmup and not req.save_output
     plan = req.extra[PLAN]
     assert plan.task == ("edit" if images else "t2i")
     assert req.task_type == (ModelTaskType.I2I if images else ModelTaskType.T2I)

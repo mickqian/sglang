@@ -51,6 +51,10 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
     normalized_args,
 )
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_sampling import (  # noqa: F401
+    api_server,
+    test_synthetic_warmup_builds_a_native_image_request,
+)
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # noqa: F401
     test_pdd_schedule_pins_the_step_count_except_for_warmup,
 )
@@ -67,6 +71,9 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import ( 
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_vae import (  # noqa: F401
     test_layerwise_image_vae_preserves_fused_decode,
     tiny_image,
+)
+from sglang.multimodal_gen.test.unit.test_online_fp8_layerwise_load import (  # noqa: F401
+    TestOnlineFp8LayerwiseLoad,
 )
 from sglang.multimodal_gen.tools import (
     build_minimax_h3_adaln_cache,
