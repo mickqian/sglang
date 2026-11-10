@@ -70,7 +70,12 @@ def make_server(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "device_name,memory_gib", [("NVIDIA B300 SXM6 AC", 268), ("NVIDIA H200", 140)]
+    "device_name,memory_gib",
+    [
+        ("NVIDIA B300 SXM6 AC", 268),
+        ("NVIDIA H200", 140),
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 95),
+    ],
 )
 def test_online_adaln_default_and_explicit_overrides(
     make_server, device_name, memory_gib
@@ -84,6 +89,8 @@ def test_online_adaln_default_and_explicit_overrides(
     assert wider.minimax_h3_adaln_online and wider.minimax_h3_adaln_plan_width == 4
     other = make_server(device_names=["NVIDIA H100"])
     assert not other.minimax_h3_adaln_online
+    ada = make_server(48, device_names=["NVIDIA RTX 6000 Ada Generation"])
+    assert not ada.minimax_h3_adaln_online
     mixed = make_server(num_gpus=2, device_names=["NVIDIA B300 SXM6 AC", "NVIDIA H200"])
     assert not mixed.minimax_h3_adaln_online
 

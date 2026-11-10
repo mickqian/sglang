@@ -277,8 +277,9 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             server_args._requested_component_attention_backends["transformer"] = "fa"
 
     def _configure_online_adaln(self, server_args) -> None:
-        # The measured H200/B300 recipes avoid keeping 24.2 GiB of constant AdaLN
-        # projections resident. Explicit choices and custom weights win.
+        # Measured H200/B300 and RTX PRO 6000 Blackwell recipes avoid keeping
+        # 24.2 GiB of constant AdaLN projections resident. Explicit choices and
+        # custom weights win.
         if (
             server_args.minimax_h3_adaln_online is None
             and server_args.performance_mode == "auto"
@@ -294,7 +295,11 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             device_names = [torch.cuda.get_device_name(i) for i in gpu_ids]
             if any(
                 all(name.startswith(family) for name in device_names)
-                for family in ("NVIDIA B300", "NVIDIA H200")
+                for family in (
+                    "NVIDIA B300",
+                    "NVIDIA H200",
+                    "NVIDIA RTX PRO 6000 Blackwell",
+                )
             ):
                 server_args.minimax_h3_adaln_online = True
         if server_args.minimax_h3_adaln_online is None:
