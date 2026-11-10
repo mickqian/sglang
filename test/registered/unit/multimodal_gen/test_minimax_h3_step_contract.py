@@ -54,6 +54,10 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import ( 
     test_large_memory_residency_keeps_explicit_offload_overrides,
     test_online_adaln_default_and_explicit_overrides,
 )
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_vae import (  # noqa: F401
+    test_layerwise_image_vae_preserves_fused_decode,
+    tiny_image,
+)
 from sglang.multimodal_gen.tools import (
     build_minimax_h3_adaln_cache,
     fuse_minimax_h3_pdd_heads,

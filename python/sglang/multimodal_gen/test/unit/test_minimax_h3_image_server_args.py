@@ -135,9 +135,7 @@ def test_host_tier_default_requires_capacity_for_the_whole_release(
     model_path = write_model_dir(tmp_path / "release", tasks)
     config = MiniMaxH3ImagePipelineConfig(model_path=model_path)
     capacity = config.release_pdd_steps() * len(tasks) + spare_slots
-    monkeypatch.setattr(
-        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS", capacity
-    )
+    monkeypatch.setenv("SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS", str(capacity))
     args = make_server(
         config=config,
         minimax_h3_adaln_online=True,
@@ -160,9 +158,7 @@ def test_edit_online_adaln_rejects_narrow_plan_and_fp32_rebuild(
         make_server(
             config=config, minimax_h3_adaln_online=True, minimax_h3_adaln_plan_width=1
         )
-    monkeypatch.setattr(
-        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32", True
-    )
+    monkeypatch.setenv("SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32", "1")
     with pytest.raises(ValueError, match="match precision"):
         make_server(minimax_h3_adaln_online=True)
 

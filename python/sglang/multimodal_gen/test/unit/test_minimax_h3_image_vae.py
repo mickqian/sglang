@@ -6,11 +6,13 @@ draws from the global RNG.
 """
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
+from sglang.kernels.ops import diffusion as diffusion_ops
 from sglang.multimodal_gen.configs.models.vaes.minimax_h3_video import (
     MiniMaxH3VideoVAEConfig,
 )
@@ -23,6 +25,9 @@ from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_vae_cuda_opt import (
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae import (
     AutoencoderKLLegacy,
     DiagonalGaussianDistribution,
+)
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
+    normalized_args,
 )
 
 TINY_VIT = {
@@ -84,6 +89,40 @@ def _tiny_image():
     for name in ("encoder", "decoder", "quant_conv", "post_quant_conv"):
         setattr(model, name, getattr(tiny, name))
     return model.eval()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="requires NVIDIA CUDA",
+)
+def test_layerwise_image_vae_preserves_fused_decode(tiny_image, monkeypatch):
+    monkeypatch.setenv("MINIMAX_H3_VAE_DECODER_FUSED_NORM", "1")
+    model = tiny_image.cuda()
+    model.prepare_decoder_autocast_weights(torch.bfloat16)
+    with torch.no_grad():
+        for block in model.decoder.transformer_blocks:
+            block.scale1.normal_(0, 0.1)
+            block.scale2.normal_(0, 0.1)
+    latents = [torch.randn(1, 24, 1, 4, 4, device="cuda") for _ in range(2)]
+    with set_forward_context(0, None):
+        expected = [model.decode_image_raw(x) for x in latents]
+        model.configure_layerwise_offload(
+            normalized_args(layerwise_prefetch_size={"video_vae": 1}),
+            component_name="video_vae",
+        )
+        with patch.object(
+            diffusion_ops,
+            "h3_vae_scale_add_rmsnorm",
+            wraps=diffusion_ops.h3_vae_scale_add_rmsnorm,
+        ) as scale_add:
+            for _ in range(2):
+                for latent, reference in zip(latents, expected):
+                    torch.testing.assert_close(
+                        model.decode_image_raw(latent), reference, rtol=0, atol=0
+                    )
+            assert scale_add.call_count == 12
+    for manager in model.layerwise_offload_managers:
+        manager.release_all()
 
 
 def test_local_tiling_decode_matches_untiled(tiny_image):

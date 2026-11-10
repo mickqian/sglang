@@ -50,11 +50,7 @@ def _fused_blocks_available(blocks, hidden_states) -> bool:
         return False
     dim = hidden_states.shape[-1]
     for block in blocks:
-        # Layerwise offload hooks live on the block. This loop calls attn and
-        # ff directly, so those hooks would not see the weights move.
-        if block._forward_pre_hooks or block._forward_hooks:
-            return False
-        if not getattr(block, "use_scale", False):
+        if type(block) is not TransformerBlock or not block.use_scale:
             return False
         norm1, norm2 = block.norm1, block.norm2
         if not isinstance(norm1, nn.RMSNorm) or not isinstance(norm2, nn.RMSNorm):
@@ -62,10 +58,9 @@ def _fused_blocks_available(blocks, hidden_states) -> bool:
         if (
             norm1.weight is None
             or norm2.weight is None
-            or norm1.weight.shape != (dim,)
-            or norm2.weight.shape != (dim,)
-            or block.scale1.shape != (dim,)
-            or block.scale2.shape != (dim,)
+            # offloaded parameters are placeholders until the block's pre-hook
+            or norm1.normalized_shape != (dim,)
+            or norm2.normalized_shape != (dim,)
         ):
             return False
     return True
@@ -76,7 +71,6 @@ _FUSED_BLOCKS_LOGGED = False
 
 def _run_fused_transformer_blocks(blocks, hidden_states, rotary_pos_emb):
     global _FUSED_BLOCKS_LOGGED
-    from sglang.kernels.ops.diffusion import h3_vae_rmsnorm, h3_vae_scale_add_rmsnorm
 
     if not _FUSED_BLOCKS_LOGGED:
         _FUSED_BLOCKS_LOGGED = True
@@ -86,26 +80,13 @@ def _run_fused_transformer_blocks(blocks, hidden_states, rotary_pos_emb):
     pending = None
     pending_scale = None
     for block in blocks:
-        if pending is None:
-            normed = h3_vae_rmsnorm(hidden_states, block.norm1.weight, block.norm1.eps)
-        else:
-            hidden_states, normed = h3_vae_scale_add_rmsnorm(
-                hidden_states,
-                pending,
-                pending_scale,
-                block.norm1.weight,
-                block.norm1.eps,
-            )
-        attn_output = block.attn(normed, rotary_pos_emb)
-        hidden_states, normed = h3_vae_scale_add_rmsnorm(
+        hidden_states, pending, pending_scale = block(
             hidden_states,
-            attn_output,
-            block.scale1,
-            block.norm2.weight,
-            block.norm2.eps,
+            rotary_pos_emb,
+            fused_norm=True,
+            pending=pending,
+            pending_scale=pending_scale,
         )
-        pending = block.ff(normed)
-        pending_scale = block.scale2
     return _scaled_residual_add(hidden_states, pending, pending_scale)
 
 
