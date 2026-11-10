@@ -10,7 +10,7 @@ export const config = (() => {
     ["rtxpro6000", "RTX PRO 6000 Blackwell", 96, 1],
     ["rtx6000ada", "RTX 6000 Ada", 48, 1],
     ["rtx5090", "RTX 5090", 32, 1],
-    ["rtx4090", "RTX 4090", 24, 1], ["rtx3090", "RTX 3090", 24, 2],
+    ["rtx4090", "RTX 4090", 24, 1], ["rtx3090", "RTX 3090", 24, 1],
     ["rtx5080", "RTX 5080", 16, 1], ["rtx5070ti", "RTX 5070 Ti", 16, 1],
     ["rtx4080", "RTX 4080", 16, 1], ["rtx4060ti", "RTX 4060 Ti", 16, 1],
     ["rtx5070", "RTX 5070", 12, 1], ["rtx4070", "RTX 4070", 12, 1],
@@ -18,13 +18,13 @@ export const config = (() => {
   ];
   const profile = (hw) => hardware.find(([id]) => id === hw);
   const maxRecipeGpus = (hw) => hw === "rtx3090" ? 2 : hw === "dgx-spark" || hw.startsWith("rtx") ? 1 : 8;
-  // The native CUDA encoder loads 48.09 GiB of BF16 weights before activations.
-  // Whole-component offload cannot shrink that lower bound; no layerwise path
-  // or quantized image checkpoint is currently supported.
+  // Whole-component placement must fit the encoder; layerwise placement streams
+  // its blocks and keeps the native BF16 checkpoint usable on smaller cards.
   const encoderFits = (hw, gpus) => (profile(hw)?.[2] || 0) * gpus >= 48.1;
   const derivedPlan = (hw, gpus) => {
     const [, , vram, minimum] = profile(hw) || [hw, hw, 0, 1];
     if (hw === "dgx-spark") return { tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto" };
+    if (!encoderFits(hw, gpus)) return { tp_size: 1, ulysses_degree: gpus, ring_degree: 1, placement: "layerwise" };
     // Conservative working-set estimate from the measured H200 load/runtime
     // peaks: sharded DiT, folded encoder, VAE/activations and allocator margin.
     const residentTp = [1, 2, 4, 8].find((tp) => tp >= minimum && gpus % tp === 0
@@ -34,7 +34,7 @@ export const config = (() => {
       placement: vram >= 130 ? "auto" : residentTp ? "resident" : "offload" };
   };
   const derivedRecipes = hardware.flatMap(([hw, , , minimum]) => hw === "dgx-spark" ? []
-    : [1, 2, 4, 8].filter((gpus) => gpus <= maxRecipeGpus(hw) && encoderFits(hw, gpus)
+    : [1, 2, 4, 8].filter((gpus) => gpus <= maxRecipeGpus(hw)
       && (["h200", "b300"].includes(hw) ? gpus > 2 : hw !== "rtxpro6000")).map((gpus) => ({
         id: `${hw}-${gpus}-derived`, hw, nodes: 1, gpus_per_node: gpus,
         ...derivedPlan(hw, gpus), encoder: gpus > 1 ? "fold" : "auto",
@@ -60,6 +60,11 @@ export const config = (() => {
     && s.vae === "auto" && s.quality === "lossless";
   const fileUrlServer = (s) => s.hw === "b300" && localVaeServer(s) && s.vae === "auto";
   const fileUrlWorkload = (s) => fileUrlServer(s) && guide4kWorkload(s) && s.quality === "lossless";
+  const requestPrompt = (s) => s.mode === "edit"
+    ? s.references === "two"
+      ? "Keep the scene from <Picture 1> and use the color palette of <Picture 2>."
+      : "Keep the scene and change the sky to a warm sunset."
+    : "A quiet London street after rain, warm shop lights reflected on the pavement, detailed photograph";
   const config = {
   modelName: "MiniMax-H3-Image",
   runModes: ["python"],
@@ -85,11 +90,23 @@ export const config = (() => {
     },
     {
       id: "placement", title: "Placement", scope: "serve", default: "auto",
-      description: "Auto chooses component placement. Resident needs room for all weights and activations; component offload transfers whole modules.",
+      description: "Resident keeps weights on the GPU. Component offload transfers whole modules; layerwise offload streams blocks for smaller GPUs and needs host RAM.",
       options: [
         { id: "auto", label: "Auto", recommended: true },
         { id: "resident", label: "Resident", flags: ["--component-residency all=resident"] },
         { id: "offload", label: "Component offload", flags: ["--component-residency all=component-offload"] },
+        { id: "layerwise", label: "Layerwise offload", flags: ["--component-residency all=layerwise-offload", "--layerwise-prefetch-size transformer=1,text_encoder=1,video_vae=1"] },
+      ],
+    },
+    {
+      id: "quantization", title: "Weight quantization", scope: "serve", default: "native",
+      description: "Native keeps release precision. Online FP8 and MXFP8 reduce memory and can accelerate inference; both change numerics. AdaLN projections and the VAE retain native precision. Restart to change this setting.",
+      options: [
+        { id: "native", label: "Native BF16", recommended: true },
+        { id: "fp8-dit", label: "FP8 DiT", flags: ["--quantization fp8"] },
+        { id: "mxfp8-dit", label: "MXFP8 DiT", flags: ["--quantization mxfp8"] },
+        { id: "fp8-all", label: "FP8 DiT + encoder", flags: ["--quantization fp8", "--component-quantizations.text_encoder fp8"] },
+        { id: "mxfp8-all", label: "MXFP8 DiT + encoder", flags: ["--quantization mxfp8", "--component-quantizations.text_encoder mxfp8"] },
       ],
     },
     {
@@ -107,6 +124,15 @@ export const config = (() => {
         { id: "auto", label: "Auto", recommended: true },
         { id: "online", label: "Precompute", flags: ["--minimax-h3-adaln-online true"] },
         { id: "resident", label: "Keep weights", flags: ["--minimax-h3-adaln-online false"] },
+      ],
+    },
+    {
+      id: "execution", title: "Execution", scope: "serve", default: "eager",
+      description: "Graphs capture the selected request shape at startup and replay matching inputs; other shapes run eager. Changing task, size or reference layout requires a restart to capture it. Regional compile adds startup work and can change floating-point rounding.",
+      options: [
+        { id: "eager", label: "Eager", recommended: true },
+        { id: "bcg", label: "Breakable CUDA graph" },
+        { id: "compile", label: "Regional compile", flags: ["--enable-torch-compile true", "--regional-compile true"] },
       ],
     },
     {
@@ -181,10 +207,11 @@ export const config = (() => {
         { id: "spark-single", hw: "dgx-spark", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto", adaln: "auto", default: true },
         { id: "b300-single", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "auto", encoder: "auto" },
         { id: "b300-single-resident", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "resident", encoder: "auto" },
+        { id: "b300-single-layerwise", hw: "b300", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement: "layerwise", encoder: "auto", adaln: "online" },
         ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `b300-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "b300", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
         ...["auto", "resident", "offload"].map((placement) => ({ id: `h200-single-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto" })),
         ...[[2, 1, 1], [1, 2, 1], [1, 1, 2]].flatMap(([tp_size, ulysses_degree, ring_degree]) => ["auto", "resident"].map((placement) => ({ id: `h200-two-${tp_size}-${ulysses_degree}-${ring_degree}-${placement}`, hw: "h200", nodes: 1, gpus_per_node: 2, tp_size, ulysses_degree, ring_degree, placement, encoder: "fold" }))),
-        ...["resident", "offload"].map((placement) => ({ id: `rtxpro6000-single-${placement}`, hw: "rtxpro6000", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto", default: placement === "resident" })),
+        ...["resident", "offload", "layerwise"].map((placement) => ({ id: `rtxpro6000-single-${placement}`, hw: "rtxpro6000", nodes: 1, gpus_per_node: 1, tp_size: 1, ulysses_degree: 1, ring_degree: 1, placement, encoder: "auto", adaln: placement === "layerwise" ? "online" : "auto", default: placement === "resident" })),
         ...derivedRecipes,
       ].map((recipe) => ({
         adaln: "auto",
@@ -212,9 +239,14 @@ export const config = (() => {
         const errors = [];
         if (!profile(s.hw)) errors.push("Choose a listed NVIDIA GPU.");
         if (s.hw === "dgx-spark" && Number(s.gpus_per_node) !== 1) errors.push("This DGX Spark recipe uses one node with one GB10 GPU.");
-        if (s.hw === "dgx-spark" && s.adaln === "resident" && s.placement !== "offload") errors.push("Resident GB10 requires native AdaLN precomputation. Choose Auto or Precompute.");
+        if (s.hw === "dgx-spark" && s.adaln === "resident" && ["auto", "resident"].includes(s.placement)) errors.push("Resident GB10 requires native AdaLN precomputation. Choose Auto or Precompute.");
         if (Number(s.gpus_per_node) > maxRecipeGpus(s.hw)) errors.push("Default multi-GPU recipes require NVLink. This GPU is limited to a single-card recipe, or a two-card NVLink pair for RTX 3090.");
-        if (profile(s.hw) && !encoderFits(s.hw, Number(s.gpus_per_node))) errors.push("No native-precision recipe fits this capacity: the text encoder alone loads about 48.1 GiB of GPU weights before activations. Whole-component offload cannot reduce it; image layerwise offload and quantization are unavailable.");
+        if (s.quantization?.startsWith("mxfp8") && ["rtx6000ada", "rtx4090", "rtx4080", "rtx4060ti", "rtx4070", "rtx3090", "rtx3060"].includes(s.hw)) errors.push("Choose FP8 or Native BF16 on this GPU; MXFP8 requires Hopper or newer.");
+        if (s.execution === "bcg" && s.warmup === "off") errors.push("Choose Prepare at startup to capture CUDA graphs.");
+        if (profile(s.hw) && !encoderFits(s.hw, Number(s.gpus_per_node))) {
+          if (s.placement !== "layerwise") errors.push("Choose Layerwise offload for this GPU capacity, or apply the derived recipe.");
+          if (s.adaln !== "online") errors.push("Choose AdaLN Precompute for the small-GPU recipe.");
+        }
         if (!degrees.every((n) => Number.isInteger(n) && n > 0)) errors.push("Parallel degrees must be positive integers.");
         if (Number(s.nodes) !== 1 || Number(s.gpus_per_node) !== degrees.reduce((a, b) => a * b, 1)) errors.push("Use one node with GPU count equal to TP × Ulysses × Ring.");
         if (![1, 2, 4, 8].includes(t.tp_size)) errors.push("TP must divide both the DiT and text-encoder head counts: choose 1, 2, 4, or 8.");
@@ -238,6 +270,11 @@ export const config = (() => {
           : s.hw === "b300" ? Number(s.gpus_per_node) <= 2
           : Number(s.gpus_per_node) === 1);
       const serveVerified = !!recipe && !recipe.unverified && !errors.length
+        && ((!s.quantization || s.quantization === "native") || (Number(s.gpus_per_node) === 1 && s.adaln !== "resident"
+          && ((s.hw === "b300" && (s.placement === "resident" || (s.placement === "layerwise" && s.quantization.endsWith("-all"))))
+            || (s.hw === "rtxpro6000" && s.placement === "resident" && s.quantization.endsWith("-all")))))
+        && ((!s.execution || s.execution === "eager") || (["bcg", "compile"].includes(s.execution) && s.hw === "b300" && Number(s.gpus_per_node) === 1 && s.placement === "resident" && s.adaln !== "resident" && (!s.quantization || s.quantization === "native")))
+        && (s.placement !== "layerwise" || s.adaln === "online")
         && (s.delivery !== "url" || fileUrlServer(s))
         && (s.conditioning !== "off" || uncachedServer(s))
         && (s.vae !== "local" || localVaeServer(s))
@@ -250,6 +287,14 @@ export const config = (() => {
       const flags = ["--model-path {{MODEL_NAME}}", "--backend sglang"];
       if (Number(s.gpus_per_node) > 1) flags.push(`--num-gpus ${s.gpus_per_node}`, `--tp-size ${topology.tp_size}`, `--ulysses-degree ${topology.ulysses_degree}`, `--ring-degree ${topology.ring_degree}`);
       flags.push("--host {{HOST_IP}}", "--port {{PORT}}");
+      if (s.execution === "bcg") {
+        const [width, height] = s.size.split("x").map(Number);
+        const warmup = { prompt: requestPrompt(s), width, height, quality: "lossless" };
+        if (s.mode === "edit") warmup.image_path = s.references === "two"
+          ? ["{{WARMUP_IMAGE_PATH}}", "{{WARMUP_IMAGE_PATH_2}}"] : ["{{WARMUP_IMAGE_PATH}}"];
+        flags.push("--enable-breakable-cuda-graph true", `--warmup-resolutions ${s.size}`,
+          "--warmup-steps 6", "--bcg-text-buckets 256", `--warmup-sampling-params '${JSON.stringify(warmup)}'`);
+      }
       if (s.delivery === "url") flags.push("--output-path {{OUTPUT_DIR}}");
       return {
         match: { hw: s.hw }, nnodes: 1, verified, flags,
@@ -267,8 +312,8 @@ export const config = (() => {
             ]
             : verified ? [] : [
               "This exact hardware, topology, placement and workload recipe is not yet verified.",
-              ...(derivedRecipe ? ["Derived from checkpoint sizes, measured H200 memory and native TP/encoder fold. Start at 2048 × 2048; latency and capacity on this GPU are unmeasured.",
-                ...(derivedRecipe.placement === "offload" ? ["Component offload transfers whole modules. Plan for 256 GB host RAM and local NVMe; small-card PCIe transfer can dominate latency."] : []),
+              ...(derivedRecipe ? ["Derived from checkpoint sizes and measured native placement paths. Start at 2048 × 2048; this GPU's latency is unmeasured.",
+                ...(["offload", "layerwise"].includes(derivedRecipe.placement) ? ["Plan for 256 GB host RAM and local NVMe. Layerwise offload reduces GPU memory; host-to-GPU transfers can dominate latency."] : []),
               ] : []),
             ],
           verification: { serve: errors.length ? "error" : serveVerified ? "verified" : "unverified", request: errors.length ? "error" : verified ? "verified" : "unverified" },
@@ -285,15 +330,15 @@ export const config = (() => {
     OUTPUT_DIR: { target: "command", label: "Saved image directory", default: "./outputs/h3-image", showWhen: (s) => s.delivery === "url" },
     IMAGE_PATH: { target: "curl", label: "Reference image", default: "/path/to/reference.png", showWhen: (s) => s.mode === "edit" },
     IMAGE_PATH_2: { target: "curl", label: "Second reference image", default: "/path/to/reference-2.png", showWhen: (s) => s.mode === "edit" && s.references === "two" },
+    WARMUP_IMAGE_PATH: { target: "command", label: "Warmup reference on server", default: "/path/to/reference.png", showWhen: (s) => s.execution === "bcg" && s.mode === "edit" },
+    WARMUP_IMAGE_PATH_2: { target: "command", label: "Second warmup reference on server", default: "/path/to/reference-2.png", showWhen: (s) => s.execution === "bcg" && s.mode === "edit" && s.references === "two" },
   },
   curl: (s) => {
     const save = s.delivery === "url"
       ? " | python3 -c 'import json,sys,urllib.parse,urllib.request; urllib.request.urlretrieve(urllib.parse.urljoin(\"http://{{CURL_HOST}}:{{CURL_PORT}}\",json.load(sys.stdin)[\"data\"][0][\"url\"]),\"generated.png\")'"
       : " | python3 -c 'import base64,json,sys; open(\"generated.png\",\"wb\").write(base64.b64decode(json.load(sys.stdin)[\"data\"][0][\"b64_json\"]))'";
     const references = s.references === "two" ? " \\\n  -F 'image=@{{IMAGE_PATH_2}}'" : "";
-    const prompt = s.references === "two"
-      ? "Keep the scene from <Picture 1> and use the color palette of <Picture 2>."
-      : "Keep the scene and change the sky to a warm sunset.";
+    const prompt = requestPrompt(s);
     const compression = s.png === "none" ? " -F 'output_compression=0'" : "";
     if (s.mode === "edit") return `curl --fail-with-body http://{{CURL_HOST}}:{{CURL_PORT}}/v1/images/edits \\
   -F 'model={{MODEL_NAME}}' \\
@@ -303,7 +348,7 @@ export const config = (() => {
   -F 'response_format=${s.delivery}' -F 'output_format=png'${compression}${save}`;
     return `curl --fail-with-body http://{{CURL_HOST}}:{{CURL_PORT}}/v1/images/generations \\
   -H 'Content-Type: application/json' \\
-  -d '${JSON.stringify({ model: "{{MODEL_NAME}}", prompt: "A quiet London street after rain, warm shop lights reflected on the pavement, detailed photograph", size: s.size, quality: s.quality, seed: Number(s.seed), generator_device: "cpu", response_format: s.delivery, output_format: "png", output_compression: s.png === "none" ? 0 : undefined }, null, 2)}'${save}`;
+  -d '${JSON.stringify({ model: "{{MODEL_NAME}}", prompt, size: s.size, quality: s.quality, seed: Number(s.seed), generator_device: "cpu", response_format: s.delivery, output_format: "png", output_compression: s.png === "none" ? 0 : undefined }, null, 2)}'${save}`;
   },
   cells: [],
   };

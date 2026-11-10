@@ -94,7 +94,7 @@ encoder. Qwen uses a 1024-pixel short edge; the VAE keeps the short edge within
 1024–2048 pixels. Reference order, dimensions, generator device, model revision
 and precision all matter when reproducing an edit.
 
-## 3. Deployment boundaries
+## 3. Deployment options
 
 DiT and text-encoder weights use BF16. The VAE checkpoint uses FP32; its
 decoder weights are prepared in BF16 for BF16 autocast. The DiT uses dense
@@ -120,7 +120,7 @@ keep the checkpoint files available for uncached plans. The bounded GPU and
 host caches reuse these exact results. Select **Keep weights** in the picker,
 or pass `--minimax-h3-adaln-online false`, to avoid the rebuild cost. Other
 GPUs keep projection weights by default; explicit online precomputation is
-available but unmeasured there. Prebuilt AdaLN sidecars remain unsupported.
+available through **Precompute**.
 
 `quality=lossless` is the default. It enables shared DiT and VAE QK-norm/RoPE
 fusion, uses cuDNN SDPA in the VAE with a backend fallback, and batches existing
@@ -142,16 +142,29 @@ cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
 `--allow-cudnn-tf32 false --allow-bf16-reduced-precision-reduction false` are
 available but are not covered by these measurements.
 
-The current image integration rejects BCG, torch.compile, FSDP, layerwise
-offload, CFG parallelism, quantization, LoRA, Cache-DiT and disaggregation.
-Video-model feature and performance results do not establish image-model support
-for these paths.
+**Layerwise offload** streams the DiT, text encoder and VAE decoder blocks from
+host RAM while preserving native precision. Use **Precompute** with it to avoid
+reloading the large AdaLN projection weights. This is the capacity option for
+smaller GPUs; resident serving remains faster when the model fits.
+
+**Online FP8 / MXFP8** quantizes the DiT, optionally with the text encoder, from
+the original checkpoint. Select it separately in the picker; native BF16 remains
+the default. These are approximate modes even with `quality=exact` or `lossless`:
+quality controls kernel execution within the selected precision. AdaLN
+precomputation and the VAE retain native precision. MXFP8 uses block scaling on
+Blackwell and the FP8 fallback on Hopper; use FP8 on older supported GPUs.
+
+**Breakable CUDA graph** captures the picker's task, size and reference layout
+during startup. Its warmup prompt matches the generated request; editing also
+needs the reference files on the server. Matching signatures replay the graph,
+while other signatures run eager. **Regional compile** compiles repeated DiT
+blocks with PyTorch. Both keep all six steps; compile can change floating-point
+rounding and increases cold startup time. Eager remains the default.
 
 ### Hardware recommendations
 
 The picker provides measured recipes for H200/B300, single-card RTX PRO 6000 and DGX Spark,
-and **Derived** recipes where the native checkpoint can fit. Other cards show
-the capacity limit. A derived recipe estimates the best placement and
+and **Derived** recipes for other listed GPUs. A derived recipe estimates placement and
 parallel layout for the selected GPU count from checkpoint sizes and measured
 H200 memory use. It has no hardware latency measurement or capacity guarantee.
 Apply **Use derived recipe** to set its placement, encoder fold and online
@@ -163,17 +176,16 @@ AdaLN together. Start with 2048 × 2048.
 | H100 / H800, 80 GB | 1 GPU, or 2 for resident serving | Component offload on one; resident Ulysses2 with encoder fold on two |
 | RTX PRO 6000 Blackwell, 96 GB | 1 GPU | Measured resident recipe with AdaLN precomputation; component offload saves memory |
 | DGX Spark, 128 GB shared | 1 GB10 | Measured Auto resident recipe with native AdaLN precomputation; requires at least 106 GiB available |
-| RTX 6000 Ada, RTX 5090 / 4090 and listed 12–48 GB cards without NVLink | 1 GPU | No native-precision recipe fits the current whole-component encoder |
-| RTX 3090, 24 GB | At most a [two-card NVLink pair](https://www.nvidia.com/content/geforce-gtx/GEFORCE_RTX_3090_USER_GUIDE_v02.pdf) | Even two cards have less memory than the native encoder weights require |
+| RTX 6000 Ada, RTX 5090 / 4090 and listed 12–48 GB cards without NVLink | 1 GPU | Layerwise offload with native AdaLN precomputation |
+| RTX 3090, 24 GB | 1 GPU; optionally a [two-card NVLink pair](https://www.nvidia.com/content/geforce-gtx/GEFORCE_RTX_3090_USER_GUIDE_v02.pdf) | Layerwise offload with native AdaLN precomputation |
 
 Multi-GPU recommendations assume an NVLink-connected machine. Cards without
-NVLink use single-card recipes by default. The native CUDA text encoder loads
-about 48.1 GiB of weights before activations; whole-component offload cannot
-reduce this floor. The image model has no layerwise-offload or quantization
-path, so its small-VRAM entries explain the limit and disable command copying.
-A smaller output does not make those encoder weights fit. Offload recipes
-assume a 256 GB-class host and local NVMe. None changes precision, the six steps
-or the minimum generation canvas.
+NVLink use single-card recipes by default. Offload recipes assume a 256 GB-class
+host and local NVMe. Layerwise offload preserves the six steps, native precision
+and minimum generation canvas. The capacity validation uses a constrained B300
+allocator: native 2K/4K generation and editing, including two-reference 4K,
+passed with an 8 GiB allocator limit and a 10.01 GiB measured whole-GPU peak.
+It is not a latency measurement on the listed consumer GPUs.
 
 ### DGX Spark (128 GB)
 
@@ -188,7 +200,7 @@ Start with a 2048 × 2048 output.
 The [128 GB configuration](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
 has one [shared CPU/GPU memory pool](https://docs.nvidia.com/dgx/dgx-spark/known-issues.html#guidance-for-reporting-memory-resources-with-unified-memory-architecture).
 Component offload does not provide another 128 GB of memory. Whole-component transfers can temporarily hold both CPU and GPU copies in
-that pool; its image pipeline has no layerwise-offload fallback. Use a bounded
+that pool. Use a bounded
 container with swap disabled for the process, such as `--memory 104g
 --memory-swap 104g --shm-size 8g`, and download weights inside that container
 so its file cache can be reclaimed within the limit. The picker marks option

@@ -173,6 +173,9 @@ test("H3-Image derives capacity-aware commands without borrowing video-only feat
     ["b200", 1, 1, 1, "auto"], ["gb300", 4, 1, 4, "auto"],
     ["h100", 1, 1, 1, "offload"], ["h100", 2, 1, 2, "resident"],
     ["h800", 2, 1, 2, "resident"],
+    ["rtx3060", 1, 1, 1, "layerwise"], ["rtx4090", 1, 1, 1, "layerwise"],
+    ["rtx5090", 1, 1, 1, "layerwise"], ["rtx6000ada", 1, 1, 1, "layerwise"],
+    ["rtx3090", 2, 1, 2, "layerwise"],
   ]) {
     const selected = selection(config, { hw, gpus_per_node: gpus });
     const recipe = resource.recommendedRecipe(selected);
@@ -192,23 +195,21 @@ test("H3-Image derives capacity-aware commands without borrowing video-only feat
   }
   for (const hw of config.supportedHardware) {
     const recipes = resource.verifiedRecipes.filter((recipe) => recipe.hw === hw);
-    if (!recipes.length) {
-      assert.match(resolve(config, { hw }).builder.errors.join(" "), /encoder alone loads/);
-      continue;
-    }
+    assert.ok(recipes.length, hw);
     const starting = recipes.find((recipe) => recipe.default) || recipes[0];
     assert.deepEqual(resolve(config, { ...starting, topology_mode: "manual" }).builder.errors, []);
   }
   const small = resolve(config, { hw: "rtx5090", gpus_per_node: 1 });
-  assert.match(small.builder.errors.join(" "), /encoder alone loads/);
+  assert.match(small.builder.errors.join(" "), /Layerwise offload/);
   assert.equal(small.verified, false);
   assert.equal(small.builder.verification.serve, "error");
   const flags = config.overlayDims.filter((dim) => dim.scope === "serve")
     .flatMap((dim) => dim.options.flatMap((option) => option.flags || []));
-  assert.doesNotMatch(flags.join(" "), /layerwise-offload|use-fsdp|quantization|nvfp4/);
+  assert.match(flags.join(" "), /all=layerwise-offload/);
+  assert.match(flags.join(" "), /--layerwise-prefetch-size transformer=1,text_encoder=1,video_vae=1/);
 });
 
-test("H3-Image omits multi-GPU recipes without NVLink and blocks insufficient capacity", () => {
+test("H3-Image omits multi-GPU recipes without NVLink and streams small GPUs", () => {
   const config = get("/MiniMax/MiniMax-H3-Image.mdx");
   const resource = config.commandBuilder.resource;
   for (const hw of config.supportedHardware.filter((hw) => hw.startsWith("rtx") && hw !== "rtx3090")) {
@@ -217,7 +218,9 @@ test("H3-Image omits multi-GPU recipes without NVLink and blocks insufficient ca
     assert.match(resolve(config, { hw, gpus_per_node: 2 }).builder.errors.join(" "), /require NVLink/);
   }
   for (const gpus_per_node of [1, 2]) {
-    assert.match(resolve(config, { hw: "rtx3090", gpus_per_node }).builder.errors.join(" "), /encoder alone loads/);
+    const recipe = resource.recommendedRecipe(selection(config, { hw: "rtx3090", gpus_per_node }));
+    assert.equal(recipe.placement, "layerwise");
+    assert.deepEqual(resolve(config, recipe).builder.errors, []);
   }
   assert.match(resolve(config, { hw: "rtx3090", gpus_per_node: 4 }).builder.errors.join(" "), /two-card NVLink pair/);
 });
@@ -287,6 +290,44 @@ test("H3-Image request controls preserve reference order, seed and native canvas
   assert.equal(json.generator_device, "cpu");
   assert.equal(json.min_generation_area, undefined);
   assert.deepEqual(resolve(config, { seed: 1234, size: "4736x3552" }).flags, resolve(config).flags);
+});
+
+test("H3-Image graph warmup matches the generated request and server references", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  for (const mode of ["t2i", "edit"]) {
+    const s = { mode, references: "two", size: "4096x4096", execution: "bcg", placement: "resident", adaln: "online" };
+    const result = resolve(config, s);
+    const flag = result.flags.find((value) => value.startsWith("--warmup-sampling-params "));
+    const warmup = JSON.parse(flag.match(/'(.+)'$/)[1]);
+    assert.equal(warmup.width, 4096);
+    assert.equal(warmup.height, 4096);
+    assert.equal(warmup.quality, "lossless");
+    if (mode === "edit") {
+      assert.deepEqual(warmup.image_path, ["{{WARMUP_IMAGE_PATH}}", "{{WARMUP_IMAGE_PATH_2}}"]);
+      assert.ok(curl(config, s).includes(warmup.prompt));
+    } else {
+      assert.equal(warmup.image_path, undefined);
+      assert.equal(warmup.prompt, JSON.parse(curl(config, s).match(/-d '([\s\S]+)' \|/)[1]).prompt);
+    }
+    assert.equal(spawnSync("bash", ["-n"], { input: "sglang serve " + result.flags.join(" ") }).status, 0);
+  }
+  assert.match(resolve(config, { execution: "bcg", warmup: "off" }).builder.errors.join(" "), /capture CUDA graphs/);
+});
+
+test("H3-Image quantization remains opt-in with separate hardware and placement coverage", () => {
+  const config = get("/MiniMax/MiniMax-H3-Image.mdx");
+  const dim = config.overlayDims.find((item) => item.id === "quantization");
+  assert.equal(dim.default, "native");
+  assert.ok(dim.options.find((option) => option.id === "mxfp8-all").flags.includes("--component-quantizations.text_encoder mxfp8"));
+  assert.equal(resolve(config, { quantization: "fp8-all", placement: "layerwise", adaln: "online" }).builder.verification.serve, "verified");
+  assert.equal(resolve(config, { quantization: "fp8-dit", placement: "layerwise", adaln: "online" }).builder.verification.serve, "unverified");
+  assert.match(resolve(config, { hw: "rtx4090", quantization: "mxfp8-all", placement: "layerwise", adaln: "online" }).builder.errors.join(" "), /Hopper or newer/);
+  assert.equal(resolve(config, { hw: "rtxpro6000", quantization: "mxfp8-all", placement: "resident" }).builder.verification.serve, "verified");
+  assert.equal(resolve(config, { hw: "rtxpro6000", quantization: "mxfp8-dit", placement: "resident" }).builder.verification.serve, "unverified");
+  assert.deepEqual(resolve(config, { quantization: "fp8-all", placement: "resident", adaln: "resident" }).builder.errors, []);
+  assert.equal(resolve(config, { execution: "compile", placement: "resident" }).builder.verification.serve, "verified");
+  assert.equal(resolve(config, { execution: "compile", placement: "layerwise", adaln: "online" }).builder.verification.serve, "unverified");
+  assert.doesNotMatch(curl(config, { quantization: "fp8-all" }), /--quantization|component-quantizations/);
 });
 
 test("H3-Image file URLs couple persistent output with a separate image download", () => {
