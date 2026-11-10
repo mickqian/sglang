@@ -43,6 +43,9 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (
     test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity,
     test_adaln_prewarm_requires_the_same_denoising_prefix,
 )
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
+    normalized_args,
+)
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # noqa: F401
     test_pdd_schedule_pins_the_step_count_except_for_warmup,
 )
@@ -72,7 +75,7 @@ def global_server_args(monkeypatch):
     monkeypatch.setattr(
         server_args_module,
         "_global_server_args",
-        SimpleNamespace(comfyui_mode=False),
+        normalized_args(),
     )
 
 
