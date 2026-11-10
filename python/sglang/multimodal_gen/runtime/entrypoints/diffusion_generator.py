@@ -263,10 +263,12 @@ class DiffGenerator:
                 "Either remove --output-file-name or use a single prompt."
             )
 
+        # Build the template from one resolved prompt; each prompt is cloned in
+        # below, and model validators expect the str a single request carries.
         sampling_params_orig = SamplingParams.from_user_sampling_params_args(
             self.server_args.model_path,
             server_args=self.server_args,
-            **sampling_params_kwargs,
+            **{**sampling_params_kwargs, "prompt": prompts[0]},
         )
 
         request_groups: list[list[Req]] = []

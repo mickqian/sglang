@@ -94,7 +94,10 @@ class MiniMaxH3TimestepPreparationStage(PipelineStage):
                 self._pdd_image_sigmas,
                 task=plan.task,
                 num_steps=batch.num_inference_steps,
-                is_warmup=batch.is_warmup,
+                # torch.compile's real-path prewarm also runs a warmup-length
+                # prefix, but is not flagged is_warmup.
+                is_warmup=batch.is_warmup
+                or bool(batch.extra.get("server_internal_prewarm")),
             )
             # No audio stream; the audio entry mirrors video so consumers that
             # expect both keys see equal-length plans.

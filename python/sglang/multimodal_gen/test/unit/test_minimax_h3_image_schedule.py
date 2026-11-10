@@ -127,6 +127,17 @@ def test_pdd_schedule_pins_the_step_count_except_for_warmup(tmp_path, task):
     assert "full" not in warmup.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]
 
 
+@pytest.mark.parametrize("task", ["t2i", "edit"])
+def test_pdd_schedule_accepts_compile_real_path_prewarm(tmp_path, task):
+    # torch.compile's real-path prewarm runs warmup_steps but is not is_warmup.
+    stage = _pdd_stage(tmp_path, {"num_inference_steps": 6, "sigmas": PDD_SIGMAS})
+    prewarm = _stage_batch(task, 1)
+    prewarm.extra["server_internal_prewarm"] = True
+    stage.forward(prewarm, SimpleNamespace())
+    assert _bits(prewarm.sigmas) == _bits(_float32_timestep_schedule(PDD_SIGMAS)[0][:2])
+    assert "full" not in prewarm.extra[MINIMAX_H3_SIGMAS_EXTRA_KEY]
+
+
 @pytest.mark.parametrize(
     "config,match",
     [
