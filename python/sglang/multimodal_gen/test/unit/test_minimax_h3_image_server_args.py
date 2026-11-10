@@ -276,6 +276,23 @@ def test_image_auxiliary_policy_prevents_cpu_to_layerwise_replacement(make_serve
     assert args.text_encoder_cpu_offload and args.vae_cpu_offload
 
 
+@pytest.mark.parametrize("component", ["transformer", "text_encoder", "video_vae"])
+@pytest.mark.parametrize(
+    "selector", ["component_residency", "layerwise_offload_components"]
+)
+def test_explicit_image_layerwise_placement_loads_on_cpu(
+    make_server, component, selector
+):
+    value = (
+        f"{component}=layerwise-offload"
+        if selector == "component_residency"
+        else [component]
+    )
+    args = make_server(24, **{selector: value})
+    assert args.residency_mode(component) == "layerwise-offload"
+    assert args.should_start_component_on_cpu(component)
+
+
 def test_video_config_auto_offloads_auxiliary_components_layerwise(make_server):
     assert ModelDeploymentConfig().auto_auxiliary_layerwise_offload
     args = make_server(config=MiniMaxH3PipelineConfig())

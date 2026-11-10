@@ -75,9 +75,9 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         return False
 
     def get_model_deployment_config(self) -> ModelDeploymentConfig:
-        # Stage-level offload remains possible; no layerwise, FSDP or compile
-        # policy is taken from the much larger video workload. One positive
-        # branch per step leaves nothing for CFG parallelism, so with no other
+        # Automatic layerwise offload, FSDP and compile policies stay separate
+        # from the larger video workload. One positive branch per step leaves
+        # nothing for CFG parallelism, so with no other
         # parallel flag `--num-gpus N` runs Ulysses N over the packed sequence.
         return ModelDeploymentConfig(
             auto_auxiliary_layerwise_offload=False,
@@ -241,8 +241,6 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         ):
             if getattr(server_args, name):
                 raise ValueError(f"MiniMax H3 image does not support {name}")
-        if server_args.has_layerwise_offload_components():
-            raise ValueError("MiniMax H3 image does not support layerwise offload")
         if server_args.minimax_h3_adaln_cache_path is not None:
             raise ValueError("MiniMax H3 image does not support an AdaLN cache")
         if server_args.quantization is not None or server_args.component_quantizations:
