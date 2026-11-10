@@ -21,6 +21,9 @@ from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_audio_vae import (
 from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae import (
     AutoencoderKLLegacy,
 )
+from sglang.multimodal_gen.runtime.models.vaes.minimax_h3_video_vae.klvae import (
+    get_tile_parallel_state,
+)
 
 
 class MiniMaxH3VideoVAE(AutoencoderKLLegacy, LayerwiseOffloadableModuleMixin):
@@ -108,6 +111,18 @@ class MiniMaxH3ImageVAE(MiniMaxH3VideoVAE):
             and tiles[0].is_cuda
             and forward_fn == self.decode
         ):
+            tile_rank, tile_world_size = get_tile_parallel_state()
+            parallel_decode = (
+                self.use_parallel_decode
+                and self.sglang_config.use_parallel_tiling
+                and not self.parallel_tiling
+                and 1 < tile_world_size <= len(tiles)
+                and tile_indices == list(range(len(tiles)))
+            )
+            if parallel_decode:
+                tile_indices = self._local_tile_indices(
+                    len(tiles), tile_rank, tile_world_size
+                )
             chunk_size = max(1, 128 // tiles[0].shape[0])
             outputs = []
             for start in range(0, len(tile_indices), chunk_size):
@@ -120,6 +135,8 @@ class MiniMaxH3ImageVAE(MiniMaxH3VideoVAE):
                         cls_agg=cls_agg,
                     )
                 )
+            if parallel_decode:
+                return self._all_gather_tiled_results(outputs, len(tiles))
             return outputs
         return super()._run_tile_tasks(
             tiles, tile_indices, forward_fn, stack_tiling, cls_agg

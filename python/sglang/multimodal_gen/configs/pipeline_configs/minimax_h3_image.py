@@ -17,6 +17,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.model_deployment_config impo
     ModelDeploymentConfig,
 )
 from sglang.multimodal_gen.configs.task_type import DataType, ModelTaskType
+from sglang.multimodal_gen.runtime.managers.memory_managers.component_residency import (
+    RESIDENT,
+)
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
@@ -75,18 +78,29 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
         return False
 
     def get_model_deployment_config(self) -> ModelDeploymentConfig:
-        # Stage-level offload remains possible; no layerwise, FSDP or compile
-        # policy is taken from the much larger video workload. One positive
-        # branch per step leaves nothing for CFG parallelism, so with no other
+        # Automatic layerwise offload, FSDP and compile policies stay separate
+        # from the larger video workload. One positive branch per step leaves
+        # nothing for CFG parallelism, so with no other
         # parallel flag `--num-gpus N` runs Ulysses N over the packed sequence.
         return ModelDeploymentConfig(
             auto_auxiliary_layerwise_offload=False,
-            # Full 2048² generation and multi-reference editing fit on H200
-            # even with AdaLN weights resident (about 115 GiB peak reserved).
-            keep_resident_min_available_gb=130,
+            # H200 keeps headroom even with AdaLN weights resident. GB10 uses
+            # online AdaLN to fit native 4K in its shared pool; validation below
+            # refuses a resident GB10 launch that keeps those projection weights.
+            keep_resident_min_available_gb=(
+                106 if self._uses_gb10_shared_memory() else 130
+            ),
             keep_resident_components=("dit", "text_encoder", "vae"),
             auto_enable_cfg_parallel=False,
             supports_cfg_parallel=False,
+        )
+
+    @staticmethod
+    def _uses_gb10_shared_memory() -> bool:
+        return (
+            current_platform.is_cuda()
+            and current_platform.device_shares_host_memory()
+            and torch.cuda.get_device_name(0).startswith("NVIDIA GB10")
         )
 
     def get_supported_task_types(self) -> tuple[ModelTaskType, ...]:
@@ -273,8 +287,9 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             server_args._requested_component_attention_backends["transformer"] = "fa"
 
     def _configure_online_adaln(self, server_args) -> None:
-        # The measured H200/B300 recipes avoid keeping 24.2 GiB of constant AdaLN
-        # projections resident. Explicit choices and custom weights win.
+        # Measured H200/B300, GB10 and RTX PRO 6000 Blackwell recipes avoid keeping
+        # 24.2 GiB of constant AdaLN projections resident. Explicit choices and
+        # custom weights win.
         if (
             server_args.minimax_h3_adaln_online is None
             and server_args.performance_mode == "auto"
@@ -290,12 +305,26 @@ class MiniMaxH3ImagePipelineConfig(MiniMaxH3PipelineConfig):
             device_names = [torch.cuda.get_device_name(i) for i in gpu_ids]
             if any(
                 all(name.startswith(family) for name in device_names)
-                for family in ("NVIDIA B300", "NVIDIA H200")
+                for family in (
+                    "NVIDIA B300",
+                    "NVIDIA H200",
+                    "NVIDIA GB10",
+                    "NVIDIA RTX PRO 6000 Blackwell",
+                )
             ):
                 server_args.minimax_h3_adaln_online = True
         if server_args.minimax_h3_adaln_online is None:
             server_args.minimax_h3_adaln_online = False
         if not server_args.minimax_h3_adaln_online:
+            if (
+                self._uses_gb10_shared_memory()
+                and server_args.residency_mode("transformer") == RESIDENT
+                and server_args.residency_mode("text_encoder") == RESIDENT
+            ):
+                raise ValueError(
+                    "MiniMax H3 image resident GB10 requires online AdaLN "
+                    "precomputation to fit the shared memory pool"
+                )
             return
         if envs.SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32:
             raise ValueError("MiniMax H3 image online AdaLN requires match precision")

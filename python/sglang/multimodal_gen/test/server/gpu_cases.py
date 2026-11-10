@@ -763,8 +763,9 @@ ONE_GPU_B200_CASES = ONE_GPU_MODELOPT_NVFP4_CASES + [
         sampling,
         perf_warmup_requests=1,
         perf_repeat_requests=2,
-        # Pre-release goldens remain private until the checkpoint is published.
-        run_consistency_check=False,
+        # Consistency remains required; pre-release goldens stay private until
+        # the checkpoint and its authorized golden artifacts are published.
+        run_consistency_check=True,
         # The release provides a native SGLang reference, not a Diffusers pipeline.
         run_component_accuracy_check=False,
         run_t2v_input_reference_check=False,

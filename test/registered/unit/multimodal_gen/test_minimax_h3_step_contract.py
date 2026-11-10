@@ -43,14 +43,23 @@ from sglang.multimodal_gen.test.unit.test_minimax_h3_image_denoise_loop import (
     test_adaln_prewarm_keeps_denoising_prefix_and_respects_capacity,
     test_adaln_prewarm_requires_the_same_denoising_prefix,
 )
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_pipeline_config import (
+    normalized_args,
+)
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_schedule import (  # noqa: F401
     test_pdd_schedule_pins_the_step_count_except_for_warmup,
 )
 from sglang.multimodal_gen.test.unit.test_minimax_h3_image_server_args import (  # noqa: F401
     make_server,
+    test_explicit_image_layerwise_placement_loads_on_cpu,
+    test_gb10_residency_requires_available_shared_memory_and_online_adaln,
     test_host_tier_default_requires_capacity_for_the_whole_release,
     test_large_memory_residency_keeps_explicit_offload_overrides,
     test_online_adaln_default_and_explicit_overrides,
+)
+from sglang.multimodal_gen.test.unit.test_minimax_h3_image_vae import (  # noqa: F401
+    test_layerwise_image_vae_preserves_fused_decode,
+    tiny_image,
 )
 from sglang.multimodal_gen.tools import (
     build_minimax_h3_adaln_cache,
@@ -66,7 +75,7 @@ def global_server_args(monkeypatch):
     monkeypatch.setattr(
         server_args_module,
         "_global_server_args",
-        SimpleNamespace(comfyui_mode=False),
+        normalized_args(),
     )
 
 

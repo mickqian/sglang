@@ -30,8 +30,9 @@ class SimulatedCUDA(Platform):
     device_name = "CPU-test-simulated-CUDA"
     device_type = "cuda"
 
-    def __init__(self, memory_gib):
+    def __init__(self, memory_gib, shared_memory=False):
         self.memory_gib = memory_gib
+        self.shared_memory = shared_memory
 
     def get_device_total_memory(self):
         return int(self.memory_gib * 1024**3)
@@ -40,13 +41,15 @@ class SimulatedCUDA(Platform):
         return self.memory_gib
 
     def device_shares_host_memory(self):
-        return False
+        return self.shared_memory
 
 
 @pytest.fixture
 def make_server(monkeypatch, tmp_path):
-    def make(memory_gib=80, *, config=None, device_names=None, **kwargs):
-        platform = SimulatedCUDA(memory_gib)
+    def make(
+        memory_gib=80, *, config=None, device_names=None, shared_memory=False, **kwargs
+    ):
+        platform = SimulatedCUDA(memory_gib, shared_memory=shared_memory)
         monkeypatch.setattr(args_module, "current_platform", platform)
         monkeypatch.setattr(auto_tune_module, "current_platform", platform)
         monkeypatch.setattr(image_config, "current_platform", platform)
@@ -70,7 +73,12 @@ def make_server(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "device_name,memory_gib", [("NVIDIA B300 SXM6 AC", 268), ("NVIDIA H200", 140)]
+    "device_name,memory_gib",
+    [
+        ("NVIDIA B300 SXM6 AC", 268),
+        ("NVIDIA H200", 140),
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 95),
+    ],
 )
 def test_online_adaln_default_and_explicit_overrides(
     make_server, device_name, memory_gib
@@ -84,6 +92,8 @@ def test_online_adaln_default_and_explicit_overrides(
     assert wider.minimax_h3_adaln_online and wider.minimax_h3_adaln_plan_width == 4
     other = make_server(device_names=["NVIDIA H100"])
     assert not other.minimax_h3_adaln_online
+    ada = make_server(48, device_names=["NVIDIA RTX 6000 Ada Generation"])
+    assert not ada.minimax_h3_adaln_online
     mixed = make_server(num_gpus=2, device_names=["NVIDIA B300 SXM6 AC", "NVIDIA H200"])
     assert not mixed.minimax_h3_adaln_online
 
@@ -91,6 +101,28 @@ def test_online_adaln_default_and_explicit_overrides(
 def test_online_adaln_is_explicitly_available_on_other_devices(make_server):
     args = make_server(minimax_h3_adaln_online=True)
     assert args.minimax_h3_adaln_online and args.minimax_h3_adaln_plan_width == 2
+
+
+def test_gb10_residency_requires_available_shared_memory_and_online_adaln(make_server):
+    hardware = dict(device_names=["NVIDIA GB10"], shared_memory=True)
+    resident = make_server(109, **hardware)
+    assert resident.minimax_h3_adaln_online
+    assert not resident.dit_cpu_offload and not resident.text_encoder_cpu_offload
+    below_threshold = make_server(105, **hardware)
+    assert below_threshold.text_encoder_cpu_offload
+    with pytest.raises(ValueError, match="resident GB10 requires online AdaLN"):
+        make_server(109, **hardware, minimax_h3_adaln_online=False)
+    offload = make_server(109, **hardware, component_residency="all=component-offload")
+    assert offload.dit_cpu_offload and offload.text_encoder_cpu_offload
+    layerwise = make_server(
+        109,
+        **hardware,
+        component_residency="all=layerwise-offload",
+        minimax_h3_adaln_online=False,
+    )
+    assert layerwise.residency_mode("transformer") == "layerwise-offload"
+    discrete = make_server(109, device_names=["NVIDIA GB10"])
+    assert discrete.text_encoder_cpu_offload
 
 
 @pytest.mark.parametrize("tasks", [["t2i"], ["t2i", "edit"]])
@@ -103,9 +135,7 @@ def test_host_tier_default_requires_capacity_for_the_whole_release(
     model_path = write_model_dir(tmp_path / "release", tasks)
     config = MiniMaxH3ImagePipelineConfig(model_path=model_path)
     capacity = config.release_pdd_steps() * len(tasks) + spare_slots
-    monkeypatch.setattr(
-        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS", capacity
-    )
+    monkeypatch.setenv("SGLANG_DIFFUSION_MINIMAX_H3_ADALN_GPU_PLANS", str(capacity))
     args = make_server(
         config=config,
         minimax_h3_adaln_online=True,
@@ -128,9 +158,7 @@ def test_edit_online_adaln_rejects_narrow_plan_and_fp32_rebuild(
         make_server(
             config=config, minimax_h3_adaln_online=True, minimax_h3_adaln_plan_width=1
         )
-    monkeypatch.setattr(
-        image_config.envs, "SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32", True
-    )
+    monkeypatch.setenv("SGLANG_DIFFUSION_MINIMAX_H3_ADALN_FP32", "1")
     with pytest.raises(ValueError, match="match precision"):
         make_server(minimax_h3_adaln_online=True)
 
@@ -249,6 +277,23 @@ def test_image_auxiliary_policy_prevents_cpu_to_layerwise_replacement(make_serve
     ).maybe_replace_cpu_offloaded_components_with_layerwise()
     assert args.layerwise_offload_components is None
     assert args.text_encoder_cpu_offload and args.vae_cpu_offload
+
+
+@pytest.mark.parametrize("component", ["transformer", "text_encoder", "video_vae"])
+@pytest.mark.parametrize(
+    "selector", ["component_residency", "layerwise_offload_components"]
+)
+def test_explicit_image_layerwise_placement_loads_on_cpu(
+    make_server, component, selector
+):
+    value = (
+        f"{component}=layerwise-offload"
+        if selector == "component_residency"
+        else [component]
+    )
+    args = make_server(24, **{selector: value})
+    assert args.residency_mode(component) == "layerwise-offload"
+    assert args.should_start_component_on_cpu(component)
 
 
 def test_video_config_auto_offloads_auxiliary_components_layerwise(make_server):

@@ -43,6 +43,8 @@ def normalized_args(**overrides):
         elif f.default_factory is not MISSING:
             setattr(args, f.name, f.default_factory())
     args.backend = "sglang"
+    # hardware-dependent auto policy is covered by the ServerArgs tests
+    args.performance_mode = "manual"
     # ServerArgs._adjust_attention_backend snapshots explicit requests first.
     args._requested_component_attention_backends = {}
     args.pipeline_config = MiniMaxH3ImagePipelineConfig()
