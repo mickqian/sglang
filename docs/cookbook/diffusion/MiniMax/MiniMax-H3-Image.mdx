@@ -143,10 +143,9 @@ cuDNN TF32 and BF16 reduced-precision reduction. The stricter overrides
 available but are not covered by these measurements.
 
 DiT layerwise offload and torch.compile are supported.
-`--dit-layerwise-offload true` streams DiT layers from host memory and keeps
-outputs identical to resident serving; adding
+`--dit-layerwise-offload true` streams DiT layers from host memory; adding
 `--layerwise-offload-components dit,text_encoder,vae` also streams the encoder
-and VAE, with outputs within a few 8-bit levels of resident serving. At 2K on
+and VAE. Both keep outputs identical to resident serving. At 2K on
 H200, `--enable-torch-compile` did not reduce warm latency and raises peak
 memory, so it stays off by default. Compiled outputs follow a slightly
 different floating-point trajectory.
@@ -155,7 +154,7 @@ different floating-point trajectory.
 | --- | --- | --- | --- |
 | Auto resident | 1.85 s | 3.18 s | 90 GiB |
 | DiT layerwise offload | 4.33 s | 4.43 s | 56 GiB |
-| DiT, encoder and VAE layerwise offload | 4.33 s | 4.43 s | 8.6 GiB |
+| DiT, encoder and VAE layerwise offload | 4.33 s | 4.43 s | 8.7 GiB |
 | torch.compile | 1.80 s | 3.18 s | 126 GiB |
 
 These rows use the checkpoint's example prompts and edit reference, seed 42,
