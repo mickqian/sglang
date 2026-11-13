@@ -226,6 +226,12 @@ _SPECS: tuple[tuple[str, KernelBackend, str, frozenset], ...] = (
         _CUDA,
     ),
     (
+        "diffusion.rmsnorm_tanh_residual_sum2",
+        KernelBackend.TRITON,
+        "norm.native_bf16_rmsnorm_triton:rmsnorm_tanh_residual_sum2",
+        _CUDA,
+    ),
+    (
         "diffusion.modulate_scale_shift",
         KernelBackend.JIT,
         "modulate.modulate_scale_shift_jit:modulate_scale_shift",
@@ -710,6 +716,7 @@ _EXPORTS: dict[str, str] = {
     "xpu_layernorm_modulate": "norm.layernorm_modulate_xpu_triton",
     "rmsnorm_scale": "norm.native_bf16_rmsnorm_triton",
     "rmsnorm_tanh_residual": "norm.native_bf16_rmsnorm_triton",
+    "rmsnorm_tanh_residual_sum2": "norm.native_bf16_rmsnorm_triton",
     "norm_infer": "norm.norm_triton",
     "rms_norm_fn": "norm.norm_triton",
     "try_fused_bias_mul_add": "sglang.kernels.kda_kernels.norm_scale_shift_jit",
@@ -774,6 +781,7 @@ _EXPORTS: dict[str, str] = {
     "modulate_scale_shift_cuda": "modulate.modulate_scale_shift_jit",
     "can_use_residual_gate_add_cuda": "sglang.kernels.kda_kernels.residual_gate_add_jit",
     "residual_gate_add": "sglang.kernels.kda_kernels.residual_gate_add_jit",
+    "residual_gate_add_sum2": "sglang.kernels.kda_kernels.residual_gate_add_jit",
     "residual_gate_add_cuda": "sglang.kernels.kda_kernels.residual_gate_add_jit",
     "can_use_residual_gate_add2_cuda": "modulate.residual_gate_add2_jit",
     "residual_gate_add2": "modulate.residual_gate_add2_jit",
